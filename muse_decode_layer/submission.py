@@ -5756,6 +5756,11 @@ RESIDUAL_GATE_EPS = 1e-3
 # our one-kernel version up to here (H100: 4.8 us at T<=8, 5.2 at 32 vs SGLang's Triton kernel 4.1 on H200 at 32).
 OWN_WSUM_MAX_TOKENS = 16
 GLUE_PDL = False
+GEMV_PDL = True  # gemv10/12 trigger their dependents at start; glue after them launches with PDL (PDL_TOKENS)
+PDL_TOKENS = (1, 8)
+# At T=1 the unpool GEMV launches as a PDL secondary of moe_norm2 (patched to trigger at its start), so its first
+# weight loads overlap norm2 (norm2 reads ~128 KB: little HBM contention).
+UNPOOL_PDL = True
 LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference experts (tests of the Marlin-side glue)  # PDL after a cuBLAS producer: no gain (H100 o GEMM + boundary 12.64 vs 12.74 us)
 
 
@@ -6207,6 +6212,9 @@ void g10_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t u, in
     TORCH_CHECK(false, "g10: no config");
 }
 '''
+if UNPOOL_PDL:
+    _i = _moe_CUDA_SRC.index("{\n", _moe_CUDA_SRC.index("__global__ void __launch_bounds__(512) moe_norm2(")) + 2
+    _moe_CUDA_SRC = _moe_CUDA_SRC[:_i] + '  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + _moe_CUDA_SRC[_i:]
 _G12_SRC = r'''// r-proj e71d015 muse_bf16_proj/dev/gemv12.cu (proj agent's gemv12, m=8 tensor-core streaming GEMM), copied verbatim
 // gemv12: tensor-core streaming GEMM for m = 8..32 (out[m, n] = x[m, k] @ W[n, k]^T, BF16 in, FP32 accumulate).
 // mma.sync m16n8k16 with x as A (tokens) and W as B. W is repacked in prepare() into 512-B atoms = 8 rows x 32 k,
@@ -6368,10 +6376,29 @@ def _g10_lib():
             cases = " ".join("G10_CASE(1,%d,%d,%d,%d,%d)" % c[:5] for c in sorted(set(G10_CFG.values())))
             cases12 = " ".join("G12_CASE(%d,%d,%d,%d)" % ((G12_TOKENS,) + c[:3]) for c in sorted(set(G12_CFG.values())))
             src = _G10_SRC.replace("G10_CONFIGS", cases) + "\n" + _G12_SRC.replace("G12_CONFIGS", cases12)
+            if UNPOOL_PDL:  # gemv10 may launch as a PDL secondary: its first W loads issue before griddepcontrol.wait
+                anchor = "    for (int i = threadIdx.x; i < M * K8; i += 256 * NV) xs[i] = __ldg(x + i);"
+                launch = ("        g10::gemv<M_, U_, V_, B_, K_, P_><<<blocks, 256 * V_, sm, s>>>((const uint4*)w.data_ptr(), "
+                          "(const uint4*)x.data_ptr(), \\\n        (__nv_bfloat16*)out.data_ptr(), n); return; }")
+                sig = "int64_t blocks) {"
+                for x_ in (anchor, launch, sig):
+                    assert src.count(x_) == 1, x_
+                src = src.replace(anchor, '    asm volatile("griddepcontrol.wait;" ::: "memory");\n' + anchor)
+                src = src.replace(sig, "int64_t blocks, int64_t pdl) {")
+                src = src.replace(launch, (
+                    "        cudaLaunchConfig_t lc = {}; lc.gridDim = blocks; lc.blockDim = 256 * V_; lc.dynamicSmemBytes = sm; \\\n"
+                    "        lc.stream = s; cudaLaunchAttribute la[1]; la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; \\\n"
+                    "        la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0; \\\n"
+                    "        cudaLaunchKernelEx(&lc, g10::gemv<M_, U_, V_, B_, K_, P_>, (const uint4*)w.data_ptr(), \\\n"
+                    "                           (const uint4*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), (int)n); return; }"))
+            if GEMV_PDL:  # let the next kernel (boundary / rmsnorm, launched with PDL) start its prologue early
+                for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
+                    assert src.count(anchor) == 1, anchor
+                    src = src.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
-                            "int64_t, int64_t);\n"
+                            "int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");\n"
                             "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                             "int64_t, int64_t, int64_t, int64_t, int64_t);",
                 cuda_sources=src, functions=["g10_gemv", "g12_gemm"],
@@ -6399,7 +6426,8 @@ def _linear(x, w, key, state=None):
     lib = _G10.get("lib")
     if x.shape[0] == 1 and lib is not None and key in G10_CFG and x.shape[1] == G10_CFG[key][0]:
         out = torch.empty((1, w.shape[0]), dtype=torch.bfloat16, device=x.device)
-        lib.g10_gemv(w, x.contiguous(), out, *G10_CFG[key][1:])
+        pdl = (int(key == "unpool_slice"),) if UNPOOL_PDL else ()
+        lib.g10_gemv(w, x.contiguous(), out, *G10_CFG[key][1:], *pdl)
         return out
     if x.shape[0] == G12_TOKENS and state is not None and "g12" in state and key in G12_CFG:
         out = torch.empty((G12_TOKENS, w.shape[0]), dtype=torch.bfloat16, device=x.device)
@@ -6425,13 +6453,14 @@ def kernel_fn(data, state):
     a = _linear(o, dense["o"], "o", state)  # all-reduce: identity
 
     fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
+    pdl = GLUE_PDL or (GEMV_PDL and tokens in PDL_TOKENS and _G10.get("lib") is not None)
     stream1 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev)
     h = torch.empty((tokens, HIDDEN), dtype=torch.bfloat16, device=dev)
     h32 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev) if fp32_router else stream1
     alpha, beta = state["res1"]
     _boundary[(tokens,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
                          NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
-                         PDL=GLUE_PDL, num_warps=16, launch_pdl=GLUE_PDL)
+                         PDL=pdl, num_warps=16, launch_pdl=pdl)
     main_stream, side_stream = torch.cuda.current_stream(), state["side_stream"]
     side_stream.wait_stream(main_stream)
     with torch.cuda.stream(side_stream):
@@ -6440,8 +6469,8 @@ def kernel_fn(data, state):
         bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) and TK2_MAX_TOKENS < tokens <= BUCKET_SIDE_MAX_TOKENS else None
     pooled = _linear(h, dense["pooler"], "pooler", state)
     p = torch.empty_like(pooled)
-    _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=GLUE_PDL, num_warps=8,
-                             launch_pdl=GLUE_PDL)
+    _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl, num_warps=8,
+                             launch_pdl=pdl)
     main_stream.wait_stream(side_stream)
     if not torch.cuda.is_current_stream_capturing():
         for t in (topk_ids, local_ids, topk_weights) + (bucket or ()):
@@ -6459,5 +6488,5 @@ def kernel_fn(data, state):
     alpha, beta = state["res2"]
     _boundary[(tokens,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
                          NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
-                         EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=GLUE_PDL, num_warps=16, launch_pdl=GLUE_PDL)
+                         EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, num_warps=16, launch_pdl=pdl)
     return hidden, stream2, topk_ids
