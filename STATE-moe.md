@@ -3,7 +3,7 @@
 ## Board
 - Best submit: 52169da1ba624f00 @fa39ed7, **2.061x** (2026-10-25 23:00Z; check cb18fe27 of the same code 2.061x).
   Previous: 4f0ae2c7 2.033x @a0531b2, 1561eff8 1.985x @c39a176. Top of board 2.55x (#10 2.37x).
-  Used 2026-10-25: checks 18 of 20, submits 9 of 10 (lead cap 9: none left today).
+  Used 2026-10-25: checks 17 of 20, submits 9 of 10 (lead cap 9: none left until 00:00Z).
   | load | bs | SGLang | ours | x | floor | s5 (c39a176) |
   |---|---|---|---|---|---|---|
   | decode 1 | 1 | 76.6 | 30.6 | 2.51 | 11.4 | 30.8 |
@@ -75,7 +75,9 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   (TK2_MAX knob) locally +11% at bs32, +13% at bs16: not checked.
 
 ## Ranked ideas
-1. Decode bs32 (1.49x) / bs16 (1.83x) are now the weakest. H100 ncu bs32 gemm13: DRAM 84%, issue 51%, 18.8 instr per
+1. Decode bs32 (1.49x) / bs16 (1.83x) are now the weakest. s6 SASS (tk2<512,8,8,true>): 130 instr per stage
+   = 104 dq+mma + ~22 overhead (6 mbarrier wait/branch/sync, 4 LDS weights/scales + arrive, ~16 scale-LUT
+   extract/add/LDS). NSTG 8 is special: = blocks per rp, so ptxas constant-folds the stage index (6/12 don't). H100 ncu bs32 gemm13: DRAM 84%, issue 51%, 18.8 instr per
    256 weights vs 13 for dq+mma (overhead: per-stage mbar/LDS/scale LUT, per-rp cross-warp reduce + named barrier).
    On H200 both GEMMs run at ~65% of HBM: consumer issue/latency limited. Ideas: cut per-stage overhead (scales
    for 2 stages per LDS, fewer LUT lookups), reduce per rp reduce cost (accumulate 2 rps before reducing), prefetch
