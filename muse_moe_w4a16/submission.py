@@ -62,7 +62,7 @@ CUDA_SRC = r"""
 #include <cudaTypedefs.h>
 
 // launch, optionally as a PDL secondary (programmatic stream serialization: CUDA-graph capturable)
-static int g_pdl = 1, g_twpf = 0;
+static int g_pdl = 7, g_twpf = 0;  // g_pdl bits: 1 decode gemm2, 2 decode norm2, 4 big-M kernels
 template <typename... KA, typename... AA>
 static int launch_k(void (*k)(KA...), int grid, int block, int smem, cudaStream_t st, bool pdl, AA... args) {
   cudaLaunchConfig_t lc = {};
@@ -1283,7 +1283,7 @@ static int launch_tk2(const void* wq, const void* s2, const void* lut, const voi
     cudaFuncSetAttribute(moe_tk2<NRT, NC, NSTG, GATED>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
-  return launch_k(moe_tk2<NRT, NC, NSTG, GATED>, grid, (NC + 1) * 32, SMEM, st, !GATED && g_pdl,
+  return launch_k(moe_tk2<NRT, NC, NSTG, GATED>, grid, (NC + 1) * 32, SMEM, st, !GATED && (g_pdl & 1),
       (const uint4*)wq, (const uint32_t*)s2, (const uint32_t*)lut, (const float*)gs, (const __nv_bfloat16*)x,
       (const int*)ids, nroutes, start, count, (int*)meta, (int*)sroutes, (int*)inv, out);
 }
@@ -1809,7 +1809,7 @@ static int launch_tw(const void* wb, const void* sb, const void* gs, const void*
     cudaFuncSetAttribute(moe_tw<RT, KG, NSTG, GATED>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
-  return launch_k(moe_tw<RT, KG, NSTG, GATED>, grid, 384, SMEM, st, g_pdl,
+  return launch_k(moe_tw<RT, KG, NSTG, GATED>, grid, 384, SMEM, st, (g_pdl & 4) != 0,
       (const char*)wb, (const char*)sb, (const float*)gs, (const uint32_t*)lut, maps,
       (int*)meta, (const int*)sroutes, (__nv_bfloat16*)out, g_twpf);
 }
@@ -1858,7 +1858,7 @@ int64_t moe_route_launch(torch::Tensor ids, int64_t start, int64_t count, torch:
 int64_t moe_norm_launch(torch::Tensor y, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1, int64_t start,
                         int64_t count, double eps, torch::Tensor out) {
   const int M = (int)out.size(0);
-  return launch_k(moe_norm, M, 512, 0, at::cuda::getCurrentCUDAStream(), g_pdl,
+  return launch_k(moe_norm, M, 512, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const __nv_bfloat16*)y.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
       (const float*)w1.data_ptr(), (int)start, (int)count, (float)eps, (__nv_bfloat16*)out.data_ptr());
 }
@@ -1896,7 +1896,7 @@ static void tw_maps(TMaps& maps, void* ptr, int64_t rows) {
   }
 }
 int64_t moe_gather_launch(torch::Tensor x, torch::Tensor meta, torch::Tensor sroutes, torch::Tensor xg) {
-  return launch_k(moe_gather, (int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream(), g_pdl,
+  return launch_k(moe_gather, (int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const uint32_t*)x.data_ptr(), (const int*)meta.data_ptr(), (const int*)sroutes.data_ptr(), (uint32_t*)xg.data_ptr());
 }
 int64_t moe_tw_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tensor sb_, torch::Tensor gs_,
@@ -1955,7 +1955,7 @@ int64_t moe_act_launch(torch::Tensor acc13, torch::Tensor meta, torch::Tensor sr
 int64_t moe_norm2_launch(torch::Tensor acc2, torch::Tensor inv, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1,
                          torch::Tensor gs, int64_t start, int64_t count, double eps, torch::Tensor out) {
   const int M = (int)out.size(0);
-  return launch_k(moe_norm2, M, 512, 0, at::cuda::getCurrentCUDAStream(), g_pdl,
+  return launch_k(moe_norm2, M, 512, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 2) != 0,
       (const float*)acc2.data_ptr(), (const int*)inv.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
       (const float*)w1.data_ptr(), (const float*)gs.data_ptr(), (int)start, (int)count, (float)eps,
       (__nv_bfloat16*)out.data_ptr());
@@ -2152,6 +2152,7 @@ def _plan(M):
 
 
 PLAN_OVERRIDE = None
+PDL_DECODE = {1: 0, 8: 2, 16: 1, 32: 3}  # per-bs PDL bits for the decode path (judge A/B, s5)
 TB_RT = 0  # big-M moe_tb on (1) or off (0: old moe_big path)
 TB_CFG = 48  # RT*10 + stages
 TW_CFG = 218  # big-M wgmma kernel moe_tw: RT*100 + KG*10 + stages (0: off)
@@ -2177,6 +2178,7 @@ def kernel_fn(data, st):
     y = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
     out = torch.empty((M, H), dtype=torch.bfloat16, device=dev)
     if M <= 32 and TK2_NSTG:
+        lib.moe_set_pdl(PDL_DECODE.get(M, 3), 0)
         inv = torch.empty(M * TOP_K, dtype=torch.int32, device=dev)
         y32 = torch.empty((M * TOP_K, H), dtype=torch.float32, device=dev)
         lib.moe_tk2_launch(1, TK2_NSTG, st["w13q"], st["w13s2"], st["lut"], st["gs13"], x, ids, st["start"], st["count"],
@@ -2196,6 +2198,7 @@ def kernel_fn(data, st):
         lib.moe_sk_launch(0, sk[1], st["w2q"], st["w2s2"], st["lut"], inter, meta, sroutes, acc2)
         lib.moe_norm2_launch(acc2, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], POST_NORM_EPS, out)
         return out
+    lib.moe_set_pdl(7, 0)
     p13, p2 = PLAN_OVERRIDE(M) if PLAN_OVERRIDE else _plan(M)
     assert p13 in _CFGS and p2 in _CFGS, (p13, p2)
     lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
