@@ -129,3 +129,34 @@
   after boundary). Background: gemv10 pooler = 64 regs x 1024 threads = the whole RF, so any router CTA blocks it.
 - DEAD: _red_fin (decode full's last attention kernel) triggering dependents early: decode 1 full +2.5 us.
 - H100 noise now: other agents' runs move the same file by up to 4 us at d1: A/B interleaved, >= 2 rounds.
+
+## Session 5 (2026-10-25 22:11-23:30Z)
+- v15 (3508986): moe_src.py = r-moe c39a176 (moe_tw: wgmma big-M experts, dequantized NVFP4 A in registers, TMA B
+  from a gathered K-permuted x). T > 32 experts now go through `_moe_kernel_fn` (route, gather, tw gemm13/gemm2,
+  norm). H100 v16 333.8/481.7 (v14 338.7/494.6), v32 417.8/674.7 (471.1/726.9).
+  check 58f0ef6f **1.8176x [1.790, 1.845], 12,445 us**: d1 80.7/92.5, d16 162.9/234.1, d32 190.3/343.3,
+  v1 135.7/144.6, v16 297.5/394.0, v32 382.3/553.1 (H200 us, sliding/full). tools/ckparse.py summarizes a check json.
+- DEAD: moe_tw at decode T=16/32 instead of tk2 (TW_TOKENS): H100 d16 +14, d32 +29 us.
+- DEAD: Triton split-K skinny GEMM with last-CTA reduce for T=16/32 (tools/skgemm.py): ties cuBLAS at best
+  (qkv m16 18.0 vs 18.2, m32 19.7 vs 18.3 us H100 cold); ~2.1 TB/s is what both reach for 38 MB incl. launch.
+- DEAD: moe_tk2 gemm13 as a PDL secondary of _rmsnorm_gain (TK2_PDL13, layer.py patches tk2: producer streams W and
+  routing runs before the consumers' griddepcontrol.wait; launch via cudaLaunchKernelEx): works (tk2 starts 0.8 us
+  after rmsnorm starts) but rmsnorm is only 1.7 us and the safe ordering (join side stream BEFORE rmsnorm, rmsnorm
+  without PDL, because tk2 reads topk_ids before its wait) loses the rmsnorm's own PDL: H100 tie.
+- DEAD: pooler first + router as its PDL secondary at T=8 (ROUTER_AFTER_POOLER), and the pooler on a priority -1
+  stream (POOLER_HI_PRIORITY): the pooler starts 8 us earlier, but the router starves beside it (10 -> 34 us) and
+  routing becomes critical: v1 +2..3 us. Pooler + router are HBM/SM-bound together (as s4).
+  BUG FOUND on the way (eager tests, 2nd call): a main-stream tensor written on the side stream (p) reused the block
+  _route had just freed (its split-K partials, same 64 KB): race. Rule: allocate side-written tensors BEFORE any
+  main-stream temporaries are freed.
+- DEAD: L2 prefetch of the FP32 router W (8 MB) from extra boundary-1 programs: router at T=8 is still 9.8 us (it is
+  issue-bound: [8,2,1024] broadcast-multiply-reduce), v1 +0.9; d1 -0.8 on H100 but judge d1 -2% (noise level).
+  Router configs (tools/router_sweep.py): current (BE 2, BK 1024, KS 8, 4 warps) is the best; tl.dot(ieee) FP32
+  (tools/router_dot.py) slower (T=8 14.5 vs 11.4). proj's CUDA FP32 router (pj_router): T=8 9.47 vs ours 11.4 us,
+  T=1 6.91 vs 5.87 (H100): could save ~2 us at v1 only; not integrated.
+- v16 (99f31b3): proj's cuBLASLt with explicit algo configs (lt_src.cu = r-proj dev/lt.cu @f7b1c8b, own load_inline
+  -lcublasLt, configs validated vs F.linear in prepare) at proj's H200 picks: check f8e06892 1.8112x (noise vs v15).
+  pooler m256 pick is +11.5 us in the layer on H100 (beside the router_split): never used.
+- v17 (5cf795f, main): lt only for pooler m128, qkv m128/m256: check 842b5e2c 1.8045x. Per-shape vs v15 check:
+  v32 +1-2% (consistent with H100 qkv m256 -1.9 us), rest noise: identical code moved d1 2.118 -> 2.069, d32 1.392 ->
+  1.341 between checks. Three near-identical codes: 1.818 / 1.811 / 1.805 => judge total noise ~+-1%.
