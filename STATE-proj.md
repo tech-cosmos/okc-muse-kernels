@@ -22,12 +22,14 @@ Still at cuBLAS speed: all BF16 shapes at m = 16, 32, 128, 256 (4 of 6 loads). T
 - Router: m<=8 true-FP32 dev/router.cu; m 9-32 hi/lo mma dev/gemv7.cu; m>32 one cuBLAS GEMM vs stacked [hi; lo].
 - BF16 m=1: dev/gemv10.cu (grid-stride over chunks of whole rows, W row-major in place, fat 1024-thread blocks
   share one x copy in smem; FP32 FMA). Configs BF16_G10.
-- BF16 m=8: dev/gemv12.cu (mma.sync m16n8k16, x = A, W = B repacked by _pack12 into 512-B atoms [ks][rg][atom][lane];
-  block = (k-chunk, NG 8-row groups) x WG warps each; x chunk cp.async'd into smem first; per-warp smem slots summed;
-  S>1: FP32 partials in st["ws12"] + counter st["cnt12"], last block of a rg writes BF16). Configs BF16_G12.
+- BF16 m=8 (and pooler m=16): dev/gemv12.cu (mma.sync m16n8k16, x = A, W = B repacked by _pack12 into 512-B atoms
+  [ks][rg][atom][lane]; block = (k-chunk, NG 8-row groups) x WG warps each; x chunk cp.async'd into smem first, in XP
+  pieces through a ring of XR buffers (pooler m16: S=1, full K, ring 8/2); per-warp smem slots summed; S>1: FP32
+  partials in st["ws12"] + counter st["cnt12"], last block of a rg writes BF16). Configs BF16_G12
+  (m, kcu, wg, pf, bk, xp, xr).
 - Other m: F.linear (cuBLAS) = SGLang.
 - bench.py: `python bench.py test` (39 cases), `python bench.py bench [filter]`. Sweeps: dev/g10.py, dev/g12.py
-  ("M,KCU,WG,PF;..." bk...), dev/g11.py (dead variant). Phase timers: /tmp/pj/dbg12.py style (globaltimer per block).
+  ("M,KCU,WG,PF,XP,XR;..." bk...; skips invalid configs), dev/g11.py (dead variant). Phase timers: /tmp/pj/dbg12.py style (globaltimer per block).
 
 ## Budget 2026-10-25: checks 8/20, scored 5/10 (CLAUDE.md: max 6 submits/day). Resets 00:00 UTC.
 
@@ -40,13 +42,17 @@ Still at cuBLAS speed: all BF16 shapes at m = 16, 32, 128, 256 (4 of 6 loads). T
 - float atomicAdd on smem = CAS loop. Cluster size 4 at 1 block/SM: only 30 clusters fit (2 waves for 32).
 - H200 gains exceed H100 gains for these kernels (H100 +1% -> H200 +6% at qkv m8). Don't drop marginal H100 wins.
 - gemv12 m8 qkv (S=4): end phase (slot sum, stcg partials, fence, counter, re-read) ~2.8 us; warps finish with a
-  ~1.8 us spread inside a block. m16/m32: gemv12 5-25% slower than cuBLAS on H100 (smem LDS + mma.sync pressure).
+  ~1.8 us spread inside a block. H200 gemv12 at m16: qkv 0.99, o 0.91, pooler 1.08, unpooler 0.95; m32 0.72-0.93.
+- Dead ends this session: TMA bulk x staging (slower than cp.async), shared float atomics, 4-block clusters,
+  R=2 row groups per warp (spills), gemv9 warp stream-K, CUDA-core math at m>=8, cuBLAS swap-AB.
+- unpooler m8 on gemv12 with 32 blocks: H200 5.71 once, 7.04/7.27 twice (same code): few-SM configs are fragile.
 
 ## Next (ranked)
 1. gemv12 split-K end phase: release/acquire atomics instead of fence+atomic; or red.global into ws + one counter;
    or no split K where n/8 divides 128 (o, pooler m8 already S=1). Also slot sum cost (WG-deep).
-2. m16/m32 (decode 16/32 = 2 loads): gemv12 with TT=1/2 is compute/smem-heavy: try ldmatrix for x A frags (x row
-   major in smem, ldmatrix.x4 gives a0..a3 for 16 tokens x 16 k: but our k permutation must match: permute x columns
-   when staging so ldmatrix yields the right slots), and more warps per rg (WG 4-8) so fewer rgs per block.
+2. m16/m32 (decode 16/32 = 2 loads): gemv12 loses (m32 badly). Per 512 B of W a lane does TT*2 LDS.128 + TT*2 mma.
+   Ideas: wgmma (m64nNk16 with W as A from smem via TMA, x as B: N = m tokens = 16/32) so x is read from smem by the
+   tensor core directly and W streams via TMA; or keep x A-fragments in registers across atoms (k-major loop inside a
+   warp for a fixed k slice over many rgs: x frags loaded once per k slice, W atoms of all rgs at that k).
 3. m128/256 (verify 16/32): cuBLAS ~20-30% over floor; would need a wgmma/TMA kernel (or DeepGEMM in the judge).
 4. Router m<=8 (5.3-7.9 us vs 1.8 floor): FP32 weights 8 MB; a gemv10-style FP32 kernel might give ~4.
