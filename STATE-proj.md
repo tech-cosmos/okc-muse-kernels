@@ -5,7 +5,7 @@ Updated 2026-10-25 ~23:10 UTC (session 5).
 ## Board
 - **Best: submit 22109e72563f4cc3 = 42dac99, 1.2334x (CI 1.215-1.252), proj rank 379.** (#1 1.61x, #10 ~1.53x.)
 - Previous: 202a2485 (134eda6, lt v9) 1.2111x; a55d6b55 (e71d015) 1.1757x.
-- main = 20f475d: check fb5ef6d9 1.2439x (gemv13 m1 + gemv14 m8 over lossless 12-bit weights). SUBMIT IT after 00:00Z
+- main = cc055c8: check fb5ef6d9 1.2439x (gemv13 m1 + gemv14 m8 over lossless 12-bit weights). SUBMIT IT after 00:00Z
   (8/9 scored used on 10-25) unless something better is checked first.
 
 ## Per-shape H200 speedup vs SGLang (submit 22109e72; SGLang us in bench.py SGLANG_H200)

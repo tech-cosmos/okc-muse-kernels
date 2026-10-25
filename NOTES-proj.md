@@ -133,6 +133,6 @@
 - Integration: prepare() packs (_compress/_pack13/_pack14) and the tuner picks among g10/g13 at m=1 (F.linear dropped at
   m=1: it won a tie by noise in 720c8278) and F.linear/g12/g14/lt at m8/m16.
 - check 720c8278cc0e4e14 (3e807e3): 1.2371x; pooler m1 15.49 (was 17.77), qkv m1 11.27.
-- check 416ae38fd88a441d (64487e7, loads reordered): 1.2435x. submit a6f4d701eb1e47f2: 1.2319x (noise; board keeps 1.2334).
-- check fb5ef6d91d4342b3 (20f475d, + gemv14 at m8): 1.2439x; verify1: pooler 16.33 (18.76), qkv 13.02 (13.93); the total
+- check 416ae38fd88a441d (820d5cb, loads reordered): 1.2435x. submit a6f4d701eb1e47f2: 1.2319x (noise; board keeps 1.2334).
+- check fb5ef6d91d4342b3 (cc055c8 = 20f475d before rebase, + gemv14 at m8): 1.2439x; verify1: pooler 16.33 (18.76), qkv 13.02 (13.93); the total
   is noise-limited (other loads +-2%). H200 tune: g14 wins pooler m8 (20.3 vs lt 22.5) and qkv m8; lt keeps o/unp m8.
