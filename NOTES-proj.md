@@ -78,3 +78,12 @@
   its own ws12/cnt12 now. Rule: every split-K kernel gets its own workspace.
 - check 1c6ae4b67d9d4e46 (e71d015): 1.1772x; H200 verify1: qkv 13.36 (14.14), o 6.74 (6.85), pooler 19.06 (21.26),
   unpooler 5.71 (6.96). submit a55d6b55a2604db3: 1.1757x (CI 1.158-1.193). New best.
+- gemv12 x pieces: TMA bulk (cp.async.bulk + mbarrier, one thread issuing M*XP copies) was SLOWER than cp.async
+  (qkv m8 18.7 vs 17.9, unp1k 9.2 vs 7.1). cp.async pieces (commit group per piece, wait_group + barrier at piece
+  boundaries) and an x ring (XR buffers over XP pieces, S=1 with full K): pooler m16 S=1 26.5 vs cuBLAS 27.8 (H100).
+- Phase timers m16 qkv (S=4): loop ends ~same as m8 (W-bound ~2.9 TB/s); end phase 2.3-3.1 us = the loss.
+- check 49298f3eb9994920 (39dccf9, gemv12 on all m16/m32 shapes, probe): 1.1401x. H200: m16 qkv 0.993, o 0.905,
+  pooler 1.080, unpooler 0.946; m32 qkv 0.801, o 0.724, pooler 0.929, unpooler 0.852.
+- check c569b69329a44aed (a0424fc, m8 + pooler m16): 1.1772x; pooler m16 19.92 (SGLang 21.57). unpooler m8 7.27
+  (0.973x) although check 1c6ae4b6 had 5.71 (1.219x) with the same code: its config uses 32 blocks (32 SMs): fragile.
+  Not submitted (expected gain over 1.1757 within noise; 1 submit left today).
