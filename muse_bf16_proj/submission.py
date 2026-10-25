@@ -6,8 +6,9 @@ FP32 split partials), as SGLang's F.linear in FP32. Above 8 tokens SGLang's BF16
 accumulation: 9..32 tokens a native tensor-core kernel (dev/gemv6.cu: mma.sync with hi and lo tiles into one FP32
 accumulator, split K reduced in FP32 over a thread-block cluster through distributed shared memory); above 32 one
 cuBLAS GEMM against the stacked [hi; lo] weight (FP32 out) and an FP32 add of the two halves. BF16 projections: at 1 token a native grid-stride GEMV (dev/gemv10.cu: W read in place, row-major, the whole grid
-sweeping one contiguous window; FP32 FMA and FP32 reductions, no split K), else cuBLAS (as SGLang's
-bf16_gemm_dispatch on H200).
+sweeping one contiguous window; FP32 FMA and FP32 reductions, no split K), else at 8 tokens a native
+tensor-core streaming GEMM (dev/gemv12.cu: mma.sync with x as A and W, repacked losslessly into 512-B fragment atoms, as B;
+FP32 accumulators; split K reduced in FP32), else cuBLAS (as SGLang's bf16_gemm_dispatch on H200).
 Native kernels are built once at import (load_inline); if the build fails everything falls back to torch.
 """
 
@@ -482,6 +483,140 @@ void g10_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t u, in
     TORCH_CHECK(false, "g10: no config");
 }
 '''
+_G12_SRC = r'''// gemv12: tensor-core streaming GEMM for m = 8..32 (out[m, n] = x[m, k] @ W[n, k]^T, BF16 in, FP32 accumulate).
+// mma.sync m16n8k16 with x as A (tokens) and W as B. W is repacked in prepare() into 512-B atoms = 8 rows x 32 k,
+// lane l holding row l/4, k (l%4)*8..+8 (one uint4 = the B fragments of two k16 mmas; x's A fragments use the same
+// k permutation); layout [ks][rg][KC/32 atoms][lane] (ks = k-chunk of KC = 1024*KCU, rg = 8-row group).
+// Block b = (ks = b / bk, a run of NG rgs); it is NG groups of WG warps, group gi streams rg0+gi's KC/32 atoms
+// (warp wi takes atoms wi, wi+WG, ...; PF in flight in registers). x[:, chunk] is staged in smem first (cp.async;
+// it must not queue behind the W stream). Each warp's FP32 C fragments go to its own smem slot; WG slots summed.
+// One k-chunk: BF16 written directly. Else FP32 partials [S][m][n] in a workspace, a per-rg counter, and the last
+// of the S blocks of a rg sums them in FP32 and writes BF16 (counters re-zeroed).
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+namespace g12 {
+__device__ __forceinline__ uint4 ldw(const uint4* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+template <int M, int KCU, int WG, int PF>
+__global__ void __launch_bounds__(1024, 1) gemm(const uint4* __restrict__ W, const __nv_bfloat16* __restrict__ x,
+                                                __nv_bfloat16* __restrict__ out, float* __restrict__ ws,
+                                                int* __restrict__ cnt, int n, int nrg_all, int k, int bk) {
+    constexpr int KC = 1024 * KCU, TT = (M + 15) / 16, XS = KC * 2 + 64;  // x row stride in smem (bytes), padded
+    constexpr int NT = M < 16 ? M : 16, NA = KC / 32 / WG;               // atoms per warp
+    static_assert(NA % PF == 0, "PF must divide the atoms per warp");
+    extern __shared__ __align__(16) unsigned char smem[];
+    unsigned char* xs = smem;                        // x[M][KC] (row stride XS)
+    float4* accp = (float4*)(smem + M * XS);         // [warps][TT][32 lanes] C fragments
+    __shared__ int flag[64];
+    const int t = threadIdx.x, lane = t & 31, wp = t >> 5, g = lane >> 2, c = lane & 3;
+    const int gi = wp / WG, wi = wp % WG, NG = blockDim.x / (32 * WG);
+    const int S = k / KC, ks = blockIdx.x / bk, rg0 = (blockIdx.x % bk) * NG, rg = rg0 + gi;
+    for (int i = t; i < M * (KC / 8); i += blockDim.x) {
+        const int r = i / (KC / 8), q = i % (KC / 8);
+        const unsigned sa = (unsigned)__cvta_generic_to_shared(xs + r * XS + q * 16);
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa), "l"((const uint4*)(x + (long)r * k + (long)ks * KC) + q));
+    }
+    asm volatile("cp.async.commit_group;");
+    const uint4* wb = W + (((long)ks * nrg_all + rg) * (KC / 32) + wi) * 32 + lane;  // atom j: wb + j*WG*32
+    uint4 w[PF];
+#ifndef G12_LATE_W
+#pragma unroll
+    for (int p = 0; p < PF; ++p) w[p] = ldw(wb + p * WG * 32);
+#endif
+    asm volatile("cp.async.wait_all;");
+    __syncthreads();
+#ifdef G12_LATE_W
+#pragma unroll
+    for (int p = 0; p < PF; ++p) w[p] = ldw(wb + p * WG * 32);
+#endif
+    float acc[TT][4];
+#pragma unroll
+    for (int tt = 0; tt < TT; ++tt) acc[tt][0] = acc[tt][1] = acc[tt][2] = acc[tt][3] = 0.f;
+    for (int a = 0; a < NA; a += PF) {
+#pragma unroll
+        for (int p = 0; p < PF; ++p) {
+            const int kb = ((a + p) * WG + wi) * 32 + c * 8;
+#pragma unroll
+            for (int tt = 0; tt < TT; ++tt) {
+                uint4 xa = *(const uint4*)(xs + (tt * 16 + g) * XS + kb * 2);
+                uint4 xb = make_uint4(0, 0, 0, 0);
+                if (NT > 8) xb = *(const uint4*)(xs + (tt * 16 + g + 8) * XS + kb * 2);
+                mma(acc[tt], xa.x, xb.x, xa.y, xb.y, w[p].x, w[p].y);
+                mma(acc[tt], xa.z, xb.z, xa.w, xb.w, w[p].z, w[p].w);
+            }
+            if (a + p + PF < NA) w[p] = ldw(wb + (a + p + PF) * WG * 32);
+        }
+    }
+#pragma unroll
+    for (int tt = 0; tt < TT; ++tt) accp[(wp * TT + tt) * 32 + lane] = make_float4(acc[tt][0], acc[tt][1], acc[tt][2], acc[tt][3]);
+    __syncthreads();
+    // outputs i = ((rgl * M + tok) * 8 + row8): sum the WG warp slots of group rgl
+    const int ne = NG * M * 8;
+    auto total = [&](int i) {
+        const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+        const int tt = tok >> 4, h = (tok >> 3) & 1, l = (tok & 7) * 4 + (row8 >> 1), e = h * 2 + (row8 & 1);
+        const float* base = (const float*)accp + ((rgl * WG) * TT + tt) * 128 + l * 4 + e;
+        float s = 0.f;
+#pragma unroll
+        for (int q = 0; q < WG; ++q) s += base[q * TT * 128];
+        return s;
+    };
+    if (S == 1) {
+        for (int i = t; i < ne; i += blockDim.x) {
+            const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+            out[(long)tok * n + (rg0 + rgl) * 8 + row8] = __float2bfloat16(total(i));
+        }
+        return;
+    }
+    for (int i = t; i < ne; i += blockDim.x) {
+        const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+        __stcg(ws + ((long)ks * M + tok) * n + (rg0 + rgl) * 8 + row8, total(i));
+    }
+    __threadfence();
+    __syncthreads();
+    if (t < NG) {
+        const int last = atomicAdd(cnt + rg0 + t, 1) == S - 1;
+        flag[t] = last;
+        if (last) cnt[rg0 + t] = 0;
+    }
+    __syncthreads();
+    __threadfence();
+    for (int i = t; i < ne; i += blockDim.x) {
+        const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+        if (flag[rgl]) {
+            float s = 0.f;
+            for (int q = 0; q < S; ++q) s += __ldcg(ws + ((long)q * M + tok) * n + (rg0 + rgl) * 8 + row8);
+            out[(long)tok * n + (rg0 + rgl) * 8 + row8] = __float2bfloat16(s);
+        }
+    }
+}
+}  // namespace g12
+// nrg_all: 8-row groups of the packed weight; bk: blocks per k-chunk; each block takes n/8/bk rgs with WG warps each.
+void g12_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tensor ws, torch::Tensor cnt, int64_t nrg_all,
+              int64_t kcu, int64_t wg, int64_t pf, int64_t bk) {
+    const int m = x.size(0), k = x.size(1), n = out.size(1);
+    auto s = c10::cuda::getCurrentCUDAStream();
+    const int S = k / (1024 * kcu), ng = n / 8 / bk, threads = ng * wg * 32;
+    const int sm = m * (1024 * kcu * 2 + 64) + threads / 32 * ((m + 15) / 16) * 512;
+    TORCH_CHECK(n / 8 % bk == 0 && threads <= 1024 && ng <= 64 && sm <= 227 * 1024 && (S == 1 || m * n * S <= 8 * 32 * 8192), "g12: shape");
+#define G12_CASE(M_, U_, G_, P_) \
+    if (m == M_ && kcu == U_ && wg == G_ && pf == P_) { \
+        cudaFuncSetAttribute(g12::gemm<M_, U_, G_, P_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        g12::gemm<M_, U_, G_, P_><<<S * bk, threads, sm, s>>>((const uint4*)w.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), \
+        (__nv_bfloat16*)out.data_ptr(), ws.data_ptr<float>(), cnt.data_ptr<int>(), n, nrg_all, k, bk); return; }
+    G12_CONFIGS
+    TORCH_CHECK(false, "g12: no config");
+}
+'''
 
 # Router FP32 kernel configs (mp, kb, rw, nwarp), chosen on the H100 (dev/rt.py).
 ROUTER_F32 = [(1, (1, 2048, 1, 8)), (8, (8, 512, 2, 8)), (16, (16, 512, 2, 8))]
@@ -491,20 +626,26 @@ ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
 # BF16 grid-stride GEMV configs per layer: (m, k, u, nv, minb, pf, blocks), chosen on the H100 (dev/g10.py).
 BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4, 1, 1, 132)],
             "o": [(1, 1024, 2, 4, 2, 1, 264)], "unpooler": [(1, 4096, 2, 4, 1, 1, 132)]}
+# BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk), chosen on the H100 (dev/g12.py).
+BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32)], "pooler": [(8, 8, 8, 4, 128)], "o": [(8, 1, 2, 8, 128)],
+            "unpooler": [(8, 4, 4, 4, 32)]}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
-        _G10_SRC.replace("G10_CONFIGS", " ".join("G10_CASE(%d,%d,%d,%d,%d,%d)" % c[:6] for v in BF16_G10.values() for c in v)))
+        _G10_SRC.replace("G10_CONFIGS", " ".join("G10_CASE(%d,%d,%d,%d,%d,%d)" % c[:6] for v in BF16_G10.values() for c in v)) + "\n" +
+        _G12_SRC.replace("G12_CONFIGS", " ".join("G12_CASE(%d,%d,%d,%d)" % c for c in sorted({c[:4] for v in BF16_G12.values() for c in v}))))
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v5",
+        name="muse_proj_v6",
         cpp_sources="void pj_router(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
-                    "void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t);",
-        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv"],
+                    "void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                    "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, "
+                    "int64_t, int64_t, int64_t);",
+        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv", "g12_gemm"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -518,8 +659,18 @@ def _pack(w):
     return w.view(n // 16, 2, 8, k // 16, 2, 4, 2).permute(0, 3, 2, 5, 4, 1, 6).reshape(n // 16, k // 16, 256)
 
 
+def _pack12(w, kc):
+    # [k-chunk][8-row group][kc/32 atoms][lane][8]: atom = 8 rows x 32 k, lane l = row l/4, k (l%4)*8..+8
+    n, k = w.shape
+    return w.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
+
+
 def prepare(weights):
     st = {name: w.contiguous() for name, w in weights.items()}
+    for name, cfgs in BF16_G12.items():
+        for c in cfgs:
+            if (name, c[1]) not in st:
+                st[(name, c[1])] = _pack12(weights[name], 1024 * c[1])
     r = weights["router"]
     hi = r.to(torch.bfloat16)
     lo = (r - hi.float()).to(torch.bfloat16)
@@ -531,6 +682,9 @@ def prepare(weights):
     # Split-K workspace and per-row-block counters: always left zeroed by the kernels.
     st["ws"] = torch.zeros(32 * 8192, dtype=torch.float32, device=r.device)
     st["cnt"] = torch.zeros(1024, dtype=torch.int32, device=r.device)
+    # gemv12's own: FP32 split-K partials (overwritten each call, not zeroed) and per-rg counters (left zeroed)
+    st["ws12"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=r.device)
+    st["cnt12"] = torch.zeros(1024, dtype=torch.int32, device=r.device)
     return st
 
 
@@ -563,5 +717,10 @@ def kernel_fn(data, st):
             if m == c[0] and k == c[1]:
                 out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
                 _mod.g10_gemv(st[layer], x, out, *c[2:])  # W[:n] is the first n rows, in place
+                return out
+        for c in BF16_G12.get(layer, ()):
+            if m == c[0]:
+                out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
+                _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
                 return out
     return F.linear(x, st[layer][:n])
