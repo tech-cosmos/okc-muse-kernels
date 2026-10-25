@@ -362,7 +362,8 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 # The moe agent's NVFP4 experts (moe_src.py) at these token counts, SGLang's Marlin path elsewhere. Their board
 # (H200, us, SGLang incl. its torch post-norm at small T / theirs): bs1 77.3/42.5, bs8 143/106, bs16 196/159,
 # bs32 204/211, bs128 466/340, bs256 617/471.
-MARLIN_TOKENS = ()  # token counts kept on Marlin (v4 had (32,): moe bb49efd's bs32 fix is checked in v5)
+BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
+MARLIN_TOKENS = (32,)  # moe bb49efd at T=32: 222.0 vs Marlin 219.7 us decode 32 sliding (c17d1581)
 
 
 def _use_moe(tokens):
@@ -483,7 +484,7 @@ def kernel_fn(data, state):
     with torch.cuda.stream(side_stream):
         topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
         # The experts' bucketing too, off the main stream's path.
-        bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) else None
+        bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) and tokens <= BUCKET_SIDE_MAX_TOKENS else None
     pooled = F.linear(h, dense["pooler"])
     p = torch.empty_like(pooled)
     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=GLUE_PDL, num_warps=8,
