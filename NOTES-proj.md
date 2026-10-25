@@ -94,3 +94,18 @@
   Judge noise ~+-1%: single-shape gains < ~5% are not measurable in one check.
 - main (after 385b40e) = a0424fc's code (m8 qkv/pool/o/unpooler-b32 + pooler m16 on gemv12), check c569b693 1.1772x.
   NOT submitted (best on board stays a55d6b55 1.1757x). Next session: submit it together with the next real gain.
+
+## Session 4 (2026-10-25 21:45-23:25 UTC)
+- Triton swap-AB split-K GEMM (/tmp prototype, TMA descriptors, last-CTA FP32 reduction): never beat cuBLAS. m16: end
+  phase alone ~3 us (RED=0 variant 15.8 vs 18.6 qkv); m128/256 split-K with big tiles 1.5-3x slower. Dead end.
+- cuBLASLt heuristic gives only 8 algos (all algo 66); split-K variants of them: +4-12% on some shapes. Full
+  enumeration of algo 66 (634 tiles x 8 custom options x 7 clusters x 6 split-K; 45,792 pass AlgoCheck) screened in
+  ~30 s/shape: H100 best vs F.linear: qkv m16 17.2/18.1, m32 17.5/18.4, m128 18.1/21.1, m256 19.8/21.2; pooler m16
+  25.9/27.5, m32 26.1/27.8, m256 29.6/34.8; o -2-4%; unpooler ~0. NB attribute sizes: cluster shape and inner shape are
+  uint16, the others 4 bytes (GetAttribute with wrong size silently returns nothing).
+- Tuning in prepare() needs a READ flush (torch.sum over 256 MB), not zero_(): dirty lines from a write flush slow
+  the next kernel and mis-rank candidates. Graph replays, 25 reps, median.
+- check 1c72a94fe3b249ea (134eda6, lt at m16-256): 1.2139x. submit 202a248512c642ed: 1.2111x (CI 1.193-1.229).
+- check 556e63a8ac264fb3 (42dac99, tuner also over gemv12 + lt at m8): 1.2268x. H200 tune: lt beat gemv12 at every
+  m8 shape (pooler m8 22.2 vs g12 23.2, unpooler m8 9.8 vs 10.9 = lt split-K 8). submit 22109e72563f4cc3: 1.2334x
+  (CI 1.215-1.252), proj rank 379. Per-shape in STATE.

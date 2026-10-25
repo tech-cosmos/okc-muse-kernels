@@ -3,38 +3,38 @@
 Updated 2026-10-25 ~21:45 UTC (session 3).
 
 ## Board
-- **Best: submit a55d6b55a2604db3 = e71d015, 1.1757x (CI 1.158-1.193).** (#1 1.61x, #2-#11 1.53-1.56x.)
-- Previous: 3c377a1a (ec649e1, m1 gemv10) 1.1739x; fd765502 (25e165b) 1.1251x.
-- main: + pooler m16 on gemv12 (H200 1.05-1.08x), check c569b693 1.1772x (not submitted).
+- **Best: submit 22109e72563f4cc3 = 42dac99, 1.2334x (CI 1.215-1.252), proj rank 379.** (#1 1.61x, #10 ~1.53x.)
+- Previous: 202a2485 (134eda6, lt v9) 1.2111x; a55d6b55 (e71d015) 1.1757x.
+- main = 42dac99 (+ notes).
 
-## Per-shape H200 (us), SGLang / ours (check 1c6ae4b6 = e71d015); floor in TASK.md
+## Per-shape H200 speedup vs SGLang (submit 22109e72; SGLang us in bench.py SGLANG_H200)
 | load | qkv_gate | o | pooler | unpooler | router |
 |---|---|---|---|---|---|
-| decode 1 (m1) | 14.05/**11.50** | 7.01/**6.55** | 21.78/**18.23** | 7.04/**4.54** | 10.54/**5.32** |
-| decode 16 | 13.68/14.04 | 6.53/6.55 | 21.44/21.54 | 18.74/18.68 | 14.85/**7.38** |
-| decode 32 | 14.29/14.18 | 6.75/6.68 | 21.58/21.37 | 19.04/18.72 | 15.15/**8.57** |
-| verify 1 (m8) | 14.14/**13.36** | 6.85/6.74 | 21.26/**19.06** | 6.96/**5.71** | 26.30/**7.91** |
-| verify 16 (m128) | ~17.0 cuBLAS | ~7.4 | ~25 | ~20 | 16.4/**10.3** |
-| verify 32 (m256) | ~19.4 cuBLAS | ~9.2 | ~31 | ~24 | 17.5/**11.1** |
+| decode 1 (m1) | 1.25 | 1.07 | 1.22 | 1.66 | 2.09 |
+| decode 16 | 1.01 | 1.07 | 1.16 | 1.03 | 2.11 |
+| decode 32 | 1.02 | 1.07 | 1.16 | 1.01 | 1.75 |
+| verify 1 (m8) | 1.03 | 1.05 | 1.16 | 1.13 | 3.42 |
+| verify 16 (m128) | 1.08 | 1.02 | 1.16 | 1.00 | 1.57 |
+| verify 32 (m256) | 1.14 | 1.03 | 1.19 | 1.02 | 1.56 |
 Floors: qkv 7.9, o 3.5, pooler 14.0, unpooler 1.75 (m<=8) / 14.1, router 1.8; m256: 9.8/4.5/17.4/17.4/2.7.
-Still at cuBLAS speed: all BF16 shapes at m = 16, 32, 128, 256 (4 of 6 loads). That's where the remaining gap is.
+SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/24.8/30.7; unpooler 7 (m<=8) 18.7/20/24.
 
-## Code on main (submission.py is GENERATED: edit dev/sub_template.py + dev/*.cu, run `python dev/build_sub.py`)
+## Code on main (submission.py is GENERATED: edit dev/sub_template.py, dev/*.cu, dev/lt_cfg.txt; run `python dev/build_sub.py`)
 - Router: m<=8 true-FP32 dev/router.cu; m 9-32 hi/lo mma dev/gemv7.cu; m>32 one cuBLAS GEMM vs stacked [hi; lo].
-- BF16 m=1: dev/gemv10.cu (grid-stride over chunks of whole rows, W row-major in place, fat 1024-thread blocks
-  share one x copy in smem; FP32 FMA). Configs BF16_G10.
-- BF16 m=8 (and pooler m=16): dev/gemv12.cu (mma.sync m16n8k16, x = A, W = B repacked by _pack12 into 512-B atoms
-  [ks][rg][atom][lane]; block = (k-chunk, NG 8-row groups) x WG warps each; x chunk cp.async'd into smem first, in XP
-  pieces through a ring of XR buffers (pooler m16: S=1, full K, ring 8/2); per-warp smem slots summed; S>1: FP32
-  partials in st["ws12"] + counter st["cnt12"], last block of a rg writes BF16). Configs BF16_G12
-  (m, kcu, wg, pf, bk, xp, xr).
-- Other m: F.linear (cuBLAS) = SGLang.
-- bench.py: `python bench.py test` (39 cases), `python bench.py bench [filter]`. Sweeps: dev/g10.py, dev/g12.py
-  ("M,KCU,WG,PF,XP,XR;..." bk...; skips invalid configs), dev/g11.py (dead variant). Phase timers: /tmp/pj/dbg12.py style (globaltimer per block).
+- BF16 m=1: dev/gemv10.cu (grid-stride GEMV, fixed configs BF16_G10).
+- BF16 m>=8 (8/16/32/128/256): **prepare() `_tune`** times, per (layer, m), as CUDA-graph replays after a 256 MB read
+  flush (cold L2, like the judge), F.linear vs gemv12 (BF16_G12: m8 all, pooler m16) vs 5 cuBLASLt configs
+  (BF16_LT from dev/lt_cfg.txt), keeps the fastest in st["pick"]; kernel_fn dispatches via `_run`. Prints "tune ..."
+  lines (visible in the judge log: profiles/*.log). On the H200 lt wins every shape except unpooler m32 (F.linear).
+- dev/lt.cu: cuBLASLt matmul with explicit algo config (algo 66 = sm90 kernel; tile, stages 35=auto, split-K,
+  reduction, swizzle, custom option, cluster shape). Separate load_inline (`-lcublasLt`): if it fails, F.linear.
+- Sweep tooling: dev/lte_lib.py (load_inline helpers: lt_enum = all 45,792 algo-66 configs; lt_desc decodes a blob),
+  dev/lte.py `python dev/lte.py 16:qkv_gate 256:pooler ...` (screen all configs, 2 reps eager w/ flush, refine top 40
+  in graphs; saves /tmp/pj/lte_<m>_<layer>.pt), dev/lt_gencfg.py (-> lt_cfg.txt, top 5 distinct per shape).
+  Run with SUB=<abs path to submission.py> and cwd /tmp/pj (scripts expect /tmp/pj/lt.py: copy dev/lte_lib.py there).
+- bench.py: `python bench.py test` (39 cases), `python bench.py bench [filter]`.
 
-## Budget 2026-10-25: checks 10/20, scored 5/10 (CLAUDE.md: max 6 submits/day). Resets 00:00 UTC.
-- main = a0424fc code (check c569b693 1.1772x), not submitted: submit with the next real gain. Judge noise ~+-1%
-  per run (1.162-1.177 for near-identical code): single-shape gains < ~5% are invisible in one check.
+## Budget 2026-10-25: checks 12/20, scored 7/10 (lead: max 9 submits/day). Resets 00:00 UTC.
 
 ## What I learned (numbers in NOTES)
 - A graph's kernel launch costs ~1.8-2.6 us over an empty graph (more blocks -> more). Reader slope 3.24 TB/s (H100).
@@ -51,11 +51,9 @@ Still at cuBLAS speed: all BF16 shapes at m = 16, 32, 128, 256 (4 of 6 loads). T
 - unpooler m8 on gemv12 with 32 blocks: H200 5.71 once, 7.04/7.27 twice (same code): few-SM configs are fragile.
 
 ## Next (ranked)
-1. gemv12 split-K end phase: release/acquire atomics instead of fence+atomic; or red.global into ws + one counter;
-   or no split K where n/8 divides 128 (o, pooler m8 already S=1). Also slot sum cost (WG-deep).
-2. m16/m32 (decode 16/32 = 2 loads): gemv12 loses (m32 badly). Per 512 B of W a lane does TT*2 LDS.128 + TT*2 mma.
-   Ideas: wgmma (m64nNk16 with W as A from smem via TMA, x as B: N = m tokens = 16/32) so x is read from smem by the
-   tensor core directly and W streams via TMA; or keep x A-fragments in registers across atoms (k-major loop inside a
-   warp for a fixed k slice over many rgs: x frags loaded once per k slice, W atoms of all rgs at that k).
-3. m128/256 (verify 16/32): cuBLAS ~20-30% over floor; would need a wgmma/TMA kernel (or DeepGEMM in the judge).
-4. Router m<=8 (5.3-7.9 us vs 1.8 floor): FP32 weights 8 MB; a gemv10-style FP32 kernel might give ~4.
+1. Remaining gap is mostly unpooler m16-256 (~1.0x, cuBLAS ~3.6 TB/s already: near practical) and qkv m16/m32 (1.01;
+   floor 7.9 vs ~13.7): a native kernel that hits m1-gemv10 speed at m16/32 (gemv10 qkv m1 = 11.5 on H200).
+2. Tuner: more candidates for weak shapes (qkv m16/32: sweep was noisy, 2-rep screen; try a 6-rep screen of the top
+   500), and router m>32 (stacked hi/lo FP32-out GEMM) through cuBLASLt configs too (needs an FP32-out lt variant).
+3. gemv12 split-K end phase (~2.8 us): DSMEM cluster reduction instead of global partials+counter.
+4. Router m<=8 (5-8 us vs 1.8 floor).
