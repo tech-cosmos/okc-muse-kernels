@@ -1,34 +1,43 @@
 # STATE-moe (muse_moe_w4a16)
 
 ## Board
-- Best: submit 5706bc37ac4041ff @6a1cda0, **1.589x** (2026-10-25 ~20:30Z). Top of board 2.52x (#10 2.37x).
-- Check of same code 58a1676977ea4978: 1.586x. Per shape (H200, us; SGLang from the same run):
-  | load | bs | SGLang | ours | x | floor | experts touched (seed 7) |
+- Best check: 5708ff8cb783444c @c7dce17, **1.888x** (2026-10-25 ~21:40Z); submit of the same code: see NOTES / COORD
+  (previous best submit 5706bc37 1.589x @6a1cda0). Top of board 2.52x (#10 2.37x).
+  | load | bs | SGLang | ours | x | floor | old (6a1cda0) |
   |---|---|---|---|---|---|---|
-  | decode 1 | 1 | 79.9 | 42.4 | 1.89 | 11.4 | 3 |
-  | decode 16 | 16 | 186.3 | 127.8 | 1.46 | 52.5 | 13 |
-  | decode 32 | 32 | 203.7 | 174.5 | 1.17 | 70.8 | 18 |
-  | verify 1 | 8 | 140.9 | 89.1 | 1.58 | 37.3 | 10 |
-  | verify 16 | 128 | 470.4 | 262.8 | 1.79 | 101.3 | 25 |
-  | verify 32 | 256 | 617.8 | 348.2 | 1.77 | 108.9 | 26 |
-- The cheaper dequant (6a1cda0) gained 6-7% on H200 decode with NO change on local H100 = proof that
-  H200 decode is issue-bound.
-- One expert = 18.9 MB w13 + 9.4 MB w2 (incl. scales). Decode runs at ~2.7 TB/s on H200 AND on local H100:
-  **decode is issue-bound, not HBM-bound** (old kernel bs32 gemm13: 57% issue, ALU pipe 53% on H100). On
-  H200 every instruction per weight word counts; local H100 timings can't show it, use ncu inst counts.
+  | decode 1 | 1 | 80.0 | 31.9 | 2.51 | 11.4 | 42.4 |
+  | decode 16 | 16 | 188.7 | 101.0 | 1.87 | 52.5 | 127.8 |
+  | decode 32 | 32 | 204.2 | 134.1 | 1.52 | 70.8 | 174.5 |
+  | verify 1 | 8 | 142.4 | 71.4 | 1.99 | 37.3 | 89.1 |
+  | verify 16 | 128 | 473.5 | 260.5 | 1.82 | 101.3 | 262.8 |
+  | verify 32 | 256 | 618.5 | 353.5 | 1.75 | 108.9 | 348.2 |
+- One expert = 18.9 MB w13 + 9.4 MB w2 (incl. scales).
+- **H200 proxy that works**: ncu kernel durations (ncu locks the SM clock at base 1.45 GHz, memory unchanged:
+  same compute/BW ratio as H200 at boost). Judge H200 time ~= 0.72 x ncu total. `/tmp/ncu_t.sh <bs> <cfg>`
+  (cfg `t8` = moe_tk2 8 stages; `old11` = old moe_gemm path; scripts below). Local wall clock can't rank
+  decode kernels (H100 is HBM-bound where H200 is issue-bound).
 
 ## What's on main (submission.py)
-route (1 CTA) -> gemm13 -> gemm2 -> norm (per token). Two GEMM kernels, same packed weights:
-- `moe_gemm<R,G,GATED,MB>` (decode, M <= 32; plan 10 for M==1 (minBlocks 3), 11 otherwise): items = active
-  expert x 16-row tile (gated: gate+up pair), 8 warps split K (512 each), all weights of the item loaded
-  up front, mma.sync, smem atomic reduce, epilogue silu*up. Occupancy is everything here (64 regs, 4 CTA/SM).
-- `moe_big<GATED,NS=8,NW=8,MB=2>` (M > 32, cfg 118): item = active expert x (gated: 32 gate + 32 up rows /
-  w2: 128 rows), work-stealing counter (meta[66/67], zeroed by route), each warp ONE 16-row tile over full
-  K, x for all tokens (<= 64 per pass) staged per 64-k chunk in smem with the warps' weights (8-stage
-  cp.async ring, 144 B row stride = conflict-free LDS.128), NG (token groups) is a TEMPLATE (1,2,4,8):
-  a runtime `if (gi < ng)` around mma compiles to predicated HMMAs that still issue (was 2x slower).
+M <= 32 (decode, bs8): 3 launches, `moe_tk2<NRT, NC=8, NSTG=8, GATED>` x2 + `moe_norm2`:
+- 1 CTA/SM, 8 consumer warps + 1 producer lane. Work = (active expert, 8-token group, row-tile pair rp)
+  "rows" R; CTA b takes rows [nrp*b/grid, nrp*(b+1)/grid). Per rp the producer streams 8 blocks; block q =
+  8 units (k chunks q*8..q*8+7) = 3 cp.async.bulk copies (gate tile 4 KB, up tile 4 KB, scales 1 KB) into an
+  8-stage smem ring (mbarrier full/empty; empty count = 256: every consumer lane arrives).
+- Consumer warp w does k chunk q*8+w of every block, so its x fragments (8 kc x 2 uint4) stay in registers
+  for a whole segment. Per rp: smem cross-warp reduce (double-buffered s_red, 1 named barrier), epilogue:
+  gemm13 -> bf16 silu(gate)*up into inter[pos]; gemm2 -> FP32 y[pos] (plain stores, no atomics/zeroing).
+- gemm13 CTAs compute the routing themselves (deterministic: __match_any_sync rank + per-warp counts), CTA 0
+  writes meta/sroutes/inv for gemm2 + norm2. Experts with > 8 tokens: one segment per 8-token group (weights
+  re-read per group). Scales repacked per pair: S2 [e][rp][kc][lane] u32 (_pair_scales in prepare).
+M > 32: unchanged: route -> moe_big gemm13 -> moe_big gemm2 -> norm (cfg 118, below).
+- `moe_big<GATED,NS=8,NW=8,MB=2>`: item = active expert x (gated: 32 gate + 32 up rows / w2: 128 rows),
+  work-stealing counter (meta[66/67], zeroed by route), each warp ONE 16-row tile over full K, x for all
+  tokens (<= 64 per pass) staged per 64-k chunk in smem with the warps' weights (8-stage cp.async ring), NG
+  template (1,2,4,8).
 - dequant dq(): o0 = q&M, o1/o2 = rotl(q,10/13)&M, o3 = ((q&0x001B001B)*16648)&M, M=0x81C081C0; 4 x
-  fma.rn.bf16x2 with LUT scale. 12 instr per 8 weights. (_POS in prepare must match.)
+  bf16x2 mul with LUT scale. 12 instr per 8 weights. (_POS in prepare must match.)
+- Also in the file (not used by default): moe_sk (register-ring stream-K + atomics, SK_CFG path when
+  TK2_NSTG=0), moe_tk (TMA + atomics), moe_gemm (old decode), route2/act. Clean up when convenient.
 
 ## Local harness
 Judge JSON summary: `python /tmp/moe_sum.py <okc --json output>` (recreate if lost: prints per-shape median vs baseline).
