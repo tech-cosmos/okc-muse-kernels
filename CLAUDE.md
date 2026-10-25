@@ -55,7 +55,7 @@ Each problem has its own **20 checks and 10 scored runs** a day (`okc problems -
 problem is yours alone:
 - `okc check <dir>/submission.py --json`: use them all if you have real candidates. The judge
   reports per-shape times: one check can test independent changes on different shapes.
-- `okc submit <dir>/submission.py --json`: at most 6 a day, only when your local correctness tests
+- `okc submit <dir>/submission.py --json`: at most 9 a day (lead agent 2026-10-25), only when your local correctness tests
   pass AND a check on the same code beat our best board result for the problem. **Exception: the
   first correct submission** (no row on the board yet) may be submitted straight away.
 - Never resubmit unchanged code hoping for a lucky run.
