@@ -1,45 +1,52 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-25 20:25Z (end of session 1).
+Updated 2026-10-25 ~21:00Z (end of session 2).
 
 ## Board
-- **Best scored: 1a7c4997 = main 5a95d4a (v6), 1.4586x, 15,508 us/step.** (Session start: none; 1.000x baseline
-  53d9d188.) Board #1 2.285x (9,900 us). Budget 2026-10-25: 5 of 6 submits, 7 of 20 checks used.
-- v6 per shape, H200 (SGLang / ours, us): d1 171.9/104.0, d1f 180.0/110.4, d16 258.6/178.5, d16f 431.9/255.2,
-  d32 255.6/219.0, d32f 606.1/378.4, v1 262.8/157.1, v1f 281.3/174.1, v16 518.3/391.5, v16f 690.9/471.9,
-  v32 705.3/578.3, v32f 1044.5/737.8. Weakest loads: decode 32 (1.17 sliding), verify 32 (1.22), verify 16 (1.32).
+- **Best scored: 12744959 = dbe255a (v7), 1.555x, 14,550 us/step, layer rank 220.** Board #1 2.285x (9,900 us),
+  #20 2.03x. Budget 2026-10-25: 6 of 6 submits, 9 of 20 checks used (all spent on submits today: none left).
+- **QUEUED: main (v8, c33532e + comment-only change) checked fc3e60d0 = 1.581x [1.557, ...] > 1.555 board.
+  SUBMIT IT FIRST after 00:00 UTC 2026-10-26** (`okc submit muse_decode_layer/submission.py --json`).
+- v8 per shape, H200 (SGLang / ours, us): d1 172.7/105.5, d1f 183.2/113.7, d16 269.8/183.7, d16f 444.0/260.4,
+  d32 268.2/218.3, d32f 631.3/369.6, v1 267.7/157.9, v1f 281.0/169.3, v16 545.3/341.8, v16f 720.1/427.3,
+  v32 735.6/469.5, v32f 1074.9/631.9. (Judge noise: SGLang's own times move +-5% between runs.)
+  Per load ~: d1 1.63, d16 1.55, d32 1.42, v1 1.69, v16 1.62, v32 1.61.
 - Floors (us): d1 40/44, d16 77/137, d32 85/208, v1 62/66, v16 127/189, v32 144/267. Weights: sliding 46, full 16.
 
 ## Code (muse_decode_layer/)
-- `layer.py` = the layer; `attn_src.py` = ~/attn submission.py @82866c6; `moe_src.py` = r-moe submission.py @bb49efd.
-  **`python build.py` writes submission.py**: inlines both (attention: kernel_fn -> attn_kernel_fn, plus a
-  constexpr_function replacing triton.next_power_of_2 inside a jit body, which SGLang's import breaks in the judge;
-  moe: every top-level name prefixed `_moe_` via tokenize). Never edit submission.py by hand.
-- Pipeline: qkv F.linear -> attn kernels -> o F.linear -> `_boundary` (Triton, 1 CTA/row, 16 warps) -> side stream:
-  router (`_router_fma` FP32 <= 8 tokens, `_router_split` hi/lo tl.dot above) + `_routing` (+ moe bucketing <= 16
-  tokens) || pooler F.linear -> `_rmsnorm_gain` -> experts (moe kernels; Marlin at T=32: MARLIN_TOKENS) ->
-  unpooler F.linear (1024-row slice <= 8 tokens) -> `_boundary`. `_post_expert_wsum` is for the Marlin path <= 16 tokens.
-- bench.py `test` (13 judge tests), `bench`, `prof`; tools/timeline.py (per-kernel start/end of one replay),
-  tools/micro*.py, tools/route_stress*.py. Locally everything runs (moe kernels) except Marlin (T=32 uses moe locally).
-- diag_experts.py: a prepare-time profiler of the Marlin path, for diag checks only (never submit).
+- `layer.py` = the layer; `attn_src.py` = ~/attn submission.py @82866c6; `moe_src.py` = r-moe 6a1cda0
+  (`git show <commit>:muse_moe_w4a16/submission.py > moe_src.py`; check the route meta size, now 68 ints, matches
+  `_moe_bucket`). **`python build.py` writes submission.py** (inlines both; attention kernel_fn -> attn_kernel_fn +
+  constexpr np2 fix; moe names prefixed `_moe_`). Never edit submission.py by hand.
+- Pipeline: qkv F.linear -> attn kernels -> o F.linear -> `_boundary` -> side stream: router + `_routing`
+  (+ moe bucketing <= 16 tokens) || pooler F.linear -> `_rmsnorm_gain` -> moe experts (all T now; Marlin code kept,
+  MARLIN_TOKENS = ()) -> unpooler F.linear (1024-row slice <= 8 tokens) -> `_boundary`.
+- bench.py `test` / `bench [file] [filter]` / `prof`; tools/timeline.py <file> "<load> <layer>" (per-kernel
+  start/end of one replay). variants/sub_v7.py = v7 build for A/B.
 
-## Where the time goes (local H100 decode 1 sliding 132 us, tools/timeline.py)
-qkv GEMM 22.6 (38 MB at 1.8 TB/s), attention 4.8, o GEMM 10.6, boundary 4.3, pooler 29, prenorm 2, experts 46,
-unpooler 8, boundary 3.7. GEMMs ~70 us = proj's lane (Handoff awaited); experts = moe's lane.
-Judge-side at T>=128: experts dominate (moe kernel ~300-450 us of verify 16/32).
+## Where the time goes (judge, v8)
+- decode 1 (105 us): cuBLAS GEMMs ~50 (qkv+pooler 33, o 7, unpool 5, 3 splitK reduces 5), experts 35 + norm 3.7
+  (~BW floor for 3 experts), boundary 2x3.8, attention 4.3, rmsnorm 1.5. Router/routing hidden on the side stream.
+- decode 32 sliding (218): experts 131 (gemm13 86, gemm2 46), GEMMs ~65, attention 10, glue ~20.
+- verify 16/32: experts (moe_big) ~290/~290-450, GEMMs ~70-90. Full layers: attention 100-300 (frozen lane).
+- Layer-side glue is at the launch floor (empty kernel ~2.4 us). The remaining big levers are other lanes:
+  BF16 GEMMs at 55-65% of HBM peak (proj), experts at decode 16/32 + big-M (moe).
 
 ## Next (ranked)
-1. Watch ~/COORD.md Handoffs: proj GEMV/GEMM for qkv/o/pooler/unpooler at m=1..256 (biggest small-T lever:
-   ~25-30 us of 104 at decode 1); newer moe commits (re-copy moe_src.py, re-check T=32 vs Marlin).
-2. Fusions in my lane once GEMMs are ours: boundary into the o/unpooler GEMM epilogues via per-row partial sums
-   (sum a^2, (beta a)^2, (alpha s)(beta a), (alpha s)^2) consumed in the pooler/router prologue; prenorm folded as
-   a per-token scale after gemm13 (needs moe kernel support: W13 (x g r) = r W13 (x g)).
-3. Drop splitK-reduce kernels (1.7-2 us each, 3 per step) when GEMMs are ours.
-4. Routing risk: diag check f5fdc570 failed one timed rep's routing (3.18e-2 > 0.03 margin). Local stress 0/120.
-   If a real run fails this way, study score error upstream of the router (attention FP8 queries).
+1. After 00:00 UTC: submit v8 (see above).
+2. Watch ~/COORD.md Handoffs / r-moe and r-proj commits: re-copy moe_src.py on every moe speedup (T=1..256 all
+   use it now), rebuild, `bench.py test`, local bench vs variants/, check. Proj: their gemv7 BF16 m=1 is ~3-5%
+   faster than cuBLAS on H200 (qkv 13.3 vs 14.0, pooler 20.5 vs 21.1): worth taking when they post it, also
+   their router hi/lo kernel for m 9-32 (but my router is off the critical path, so low value).
+3. Small layer fusions (each ~1-3 us): pre-expert rmsnorm into moe gemm13's x staging for T<=32 (needs a
+   patched copy of moe CUDA: x*r*g rounded to BF16 = identical to now); remove splitK reduces once GEMMs are ours;
+   boundary into the unpool GEMM epilogue at T<=8 (last-CTA pattern) if we own that GEMV.
+4. Routing risk: diag check f5fdc570 once failed a timed rep's routing (3.18e-2 > 0.03). Not seen since (6 runs).
 
-## Dead ends
-- Multi-CTA boundary with atomics + spin row barrier: 6.6-8.3 us vs 5.0 single-CTA (H100).
-- PDL on glue kernels after a cuBLAS producer: no gain.
-- Side-stream moe bucketing at T=128/256: +29..+67 us on the judge (fine on H100).
-- moe bb49efd at T=32 vs Marlin: 222.0 vs 219.7 (tie/loss).
+## Dead ends (details in NOTES)
+- Multi-CTA boundary (atomics + spin barrier); one-pass boundary (4 sums): both slower.
+- PDL on glue after cuBLAS: no gain. Side-stream moe bucketing at T>=128: +29..67 us on the judge.
+- L2 prefetch of the next weight on a side stream (load kernel or cp.async.bulk.prefetch.L2): GEMM speeds up but
+  attention is delayed/slowed by the same amount; a side-stream fork at graph START costs ~9 us.
+- GEMV with PDL preloading W before griddepcontrol.wait: overlaps but the producer slows equally (zero-sum).
+- torch.mm(out_dtype=float32) instead of F.linear: same speed.

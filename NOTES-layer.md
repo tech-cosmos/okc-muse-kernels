@@ -63,3 +63,7 @@
 - DEAD: one-pass boundary (both norms from 4 simultaneous row sums): 4.6/4.3 vs 4.3/3.9 us at T=1, mixed at T=256.
 - Glue at decode 1 is at the launch floor: an empty kernel is ~2.4 us, boundary 3.8-4.3. Remaining layer-side lever
   is launch count (14 kernels on the critical path at T=1, 3 of them cuBLAS splitK reduces).
+- v8 (c33532e): moe_src.py = r-moe 6a1cda0 (cheaper dequant), moe kernels at T=32 too (MARLIN_TOKENS = ()).
+  Local H100 1-5 us better than v7. check fc3e60d0: **1.581x** (v7 check 1.564x); decode 32 sliding 218.3 on moe vs
+  225.0 Marlin (440361a9), so Marlin is no longer used anywhere. Not submitted: 6/6 submits used on 2026-10-25.
+  QUEUED for after 00:00 UTC. v8 per shape in STATE-layer.md.
