@@ -81,18 +81,36 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
             nb[p][u] = ld2(N + i);
         }
     };
+    // x and the escape headers first: they must not queue behind the W prologue
+    constexpr int XV = (KK / 8 + 256 * NV - 1) / (256 * NV), HV = (MAXC * RPC * ESC + 255) / 256;
+    uint4 xv[XV];
+    float2 hv[HV];
+#pragma unroll
+    for (int q = 0; q < XV; ++q) {
+        const int i = threadIdx.x + q * 256 * NV;
+        if (i < KK / 8) xv[q] = __ldg(reinterpret_cast<const uint4*>(x) + i);
+    }
+#pragma unroll
+    for (int q = 0; q < HV; ++q) {
+        const int i = t + q * 256, ch = c + (i / (RPC * ESC)) * G;
+        if (i < MAXC * RPC * ESC && ch < nch) hv[q] = __ldg(H + (long)ch * RPC * ESC + i % (RPC * ESC));
+    }
 #pragma unroll
     for (int p = 0; p < PF; ++p)
         if (c + p * G < nch) load(p, c + p * G);
-    for (int i = t; i < MAXC * RPC * ESC; i += 256) {
-        const int ch = c + (i / (RPC * ESC)) * G;
-        if (ch < nch) hs_[vg][i] = __ldg(H + (long)ch * RPC * ESC + i % (RPC * ESC));
-    }
-    for (int i = threadIdx.x; i < KK / 8; i += 256 * NV) {
-        const uint4 a = __ldg(reinterpret_cast<const uint4*>(x) + i);
-        const unsigned v[4] = {a.x, a.y, a.z, a.w};
 #pragma unroll
-        for (int j = 0; j < 4; ++j) { const int kk = XI(8 * i + 2 * j); xs[kk] = __uint_as_float(v[j] << 16); xs[kk + 1] = __uint_as_float(v[j] & 0xffff0000u); }
+    for (int q = 0; q < HV; ++q) {
+        const int i = t + q * 256, ch = c + (i / (RPC * ESC)) * G;
+        if (i < MAXC * RPC * ESC && ch < nch) hs_[vg][i] = hv[q];
+    }
+#pragma unroll
+    for (int q = 0; q < XV; ++q) {
+        const int i = threadIdx.x + q * 256 * NV;
+        if (i < KK / 8) {
+            const unsigned v[4] = {xv[q].x, xv[q].y, xv[q].z, xv[q].w};
+#pragma unroll
+            for (int j = 0; j < 4; ++j) { const int kk = XI(8 * i + 2 * j); xs[kk] = __uint_as_float(v[j] << 16); xs[kk + 1] = __uint_as_float(v[j] & 0xffff0000u); }
+        }
     }
     __syncthreads();
     int par = 0, j = 0;

@@ -221,7 +221,7 @@ def _tune(st, reps=25):
         x = torch.randn(m, k, generator=g, device=w.device).to(torch.bfloat16)
         ref = F.linear(x, w[:n]).float()
         out = torch.empty(m, n, dtype=torch.bfloat16, device=w.device)
-        cands = [None]
+        cands = [None] if m > 1 else []  # m=1: gemv10 always beat cuBLAS on the judge; ties picked F.linear by noise
         for c in cfgs:
             if c[0] == "lt" and _lt.lt_gemm(w, x, out, st["ltws"], list(c[1])) != 0:
                 continue
@@ -229,6 +229,8 @@ def _tune(st, reps=25):
             torch.cuda.synchronize()
             if ((out.float() - ref).norm() / ref.norm()).item() < 1e-3:
                 cands.append(c)
+        if not cands:
+            continue
         graphs = []
         for c in cands:  # one graph per candidate: times the kernel as the judge replays it, no host overhead
             gr = torch.cuda.CUDAGraph()
@@ -253,7 +255,7 @@ def _tune(st, reps=25):
         best = min(range(len(cands)), key=med.__getitem__)
         if cands[best] is not None:
             picks[(layer, m)] = cands[best]
-        print(f"tune {layer} m{m}: F.linear {med[0] * 1e3:.2f} us, best {cands[best]} {med[best] * 1e3:.2f} us; "
+        print(f"tune {layer} m{m}: best {cands[best]} {med[best] * 1e3:.2f} us; "
               + " ".join(f"{'F' if c is None else c[0]}:{t * 1e3:.2f}" for c, t in zip(cands, med)))
     del flush
     return picks
