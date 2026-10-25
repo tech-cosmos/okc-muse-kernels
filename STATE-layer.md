@@ -7,7 +7,8 @@ Updated 2026-10-25 ~23:30Z (end of session 5: main v17 checked 1.8045x (v15 1.81
 - **main = v17 (5cf795f): check 842b5e2c 1.8045x. v15 (3508986) check 58f0ef6f 1.818x, v16 check f8e06892 1.811x:
   all noise-equal (+-1%); v17 = v15 + cuBLASLt qkv m256 etc. (v32 +1-2%). FIRST THING after 00:00Z 2026-10-26:
   `okc submit muse_decode_layer/submission.py --json` (main = v17, code identical to check 842b5e2c).**
-- Budget 2026-10-25: 9 of 9 submits used, 17 of 20 checks used.
+- Budget 2026-10-25: 9 of 9 submits used, 18 of 20 checks used. v18 (moe RT=4 682dd87) check b55c49e3 1.798x:
+  v32 sliding -4%: reverted; stay on moe c39a176 unless moe ships a big-M that wins in the layer.
 - v15 per shape, H200 check 58f0ef6f (SGLang / ours, us): d1 171.0/80.7, d1f 182.8/92.5, d16 269.5/162.9,
   d16f 431.9/234.1, d32 264.8/190.3, d32f 617.0/343.3, v1 267.3/135.7, v1f 273.8/144.6, v16 523.6/297.5,
   v16f 703.6/394.0, v32 718.8/382.3, v32f 1060.3/553.1. Judge per-shape noise: identical code moves up to 4%.
