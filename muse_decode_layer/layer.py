@@ -40,6 +40,7 @@ except ImportError:
     HAVE_SGL = False
 
 # @@ATTENTION@@
+# @@MOE@@
 
 
 class Weights(TypedDict):
@@ -119,7 +120,8 @@ RESIDUAL_GATE_EPS = 1e-3
 # SGLang's fused_post_expert_norm_weighted_sum runs ~14 torch kernels up to 8 tokens (judge diag f5fdc570):
 # our one-kernel version up to here (H100: 4.8 us at T<=8, 5.2 at 32 vs SGLang's Triton kernel 4.1 on H200 at 32).
 OWN_WSUM_MAX_TOKENS = 16
-GLUE_PDL = False  # PDL after a cuBLAS producer: no gain (H100 o GEMM + boundary 12.64 vs 12.74 us)
+GLUE_PDL = False
+LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference experts (tests of the Marlin-side glue)  # PDL after a cuBLAS producer: no gain (H100 o GEMM + boundary 12.64 vs 12.74 us)
 
 
 # ---- boundaries: post-norm of the branch, residual gate, pre-norm of the new stream ----
@@ -357,6 +359,32 @@ def _experts_marlin(x, topk_weights, local_ids, state):
     return out
 
 
+# The moe agent's NVFP4 experts (moe_src.py) at these token counts, SGLang's Marlin path elsewhere. Their board
+# (H200, us, SGLang incl. its torch post-norm at small T / theirs): bs1 77.3/42.5, bs8 143/106, bs16 196/159,
+# bs32 204/211, bs128 466/340, bs256 617/471.
+def _use_moe(tokens):
+    return not HAVE_SGL or tokens != 32
+
+
+def _experts_moe(x, topk_weights, local_ids, state):
+    """moe_src's route -> gemm13 -> gemm2 -> norm, on local ids (-1 off this GPU: skipped as out of range)."""
+    st = state["moe"]
+    lib = st["lib"]
+    m = x.shape[0]
+    dev = x.device
+    meta = torch.empty(66, dtype=torch.int32, device=dev)
+    sroutes = torch.empty(m * TOP_K, dtype=torch.int32, device=dev)
+    inter = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=dev)
+    y = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=dev)
+    out = torch.empty((m, D_EXPERT), dtype=torch.bfloat16, device=dev)
+    p13, p2 = _moe__plan(m)
+    lib.moe_route_launch(local_ids, 0, LOCAL_EXPERTS, meta, sroutes)
+    lib.moe_gemm13(p13, st["w13q"], st["w13s"], st["gs13"], st["lut"], x, meta, sroutes, inter)
+    lib.moe_gemm2(p2, st["w2q"], st["w2s"], st["gs2"], st["lut"], inter, meta, sroutes, y)
+    lib.moe_norm_launch(y, local_ids, topk_weights, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, out)
+    return out
+
+
 def _experts_local(x, topk_weights, local_ids, state):
     """Local test fallback (no SGLang): every local expert on every token from BF16 copies made in prepare,
     each output post-normed (scale, round to BF16, RMSNorm) and kept by its routing weight."""
@@ -399,9 +427,12 @@ def prepare(weights):
         "post_expert_w": (1.0 + weights["post_expert_norm"].float()).to(torch.bfloat16),
         "side_stream": torch.cuda.Stream(weights["qkv_gate"].device),
     }
+    state["moe"] = _moe_prepare({"w13": weights["w13"], "w13_sf": weights["w13_sf"], "w13_gs": weights["w13_gs"],
+                                 "w2": weights["w2"], "w2_sf": weights["w2_sf"], "w2_gs": weights["w2_gs"],
+                                 "post_norm_w": weights["post_expert_norm"]})
     if HAVE_SGL:
         state["bank"] = _marlin_bank(weights)
-    else:
+    elif LOCAL_FALLBACK:
         from nvfp4 import dequantize
         state["experts_bf16"] = [
             (dequantize(weights["w13"][e], weights["w13_sf"][e], weights["w13_gs"][e]).to(torch.bfloat16),
@@ -448,7 +479,7 @@ def kernel_fn(data, state):
             t.record_stream(main_stream)
         for t in (h, h32):
             t.record_stream(side_stream)
-    experts = _experts_marlin if HAVE_SGL else _experts_local
+    experts = _experts_moe if _use_moe(tokens) else _experts_marlin if HAVE_SGL else _experts_local
     moe = experts(p, topk_weights, local_ids, state)  # all-reduce: identity
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
     f = F.linear(moe, state["unpool_slice"] if sliced else state["unpool"])  # all-gather: identity (zeros)

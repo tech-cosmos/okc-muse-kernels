@@ -1,6 +1,32 @@
 """Build submission.py = attention kernels (attn_src.py, from ~/attn submission.py) + the layer (layer.py).
 The judge takes one file, so the attention module is inlined with its kernel_fn renamed attn_kernel_fn."""
 import re, sys, pathlib
+import ast, io, tokenize
+
+
+def moe_namespaced(src):
+    """The moe agent's submission with every top-level Python name prefixed _moe_ (tokens only: strings,
+    including the CUDA source, and attributes stay as they are)."""
+    src = src.split("\n", 1)[1]
+    tree = ast.parse(src)
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    out, prev = [], None
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.NAME and tok.string in names and not (prev and prev.string == "."):
+            tok = tok._replace(string="_moe_" + tok.string)
+        out.append(tok)
+        if tok.type not in (tokenize.NL, tokenize.COMMENT):
+            prev = tok
+    return tokenize.untokenize(out)
+
+
 here = pathlib.Path(__file__).parent
 attn = (here / "attn_src.py").read_text()
 layer = (here / "layer.py").read_text()
@@ -22,6 +48,8 @@ def _np2_jit(n):
 
 
 class Config(TypedDict):""", 1)
+moe = moe_namespaced((here / "moe_src.py").read_text())
+layer = layer.replace("# @@MOE@@\n", "# ---- experts (moe_src.py, names prefixed _moe_) ----\n" + moe + "\n# ---- layer ----\n")
 out = "# okc: problem=muse_decode_layer\n" + layer.replace("# @@ATTENTION@@\n", "# ---- attention (attn_src.py) ----\n" + attn + "\n# ---- layer ----\n")
-assert "@@ATTENTION@@" not in out and "attn_kernel_fn" in out
+assert "@@ATTENTION@@" not in out and "@@MOE@@" not in out and "attn_kernel_fn" in out
 (here / (sys.argv[1] if len(sys.argv) > 1 else "submission.py")).write_text(out)
