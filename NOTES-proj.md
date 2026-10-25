@@ -47,7 +47,7 @@
 - Conclusion: four GEMV structures all land at cuBLAS +-5% at m1, while the pure grid-stride reader is ~20% faster
   (H100). Next: bisect from the reader upward (see STATE).
 
-## Session 3 (2026-10-25 20:30- UTC)
+## Session 3 (2026-10-25 20:30-21:45 UTC; job times: e5329f39 20:47, 3c377a1a 20:49, 1c6ae4b6 21:16, a55d6b55 21:18, 49298f3e 21:32, c569b693 21:34)
 - Probe (/tmp, numbers here): empty graph 2.88 us; a nop kernel adds 1.8 us (1 block) / 2.6 us (1056 blocks); 2 nops +3.0.
   The ~4 us "intercept" in every shape's time is mostly launch, not DRAM ramp. Reader slope 3.24 TB/s (H100).
 - dev/gemv9.cu (CUDA-core warp stream-K, W row-major, atomics+counter finalize): 25-40% SLOWER than cuBLAS. x per tile

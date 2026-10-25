@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-25 ~23:00 UTC (session 3).
+Updated 2026-10-25 ~21:45 UTC (session 3).
 
 ## Board
 - **Best: submit a55d6b55a2604db3 = e71d015, 1.1757x (CI 1.158-1.193).** (#1 1.61x, #2-#11 1.53-1.56x.)
@@ -29,7 +29,7 @@ Still at cuBLAS speed: all BF16 shapes at m = 16, 32, 128, 256 (4 of 6 loads). T
 - bench.py: `python bench.py test` (39 cases), `python bench.py bench [filter]`. Sweeps: dev/g10.py, dev/g12.py
   ("M,KCU,WG,PF;..." bk...), dev/g11.py (dead variant). Phase timers: /tmp/pj/dbg12.py style (globaltimer per block).
 
-## Budget 2026-10-25: checks 6/20, scored 5/10. (Resets 00:00 UTC.)
+## Budget 2026-10-25: checks 8/20, scored 5/10 (CLAUDE.md: max 6 submits/day). Resets 00:00 UTC.
 
 ## What I learned (numbers in NOTES)
 - A graph's kernel launch costs ~1.8-2.6 us over an empty graph (more blocks -> more). Reader slope 3.24 TB/s (H100).

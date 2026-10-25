@@ -21,7 +21,7 @@ __device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
-template <int M, int KCU, int WG, int PF, int XP, int XR, int R>
+template <int M, int KCU, int WG, int PF, int XP, int XR>
 __global__ void __launch_bounds__(1024, 1) gemm(const uint4* __restrict__ W, const __nv_bfloat16* __restrict__ x,
                                                 __nv_bfloat16* __restrict__ out, float* __restrict__ ws,
                                                 int* __restrict__ cnt, int n, int nrg_all, int k, int bk) {
@@ -32,11 +32,11 @@ __global__ void __launch_bounds__(1024, 1) gemm(const uint4* __restrict__ W, con
     constexpr int XS = XR * PB + 64;                // x ring row stride in smem (bytes), padded: XR pieces of PB
     extern __shared__ __align__(16) unsigned char smem[];
     unsigned char* xs = smem;                        // x ring [M][XR pieces] (row stride XS)
-    float4* accp = (float4*)(smem + M * XS);         // [warps][R][TT][32 lanes] C fragments
-    __shared__ int flag[128];
+    float4* accp = (float4*)(smem + M * XS);         // [warps][TT][32 lanes] C fragments
+    __shared__ int flag[64];
     const int t = threadIdx.x, lane = t & 31, wp = t >> 5, g = lane >> 2, c = lane & 3;
-    const int gi = wp / WG, wi = wp % WG, NG = blockDim.x / (32 * WG);  // NG groups of R rgs
-    const int S = k / KC, ks = blockIdx.x / bk, rg0 = (blockIdx.x % bk) * NG * R, rg = rg0 + gi * R;
+    const int gi = wp / WG, wi = wp % WG, NG = blockDim.x / (32 * WG);
+    const int S = k / KC, ks = blockIdx.x / bk, rg0 = (blockIdx.x % bk) * NG, rg = rg0 + gi;
     // x[:, chunk] in XP pieces along k through a ring of XR piece buffers (cp.async, one commit group per piece),
     // the first XR issued before any W load: the block starts on piece 0 while the rest lands.
     auto stage = [&](int p) {
@@ -50,17 +50,12 @@ __global__ void __launch_bounds__(1024, 1) gemm(const uint4* __restrict__ W, con
 #pragma unroll
     for (int p = 0; p < XR; ++p) { stage(p); asm volatile("cp.async.commit_group;"); }
     const uint4* wb = W + (((long)ks * nrg_all + rg) * (KC / 32) + wi) * 32 + lane;  // atom j: wb + j*WG*32
-    constexpr int RS = KC / 32 * 32;  // uint4 per rg unit (next rg's atoms)
-    uint4 w[PF][R];
+    uint4 w[PF];
 #pragma unroll
-    for (int p = 0; p < PF; ++p)
+    for (int p = 0; p < PF; ++p) w[p] = ldw(wb + p * WG * 32);
+    float acc[TT][4];
 #pragma unroll
-        for (int r = 0; r < R; ++r) w[p][r] = ldw(wb + r * RS + p * WG * 32);
-    float acc[R][TT][4];
-#pragma unroll
-    for (int r = 0; r < R; ++r)
-#pragma unroll
-        for (int tt = 0; tt < TT; ++tt) acc[r][tt][0] = acc[r][tt][1] = acc[r][tt][2] = acc[r][tt][3] = 0.f;
+    for (int tt = 0; tt < TT; ++tt) acc[tt][0] = acc[tt][1] = acc[tt][2] = acc[tt][3] = 0.f;
     for (int a = 0; a < NA; a += PF) {
         if (a % PA == 0) {  // piece pc = a / PA must have landed (groups complete in order)
             const int pc = a / PA;
@@ -95,33 +90,24 @@ __global__ void __launch_bounds__(1024, 1) gemm(const uint4* __restrict__ W, con
                 uint4 xa = *(const uint4*)(xs + (tt * 16 + g) * XS + kx);
                 uint4 xb = make_uint4(0, 0, 0, 0);
                 if (NT > 8) xb = *(const uint4*)(xs + (tt * 16 + g + 8) * XS + kx);
-#pragma unroll
-                for (int r = 0; r < R; ++r) {
-                    mma(acc[r][tt], xa.x, xb.x, xa.y, xb.y, w[p][r].x, w[p][r].y);
-                    mma(acc[r][tt], xa.z, xb.z, xa.w, xb.w, w[p][r].z, w[p][r].w);
-                }
+                mma(acc[tt], xa.x, xb.x, xa.y, xb.y, w[p].x, w[p].y);
+                mma(acc[tt], xa.z, xb.z, xa.w, xb.w, w[p].z, w[p].w);
             }
-            if (a + p + PF < NA) {
-#pragma unroll
-                for (int r = 0; r < R; ++r) w[p][r] = ldw(wb + r * RS + (a + p + PF) * WG * 32);
-            }
+            if (a + p + PF < NA) w[p] = ldw(wb + (a + p + PF) * WG * 32);
         }
     }
 #pragma unroll
-    for (int r = 0; r < R; ++r)
-#pragma unroll
-        for (int tt = 0; tt < TT; ++tt)
-            accp[((wp * R + r) * TT + tt) * 32 + lane] = make_float4(acc[r][tt][0], acc[r][tt][1], acc[r][tt][2], acc[r][tt][3]);
+    for (int tt = 0; tt < TT; ++tt) accp[(wp * TT + tt) * 32 + lane] = make_float4(acc[tt][0], acc[tt][1], acc[tt][2], acc[tt][3]);
     __syncthreads();
     // outputs i = ((rgl * M + tok) * 8 + row8): sum the WG warp slots of group rgl
-    const int ne = NG * R * M * 8;
+    const int ne = NG * M * 8;
     auto total = [&](int i) {
         const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
         const int tt = tok >> 4, h = (tok >> 3) & 1, l = (tok & 7) * 4 + (row8 >> 1), e = h * 2 + (row8 & 1);
-        const float* base = (const float*)accp + (((rgl / R) * WG * R + rgl % R) * TT + tt) * 128 + l * 4 + e;
+        const float* base = (const float*)accp + ((rgl * WG) * TT + tt) * 128 + l * 4 + e;
         float s = 0.f;
 #pragma unroll
-        for (int q = 0; q < WG; ++q) s += base[q * R * TT * 128];
+        for (int q = 0; q < WG; ++q) s += base[q * TT * 128];
         return s;
     };
     if (S == 1) {
@@ -137,7 +123,7 @@ __global__ void __launch_bounds__(1024, 1) gemm(const uint4* __restrict__ W, con
     }
     __threadfence();
     __syncthreads();
-    if (t < NG * R) {
+    if (t < NG) {
         const int last = atomicAdd(cnt + rg0 + t, 1) == S - 1;
         flag[t] = last;
         if (last) cnt[rg0 + t] = 0;
@@ -156,16 +142,16 @@ __global__ void __launch_bounds__(1024, 1) gemm(const uint4* __restrict__ W, con
 }  // namespace g12
 // nrg_all: 8-row groups of the packed weight; bk: blocks per k-chunk; each block takes n/8/bk rgs with WG warps each.
 void g12_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tensor ws, torch::Tensor cnt, int64_t nrg_all,
-              int64_t kcu, int64_t wg, int64_t pf, int64_t bk, int64_t xp, int64_t xr, int64_t rr) {
+              int64_t kcu, int64_t wg, int64_t pf, int64_t bk, int64_t xp, int64_t xr) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     auto s = c10::cuda::getCurrentCUDAStream();
-    const int S = k / (1024 * kcu), ng = n / 8 / bk / rr, threads = ng * wg * 32;
-    const int sm = m * (1024 * kcu * 2 / xp * xr + 64) + threads / 32 * rr * ((m + 15) / 16) * 512;
-    TORCH_CHECK(n / 8 % (bk * rr) == 0 && threads <= 1024 && ng * rr <= 128 && sm <= 227 * 1024 && (S == 1 || m * n * S <= 8 * 32 * 8192), "g12: shape");
-#define G12_CASE(M_, U_, G_, P_, X_, R_, RR_) \
-    if (m == M_ && kcu == U_ && wg == G_ && pf == P_ && xp == X_ && xr == R_ && rr == RR_) { \
-        cudaFuncSetAttribute(g12::gemm<M_, U_, G_, P_, X_, R_, RR_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
-        g12::gemm<M_, U_, G_, P_, X_, R_, RR_><<<S * bk, threads, sm, s>>>((const uint4*)w.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), \
+    const int S = k / (1024 * kcu), ng = n / 8 / bk, threads = ng * wg * 32;
+    const int sm = m * (1024 * kcu * 2 / xp * xr + 64) + threads / 32 * ((m + 15) / 16) * 512;
+    TORCH_CHECK(n / 8 % bk == 0 && threads <= 1024 && ng <= 64 && sm <= 227 * 1024 && (S == 1 || m * n * S <= 8 * 32 * 8192), "g12: shape");
+#define G12_CASE(M_, U_, G_, P_, X_, R_) \
+    if (m == M_ && kcu == U_ && wg == G_ && pf == P_ && xp == X_ && xr == R_) { \
+        cudaFuncSetAttribute(g12::gemm<M_, U_, G_, P_, X_, R_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        g12::gemm<M_, U_, G_, P_, X_, R_><<<S * bk, threads, sm, s>>>((const uint4*)w.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), \
         (__nv_bfloat16*)out.data_ptr(), ws.data_ptr<float>(), cnt.data_ptr<int>(), n, nrg_all, k, bk); return; }
     G12_CONFIGS
     TORCH_CHECK(false, "g12: no config");
