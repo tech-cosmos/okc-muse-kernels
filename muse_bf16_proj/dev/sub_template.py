@@ -43,6 +43,7 @@ _GEMV_SRC = r'''@@GEMV7@@'''
 _G10_SRC = r'''@@GEMV10@@'''
 _G12_SRC = r'''@@GEMV12@@'''
 _G13_SRC = r'''@@GEMV13@@'''
+_G14_SRC = r'''@@GEMV14@@'''
 _LT_SRC = r'''@@LT@@'''
 
 # Router FP32 kernel configs (mp, kb, rw, nwarp), chosen on the H100 (dev/rt.py).
@@ -58,7 +59,12 @@ BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4,
 BF16_G13 = {"qkv_gate": [(1, 8192, 2, 4, 1, 1, 132), (1, 8192, 2, 2, 1, 2, 132)],
             "pooler": [(1, 8192, 2, 4, 1, 1, 132), (1, 8192, 2, 2, 1, 2, 132)],
             "unpooler": [(1, 4096, 2, 4, 1, 2, 132)]}
-G13_ESC = 8  # escapes per row (gemv13.cu ESC)
+G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
+# BF16 tensor-core streaming GEMM over the same compressed weights (dev/gemv14.cu = gemv12 + decode), (m, kcu, wg, pf,
+# bk, xp), chosen on the H100 (dev/g14.py); tuned in prepare() like the others.
+BF16_G14 = {"qkv_gate": [(8, 2, 2, 4, 32, 1)], "o": [(8, 1, 2, 4, 128, 1), (8, 1, 2, 8, 128, 1)],
+            "pooler": [(8, 8, 8, 4, 128, 1), (8, 2, 2, 4, 32, 1), (16, 4, 4, 4, 64, 1)],
+            "unpooler": [(8, 4, 8, 4, 32, 1), (8, 2, 4, 4, 32, 1)]}
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
 BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32, 1, 1)], "pooler": [(8, 8, 8, 4, 128, 1, 1), (16, 8, 8, 4, 128, 8, 2)],
             "o": [(8, 1, 2, 8, 128, 1, 1)], "unpooler": [(8, 4, 4, 4, 32, 1, 1)]}  # unpooler m8: H200 5.7-7.3 (noisy)
@@ -72,11 +78,12 @@ _SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c fo
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
         _G10_SRC.replace("G10_CONFIGS", " ".join("G10_CASE(%d,%d,%d,%d,%d,%d)" % c[:6] for v in BF16_G10.values() for c in v)) + "\n" +
         _G12_SRC.replace("G12_CONFIGS", " ".join("G12_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted({c[:4] + c[5:] for v in BF16_G12.values() for c in v}))) + "\n" +
-        _G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d)" % c[1:6] for c in sorted({c for v in BF16_G13.values() for c in v}))))
+        _G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d)" % c[1:6] for c in sorted({c for v in BF16_G13.values() for c in v}))) + "\n" +
+        _G14_SRC.replace("G14_CONFIGS", " ".join("G14_CASE(%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G14.values() for c in v}))))
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v8",
+        name="muse_proj_v9",
         cpp_sources="void pj_router(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
@@ -85,8 +92,10 @@ try:
                     "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                     "void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t);",
-        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv", "g12_gemm", "g13_gemv"],
+                    "int64_t, int64_t, int64_t, int64_t);\n"
+                    "void g14_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
+                    "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -116,9 +125,11 @@ def _pack12(w, kc):
     return w.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
 
 
-def _pack13(w):
-    """Lossless 12-bit BF16 for gemv13: (sign|mantissa bytes, 4-bit exponent codes, escape header, scale), or None
-    if the weights don't fit (an exponent window of 16 with at most G13_ESC escapes per row)."""
+def _compress(w):
+    """Lossless 12-bit BF16 (gemv13/gemv14): sign|mantissa byte and 4-bit exponent code c = e - base per weight
+    (base = max exponent - 15; decoded exponent 112 | c, so sums are rescaled by scale = 2^(base - 112)); weights below
+    the window (zeros, tiny values) are escapes: code 0, byte 0 (decodes to 2^(base - 127)) plus a per-row header of
+    G13_ESC (col, (true - 2^(base - 127)) / scale) entries. None if a row has more than G13_ESC escapes."""
     n, k = w.shape
     b = w.contiguous().view(torch.int16).int() & 0xFFFF
     e = (b >> 7) & 0xFF
@@ -126,14 +137,11 @@ def _pack13(w):
     if base < 1:
         return None
     code = e - base
-    esc = code < 0  # below the window (zeros, tiny values): code 0, byte 0, fixed up from the header
+    esc = code < 0
     if int(esc.sum(1).max()) > G13_ESC:
         return None
     code = torch.where(esc, 0, code)
-    sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F)).to(torch.uint8).flatten()
-    sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=w.device)
-    nib = (code.flatten().view(-1, 8).long() << sh).sum(1)
-    nib = torch.where(nib >= 2 ** 31, nib - 2 ** 32, nib).int()
+    sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F))
     scale = 2.0 ** (base - 112)
     hdr = torch.zeros(n, G13_ESC, 2, dtype=torch.float32, device=w.device)
     rows, cols = esc.nonzero(as_tuple=True)  # row-major order
@@ -141,7 +149,34 @@ def _pack13(w):
         slot = torch.arange(len(rows), device=w.device) - torch.searchsorted(rows, rows)
         hdr[rows, slot, 0] = cols.int().view(torch.float32)
         hdr[rows, slot, 1] = (w[rows, cols].float() - 2.0 ** (base - 127)) / scale
-    return sm, nib, hdr, scale
+    return code, sm, hdr, scale
+
+
+def _nib(code):
+    """Codes [..., 8] -> int32 words: weight 2p + h at bits 4p + 16h."""
+    sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=code.device)
+    v = (code.long() << sh).sum(-1)
+    return torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
+
+
+def _pack13(w):
+    """gemv13 layout: flat byte plane, code words over 8 consecutive weights."""
+    c = _compress(w)
+    if c is None:
+        return None
+    code, sm, hdr, scale = c
+    return sm.to(torch.uint8).flatten().contiguous(), _nib(code.flatten().view(-1, 8)).contiguous(), hdr, scale
+
+
+def _pack14(w, kc):
+    """gemv14 layout: gemv12's atom order [ks][rg][atom][lane][8] for bytes and codes."""
+    c = _compress(w)
+    if c is None:
+        return None
+    code, sm, hdr, scale = c
+    n, k = w.shape
+    perm = lambda t: t.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
+    return perm(sm).to(torch.uint8), _nib(perm(code)).contiguous(), hdr, scale
 
 
 def prepare(weights):
@@ -151,6 +186,13 @@ def prepare(weights):
             if (name, c[1]) not in st:
                 st[(name, c[1])] = _pack12(weights[name], 1024 * c[1])
     if _mod is not None:
+        for name, cfgs in BF16_G14.items():
+            for c in cfgs:
+                rows = 1024 if name == "unpooler" and c[0] <= 8 else weights[name].shape[0]
+                if ("g14", name, c[1], rows) not in st:
+                    pk = _pack14(weights[name][:rows], 1024 * c[1])
+                    if pk is not None:
+                        st[("g14", name, c[1], rows)] = pk
         for name in BF16_G13:
             pk = _pack13(weights[name][:1024] if name == "unpooler" else weights[name])
             if pk is not None:
@@ -184,6 +226,10 @@ def _run(st, layer, x, out, cand):
     elif kind == "g13":
         sm, nib, hdr, scale = st[("g13", layer)]
         _mod.g13_gemv(sm, nib, hdr, x, out, scale, *c[2:])
+    elif kind == "g14":
+        rows = out.shape[1]
+        sw, nw, hdr, scale = st[("g14", layer, c[1], rows)]
+        _mod.g14_gemm(sw, nw, hdr, scale, x, out, st["ws12"], st["cnt12"], rows // 8, *c[1:])
     elif kind == "g12":
         _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
     else:
@@ -208,6 +254,11 @@ def _tune(st, reps=25):
             if ("g13", layer) in st:
                 for c in cfgs:
                     shapes.setdefault((layer, c[0]), []).append(("g13", c))
+        for layer, cfgs in BF16_G14.items():
+            for c in cfgs:
+                rows = 1024 if layer == "unpooler" and c[0] <= 8 else st[layer].shape[0]
+                if ("g14", layer, c[1], rows) in st:
+                    shapes.setdefault((layer, c[0]), []).append(("g14", c))
         for layer, cfgs in BF16_G12.items():
             for c in cfgs:
                 shapes.setdefault((layer, c[0]), []).append(("g12", c))
