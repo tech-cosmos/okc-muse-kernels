@@ -3,12 +3,14 @@
 Updated 2026-10-25 ~23:10 UTC (session 5).
 
 ## Board
-- **Best: submit 22109e72563f4cc3 = 42dac99, 1.2334x (CI 1.215-1.252), proj rank 379.** (#1 1.61x, #10 ~1.53x.)
+- **Best: submit f9cd875d5d5c4cbe = 21bec6b, 1.2482x** (lossless 12-bit weights at m1/m8). (#1 1.62x, #10 ~1.54x.)
+- Before: 22109e72 (42dac99) 1.2334x.
 - Previous: 202a2485 (134eda6, lt v9) 1.2111x; a55d6b55 (e71d015) 1.1757x.
-- main = cc055c8: check fb5ef6d9 1.2439x (gemv13 m1 + gemv14 m8 over lossless 12-bit weights). SUBMIT IT after 00:00Z
-  (8/9 scored used on 10-25) unless something better is checked first.
+- main = 21bec6b (= submitted f9cd875d) + notes. Budget 10-25 used: checks 16/20, scored 9/10 (cap reached). Resets 00:00Z.
 
-## Per-shape H200 speedup vs SGLang (submit 22109e72; SGLang us in bench.py SGLANG_H200)
+## Per-shape H200 (check 7ba50b0a, 21bec6b): m1 qkv 11.2 o 6.3 pool 15.8 unp 4.6 router 5.1; m8 qkv 13.3 o 6.8 pool 16.6
+## unp 6.6 router 8.1; m16 qkv 13.6 pool 19.1 unp 17.9; m32 qkv 13.8 pool 18.9 unp 18.9 (m>=16 = cuBLASLt, uncompressed).
+## Older table (submit 22109e72, before compression):
 | load | qkv_gate | o | pooler | unpooler | router |
 |---|---|---|---|---|---|
 | decode 1 (m1) | 1.25 | 1.07 | 1.22 | 1.66 | 2.09 |
@@ -22,7 +24,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 
 ## Code on main (submission.py is GENERATED: edit dev/sub_template.py, dev/*.cu, dev/lt_cfg.txt; run `python dev/build_sub.py`)
 - Router: m<=8 true-FP32 dev/router.cu; m 9-32 hi/lo mma dev/gemv7.cu; m>32 one cuBLAS GEMM vs stacked [hi; lo].
-- BF16 m=1: dev/gemv10.cu (grid-stride GEMV, fixed configs BF16_G10).
+- BF16 m=1: tuner picks gemv13 (compressed; qkv, pooler) or gemv10 (o, unpooler-1k).
+- BF16 m=8: tuner incl. gemv14 (compressed; wins qkv, pooler on H200), m16 pooler also gemv15 (not picked on H200).
 - BF16 m>=8 (8/16/32/128/256): **prepare() `_tune`** times, per (layer, m), as CUDA-graph replays after a 256 MB read
   flush (cold L2, like the judge), F.linear vs gemv12 (BF16_G12: m8 all, pooler m16) vs 5 cuBLASLt configs
   (BF16_LT from dev/lt_cfg.txt), keeps the fastest in st["pick"]; kernel_fn dispatches via `_run`. Prints "tune ..."
@@ -35,7 +38,6 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   Run with SUB=<abs path to submission.py> and cwd /tmp/pj (scripts expect /tmp/pj/lt.py: copy dev/lte_lib.py there).
 - bench.py: `python bench.py test` (39 cases), `python bench.py bench [filter]`.
 
-## Budget 2026-10-25: checks 12/20, scored 7/10 (lead: max 9 submits/day). Resets 00:00 UTC.
 
 ## What I learned (numbers in NOTES)
 - A graph's kernel launch costs ~1.8-2.6 us over an empty graph (more blocks -> more). Reader slope 3.24 TB/s (H100).

@@ -136,3 +136,10 @@
 - check 416ae38fd88a441d (820d5cb, loads reordered): 1.2435x. submit a6f4d701eb1e47f2: 1.2319x (noise; board keeps 1.2334).
 - check fb5ef6d91d4342b3 (cc055c8 = 20f475d before rebase, + gemv14 at m8): 1.2439x; verify1: pooler 16.33 (18.76), qkv 13.02 (13.93); the total
   is noise-limited (other loads +-2%). H200 tune: g14 wins pooler m8 (20.3 vs lt 22.5) and qkv m8; lt keeps o/unp m8.
+- dev/gemv15.cu = gemv14 with the S k-chunk blocks of a row run as a thread-block cluster, partials reduced over DSMEM
+  (no workspace/counters). H100 standalone: pooler m16 25.1 (cuBLAS 27.4), qkv m16 18.3 (18.1), unpooler m16 25.6
+  (25.8); m32 31-47 (much worse: x A-fragment smem loads per 8-row atom, x staged up front per block). H200 tuner: lt
+  22.05 vs g15 22.43 at pooler m16 -> not picked. Kept as a candidate (harmless).
+- check 7ba50b0a348044ca (21bec6b): 1.2394x. submit f9cd875d5d5c4cbe (21bec6b): 1.2482x = NEW BEST (prev 1.2334).
+- Per-load H200 (check 7ba50b0a): decode1 1.41, verify1 1.47, decode16 1.17, decode32 1.14, verify16 1.15, verify32 1.15.
+  The m>=16 loads are the drag: their BF16 shapes are still cuBLASLt on uncompressed weights.
