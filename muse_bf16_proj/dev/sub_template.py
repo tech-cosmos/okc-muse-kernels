@@ -127,31 +127,53 @@ def prepare(weights):
     st["ws12"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=r.device)
     st["cnt12"] = torch.zeros(1024, dtype=torch.int32, device=r.device)
     st["ltws"] = torch.empty(LT_WS_BYTES, dtype=torch.uint8, device=r.device)
-    st["lt"] = _lt_tune(st) if _lt is not None else {}
+    st["pick"] = _tune(st)
     return st
 
 
-def _lt_tune(st, reps=25):
-    """Per (layer, m): time F.linear and each BF16_LT config with a cold L2 on random x; keep the fastest."""
+def _run(st, layer, x, out, cand):
+    """One BF16 projection by candidate: None = F.linear, ("g12", cfg) = dev/gemv12.cu, ("lt", cfg) = cuBLASLt."""
+    if cand is None:
+        return F.linear(x, st[layer][:out.shape[1]])
+    kind, c = cand
+    if kind == "g12":
+        _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
+    else:
+        _lt.lt_gemm(st[layer], x, out, st["ltws"], list(c))
+    return out
+
+
+def _tune(st, reps=25):
+    """Per (layer, m): time F.linear, the native gemv12 config and each BF16_LT config as CUDA-graph replays with a
+    cold L2 (read flush, as the judge) on random x; keep the fastest. Only shapes and weights are used."""
     picks = {}
-    flush = torch.zeros(256 << 20, dtype=torch.uint8, device=st["ltws"].device).view(torch.int64)
+    flush = torch.zeros(256 << 20, dtype=torch.uint8, device=st["qkv_gate"].device).view(torch.int64)
     sink = torch.zeros((), dtype=torch.int64, device=flush.device)
     g = torch.Generator(device=flush.device)
     g.manual_seed(0)
-    for (layer, m), cfgs in BF16_LT.items():
+    shapes = {}
+    if _mod is not None:
+        for layer, cfgs in BF16_G12.items():
+            for c in cfgs:
+                shapes.setdefault((layer, c[0]), []).append(("g12", c))
+    if _lt is not None:
+        for key, cfgs in BF16_LT.items():
+            shapes.setdefault(key, []).extend(("lt", c) for c in cfgs)
+    for (layer, m), cfgs in sorted(shapes.items()):
         w = st[layer]
-        n, k = w.shape
+        k = w.shape[1]
+        n = 1024 if layer == "unpooler" and m <= 8 else w.shape[0]
         x = torch.randn(m, k, generator=g, device=w.device).to(torch.bfloat16)
-        ref = F.linear(x, w).float()
+        ref = F.linear(x, w[:n]).float()
         out = torch.empty(m, n, dtype=torch.bfloat16, device=w.device)
         cands = [None]
         for c in cfgs:
-            if _lt.lt_gemm(w, x, out, st["ltws"], list(c)) == 0:
-                torch.cuda.synchronize()
-                if ((out.float() - ref).norm() / ref.norm()).item() < 1e-3:
-                    cands.append(c)
-        if len(cands) == 1:
-            continue
+            if c[0] == "lt" and _lt.lt_gemm(w, x, out, st["ltws"], list(c[1])) != 0:
+                continue
+            _run(st, layer, x, out, c)
+            torch.cuda.synchronize()
+            if ((out.float() - ref).norm() / ref.norm()).item() < 1e-3:
+                cands.append(c)
         graphs = []
         for c in cands:  # one graph per candidate: times the kernel as the judge replays it, no host overhead
             gr = torch.cuda.CUDAGraph()
@@ -159,10 +181,7 @@ def _lt_tune(st, reps=25):
             s.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(s):
                 with torch.cuda.graph(gr, stream=s):
-                    if c is None:
-                        F.linear(x, w)
-                    else:
-                        _lt.lt_gemm(w, x, out, st["ltws"], list(c))
+                    _run(st, layer, x, out, c)
             torch.cuda.current_stream().wait_stream(s)
             graphs.append(gr)
         torch.cuda.synchronize()
@@ -179,7 +198,8 @@ def _lt_tune(st, reps=25):
         best = min(range(len(cands)), key=med.__getitem__)
         if cands[best] is not None:
             picks[(layer, m)] = cands[best]
-        print(f"lt {layer} m{m}: F.linear {med[0] * 1e3:.2f} us, best {cands[best]} {med[best] * 1e3:.2f} us")
+        print(f"tune {layer} m{m}: F.linear {med[0] * 1e3:.2f} us, best {cands[best]} {med[best] * 1e3:.2f} us; "
+              + " ".join(f"{'F' if c is None else c[0]}:{t * 1e3:.2f}" for c, t in zip(cands, med)))
     del flush
     return picks
 
@@ -214,14 +234,7 @@ def kernel_fn(data, st):
                 out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
                 _mod.g10_gemv(st[layer], x, out, *c[2:])  # W[:n] is the first n rows, in place
                 return out
-        for c in BF16_G12.get(layer, ()):
-            if m == c[0]:
-                out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
-                _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
-                return out
-    c = st["lt"].get((layer, m))
-    if c is not None:
-        out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
-        _lt.lt_gemm(st[layer], x, out, st["ltws"], list(c))
-        return out
-    return F.linear(x, st[layer][:n])
+    c = st["pick"].get((layer, m))
+    if c is None:
+        return F.linear(x, st[layer][:n])
+    return _run(st, layer, x, torch.empty((m, n), dtype=torch.bfloat16, device=x.device), c)
