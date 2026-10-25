@@ -24,7 +24,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
-from triton.language.extra.cuda import gdc_wait
+from triton.language.extra.cuda import gdc_wait, gdc_launch_dependents
 
 try:
     from sgl_kernel.scalar_type import scalar_types
@@ -6444,8 +6444,11 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
 
 
 @triton.jit
-def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr):
-    """One row: rmsnorm(x) (1 + w), BF16 in and out."""
+def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr,
+                  TRIG: tl.constexpr):
+    """One row: rmsnorm(x) (1 + w), BF16 in and out. TRIG: let the dependent (moe_tk2 gemm13) launch now."""
+    if TRIG:
+        gdc_launch_dependents()
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, N)
     gain = tl.load(gain_ptr + cols)
@@ -6651,6 +6654,7 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
 TK2_MAX_TOKENS = 32  # moe's TMA decode kernel (moe_tk2: route fused into gemm13, 3 launches) at T <= this
 # T > 32: moe's kernel_fn = route, gather, wgmma moe_tw gemm13/gemm2, norm (r-moe c39a176)
+TW_TOKENS = ()  # moe_tw at decode T: dead (s5 H100 d16 +14, d32 +29 us vs tk2)
 MARLIN_TOKENS = ()  # moe 6a1cda0 at T=32 beat Marlin on the judge: decode 32 sliding 218.3 (fc3e60d0) vs 225.0 (440361a9)
 
 
@@ -6672,6 +6676,18 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
     st = state["moe"]
     lib = st["lib"]
     m = x.shape[0]
+    if m in TW_TOKENS:
+        rt = _moe_TW_CFG // 100
+        meta, sroutes = _moe_bucket(state, local_ids)
+        xg = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=x.device)
+        inter = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=x.device)
+        y = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=x.device)
+        out = torch.empty((m, D_EXPERT), dtype=torch.bfloat16, device=x.device)
+        lib.moe_gather_launch(x, meta, sroutes, xg)
+        lib.moe_tw_launch(1, _moe_TW_CFG, st[f"w13b{rt}"], st[f"w13sb{rt}"], st["gs13"], st["lut"], xg, meta, sroutes, inter)
+        lib.moe_tw_launch(0, _moe_TW_CFG, st[f"w2b{rt}"], st[f"w2sb{rt}"], st["gs2"], st["lut"], inter, meta, sroutes, y)
+        lib.moe_norm_launch(y, local_ids, topk_weights, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, out)
+        return out
     if (m <= TK2_MAX_TOKENS and _moe_TK2_NSTG) or (m > 32 and _moe_TW_CFG and bucket is None):
         return _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                                "config": {"local_start": 0, "local_count": LOCAL_EXPERTS}}, st)
@@ -6862,6 +6878,37 @@ void g10_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t u, in
 if UNPOOL_PDL:
     _i = _moe_CUDA_SRC.index("{\n", _moe_CUDA_SRC.index("__global__ void __launch_bounds__(512) moe_norm2(")) + 2
     _moe_CUDA_SRC = _moe_CUDA_SRC[:_i] + '  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + _moe_CUDA_SRC[_i:]
+# moe_tk2 (decode experts, T <= 32) as PDL secondaries: gemm13 (TK2_PDL13) launches while _rmsnorm_gain (patched
+# to trigger at its start) runs; its producer warp streams the first weight stages and does the in-kernel routing
+# before the consumers' griddepcontrol.wait (right before their first x read). gemm2 (TK2_PDL2) waits at entry.
+TK2_PDL13 = False  # s5: H100 tie (d1 +1, v1 -1, d32 -1 us): rmsnorm is only 1.7 us and the safe join loses its own PDL
+TK2_PDL2 = False
+if TK2_PDL13 or TK2_PDL2:
+    _i0 = _moe_CUDA_SRC.index("__global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(")
+    _i1 = _moe_CUDA_SRC.index("static int launch_tk2(", _i0)
+    _k = _moe_CUDA_SRC[_i0:_i1]  # the moe_tk2 kernel
+    _a = "  uint4 xf[NQ][2];\n"
+    assert _k.count(_a) == 1
+    _k = _k.replace(_a, _a + '  if (GATED) asm volatile("griddepcontrol.wait;" ::: "memory");\n')
+    _a = "  } else {\n    if (tid < 33) s_off[tid] = meta[33 + tid];\n"
+    assert _k.count(_a) == 1
+    _k = _k.replace(_a, _a.replace("{\n", '{\n    asm volatile("griddepcontrol.wait;" ::: "memory");\n'))
+    _moe_CUDA_SRC = _moe_CUDA_SRC[:_i0] + _k + _moe_CUDA_SRC[_i1:]
+    _a = """  moe_tk2<NRT, NC, NSTG, GATED><<<grid, (NC + 1) * 32, SMEM, st>>>(
+      (const uint4*)wq, (const uint32_t*)s2, (const uint32_t*)lut, (const float*)gs, (const __nv_bfloat16*)x,
+      (const int*)ids, nroutes, start, count, (int*)meta, (int*)sroutes, (int*)inv, out);
+"""
+    assert _moe_CUDA_SRC.count(_a) == 1
+    _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, """  cudaLaunchConfig_t lc = {};
+  lc.gridDim = dim3(grid); lc.blockDim = dim3((NC + 1) * 32); lc.dynamicSmemBytes = SMEM; lc.stream = st;
+  cudaLaunchAttribute la[1];
+  la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la;
+  lc.numAttrs = GATED ? %d : %d;
+  cudaLaunchKernelEx(&lc, moe_tk2<NRT, NC, NSTG, GATED>,
+      (const uint4*)wq, (const uint32_t*)s2, (const uint32_t*)lut, (const float*)gs, (const __nv_bfloat16*)x,
+      (const int*)ids, nroutes, start, count, (int*)meta, (int*)sroutes, (int*)inv, out);
+""" % (int(TK2_PDL13), int(TK2_PDL2)))
 _G12_SRC = r'''// r-proj e71d015 muse_bf16_proj/dev/gemv12.cu (proj agent's gemv12, m=8 tensor-core streaming GEMM), copied verbatim
 // gemv12: tensor-core streaming GEMM for m = 8..32 (out[m, n] = x[m, k] @ W[n, k]^T, BF16 in, FP32 accumulate).
 // mma.sync m16n8k16 with x as A (tokens) and W as B. W is repacked in prepare() into 512-B atoms = 8 rows x 32 k,
@@ -7140,8 +7187,13 @@ def kernel_fn(data, state):
         bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) and TK2_MAX_TOKENS < tokens <= BUCKET_SIDE_MAX_TOKENS else None
     pooled = _linear(h, dense["pooler"], "pooler", state)
     p = torch.empty_like(pooled)
-    _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl, num_warps=8,
-                             launch_pdl=pdl)
+    tk2_pdl = TK2_PDL13 and tokens <= TK2_MAX_TOKENS and _use_moe(tokens)
+    if tk2_pdl:
+        # moe_tk2 gemm13 reads the routing before its griddepcontrol.wait: join first, so that its only
+        # (programmatic) predecessor is this rmsnorm, which has full edges from the pooler and the routing.
+        main_stream.wait_stream(side_stream)
+    _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl and not tk2_pdl,
+                             TRIG=tk2_pdl, num_warps=8, launch_pdl=pdl and not tk2_pdl)
     main_stream.wait_stream(side_stream)
     if not torch.cuda.is_current_stream_capturing():
         for t in (topk_ids, local_ids, topk_weights) + (bucket or ()):
