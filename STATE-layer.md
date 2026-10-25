@@ -1,57 +1,63 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-25 ~21:40Z (end of session 3: probes only, no judge runs; main unchanged = v8).
+Updated 2026-10-25 ~22:30Z (end of session 4: v10 scored 1.728x; main v14 checked 1.753x, submit after 00:00Z).
 
 ## Board
-- **Best scored: a7650536 = v8 (main @4c21a41), 1.576x, 14,353 us/step, layer rank 207-209.** Board #1 2.285x.
-- **main = v9 (fc6c0ea)**: v8 + proj gemv10 at T=1. check 9261f31b 1.595x; submit dd2b45c6 1.566x (noise at T>=32,
-  see NOTES s3; d1 gain held: 97-98/105 vs 104-105.5/113.5 us). Submit the NEXT real change on top of v9.
-- Budget 2026-10-25: 8 of 9 submits (cap raised to 9 by the lead), 10 of 20 checks used.
-- v9 per shape, H200 check 9261f31b (SGLang / ours, us): d1 170.5/97.0, d1f 180.3/105.0, d16 262.1/177.8,
-  d16f 434.6/257.1, d32 255.7/217.8, d32f 617.0/365.7, v1 260.5/153.5, v1f 269.6/162.4, v16 514.3/328.6,
-  v16f 673.5/415.5, v32 740.2/454.9, v32f 1102.4/623.5. Judge noise: same code moves up to 8% at d32/v32.
-- Floors (us): d1 40/44, d16 77/137, d32 85/208, v1 62/66, v16 127/189, v32 144/267. Weights: sliding 46, full 16.
+- **Best scored: 5fc7a807 = v10 (64bfdcf), 1.728x, 13,094 us/step.** Board #1 2.285x (10-25 19:30Z).
+- **main = v14 (d531473): check 50820dee 1.753x (12,900 us). FIRST THING after 00:00Z 2026-10-26: submit main
+  (`okc submit muse_decode_layer/submission.py --json`; code identical to the checked one).**
+- Budget 2026-10-25: 9 of 9 submits used (cap 9, keep 1 spare), 14 of 20 checks used.
+- v14 per shape, H200 check 50820dee (SGLang / ours, us): d1 170.2/81.2, d1f 181.6/92.3, d16 266.2/161.3,
+  d16f 440.4/240.5, d32 263.9/193.6, d32f 623.6/335.8, v1 260.4/130.7, v1f 268.1/139.8, v16 522.9/321.7,
+  v16f 697.5/404.0, v32 709.6/444.6, v32f 1068.2/630.4. Judge noise: same code moves up to 8% at d32/v32.
+- Per load (geomean over loads; load = 46 sliding + 16 full): v10 d1 1.92, d16 1.74, **d32 1.51**, v1 1.87,
+  v16 1.63, v32 1.61. d32 is the weakest load: experts 108 (tk2 gemm13 71 + gemm2 37) + cuBLAS GEMMs ~65.
+- Floors (us): d1 40/44, d16 77/137, d32 85/208, v1 62/66, v16 127/189, v32 144/267.
 
 ## Code (muse_decode_layer/)
-- `layer.py` = the layer; `g10_src.cu` = proj's gemv10 CUDA (r-proj d894f4e; re-copy `_G10_SRC` from their
-  submission.py when they improve it; configs in layer.py G10_CFG); `attn_src.py` = ~/attn submission.py @82866c6; `moe_src.py` = r-moe 6a1cda0
-  (`git show <commit>:muse_moe_w4a16/submission.py > moe_src.py`; check the route meta size, now 68 ints, matches
-  `_moe_bucket`). **`python build.py` writes submission.py** (inlines both; attention kernel_fn -> attn_kernel_fn +
-  constexpr np2 fix; moe names prefixed `_moe_`). Never edit submission.py by hand.
-- Pipeline: qkv `_linear` (gemv10 at T=1, else cuBLAS) -> attn kernels -> o F.linear -> `_boundary` -> side stream: router + `_routing`
-  (+ moe bucketing <= 16 tokens) || pooler F.linear -> `_rmsnorm_gain` -> moe experts (all T now; Marlin code kept,
-  MARLIN_TOKENS = ()) -> unpooler F.linear (1024-row slice <= 8 tokens) -> `_boundary`.
+- `layer.py` = the layer. Inlined by **`python build.py` -> submission.py** (never edit submission.py by hand):
+  `attn_src.py` = ~/attn submission.py @82866c6 (kernel_fn -> attn_kernel_fn, constexpr np2 fix, csl::decode patched
+  to trigger PDL dependents); `moe_src.py` = r-moe 0f549b6 (names prefixed `_moe_`; layer.py patches moe_norm2 to
+  trigger dependents); `g10_src.cu` = proj gemv10 (r-proj d894f4e, m=1), `g12_src.cu` = proj gemv12 (r-proj e71d015,
+  m=8); layer.py `_g10_lib` builds both in one load_inline and text-patches them (PDL trigger, PDL-secondary launch).
+  Re-copy: `git -C ~/r-moe show <c>:muse_moe_w4a16/submission.py > moe_src.py` (check the 68-int route meta
+  matches `_moe_bucket`, and that the patch anchors in layer.py/build.py still match: asserts fire at import).
+- Pipeline: qkv `_linear` (gemv10 T=1, gemv12 T=8, else cuBLAS) -> attn -> o `_linear` -> `_boundary` -> side stream:
+  router + `_routing` || pooler `_linear` -> `_rmsnorm_gain` -> experts (`_moe_kernel_fn` = tk2 at T<=32, own
+  route/moe_gemm/moe_big path at T>32) -> unpool `_linear` (1024-row slice at T<=8) -> `_boundary`.
+  PDL: GEMV_PDL (gemv triggers; glue after it launches with PDL at T in PDL_TOKENS) and GEMV_PDL_SECONDARY
+  {(tokens, sliding): keys} = GEMVs launched as PDL secondaries.
 - bench.py `test` / `bench [file] [filter]` / `prof`; tools/timeline.py <file> "<load> <layer>" (per-kernel
-  start/end of one replay). variants/sub_v7.py = v7 build for A/B.
+  start/end of one replay). variants/ (gitignored) sub_v9/v11/v12/v13/v14 builds for A/B; regenerate from git.
 
-## Where the time goes (judge, v8)
-- decode 1 (105 us): cuBLAS GEMMs ~50 (qkv+pooler 33, o 7, unpool 5, 3 splitK reduces 5), experts 35 + norm 3.7
-  (~BW floor for 3 experts), boundary 2x3.8, attention 4.3, rmsnorm 1.5. Router/routing hidden on the side stream.
-- decode 32 sliding (218): experts 131 (gemm13 86, gemm2 46), GEMMs ~65, attention 10, glue ~20.
-- verify 16/32: experts (moe_big) ~290/~290-450, GEMMs ~70-90. Full layers: attention 100-300 (frozen lane).
-- Layer-side glue is at the launch floor (empty kernel ~2.4 us). The remaining big levers are other lanes:
-  BF16 GEMMs at 55-65% of HBM peak (proj), experts at decode 16/32 + big-M (moe).
+## Where the time goes (judge check 50820dee profile + H100 timeline, v14)
+- decode 1 sliding (81 us H200): gemv10 qkv+pooler ~30, experts tk2 24+14 + norm2 4.5, o 4.4, unpool 6.6,
+  boundaries 2x~3.5, attention 4.2, rmsnorm 1.6; router 4.2 + routing 3.7 on the side stream (router delays the
+  pooler start ~3.5 us on H100: gemv10 pooler needs whole SMs). Remaining gap to floor 40 = mostly HBM-bound GEMVs
+  and experts (at ~70% BW) + ~15 us of glue.
+- decode 32 sliding (194): experts tk2 108 (gemm13 71, gemm2 37), cuBLAS GEMMs ~61 + 2 splitK reduces 4, glue ~20.
+- verify 16/32: experts moe_big ~300 / ~300-450, cuBLAS GEMMs ~70-90. Full layers: attention 100-300 (frozen lane).
 
 ## Next (ranked)
-0. Biggest lever in the whole layer = experts at T>=16 (2.3-3x their byte floor, see NOTES s3); that is moe's lane:
-   re-copy moe_src.py the moment they post a faster moe_big / decode kernel. If moe doesn't take the big-M redesign
-   (Request in COORD), it's worth doing here: wgmma with dequantized A in registers, B = x via TMA, more rows per warp.
-1. Watch ~/COORD.md Handoffs / r-moe and r-proj commits: re-copy moe_src.py on every moe speedup (T=1..256 all
-   use it), re-copy g10_src.cu when proj improves gemv10 or extends it to m=8 (verify 1 = T=8; gemv7 loses there),
-   rebuild, `bench.py test`, `bench.py bench` vs variants/sub_v8.py (gitignored, regenerate from git), check.
-2. gemv10 is ours at T=1 now, so its epilogue can take glue: unpool GEMV + boundary 2 (last-CTA), o GEMV +
-   boundary 1; each saves a launch + gap (~2-3 us at d1).
-3. Small layer fusions (each ~1-3 us): pre-expert rmsnorm into moe gemm13's x staging for T<=32 (needs a
-   patched copy of moe CUDA: x*r*g rounded to BF16 = identical to now); remove splitK reduces once GEMMs are ours;
-   boundary into the unpool GEMM epilogue at T<=8 (last-CTA pattern) if we own that GEMV.
-4. Routing risk: diag check f5fdc570 once failed a timed rep's routing (3.18e-2 > 0.03). Not seen since (6 runs).
+0. Submit main after 00:00Z (see Board). Then watch r-moe / r-proj: moe is on big-M (TMA) and the >8-token decode
+   experts (d16/d32: the weakest load); proj on gemv12 m16/m32 (cuBLAS still wins there). Re-copy + rebuild + test
+   + interleaved bench vs variants/sub_v14.py + check on every handoff.
+1. d32 (weakest load, 1.51): GEMMs at T=16/32 are cuBLAS at 61 us vs ~40 floor (proj's lane, item 2 in their STATE);
+   experts 108 vs ~56 floor (moe's lane).
+2. More PDL secondaries: none left at T=1/8 on our GEMVs (qkv is graph start; pooler would block the router). For
+   moe's tk2 kernels (1 CTA/SM, 83 KB smem) a secondary cannot co-reside; ask moe if they want PDL-friendly W prefetch.
+3. Glue fusions (each ~1-3 us at d1/v1): boundary into the o / unpool GEMV epilogue (last-CTA pattern), rmsnorm
+   into moe x staging (needs patched moe CUDA), router last-CTA top-8 (drops the routing launch from the side path).
+4. Routing risk: diag check f5fdc570 once failed a timed rep's routing (3.18e-2 > 0.03). Not seen since (10 runs).
 
 ## Dead ends (details in NOTES)
+- s4: router on few fat CTAs + pooler on the remaining SMs (HBM-bound together: tie); _red_fin PDL trigger (+2.5 us
+  d1 full); gemv12 PDL secondary for unpool at T=8 (tie) and for o on verify-full layers (+1.3).
 - s3: proj gemv7 as layer GEMVs (ties cuBLAS m1, loses m2-8); pooler before router fork; router grid sweeps (noise);
   L2 bulk prefetch inside boundary CTAs (-0.7 us) or concurrent on a side stream (+3 us); moe_big config sweep.
 - Multi-CTA boundary (atomics + spin barrier); one-pass boundary (4 sums): both slower.
-- PDL on glue after cuBLAS: no gain. Side-stream moe bucketing at T>=128: +29..67 us on the judge.
+- PDL on glue after cuBLAS: no gain (cuBLAS never triggers; after our gemv10/12 it does gain, v12). Side-stream moe bucketing at T>=128: +29..67 us on the judge.
 - L2 prefetch of the next weight on a side stream (load kernel or cp.async.bulk.prefetch.L2): GEMM speeds up but
   attention is delayed/slowed by the same amount; a side-stream fork at graph START costs ~9 us.
-- GEMV with PDL preloading W before griddepcontrol.wait: overlaps but the producer slows equally (zero-sum).
+- GEMV with PDL preloading W before griddepcontrol.wait AFTER A BIG PRODUCER (s2: Triton o GEMV after attention): zero-sum. After small producers (norm2, csl at d1) it wins (v12-v14).
 - torch.mm(out_dtype=float32) instead of F.linear: same speed.

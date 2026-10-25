@@ -102,3 +102,30 @@
   d1 held in both runs (H200 sliding/full: v8 104.3-105.5/113.4-113.7 -> v9 97.0-98.0/105.0-105.2), but the submit
   run had d32 236.1 (218-222 in the other 3 runs), v32 476.9/657.8 (450-469/624-632): shapes v9 doesn't touch, so
   judge/input variance at T>=32 (expert counts vary per input). Not resubmitting unchanged code (rule).
+
+## Session 4 (2026-10-25 21:16-22:30Z)
+- v10 (64bfdcf): moe_src.py = r-moe 0f549b6 (= their c7dce17 + the >8-token expert fix): TMA bulk-copy decode kernel
+  moe_tk2 (route fused into gemm13, 3 launches) at T<=32 via `_moe_kernel_fn` directly (TK2_MAX_TOKENS; side-stream
+  bucketing now only for 32 < T <= BUCKET_SIDE_MAX_TOKENS = never). H100: d1 114.9/134.1 (v9 118.8/142.7), d16
+  230.5/332.7 (247.2/352.0), d32 221.0/448.8 (255.2/495.0), v1 180.1/192.1 (191.5/203.7).
+  check ba297a3a **1.709x**; submit 5fc7a807 **1.728x, 13,094 us** (9th submit of 10-25: none left today).
+  H200 per load (SGLang/ours load time ratio): d1 1.92, d16 1.74, d32 1.51, v1 1.87, v16 1.63, v32 1.61.
+- v11 (a14b5d1): proj's gemv12 (r-proj e71d015 dev/gemv12.cu -> g12_src.cu, inlined; packed copies via `_pack12`
+  in prepare; shared ws/cnt: all gemv12 calls are on the main stream) for qkv/o/pooler/unpool slice at T=8 (verify 1).
+  H100 v1 174.6/187.4 (v10 180.1/192.1). check c99cf8af 1.711x: v1 136.8/147.3 vs 141.7/150.0 (rest noise).
+- v12 (012e3af): PDL around our GEMVs. (a) gemv10/12 do griddepcontrol.launch_dependents at start; boundaries +
+  rmsnorm launch with PDL at T in (1, 8) (they already preload weights/stream before gdc_wait). (b) the unpool
+  gemv10 at T=1 launches as a PDL SECONDARY (cudaLaunchKernelEx + programmatic serialization; griddepcontrol.wait
+  after its first W loads, before x) of moe_norm2, which is patched (layer.py, on _moe_CUDA_SRC) to trigger at start:
+  W loads overlap norm2 (norm2 reads ~128 KB: no HBM contention, unlike s2's attention->o dead end).
+  H100 d1 109.2/128.6 (v11 114.2/133.6), v1 -3.5. check f55079a3 1.723x: d1 84.7/92.5 vs 88.3/97.9.
+- v13 (build.py patch): csl::decode (and its twin) trigger dependents at start; o gemv10 at T=1 a PDL secondary:
+  d1 sliding -1..-3 us H100 (3 interleaved A/Bs; attention 4.5 -> 6.2 us but o finishes earlier).
+- v14 (d531473): gemv12 PDL-secondary path (L2 prefetch of its W slice per CTA, then griddepcontrol.wait). Used for
+  o at T=8 on sliding layers only: v1 sliding -1.9; verify-full o +1.3 and T=8 unpool tie (not used; table
+  GEMV_PDL_SECONDARY). check 50820dee **1.753x, 12,900 us**: d1 81.2/92.3, v1 130.7/139.8. SUBMIT after 00:00Z.
+- DEAD: router on few fat CTAs (persistent over K, BE 4-16) + pooler gemv10 on the remaining SMs (68-116 blocks):
+  pooler + router are HBM-bound together (72 MB in ~26.5 us whichever split), best tie (moe start 28.4 vs 28.8 us
+  after boundary). Background: gemv10 pooler = 64 regs x 1024 threads = the whole RF, so any router CTA blocks it.
+- DEAD: _red_fin (decode full's last attention kernel) triggering dependents early: decode 1 full +2.5 us.
+- H100 noise now: other agents' runs move the same file by up to 4 us at d1: A/B interleaved, >= 2 rounds.
