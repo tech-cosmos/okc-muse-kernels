@@ -11,8 +11,7 @@ for T in (1, 8, 16, 32, 64, 128, 256):
     s = torch.randn(T, 8192, device=dev)
     s1, h, h32 = torch.empty_like(s), torch.empty_like(a), torch.empty_like(s)
     al, be = st["res1"]
-    fb = lambda: sub._boundary[(T,)](a, s, al, be, al, st["pre_ffn"], s1, h, h32, NB=8192, N=8192, BGAIN=False,
-                                     H32=T <= 8, EPS_POST=1e-8, EPS=1e-5, num_warps=16)
+    fb = lambda: sub.boundary("t", a, s, al, be, None, st["pre_ffn"], s1, h, h32, 8192, T <= 8)
     ls = torch.zeros(1, dtype=torch.int32, device=dev)
     fr = lambda: sub._route(st, h, h32, ls, T)
     p = torch.randn(T, 4096, device=dev).to(torch.bfloat16); po = torch.empty_like(p)
