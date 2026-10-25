@@ -7368,6 +7368,445 @@ void g12_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tensor
     TORCH_CHECK(false, "g12: no config");
 }
 '''
+# proj's gemv13 (m = 1) / gemv14 (m = 8) over losslessly compressed 12-bit BF16 weights (g13_src.cu / g14_src.cu =
+# r-proj 21bec6b, inlined by build.py; _compress/_pack13/_pack14 below = proj's). Only where the weight compresses
+# (else gemv10/12 as before). H200 (proj judge): pooler m1 17.8 -> 15.5, qkv m1 11.5 -> 11.0, pooler m8 18.8 -> 16.3,
+# qkv m8 13.9 -> 13.0 us.
+_G13_SRC = r'''// gemv13: gemv10 (grid-stride GEMV, m = 1) over losslessly compressed BF16 weights: 12 bits per weight.
+// prepare() splits W [n, KK] into a sign|mantissa byte plane (flat, row-major) and a 4-bit exponent code plane:
+// code c = e - base (base = max exponent - 15), so the decoded exponent is 112 | c (exact power-of-2 rescale of the
+// sum by 2^(base - 112)). Weights with e < base (zeros, tiny values: ~1 per 8K) are escapes: code 0, byte 0 (decodes
+// to D = 2^(base - 127) in true scale) and a per-row header of ESC (col, (true - D) / scale) pairs fixes the sum.
+// Nibble layout: 32-bit word f/8 holds weights f..f+7 (f % 8 == 0); weight 2p + h at bits 4p + 16h, so pair p's
+// exponents land at BF16 bits 7..10 / 23..26 with one shift. Decode per pair: prmt (sign replicate), shift, 2 lop3.
+// Chunk = U * 4096 weights (whole rows); thread t takes the 16 weights at u * 4096 + t * 16 (one uint4 of bytes and
+// one uint2 of codes per u). Its k positions are fixed, so x lives in registers as FP32.
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+namespace g13 {
+#define XI(k) (((k) >> 4) * 20 + ((k) & 15))
+constexpr int ESC = 8, MAXC = 16;  // escapes per row; chunks per virtual block
+__device__ __forceinline__ uint4 ld4(const uint4* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ uint2 ld2(const uint2* p) {
+    uint2 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v2.u32 {%0,%1}, [%2];" : "=r"(v.x), "=r"(v.y) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
+    unsigned r;
+    asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
+    return r;
+}
+// pair p (0..3) of a nibble word: exponent bits for BF16 pair at bits 7..10 and 23..26, OR 112 << 7
+template <int P>
+__device__ __forceinline__ unsigned expo(unsigned nw) {
+    const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
+    return (s & 0x07800780u) | 0x38003800u;
+}
+// 4 weights (bytes of sw) -> 2 BF16 pairs; nibble word nw, pairs P0, P0 + 1
+template <int P0>
+__device__ __forceinline__ void dec4(unsigned sw, unsigned nw, float* f) {
+    const unsigned q0 = (prmt(sw, 0x9180u) & 0x807f807fu) | expo<P0>(nw);
+    const unsigned q1 = (prmt(sw, 0xB3A2u) & 0x807f807fu) | expo<P0 + 1>(nw);
+    f[0] = __uint_as_float(q0 << 16); f[1] = __uint_as_float(q0 & 0xffff0000u);
+    f[2] = __uint_as_float(q1 << 16); f[3] = __uint_as_float(q1 & 0xffff0000u);
+}
+__device__ __forceinline__ float dot16(const uint4& s, const uint2& nb, const float* xp) {
+    float x[16];
+#pragma unroll
+    for (int i = 0; i < 16; i += 4) *reinterpret_cast<float4*>(x + i) = *reinterpret_cast<const float4*>(xp + i);
+    float f[16];
+    dec4<0>(s.x, nb.x, f); dec4<2>(s.y, nb.x, f + 4); dec4<0>(s.z, nb.y, f + 8); dec4<2>(s.w, nb.y, f + 12);
+    float a0 = 0.f, a1 = 0.f;
+#pragma unroll
+    for (int i = 0; i < 16; i += 2) { a0 = fmaf(f[i], x[i], a0); a1 = fmaf(f[i + 1], x[i + 1], a1); }
+    return a0 + a1;
+}
+
+template <int U, int NV, int MINB, int KK, int PF>
+__global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__ S, const uint2* __restrict__ N,
+                                                       const float2* __restrict__ H, const __nv_bfloat16* __restrict__ x,
+                                                       __nv_bfloat16* __restrict__ out, int n, float scale) {
+    constexpr int CE = U * 4096, RPC = CE / KK;
+    static_assert(CE % KK == 0 && KK % 512 == 0, "chunk must hold whole rows");
+    const int t = threadIdx.x & 255, vg = threadIdx.x >> 8, lane = t & 31, wp = t >> 5;
+    const int nch = n / RPC;
+    __shared__ float red_[NV][2][U * 8];
+    __shared__ __align__(16) float xs[KK / 16 * 20];  // 16-float groups padded to 20: no bank conflicts
+    __shared__ float2 hs_[NV][MAXC * RPC * ESC];  // this vb's escape headers: chunk j = j-th of c, c + G, ...
+    float (*red)[U * 8] = red_[vg];
+    const int G = gridDim.x * NV;
+    int c = blockIdx.x * NV + vg;
+    uint4 s[PF][U];
+    uint2 nb[PF][U];
+    // escapes: the first warp of each row (u, wp with (u * 4096 + wp * 512) % KK == 0), lanes e < ESC, add
+    // x[col] * (delta / scale) of the row's entry e to their partial sum before the warp reduction
+    auto load = [&](int p, int ch) {
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            const long i = (long)ch * (CE / 16) + u * 256 + t;
+            s[p][u] = ld4(S + i);
+            nb[p][u] = ld2(N + i);
+        }
+    };
+    // x and the escape headers first: they must not queue behind the W prologue
+    constexpr int XV = (KK / 8 + 256 * NV - 1) / (256 * NV), HV = (MAXC * RPC * ESC + 255) / 256;
+    uint4 xv[XV];
+    float2 hv[HV];
+#pragma unroll
+    for (int q = 0; q < XV; ++q) {
+        const int i = threadIdx.x + q * 256 * NV;
+        if (i < KK / 8) xv[q] = __ldg(reinterpret_cast<const uint4*>(x) + i);
+    }
+#pragma unroll
+    for (int q = 0; q < HV; ++q) {
+        const int i = t + q * 256, ch = c + (i / (RPC * ESC)) * G;
+        if (i < MAXC * RPC * ESC && ch < nch) hv[q] = __ldg(H + (long)ch * RPC * ESC + i % (RPC * ESC));
+    }
+#pragma unroll
+    for (int p = 0; p < PF; ++p)
+        if (c + p * G < nch) load(p, c + p * G);
+#pragma unroll
+    for (int q = 0; q < HV; ++q) {
+        const int i = t + q * 256, ch = c + (i / (RPC * ESC)) * G;
+        if (i < MAXC * RPC * ESC && ch < nch) hs_[vg][i] = hv[q];
+    }
+#pragma unroll
+    for (int q = 0; q < XV; ++q) {
+        const int i = threadIdx.x + q * 256 * NV;
+        if (i < KK / 8) {
+            const unsigned v[4] = {xv[q].x, xv[q].y, xv[q].z, xv[q].w};
+#pragma unroll
+            for (int j = 0; j < 4; ++j) { const int kk = XI(8 * i + 2 * j); xs[kk] = __uint_as_float(v[j] << 16); xs[kk + 1] = __uint_as_float(v[j] & 0xffff0000u); }
+        }
+    }
+    __syncthreads();
+    int par = 0, j = 0;
+    for (; c < nch; c += PF * G) {
+#pragma unroll
+        for (int p = 0; p < PF; ++p) {
+            const int cc = c + p * G;
+            if (cc < nch) {
+                float acc[U];
+#pragma unroll
+                for (int u = 0; u < U; ++u) {
+                    acc[u] = dot16(s[p][u], nb[p][u], xs + XI((u * 4096 + t * 16) % KK));
+#ifndef NOESC
+                    if ((u * 4096 + wp * 512) % KK == 0 && lane < ESC) {
+                        const float2 h = hs_[vg][((j + p) * RPC + (u * 4096 + wp * 512) / KK) * ESC + lane];
+                        acc[u] = fmaf(xs[XI(__float_as_int(h.x))], h.y, acc[u]);
+                    }
+#endif
+                }
+                const int cn = cc + PF * G;
+                if (cn < nch) load(p, cn);
+#pragma unroll
+                for (int u = 0; u < U; ++u) {
+                    float v = acc[u];
+#pragma unroll
+                    for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+                    if (lane == 0) red[par][u * 8 + wp] = v;
+                }
+                asm volatile("bar.sync %0, 256;" :: "r"(vg + 1));
+                if (t < RPC) {
+                    float sum = 0.f;
+#pragma unroll
+                    for (int u = 0; u < U; ++u)
+#pragma unroll
+                        for (int w = 0; w < 8; ++w)
+                            if ((u * 4096 + w * 512) / KK == t) sum += red[par][u * 8 + w];
+                    out[(long)cc * RPC + t] = __float2bfloat16(sum * scale);
+                }
+                par ^= 1;
+            }
+        }
+        j += PF;
+    }
+}
+}  // namespace g13
+
+void g13_gemv(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tensor x, torch::Tensor out, double scale,
+              int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks) {
+    const int k = x.size(1), n = out.size(1);
+    auto st = c10::cuda::getCurrentCUDAStream();
+    TORCH_CHECK(x.size(0) == 1, "g13: m == 1");
+    TORCH_CHECK((long)n * k <= (long)g13::MAXC * blocks * nv * u * 4096, "g13: too many chunks per virtual block");
+#define G13_CASE(K_, U_, V_, B_, P_) \
+    if (k == K_ && u == U_ && nv == V_ && minb == B_ && pf == P_) { \
+        g13::gemv<U_, V_, B_, K_, P_><<<blocks, 256 * V_, 0, st>>>((const uint4*)s.data_ptr(), (const uint2*)nb.data_ptr(), \
+        (const float2*)h.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, (float)scale); return; }
+    G13_CONFIGS
+    TORCH_CHECK(false, "g13: no config");
+}
+'''
+_G14_SRC = r'''// gemv14: gemv12 (tensor-core streaming GEMM, m = 8..32) over losslessly compressed BF16 weights, 12 bits each
+// (the format of gemv13: sign|mantissa bytes + 4-bit exponent codes c = e - base, decoded exponent 112 | c, the sum
+// rescaled by 2^(base - 112); weights below the window are escapes fixed up from a per-row header).
+// Per 512-B atom of gemv12 (8 rows x 32 k), lane l's 8 weights are one uint2 of bytes (S plane) and one 32-bit code
+// word (N plane), [ks][rg][atom][lane]; they decode (prmt sign-replicate + 3 logic ops per BF16 pair) straight into
+// the uint4 of B fragments. Escapes: the block's rows' headers (ESC x (col, delta / scale)) are cp.async'd to smem
+// up front; in the epilogue each output adds x[tok, col] * delta for the escapes whose col is in the block's
+// k-chunk (x[:, chunk] is fully staged: XR == XP). Partials stay in the scaled domain; the final sum is rescaled.
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+namespace g14 {
+constexpr int ESC = 8;
+__device__ __forceinline__ uint4 ldw(const uint4* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ uint2 ld2(const uint2* p) {
+    uint2 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v2.u32 {%0,%1}, [%2];" : "=r"(v.x), "=r"(v.y) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ unsigned ld1(const unsigned* p) {
+    unsigned v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.u32 %0, [%1];" : "=r"(v) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
+    unsigned r;
+    asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
+    return r;
+}
+template <int P>
+__device__ __forceinline__ unsigned expo(unsigned nw) {
+    const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
+    return (s & 0x07800780u) | 0x38003800u;
+}
+__device__ __forceinline__ uint4 dec8(uint2 s, unsigned nw) {
+    uint4 r;
+    r.x = (prmt(s.x, 0x9180u) & 0x807f807fu) | expo<0>(nw);
+    r.y = (prmt(s.x, 0xB3A2u) & 0x807f807fu) | expo<1>(nw);
+    r.z = (prmt(s.y, 0x9180u) & 0x807f807fu) | expo<2>(nw);
+    r.w = (prmt(s.y, 0xB3A2u) & 0x807f807fu) | expo<3>(nw);
+    return r;
+}
+__device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+template <int M, int KCU, int WG, int PF, int XP, int XR>
+__global__ void __launch_bounds__(1024, 1) gemm(const uint2* __restrict__ WS, const unsigned* __restrict__ WN,
+                                                const float2* __restrict__ H, float scale, const __nv_bfloat16* __restrict__ x,
+                                                __nv_bfloat16* __restrict__ out, float* __restrict__ ws,
+                                                int* __restrict__ cnt, int n, int nrg_all, int k, int bk) {
+    constexpr int KC = 1024 * KCU, TT = (M + 15) / 16;
+    constexpr int NT = M < 16 ? M : 16, NA = KC / 32 / WG;               // atoms per warp
+    static_assert(NA % (PF * XP) == 0 && XR == XP && XP <= 4, "x pieces: fully staged");
+    constexpr int PA = NA / XP, PB = KC / XP * 2;  // atoms per x piece (per warp), bytes per x piece row
+    constexpr int XS = XR * PB + 64;                // x ring row stride in smem (bytes), padded: XR pieces of PB
+    extern __shared__ __align__(16) unsigned char smem[];
+    unsigned char* xs = smem;                        // x ring [M][XR pieces] (row stride XS)
+    float4* accp = (float4*)(smem + M * XS);         // [warps][TT][32 lanes] C fragments
+    float2* hs = (float2*)(smem + M * XS + blockDim.x / 32 * TT * 512);  // [NG * 8 rows][ESC] escape headers
+    __shared__ int flag[64];
+    const int t = threadIdx.x, lane = t & 31, wp = t >> 5, g = lane >> 2, c = lane & 3;
+    const int gi = wp / WG, wi = wp % WG, NG = blockDim.x / (32 * WG);
+    const int S = k / KC, ks = blockIdx.x / bk, rg0 = (blockIdx.x % bk) * NG, rg = rg0 + gi;
+    // x[:, chunk] in XP pieces along k through a ring of XR piece buffers (cp.async, one commit group per piece),
+    // the first XR issued before any W load: the block starts on piece 0 while the rest lands.
+    auto stage = [&](int p) {
+        for (int i = t; i < M * (PB / 16); i += blockDim.x) {
+            const int r = i / (PB / 16), q = i % (PB / 16);
+            const unsigned sa = (unsigned)__cvta_generic_to_shared(xs + r * XS + (p % XR) * PB + q * 16);
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa),
+                         "l"((const uint4*)(x + (long)r * k + (long)ks * KC + p * (KC / XP)) + q));
+        }
+    };
+    // escape headers ride in x piece 0's commit group
+    for (int i = t; i < NG * 8 * ESC / 2; i += blockDim.x) {
+        const unsigned sa = (unsigned)__cvta_generic_to_shared(hs + 2 * i);
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa), "l"(H + (long)rg0 * 8 * ESC + 2 * i));
+    }
+#pragma unroll
+    for (int p = 0; p < XR; ++p) { stage(p); asm volatile("cp.async.commit_group;"); }
+    const long wo = (((long)ks * nrg_all + rg) * (KC / 32) + wi) * 32 + lane;  // atom j: wo + j*WG*32
+    const uint2* wbs = WS + wo;
+    const unsigned* wbn = WN + wo;
+    uint2 ws_[PF];
+    unsigned wn_[PF];
+#pragma unroll
+    for (int p = 0; p < PF; ++p) { ws_[p] = ld2(wbs + p * WG * 32); wn_[p] = ld1(wbn + p * WG * 32); }
+    float acc[TT][4];
+#pragma unroll
+    for (int tt = 0; tt < TT; ++tt) acc[tt][0] = acc[tt][1] = acc[tt][2] = acc[tt][3] = 0.f;
+    for (int a = 0; a < NA; a += PF) {
+        if (a % PA == 0) {  // piece pc = a / PA must have landed (groups complete in order)
+            const int pc = a / PA;
+            if (XR == XP) {     // everything staged up front
+                const int left = XP - 1 - pc;
+                if (left >= 3) asm volatile("cp.async.wait_group 3;");
+                else if (left == 2) asm volatile("cp.async.wait_group 2;");
+                else if (left == 1) asm volatile("cp.async.wait_group 1;");
+                else asm volatile("cp.async.wait_group 0;");
+                __syncthreads();
+            } else {            // ring: committed XR + pc - 1 groups (one per boundary), piece pc is group pc
+                if (pc == 0) {
+                    if (XR == 4) asm volatile("cp.async.wait_group 3;");
+                    else if (XR == 3) asm volatile("cp.async.wait_group 2;");
+                    else asm volatile("cp.async.wait_group 1;");
+                } else {
+                    if (XR == 4) asm volatile("cp.async.wait_group 2;");
+                    else if (XR == 3) asm volatile("cp.async.wait_group 1;");
+                    else asm volatile("cp.async.wait_group 0;");
+                }
+                __syncthreads();  // piece pc visible to all; everyone is done with piece pc - 1
+                if (pc > 0 && pc - 1 + XR < XP) stage(pc - 1 + XR);
+                if (pc > 0) asm volatile("cp.async.commit_group;");
+            }
+        }
+#pragma unroll
+        for (int p = 0; p < PF; ++p) {
+            const uint4 wv = dec8(ws_[p], wn_[p]);
+            const int kb = ((a + p) * WG + wi) * 32 + c * 8;
+#pragma unroll
+            for (int tt = 0; tt < TT; ++tt) {
+                const int kx = (kb - (a / PA) * (KC / XP) + ((a / PA) % XR) * (KC / XP)) * 2;
+                uint4 xa = *(const uint4*)(xs + (tt * 16 + g) * XS + kx);
+                uint4 xb = make_uint4(0, 0, 0, 0);
+                if (NT > 8) xb = *(const uint4*)(xs + (tt * 16 + g + 8) * XS + kx);
+                mma(acc[tt], xa.x, xb.x, xa.y, xb.y, wv.x, wv.y);
+                mma(acc[tt], xa.z, xb.z, xa.w, xb.w, wv.z, wv.w);
+            }
+            if (a + p + PF < NA) { ws_[p] = ld2(wbs + (a + p + PF) * WG * 32); wn_[p] = ld1(wbn + (a + p + PF) * WG * 32); }
+        }
+    }
+#pragma unroll
+    for (int tt = 0; tt < TT; ++tt) accp[(wp * TT + tt) * 32 + lane] = make_float4(acc[tt][0], acc[tt][1], acc[tt][2], acc[tt][3]);
+    __syncthreads();
+    // outputs i = ((rgl * M + tok) * 8 + row8): sum the WG warp slots of group rgl
+    const int ne = NG * M * 8;
+    auto total = [&](int i) {
+        const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+        const int tt = tok >> 4, h = (tok >> 3) & 1, l = (tok & 7) * 4 + (row8 >> 1), e = h * 2 + (row8 & 1);
+        const float* base = (const float*)accp + ((rgl * WG) * TT + tt) * 128 + l * 4 + e;
+        float s = 0.f;
+#pragma unroll
+        for (int q = 0; q < WG; ++q) s += base[q * TT * 128];
+        const float2* he = hs + (rgl * 8 + row8) * ESC;
+#pragma unroll
+        for (int e = 0; e < ESC; ++e) {
+            const int col = __float_as_int(he[e].x) - ks * KC;
+            if (col >= 0 && col < KC) s = fmaf(__bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2)), he[e].y, s);
+        }
+        return s;
+    };
+    if (S == 1) {
+        for (int i = t; i < ne; i += blockDim.x) {
+            const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+            out[(long)tok * n + (rg0 + rgl) * 8 + row8] = __float2bfloat16(total(i) * scale);
+        }
+        return;
+    }
+    for (int i = t; i < ne; i += blockDim.x) {
+        const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+        __stcg(ws + ((long)ks * M + tok) * n + (rg0 + rgl) * 8 + row8, total(i));
+    }
+    __threadfence();
+    __syncthreads();
+    if (t < NG) {
+        const int last = atomicAdd(cnt + rg0 + t, 1) == S - 1;
+        flag[t] = last;
+        if (last) cnt[rg0 + t] = 0;
+    }
+    __syncthreads();
+    __threadfence();
+    for (int i = t; i < ne; i += blockDim.x) {
+        const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+        if (flag[rgl]) {
+            float s = 0.f;
+            for (int q = 0; q < S; ++q) s += __ldcg(ws + ((long)q * M + tok) * n + (rg0 + rgl) * 8 + row8);
+            out[(long)tok * n + (rg0 + rgl) * 8 + row8] = __float2bfloat16(s * scale);
+        }
+    }
+}
+}  // namespace g14
+// nrg_all: 8-row groups of the packed weight; bk: blocks per k-chunk; each block takes n/8/bk rgs with WG warps each.
+void g14_gemm(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out,
+              torch::Tensor ws, torch::Tensor cnt, int64_t nrg_all, int64_t kcu, int64_t wg, int64_t pf, int64_t bk, int64_t xp) {
+    const int m = x.size(0), k = x.size(1), n = out.size(1);
+    auto s = c10::cuda::getCurrentCUDAStream();
+    const int S = k / (1024 * kcu), ng = n / 8 / bk, threads = ng * wg * 32;
+    const int sm = m * (1024 * kcu * 2 + 64) + threads / 32 * ((m + 15) / 16) * 512 + ng * 8 * g14::ESC * 8;
+    TORCH_CHECK(n / 8 % bk == 0 && threads <= 1024 && ng <= 64 && sm <= 227 * 1024 && (S == 1 || m * n * S <= 8 * 32 * 8192), "g14: shape");
+#define G14_CASE(M_, U_, G_, P_, X_) \
+    if (m == M_ && kcu == U_ && wg == G_ && pf == P_ && xp == X_) { \
+        cudaFuncSetAttribute(g14::gemm<M_, U_, G_, P_, X_, X_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        g14::gemm<M_, U_, G_, P_, X_, X_><<<S * bk, threads, sm, s>>>((const uint2*)ws_.data_ptr(), (const unsigned*)wn.data_ptr(), \
+        (const float2*)h.data_ptr(), (float)scale, (const __nv_bfloat16*)x.data_ptr(), \
+        (__nv_bfloat16*)out.data_ptr(), ws.data_ptr<float>(), cnt.data_ptr<int>(), n, nrg_all, k, bk); return; }
+    G14_CONFIGS
+    TORCH_CHECK(false, "g14: no config");
+}
+'''
+G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv, minb, pf, blocks), k = 8192
+G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, wg, pf, bk, xp), m = 8
+G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
+
+
+def _compress(w):
+    """proj's lossless 12-bit BF16: sign|mantissa byte and 4-bit exponent code c = e - base per weight (base = max
+    exponent - 15; decoded exponent 112 | c, sums rescaled by scale = 2^(base - 112)); weights below the window are
+    escapes (code 0, byte 0, decoding to 2^(base - 127)) fixed by a per-row header of G13_ESC (col, delta / scale)
+    entries. None if a row has more than G13_ESC escapes."""
+    n, k = w.shape
+    b = w.contiguous().view(torch.int16).int() & 0xFFFF
+    e = (b >> 7) & 0xFF
+    base = int(e.max()) - 15
+    if base < 1:
+        return None
+    code = e - base
+    esc = code < 0
+    if int(esc.sum(1).max()) > G13_ESC:
+        return None
+    code = torch.where(esc, 0, code)
+    sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F))
+    scale = 2.0 ** (base - 112)
+    hdr = torch.zeros(n, G13_ESC, 2, dtype=torch.float32, device=w.device)
+    rows, cols = esc.nonzero(as_tuple=True)  # row-major order
+    if len(rows):
+        slot = torch.arange(len(rows), device=w.device) - torch.searchsorted(rows, rows)
+        hdr[rows, slot, 0] = cols.int().view(torch.float32)
+        hdr[rows, slot, 1] = (w[rows, cols].float() - 2.0 ** (base - 127)) / scale
+    return code, sm, hdr, scale
+
+
+def _nib(code):
+    """Codes [..., 8] -> int32 words: weight 2p + h at bits 4p + 16h."""
+    sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=code.device)
+    v = (code.long() << sh).sum(-1)
+    return torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
+
+
+def _pack13(w):
+    """gemv13 layout: flat byte plane, code words over 8 consecutive weights."""
+    c = _compress(w)
+    if c is None:
+        return None
+    code, sm, hdr, scale = c
+    return sm.to(torch.uint8).flatten().contiguous(), _nib(code.flatten().view(-1, 8)).contiguous(), hdr, scale
+
+
+def _pack14(w, kc):
+    """gemv14 layout: gemv12's atom order [ks][rg][atom][lane][8] for bytes and codes."""
+    c = _compress(w)
+    if c is None:
+        return None
+    code, sm, hdr, scale = c
+    n, k = w.shape
+    perm = lambda t: t.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
+    return perm(sm).to(torch.uint8), _nib(perm(code)).contiguous(), hdr, scale
 # (k, u, nv, minb, pf, blocks) per weight, m = 1, chosen by proj on the H100 (dev/g10.py)
 G10_CFG = {"qkv_gate": (8192, 4, 4, 1, 1, 132), "pooler": (8192, 4, 4, 1, 1, 132), "o": (1024, 2, 4, 2, 1, 264),
            "unpool_slice": (4096, 2, 4, 1, 1, 132)}
@@ -7436,13 +7875,25 @@ def _g10_lib():
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src.count(anchor) == 1, anchor
                     src = src.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
+            src13 = (_G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(8192,%d,%d,%d,%d)" % c[:4] for c in sorted(set(G13_CFG.values()))))
+                     + "\n" + _G14_SRC.replace("G14_CONFIGS", " ".join("G14_CASE(%d,%d,%d,%d,%d)" % (G12_TOKENS, c[0], c[1], c[2], c[4])
+                                                                      for c in sorted(set(G14_CFG.values())))))
+            if GEMV_PDL:
+                for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
+                    assert src13.count(anchor) == 1, anchor
+                    src13 = src13.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
+            src = src + "\n" + src13
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
                             "int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");\n"
                             "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                            "int64_t, int64_t, int64_t, int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");",
-                cuda_sources=src, functions=["g10_gemv", "g12_gemm"],
+                            "int64_t, int64_t, int64_t, int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");\n"
+                            "void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
+                            "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                            "void g14_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
+                            "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm"],
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
             print("layer: gemv10/12 build failed, cuBLAS:", e)
@@ -7576,12 +8027,24 @@ def _g12_prepare(state):
     state["g12"] = {key: _pack12(w[key], 1024 * c[0]) for key, c in G12_CFG.items()}
     state["g12_ws"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=dev)
     state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
+    state["g13"] = {key: pk for key in G13_CFG if (pk := _pack13(w[key])) is not None}
+    state["g14"] = {key: pk for key, c in G14_CFG.items() if (pk := _pack14(w[key], 1024 * c[0])) is not None}
 
 
 def _linear(x, w, key, state=None, sliding=False):
     """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), gemv12 at 8 (FP32 accumulate and
     split-K partials), else cuBLAS."""
     lib = _G10.get("lib")
+    if state is not None and x.shape[0] in (1, G12_TOKENS):
+        pk = state.get("g13" if x.shape[0] == 1 else "g14", {}).get(key)
+        if pk is not None and key not in GEMV_PDL_SECONDARY.get((x.shape[0], sliding), ()):
+            out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
+            if x.shape[0] == 1:
+                lib.g13_gemv(pk[0], pk[1], pk[2], x.contiguous(), out, pk[3], *G13_CFG[key])
+            else:
+                lib.g14_gemm(pk[0], pk[1], pk[2], pk[3], x.contiguous(), out, state["g12_ws"], state["g12_cnt"],
+                             w.shape[0] // 8, *G14_CFG[key])
+            return out
     if x.shape[0] == 1 and lib is not None and key in G10_CFG and x.shape[1] == G10_CFG[key][0]:
         out = torch.empty((1, w.shape[0]), dtype=torch.bfloat16, device=x.device)
         pdl = (int(key in GEMV_PDL_SECONDARY.get((1, sliding), ())),) if UNPOOL_PDL else ()

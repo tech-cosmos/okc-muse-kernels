@@ -540,6 +540,69 @@ if TK2_PDL13 or TK2_PDL2:
       (const int*)ids, nroutes, start, count, (int*)meta, (int*)sroutes, (int*)inv, out);
 """ % (int(TK2_PDL13), int(TK2_PDL2)))
 _G12_SRC = None  # @@G12@@
+# proj's gemv13 (m = 1) / gemv14 (m = 8) over losslessly compressed 12-bit BF16 weights (g13_src.cu / g14_src.cu =
+# r-proj 21bec6b, inlined by build.py; _compress/_pack13/_pack14 below = proj's). Only where the weight compresses
+# (else gemv10/12 as before). H200 (proj judge): pooler m1 17.8 -> 15.5, qkv m1 11.5 -> 11.0, pooler m8 18.8 -> 16.3,
+# qkv m8 13.9 -> 13.0 us.
+_G13_SRC = None  # @@G13@@
+_G14_SRC = None  # @@G14@@
+G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv, minb, pf, blocks), k = 8192
+G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, wg, pf, bk, xp), m = 8
+G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
+
+
+def _compress(w):
+    """proj's lossless 12-bit BF16: sign|mantissa byte and 4-bit exponent code c = e - base per weight (base = max
+    exponent - 15; decoded exponent 112 | c, sums rescaled by scale = 2^(base - 112)); weights below the window are
+    escapes (code 0, byte 0, decoding to 2^(base - 127)) fixed by a per-row header of G13_ESC (col, delta / scale)
+    entries. None if a row has more than G13_ESC escapes."""
+    n, k = w.shape
+    b = w.contiguous().view(torch.int16).int() & 0xFFFF
+    e = (b >> 7) & 0xFF
+    base = int(e.max()) - 15
+    if base < 1:
+        return None
+    code = e - base
+    esc = code < 0
+    if int(esc.sum(1).max()) > G13_ESC:
+        return None
+    code = torch.where(esc, 0, code)
+    sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F))
+    scale = 2.0 ** (base - 112)
+    hdr = torch.zeros(n, G13_ESC, 2, dtype=torch.float32, device=w.device)
+    rows, cols = esc.nonzero(as_tuple=True)  # row-major order
+    if len(rows):
+        slot = torch.arange(len(rows), device=w.device) - torch.searchsorted(rows, rows)
+        hdr[rows, slot, 0] = cols.int().view(torch.float32)
+        hdr[rows, slot, 1] = (w[rows, cols].float() - 2.0 ** (base - 127)) / scale
+    return code, sm, hdr, scale
+
+
+def _nib(code):
+    """Codes [..., 8] -> int32 words: weight 2p + h at bits 4p + 16h."""
+    sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=code.device)
+    v = (code.long() << sh).sum(-1)
+    return torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
+
+
+def _pack13(w):
+    """gemv13 layout: flat byte plane, code words over 8 consecutive weights."""
+    c = _compress(w)
+    if c is None:
+        return None
+    code, sm, hdr, scale = c
+    return sm.to(torch.uint8).flatten().contiguous(), _nib(code.flatten().view(-1, 8)).contiguous(), hdr, scale
+
+
+def _pack14(w, kc):
+    """gemv14 layout: gemv12's atom order [ks][rg][atom][lane][8] for bytes and codes."""
+    c = _compress(w)
+    if c is None:
+        return None
+    code, sm, hdr, scale = c
+    n, k = w.shape
+    perm = lambda t: t.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
+    return perm(sm).to(torch.uint8), _nib(perm(code)).contiguous(), hdr, scale
 # (k, u, nv, minb, pf, blocks) per weight, m = 1, chosen by proj on the H100 (dev/g10.py)
 G10_CFG = {"qkv_gate": (8192, 4, 4, 1, 1, 132), "pooler": (8192, 4, 4, 1, 1, 132), "o": (1024, 2, 4, 2, 1, 264),
            "unpool_slice": (4096, 2, 4, 1, 1, 132)}
@@ -608,13 +671,25 @@ def _g10_lib():
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src.count(anchor) == 1, anchor
                     src = src.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
+            src13 = (_G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(8192,%d,%d,%d,%d)" % c[:4] for c in sorted(set(G13_CFG.values()))))
+                     + "\n" + _G14_SRC.replace("G14_CONFIGS", " ".join("G14_CASE(%d,%d,%d,%d,%d)" % (G12_TOKENS, c[0], c[1], c[2], c[4])
+                                                                      for c in sorted(set(G14_CFG.values())))))
+            if GEMV_PDL:
+                for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
+                    assert src13.count(anchor) == 1, anchor
+                    src13 = src13.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
+            src = src + "\n" + src13
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
                             "int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");\n"
                             "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                            "int64_t, int64_t, int64_t, int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");",
-                cuda_sources=src, functions=["g10_gemv", "g12_gemm"],
+                            "int64_t, int64_t, int64_t, int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");\n"
+                            "void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
+                            "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                            "void g14_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
+                            "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm"],
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
             print("layer: gemv10/12 build failed, cuBLAS:", e)
@@ -679,12 +754,24 @@ def _g12_prepare(state):
     state["g12"] = {key: _pack12(w[key], 1024 * c[0]) for key, c in G12_CFG.items()}
     state["g12_ws"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=dev)
     state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
+    state["g13"] = {key: pk for key in G13_CFG if (pk := _pack13(w[key])) is not None}
+    state["g14"] = {key: pk for key, c in G14_CFG.items() if (pk := _pack14(w[key], 1024 * c[0])) is not None}
 
 
 def _linear(x, w, key, state=None, sliding=False):
     """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), gemv12 at 8 (FP32 accumulate and
     split-K partials), else cuBLAS."""
     lib = _G10.get("lib")
+    if state is not None and x.shape[0] in (1, G12_TOKENS):
+        pk = state.get("g13" if x.shape[0] == 1 else "g14", {}).get(key)
+        if pk is not None and key not in GEMV_PDL_SECONDARY.get((x.shape[0], sliding), ()):
+            out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
+            if x.shape[0] == 1:
+                lib.g13_gemv(pk[0], pk[1], pk[2], x.contiguous(), out, pk[3], *G13_CFG[key])
+            else:
+                lib.g14_gemm(pk[0], pk[1], pk[2], pk[3], x.contiguous(), out, state["g12_ws"], state["g12_cnt"],
+                             w.shape[0] // 8, *G14_CFG[key])
+            return out
     if x.shape[0] == 1 and lib is not None and key in G10_CFG and x.shape[1] == G10_CFG[key][0]:
         out = torch.empty((1, w.shape[0]), dtype=torch.bfloat16, device=x.device)
         pdl = (int(key in GEMV_PDL_SECONDARY.get((1, sliding), ())),) if UNPOOL_PDL else ()
