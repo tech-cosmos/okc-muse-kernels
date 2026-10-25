@@ -61,6 +61,25 @@ CUDA_SRC = r"""
 #include <cuda.h>
 #include <cudaTypedefs.h>
 
+// launch, optionally as a PDL secondary (programmatic stream serialization: CUDA-graph capturable)
+static int g_pdl = 1, g_twpf = 0;
+template <typename... KA, typename... AA>
+static int launch_k(void (*k)(KA...), int grid, int block, int smem, cudaStream_t st, bool pdl, AA... args) {
+  cudaLaunchConfig_t lc = {};
+  lc.gridDim = dim3(grid);
+  lc.blockDim = dim3(block);
+  lc.dynamicSmemBytes = smem;
+  lc.stream = st;
+  cudaLaunchAttribute la[1];
+  la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  la[0].val.programmaticStreamSerializationAllowed = 1;
+  lc.attrs = la;
+  lc.numAttrs = pdl ? 1 : 0;
+  cudaLaunchKernelEx(&lc, k, ((KA)args)...);
+  return (int)cudaGetLastError();
+}
+int64_t moe_set_pdl(int64_t v, int64_t twpf) { g_pdl = (int)v; g_twpf = (int)twpf; return 0; }
+
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 
@@ -233,6 +252,7 @@ __global__ void __launch_bounds__(1024) moe_route(const int* __restrict__ ids, i
                                                   int* __restrict__ meta, int* __restrict__ sroutes) {
   __shared__ int cnt[32], base[32], fill[32];
   const int tid = threadIdx.x;
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (tid < 32) { cnt[tid] = 0; fill[tid] = 0; }
   __syncthreads();
   for (int i = tid; i < nroutes; i += blockDim.x) {
@@ -282,6 +302,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     float4 a = wp[0], b = wp[1];
     wv[0] = a.x; wv[1] = a.y; wv[2] = a.z; wv[3] = a.w; wv[4] = b.x; wv[5] = b.y; wv[6] = b.z; wv[7] = b.w;
   }
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
   float v[8][8], ss[8];
   bool loc[8];
 #pragma unroll
@@ -800,6 +821,7 @@ __global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y, co
     float4 a = wp[0], b = wp[1];
     wv[0] = a.x; wv[1] = a.y; wv[2] = a.z; wv[3] = a.w; wv[4] = b.x; wv[5] = b.y; wv[6] = b.z; wv[7] = b.w;
   }
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
   float v[8][8], ss[8];
   bool loc[8];
 #pragma unroll
@@ -885,6 +907,9 @@ __device__ __forceinline__ void mbar_wait(uint64_t* b, int parity) {
       "{\n.reg .pred p;\nWAIT_%=:\n"
       "mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
       "@!p bra WAIT_%=;\n}\n" ::"r"(smem_u32(b)), "r"(parity) : "memory");
+}
+__device__ __forceinline__ void prefetch_l2(const void* src, int bytes) {
+  asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(src), "r"(bytes) : "memory");
 }
 __device__ __forceinline__ void bulk_g2s(void* dst, const void* src, int bytes, uint64_t* bar) {
   asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
@@ -1058,8 +1083,11 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], NC * 32); }
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
-  if (GATED) {
-    // routing (M * 8 <= 256 routes): warp w takes routes [32 w, 32 w + 32)
+  // PDL: let the next kernel's CTAs launch as soon as SMs free up (they wait for us before reading our output)
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  {
+    // routing (M * 8 <= 256 routes): warp w takes routes [32 w, 32 w + 32); gemm2 recomputes it (same result)
+    // instead of reading gemm13's meta, so its producer can stream w2 before gemm13 has finished
     int e = -1, rank = 0;
     if (warp < 8) {
       s_wc[warp][lane] = 0;
@@ -1104,17 +1132,13 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
     if (e >= 0) {
       const int i = warp * 32 + lane, pos = s_wc[warp][e] + rank;
       s_srt[pos] = i;
-      if (blockIdx.x == 0) { sroutes[pos] = i; inv[i] = pos; }
+      if (GATED && blockIdx.x == 0) { sroutes[pos] = i; inv[i] = pos; }
     }
-    if (blockIdx.x == 0 && tid < 33) {
+    if (GATED && blockIdx.x == 0 && tid < 33) {
       meta[33 + tid] = s_off[tid];
       if (tid < 32) meta[1 + tid] = s_e[tid];
       if (tid == 0) meta[0] = s_nact;
     }
-  } else {
-    if (tid < 33) s_off[tid] = meta[33 + tid];
-    if (tid < 32) s_e[tid] = meta[1 + tid];
-    if (tid == 0) s_nact = meta[0];
   }
   __syncthreads();
   const int nact = s_nact;
@@ -1155,6 +1179,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
     }
     return;
   }
+  if (!GATED) asm volatile("griddepcontrol.wait;" ::: "memory");  // inter is gemm13's output
   uint4 xf[NQ][2];
   int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0, st = 0, ph = 0, rb = 0;
   float gsc = 0.f;
@@ -1258,10 +1283,9 @@ static int launch_tk2(const void* wq, const void* s2, const void* lut, const voi
     cudaFuncSetAttribute(moe_tk2<NRT, NC, NSTG, GATED>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
-  moe_tk2<NRT, NC, NSTG, GATED><<<grid, (NC + 1) * 32, SMEM, st>>>(
+  return launch_k(moe_tk2<NRT, NC, NSTG, GATED>, grid, (NC + 1) * 32, SMEM, st, !GATED && g_pdl,
       (const uint4*)wq, (const uint32_t*)s2, (const uint32_t*)lut, (const float*)gs, (const __nv_bfloat16*)x,
       (const int*)ids, nroutes, start, count, (int*)meta, (int*)sroutes, (int*)inv, out);
-  return (int)cudaGetLastError();
 }
 
 #define SK_DISPATCH(NRT, XR)                                                                 \
@@ -1662,7 +1686,7 @@ template <int RT, int KG, int NSTG, bool GATED>
 __global__ void __launch_bounds__(384, 1) moe_tw(
     const char* __restrict__ Wb, const char* __restrict__ Sb, const float* __restrict__ gs,
     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps,
-    int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
+    int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, int pfk) {
   using C = TWC<RT, GATED>;
   constexpr int NRB = C::NRB;
   extern __shared__ __align__(1024) uint4 smem_tw[];
@@ -1672,6 +1696,10 @@ __global__ void __launch_bounds__(384, 1) moe_tw(
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
+  // PDL: gemm13 waits for moe_gather (and so moe_route) before reading meta, then lets gemm2 launch; gemm2 reads
+  // meta (complete by then) and only waits (producer) before its first copy of gemm13's output
+  if (GATED) asm volatile("griddepcontrol.wait;" ::: "memory");
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (tid < 33) s_off[tid] = meta[33 + tid];
   if (tid == 0) {
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 8 * 32); }
@@ -1699,8 +1727,21 @@ __global__ void __launch_bounds__(384, 1) moe_tw(
     if (warp > 8 || lane != 0) return;
     int* counter = meta + (GATED ? 66 : 67);
     int st = 0, ph = 0, i = 0;
-    for (;;) {
-      const int item = atomicAdd(counter, 1);
+    int item = atomicAdd(counter, 1);
+    if (!GATED) {
+      if (item < nitems && pfk) {  // L2-prefetch the first item's first pfk k chunks while gemm13 finishes
+        int a = 0;
+        while (s_cum[a + 1] <= item) ++a;
+        const int rem = item - s_cum[a], p = rem / NRB, rb = rem - p * NRB;
+        const int e = s_e[a];
+        const char* wsrc = Wb + ((size_t)e * NRB + rb) * 64 * C::WB;
+        const char* ssrc = Sb + ((size_t)e * NRB + rb) * 64 * C::SB;
+        prefetch_l2(wsrc, pfk * C::WB);
+        prefetch_l2(ssrc, pfk * C::SB);
+      }
+      asm volatile("griddepcontrol.wait;" ::: "memory");
+    }
+    for (;; item = atomicAdd(counter, 1)) {
       if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
       if (item >= nitems) {
         s_item[st] = -1;
@@ -1768,16 +1809,17 @@ static int launch_tw(const void* wb, const void* sb, const void* gs, const void*
     cudaFuncSetAttribute(moe_tw<RT, KG, NSTG, GATED>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
-  moe_tw<RT, KG, NSTG, GATED><<<grid, 384, SMEM, st>>>(
+  return launch_k(moe_tw<RT, KG, NSTG, GATED>, grid, 384, SMEM, st, g_pdl,
       (const char*)wb, (const char*)sb, (const float*)gs, (const uint32_t*)lut, maps,
-      (int*)meta, (const int*)sroutes, (__nv_bfloat16*)out);
-  return (int)cudaGetLastError();
+      (int*)meta, (const int*)sroutes, (__nv_bfloat16*)out, g_twpf);
 }
 
 // xg[pos] = x[sroutes[pos] >> 3] with each 64-chunk K-permuted (logical word (j*2+h)*4+t <- physical word 8t+2j+h).
 __global__ void __launch_bounds__(256) moe_gather(const uint32_t* __restrict__ X, const int* __restrict__ meta,
                                                   const int* __restrict__ sroutes, uint32_t* __restrict__ XG) {
   const int pos = blockIdx.x;
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of moe_route
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (pos >= meta[65]) return;
   const uint32_t* src = X + (size_t)(sroutes[pos] >> 3) * (KD / 2);
   uint32_t* dst = XG + (size_t)pos * (KD / 2);
@@ -1816,10 +1858,9 @@ int64_t moe_route_launch(torch::Tensor ids, int64_t start, int64_t count, torch:
 int64_t moe_norm_launch(torch::Tensor y, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1, int64_t start,
                         int64_t count, double eps, torch::Tensor out) {
   const int M = (int)out.size(0);
-  moe_norm<<<M, 512, 0, at::cuda::getCurrentCUDAStream()>>>(
+  return launch_k(moe_norm, M, 512, 0, at::cuda::getCurrentCUDAStream(), g_pdl,
       (const __nv_bfloat16*)y.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
       (const float*)w1.data_ptr(), (int)start, (int)count, (float)eps, (__nv_bfloat16*)out.data_ptr());
-  return (int64_t)cudaGetLastError();
 }
 int64_t moe_tb_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tensor sb_, torch::Tensor gs_,
                       torch::Tensor lut_, torch::Tensor x_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
@@ -1855,9 +1896,8 @@ static void tw_maps(TMaps& maps, void* ptr, int64_t rows) {
   }
 }
 int64_t moe_gather_launch(torch::Tensor x, torch::Tensor meta, torch::Tensor sroutes, torch::Tensor xg) {
-  moe_gather<<<(int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+  return launch_k(moe_gather, (int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream(), g_pdl,
       (const uint32_t*)x.data_ptr(), (const int*)meta.data_ptr(), (const int*)sroutes.data_ptr(), (uint32_t*)xg.data_ptr());
-  return (int64_t)cudaGetLastError();
 }
 int64_t moe_tw_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tensor sb_, torch::Tensor gs_,
                       torch::Tensor lut_, torch::Tensor xb_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
@@ -1915,11 +1955,10 @@ int64_t moe_act_launch(torch::Tensor acc13, torch::Tensor meta, torch::Tensor sr
 int64_t moe_norm2_launch(torch::Tensor acc2, torch::Tensor inv, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1,
                          torch::Tensor gs, int64_t start, int64_t count, double eps, torch::Tensor out) {
   const int M = (int)out.size(0);
-  moe_norm2<<<M, 512, 0, at::cuda::getCurrentCUDAStream()>>>(
+  return launch_k(moe_norm2, M, 512, 0, at::cuda::getCurrentCUDAStream(), g_pdl,
       (const float*)acc2.data_ptr(), (const int*)inv.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
       (const float*)w1.data_ptr(), (const float*)gs.data_ptr(), (int)start, (int)count, (float)eps,
       (__nv_bfloat16*)out.data_ptr());
-  return (int64_t)cudaGetLastError();
 }
 """
 
@@ -1964,7 +2003,8 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "int64_t moe_act_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
         "torch::Tensor, torch::Tensor);"
         "int64_t moe_norm2_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-        "torch::Tensor, int64_t, int64_t, double, torch::Tensor);")
+        "torch::Tensor, int64_t, int64_t, double, torch::Tensor);"
+        "int64_t moe_set_pdl(int64_t, int64_t);")
 
 
 def _lib():
@@ -1975,7 +2015,7 @@ def _lib():
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=CUDA_SRC,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tb_launch",
                                       "moe_gather_launch", "moe_tw_launch",
-                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch"],
+                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_set_pdl"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
     return _LIB
