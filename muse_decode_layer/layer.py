@@ -363,6 +363,7 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 # (H200, us, SGLang incl. its torch post-norm at small T / theirs): bs1 77.3/42.5, bs8 143/106, bs16 196/159,
 # bs32 204/211, bs128 466/340, bs256 617/471.
 BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
+TK2_MAX_TOKENS = 32  # moe's TMA decode kernel (moe_tk2: route fused into gemm13, 3 launches) at T <= this
 MARLIN_TOKENS = ()  # moe 6a1cda0 at T=32 beat Marlin on the judge: decode 32 sliding 218.3 (fc3e60d0) vs 225.0 (440361a9)
 
 
@@ -384,6 +385,9 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
     st = state["moe"]
     lib = st["lib"]
     m = x.shape[0]
+    if m <= TK2_MAX_TOKENS and _moe_TK2_NSTG:
+        return _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
+                               "config": {"local_start": 0, "local_count": LOCAL_EXPERTS}}, st)
     dev = x.device
     inter = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=dev)
     y = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=dev)
@@ -523,7 +527,7 @@ def kernel_fn(data, state):
     with torch.cuda.stream(side_stream):
         topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
         # The experts' bucketing too, off the main stream's path.
-        bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) and tokens <= BUCKET_SIDE_MAX_TOKENS else None
+        bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) and TK2_MAX_TOKENS < tokens <= BUCKET_SIDE_MAX_TOKENS else None
     pooled = _linear(h, dense["pooler"], "pooler")
     p = torch.empty_like(pooled)
     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=GLUE_PDL, num_warps=8,
