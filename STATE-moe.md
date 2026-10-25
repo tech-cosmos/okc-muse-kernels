@@ -60,6 +60,15 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 5 (PDL) summary
+- main @1082f4e = c39a176 + PDL on big-M (route -> gather/tw13/tw2/norm as PDL secondaries; g_pdl = 4): check
+  53a3755c 1.9835x (tie with board, not submitted). Switches in the lib: moe_set_pdl(bits, twpf) (1 decode gemm2,
+  2 decode norm2, 4 big-M), moe_set_blk(blk) (tk2_map row order); tools/pdl_ab.py, tools/blk_ab.py.
+- Judge says: decode gemm2 as PDL secondary (needs its own routing: +2 us) LOSES; decode norm2 PDL ~0; blk 2 at
+  bs32 LOSES badly (151 vs 137). Local H100 said all of these win: the H100 is not a proxy for decode launch/
+  overlap effects.
+- Checks used 2026-10-25: 13 of 20, submits 7 of 9.
+
 ## Ranked ideas
 1. Big-M compute is the limit (ncu bs256: compute-only 180/100 us vs memory-only 166/87 vs full 210/118,
    issue ~55%, 2 consumer warps/SMSP latency-bound). Next: a 256-thread moe_tw (2 consumer WGs, producer duty in
@@ -69,10 +78,15 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
    (~3.5 us on bs128/256). Also moe_norm (~7-10 us at bs256).
 3. Decode bs32 (1.51x) is near memory-bound in the proxy (DRAM 83% at ncu clocks). bs16 1.87x: check DRAM%.
    moe_tw on decode loses (proxy bs8 91 vs 86, bs16 123 vs 90, bs32 149 vs 131).
-4. Launch overhead: PDL so prologues overlap the previous kernel.
+4. (s5 done/dead for decode) PDL. Maybe: one persistent decode kernel (gemm13 -> grid barrier -> gemm2) only
+   if a cheap way to avoid the routing recompute; low priority.
+6. Decode experts with > 8 tokens (bs32 skewed routings): share dequant across 2 groups (n16 mma) with x of the
+   2nd group in smem or registers (1 CTA/SM allows ~224 regs); L2-reorder (blk) is dead.
 5. Clean-up: remove moe_sk / moe_tk / moe_gemm / route2 / act / moe_tb / moe_big from submission.py (~55 s compile).
 
 ## Dead ends
+- (s5) decode PDL (gemm2 secondary + routing recompute) and tk2_map blk 2 row order: judge worse (checks 52e5359f, 9acf8e84, 715085cb).
+- (s5) tw2 L2 prefetch of first item before griddepcontrol.wait: no local gain.
 - (s4) K-split tail for moe_tw (last `grid` items as 2 K halves, FP32 partials, 2nd finisher reduces): SM idle
   20% -> 13% in ncu, judge WORSE (check 2c41a133 1.972x: bs128 249 / bs256 292 vs 233/278). 4 parts: worse in ncu.
 - (s4) moe_tb: TMA ring + mma.sync for big M (8 consumer warps, RT=4, x as 64 per-row 128-B bulk copies):
