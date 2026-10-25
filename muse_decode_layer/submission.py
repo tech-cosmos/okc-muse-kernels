@@ -4992,23 +4992,36 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 # The moe agent's NVFP4 experts (moe_src.py) at these token counts, SGLang's Marlin path elsewhere. Their board
 # (H200, us, SGLang incl. its torch post-norm at small T / theirs): bs1 77.3/42.5, bs8 143/106, bs16 196/159,
 # bs32 204/211, bs128 466/340, bs256 617/471.
+MARLIN_TOKENS = ()  # token counts kept on Marlin (v4 had (32,): moe bb49efd's bs32 fix is checked in v5)
+
+
 def _use_moe(tokens):
-    return not HAVE_SGL or tokens != 32
+    return not HAVE_SGL or tokens not in MARLIN_TOKENS
 
 
-def _experts_moe(x, topk_weights, local_ids, state):
+def _moe_bucket(state, local_ids):
+    """moe_src's route kernel: this GPU's routes bucketed by expert (meta, sorted route ids)."""
+    dev = local_ids.device
+    meta = torch.empty(66, dtype=torch.int32, device=dev)
+    sroutes = torch.empty(local_ids.numel(), dtype=torch.int32, device=dev)
+    state["moe"]["lib"].moe_route_launch(local_ids, 0, LOCAL_EXPERTS, meta, sroutes)
+    return meta, sroutes
+
+
+def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
     """moe_src's route -> gemm13 -> gemm2 -> norm, on local ids (-1 off this GPU: skipped as out of range)."""
     st = state["moe"]
     lib = st["lib"]
     m = x.shape[0]
     dev = x.device
-    meta = torch.empty(66, dtype=torch.int32, device=dev)
-    sroutes = torch.empty(m * TOP_K, dtype=torch.int32, device=dev)
     inter = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=dev)
     y = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=dev)
     out = torch.empty((m, D_EXPERT), dtype=torch.bfloat16, device=dev)
     p13, p2 = _moe__plan(m)
-    lib.moe_route_launch(local_ids, 0, LOCAL_EXPERTS, meta, sroutes)
+    if bucket is None:
+        meta, sroutes = _moe_bucket(state, local_ids)
+    else:
+        meta, sroutes = bucket
     lib.moe_gemm13(p13, st["w13q"], st["w13s"], st["gs13"], st["lut"], x, meta, sroutes, inter)
     lib.moe_gemm2(p2, st["w2q"], st["w2s"], st["gs2"], st["lut"], inter, meta, sroutes, y)
     lib.moe_norm_launch(y, local_ids, topk_weights, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, out)
@@ -5099,18 +5112,22 @@ def kernel_fn(data, state):
     side_stream.wait_stream(main_stream)
     with torch.cuda.stream(side_stream):
         topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
+        # The experts' bucketing too, off the main stream's path.
+        bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) else None
     pooled = F.linear(h, dense["pooler"])
     p = torch.empty_like(pooled)
     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=GLUE_PDL, num_warps=8,
                              launch_pdl=GLUE_PDL)
     main_stream.wait_stream(side_stream)
     if not torch.cuda.is_current_stream_capturing():
-        for t in (topk_ids, local_ids, topk_weights):
+        for t in (topk_ids, local_ids, topk_weights) + (bucket or ()):
             t.record_stream(main_stream)
         for t in (h, h32):
             t.record_stream(side_stream)
-    experts = _experts_moe if _use_moe(tokens) else _experts_marlin if HAVE_SGL else _experts_local
-    moe = experts(p, topk_weights, local_ids, state)  # all-reduce: identity
+    if _use_moe(tokens):
+        moe = _experts_moe(p, topk_weights, local_ids, state, bucket)  # all-reduce: identity
+    else:
+        moe = (_experts_marlin if HAVE_SGL else _experts_local)(p, topk_weights, local_ids, state)
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
     f = F.linear(moe, state["unpool_slice"] if sliced else state["unpool"])  # all-gather: identity (zeros)
     stream2 = torch.empty_like(stream1)
