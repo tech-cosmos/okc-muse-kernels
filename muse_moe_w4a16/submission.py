@@ -14,10 +14,7 @@ Four launches per call:
   norm  : per token, (1 + w) * y, RMSNorm, weighted sum over its local slots (FP32) -> bf16.
 """
 
-import ctypes
 import hashlib
-import os
-import subprocess
 from typing import TypedDict
 
 import torch
@@ -364,67 +361,60 @@ static int launch_gemm(const void* wq, const void* ws, const void* gs, const voi
   }                                                                                         \
   return -1;
 
-extern "C" {
-int moe_gemm13(int cfg, const void* wq, const void* ws, const void* gs, const void* lut, const void* x,
-           const void* meta, const void* sr, void* out, void* stream) {
-  cudaStream_t st = (cudaStream_t)stream;
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+
+#define PTR(t) ((const void*)(t).data_ptr())
+int64_t moe_gemm13(int64_t cfg, torch::Tensor wq_, torch::Tensor ws_, torch::Tensor gs_, torch::Tensor lut_,
+                   torch::Tensor x_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
+  cudaStream_t st = at::cuda::getCurrentCUDAStream();
+  const void *wq = PTR(wq_), *ws = PTR(ws_), *gs = PTR(gs_), *lut = PTR(lut_), *x = PTR(x_), *meta = PTR(meta_),
+             *sr = PTR(sr_);
+  void* out = out_.data_ptr();
   DISPATCH(true)
 }
-int moe_gemm2(int cfg, const void* wq, const void* ws, const void* gs, const void* lut, const void* x,
-          const void* meta, const void* sr, void* out, void* stream) {
-  cudaStream_t st = (cudaStream_t)stream;
+int64_t moe_gemm2(int64_t cfg, torch::Tensor wq_, torch::Tensor ws_, torch::Tensor gs_, torch::Tensor lut_,
+                  torch::Tensor x_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
+  cudaStream_t st = at::cuda::getCurrentCUDAStream();
+  const void *wq = PTR(wq_), *ws = PTR(ws_), *gs = PTR(gs_), *lut = PTR(lut_), *x = PTR(x_), *meta = PTR(meta_),
+             *sr = PTR(sr_);
+  void* out = out_.data_ptr();
   DISPATCH(false)
 }
-int moe_route_launch(const void* ids, int nroutes, int start, int count, void* meta, void* sroutes, void* stream) {
-  moe_route<<<1, 1024, 0, (cudaStream_t)stream>>>((const int*)ids, nroutes, start, count, (int*)meta, (int*)sroutes);
-  return (int)cudaGetLastError();
+int64_t moe_route_launch(torch::Tensor ids, int64_t start, int64_t count, torch::Tensor meta, torch::Tensor sroutes) {
+  moe_route<<<1, 1024, 0, at::cuda::getCurrentCUDAStream()>>>((const int*)ids.data_ptr(), (int)ids.numel(), (int)start,
+                                                               (int)count, (int*)meta.data_ptr(), (int*)sroutes.data_ptr());
+  return (int64_t)cudaGetLastError();
 }
-int moe_norm_launch(const void* y, const void* ids, const void* tw, const void* w1, int start, int count, float eps, void* out,
-         int M, void* stream) {
-  moe_norm<<<M, 512, 0, (cudaStream_t)stream>>>((const __nv_bfloat16*)y, (const int*)ids, (const float*)tw,
-                                               (const float*)w1, start, count, eps, (__nv_bfloat16*)out);
-  return (int)cudaGetLastError();
-}
+int64_t moe_norm_launch(torch::Tensor y, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1, int64_t start,
+                        int64_t count, double eps, torch::Tensor out) {
+  const int M = (int)out.size(0);
+  moe_norm<<<M, 512, 0, at::cuda::getCurrentCUDAStream()>>>(
+      (const __nv_bfloat16*)y.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
+      (const float*)w1.data_ptr(), (int)start, (int)count, (float)eps, (__nv_bfloat16*)out.data_ptr());
+  return (int64_t)cudaGetLastError();
 }
 """
 
 _LIB = None
-
-
-def _nvcc():
-    for p in (os.environ.get("CUDA_HOME", ""), "/usr/local/cuda", "/usr/local/cuda-13.0", "/usr/local/cuda-12.9",
-              "/usr/local/cuda-12.8"):
-        if p and os.path.exists(os.path.join(p, "bin", "nvcc")):
-            return os.path.join(p, "bin", "nvcc")
-    return "nvcc"
+_CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+        "torch::Tensor, torch::Tensor, torch::Tensor);"
+        "int64_t moe_gemm2(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+        "torch::Tensor, torch::Tensor, torch::Tensor);"
+        "int64_t moe_route_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor);"
+        "int64_t moe_norm_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, double, "
+        "torch::Tensor);")
 
 
 def _lib():
     global _LIB
     if _LIB is None:
-        h = hashlib.sha256(CUDA_SRC.encode()).hexdigest()[:16]
-        d = os.path.join("/tmp", f"moe_w4a16_{h}")
-        so = os.path.join(d, "moe.so")
-        if not os.path.exists(so):
-            os.makedirs(d, exist_ok=True)
-            cu = os.path.join(d, "moe.cu")
-            with open(cu, "w") as f:
-                f.write(CUDA_SRC)
-            tmp = so + f".{os.getpid()}"
-            subprocess.check_call([_nvcc(), "-O3", "-std=c++17", "-gencode", "arch=compute_90a,code=sm_90a",
-                                   "--shared", "-Xcompiler", "-fPIC", "-o", tmp, cu])
-            os.replace(tmp, so)
-        lib = ctypes.CDLL(so)
-        vp, ci = ctypes.c_void_p, ctypes.c_int
-        for name in ("moe_gemm13", "moe_gemm2"):
-            fn = getattr(lib, name)
-            fn.argtypes = [ci] + [vp] * 9
-            fn.restype = ci
-        lib.moe_route_launch.argtypes = [vp, ci, ci, ci, vp, vp, vp]
-        lib.moe_route_launch.restype = ci
-        lib.moe_norm_launch.argtypes = [vp, vp, vp, vp, ci, ci, ctypes.c_float, vp, ci, vp]
-        lib.moe_norm_launch.restype = ci
-        _LIB = lib
+        from torch.utils.cpp_extension import load_inline
+        h = hashlib.sha256(CUDA_SRC.encode()).hexdigest()[:12]
+        _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=CUDA_SRC,
+                           functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch"],
+                           extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
+                           extra_cflags=["-O3"], verbose=False)
     return _LIB
 
 
@@ -528,7 +518,6 @@ def kernel_fn(data, st):
     tw = data["topk_weights"].float().contiguous()
     M = x.shape[0]
     dev = x.device
-    stream = ctypes.c_void_p(torch.cuda.current_stream().cuda_stream)
     meta = torch.empty(66, dtype=torch.int32, device=dev)
     sroutes = torch.empty(M * TOP_K, dtype=torch.int32, device=dev)
     inter = torch.empty((M * TOP_K, I), dtype=torch.bfloat16, device=dev)
@@ -536,11 +525,8 @@ def kernel_fn(data, st):
     out = torch.empty((M, H), dtype=torch.bfloat16, device=dev)
     p13, p2 = PLAN_OVERRIDE(M) if PLAN_OVERRIDE else _plan(M)
     assert p13 in _CFGS and p2 in _CFGS, (p13, p2)
-    lib.moe_route_launch(ids.data_ptr(), M * TOP_K, st["start"], st["count"], meta.data_ptr(), sroutes.data_ptr(), stream)
-    lib.moe_gemm13(p13, st["w13q"].data_ptr(), st["w13s"].data_ptr(), st["gs13"].data_ptr(), st["lut"].data_ptr(),
-               x.data_ptr(), meta.data_ptr(), sroutes.data_ptr(), inter.data_ptr(), stream)
-    lib.moe_gemm2(p2, st["w2q"].data_ptr(), st["w2s"].data_ptr(), st["gs2"].data_ptr(), st["lut"].data_ptr(),
-              inter.data_ptr(), meta.data_ptr(), sroutes.data_ptr(), y.data_ptr(), stream)
-    lib.moe_norm_launch(y.data_ptr(), ids.data_ptr(), tw.data_ptr(), st["w1"].data_ptr(), st["start"], st["count"],
-             POST_NORM_EPS, out.data_ptr(), M, stream)
+    lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
+    lib.moe_gemm13(p13, st["w13q"], st["w13s"], st["gs13"], st["lut"], x, meta, sroutes, inter)
+    lib.moe_gemm2(p2, st["w2q"], st["w2s"], st["gs2"], st["lut"], inter, meta, sroutes, y)
+    lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out)
     return out
