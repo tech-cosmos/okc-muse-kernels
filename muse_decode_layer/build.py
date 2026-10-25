@@ -50,6 +50,10 @@ def _np2_jit(n):
 class Config(TypedDict):""", 1)
 moe = moe_namespaced((here / "moe_src.py").read_text())
 layer = layer.replace("# @@MOE@@\n", "# ---- experts (moe_src.py, names prefixed _moe_) ----\n" + moe + "\n# ---- layer ----\n")
+g10 = (here / "g10_src.cu").read_text()  # proj's gemv10 CUDA source, as a raw string literal in the layer
+Q3 = "'" * 3
+assert Q3 not in g10 and layer.count("_G10_SRC = None  # @@G10@@\n") == 1
+layer = layer.replace("_G10_SRC = None  # @@G10@@\n", "_G10_SRC = r" + Q3 + g10 + Q3 + "\n")
 out = "# okc: problem=muse_decode_layer\n" + layer.replace("# @@ATTENTION@@\n", "# ---- attention (attn_src.py) ----\n" + attn + "\n# ---- layer ----\n")
 assert "@@ATTENTION@@" not in out and "@@MOE@@" not in out and "attn_kernel_fn" in out
 (here / (sys.argv[1] if len(sys.argv) > 1 else "submission.py")).write_text(out)

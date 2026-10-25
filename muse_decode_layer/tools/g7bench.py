@@ -16,13 +16,31 @@ def t(fn, n=60):
         for _ in range(n):
             torch.sum(flush.view(torch.int64), 0, out=sink); e0.record(); g.replay(); e1.record(); torch.cuda.synchronize(); ts.append(e0.elapsed_time(e1) * 1e3)
     return statistics.median(ts)
-cfgs = dict((k, v[0][1]) for k, v in pj.BF16_GEMV.items())
+cfgs = dict((k, v[0][1]) for k, v in getattr(pj, 'BF16_GEMV', {}).items())
 for name, (n, k) in shapes.items():
     w = (torch.randn(n, k, device=dev) * 0.02).bfloat16(); wp = pj._pack(w).contiguous()
     for m in map(int, sys.argv[2:]):
         x = torch.randn(m, k, device=dev).bfloat16(); out = torch.empty(m, n, dtype=torch.bfloat16, device=dev)
         ref = F.linear(x, w)
-        c = cfgs[name]; pj._mod.g7_gemv(wp, x, out, *c)
+        c = cfgs.get(name)
+        if c is None:
+            c = {"qkv_gate": (2304, 1, 2, 2, 8, 1, 4, 1), "pooler": (4096, 1, 2, 4, 16, 1, 1, 1), "o": (8192, 1, 2, 4, 8, 1, 1, 1),
+                 "unpooler": (1024, 1, 2, 4, 8, 1, 4, 1)}[name]
+        try:
+            pj._mod.g7_gemv(wp, x, out, *c)
+        except Exception:
+            tc = t(lambda: F.linear(x, w)); out = torch.empty(m, n, dtype=torch.bfloat16, device=dev)
+            c10 = pj.BF16_G10[name][0][2:]; pj._mod.g10_gemv(w, x, out, *c10)
+            err = ((out.float() - ref.float()).norm() / ref.float().norm()).item()
+            print(f"{name:9s} m{m}: cublas {tc:6.2f}  g10 {t(lambda: pj._mod.g10_gemv(w, x, out, *c10)):6.2f} us  err {err:.1e}")
+            continue
         err = ((out.float() - ref.float()).norm() / ref.float().norm()).item()
         tc = t(lambda: F.linear(x, w)); tg = t(lambda: pj._mod.g7_gemv(wp, x, out, *c))
-        print(f"{name:9s} m{m}: cublas {tc:6.2f}  g7 {tg:6.2f} us  err {err:.1e}")
+        line = f"{name:9s} m{m}: cublas {tc:6.2f}  g7 {tg:6.2f} us  err {err:.1e}"
+        g10 = getattr(pj, "BF16_G10", {}).get(name, [])
+        if m == 1 and g10:
+            c10 = g10[0][2:]; o10 = torch.empty(m, n, dtype=torch.bfloat16, device=dev)
+            pj._mod.g10_gemv(w, x, o10, *c10)
+            e10 = ((o10.float() - ref.float()).norm() / ref.float().norm()).item()
+            line += f"  g10 {t(lambda: pj._mod.g10_gemv(w, x, o10, *c10)):6.2f} err {e10:.1e}"
+        print(line)

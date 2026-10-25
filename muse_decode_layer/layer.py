@@ -452,8 +452,47 @@ def prepare(weights):
             (dequantize(weights["w13"][e], weights["w13_sf"][e], weights["w13_gs"][e]).to(torch.bfloat16),
              dequantize(weights["w2"][e], weights["w2_sf"][e], weights["w2_gs"][e]).to(torch.bfloat16))
             for e in range(LOCAL_EXPERTS)]
+    _g10_lib()
     torch.cuda.synchronize()
     return state
+
+
+# ---- BF16 GEMV at 1 token: the proj agent's gemv10 (g10_src.cu = r-proj d894f4e, inlined by build.py) ----
+
+_G10_SRC = None  # @@G10@@
+# (k, u, nv, minb, pf, blocks) per weight, m = 1, chosen by proj on the H100 (dev/g10.py)
+G10_CFG = {"qkv_gate": (8192, 4, 4, 1, 1, 132), "pooler": (8192, 4, 4, 1, 1, 132), "o": (1024, 2, 4, 2, 1, 264),
+           "unpool_slice": (4096, 2, 4, 1, 1, 132)}
+_G10 = {}
+
+
+def _g10_lib():
+    if "lib" not in _G10:
+        _G10["lib"] = None
+        try:
+            import hashlib
+            from torch.utils.cpp_extension import load_inline
+            cases = " ".join("G10_CASE(1,%d,%d,%d,%d,%d)" % c[:5] for c in sorted(set(G10_CFG.values())))
+            src = _G10_SRC.replace("G10_CONFIGS", cases)
+            _G10["lib"] = load_inline(
+                name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
+                cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
+                            "int64_t, int64_t);",
+                cuda_sources=src, functions=["g10_gemv"],
+                extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
+        except Exception as e:  # noqa: BLE001
+            print("layer: gemv10 build failed, cuBLAS at 1 token:", e)
+    return _G10["lib"]
+
+
+def _linear(x, w, key):
+    """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), else cuBLAS."""
+    lib = _G10.get("lib")
+    if x.shape[0] == 1 and lib is not None and key in G10_CFG and x.shape[1] == G10_CFG[key][0]:
+        out = torch.empty((1, w.shape[0]), dtype=torch.bfloat16, device=x.device)
+        lib.g10_gemv(w, x.contiguous(), out, *G10_CFG[key][1:])
+        return out
+    return F.linear(x, w)
 
 
 def kernel_fn(data, state):
@@ -462,14 +501,14 @@ def kernel_fn(data, state):
     hq, d = cfg["num_q_heads"], cfg["head_dim"]
     dense = state["dense"]
     dev = data["stream"].device
-    qkv = F.linear(data["attn_input"], dense["qkv_gate"])
+    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate")
     o = attn_kernel_fn({
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
         "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
         "seq_lens": data["seq_lens"], "config": cfg}).view(tokens, hq * d)
-    a = F.linear(o, dense["o"])  # all-reduce: identity
+    a = _linear(o, dense["o"], "o")  # all-reduce: identity
 
     fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
     stream1 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev)
@@ -485,7 +524,7 @@ def kernel_fn(data, state):
         topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
         # The experts' bucketing too, off the main stream's path.
         bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) and tokens <= BUCKET_SIDE_MAX_TOKENS else None
-    pooled = F.linear(h, dense["pooler"])
+    pooled = _linear(h, dense["pooler"], "pooler")
     p = torch.empty_like(pooled)
     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=GLUE_PDL, num_warps=8,
                              launch_pdl=GLUE_PDL)
@@ -500,7 +539,7 @@ def kernel_fn(data, state):
     else:
         moe = (_experts_marlin if HAVE_SGL else _experts_local)(p, topk_weights, local_ids, state)
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
-    f = F.linear(moe, state["unpool_slice"] if sliced else state["unpool"])  # all-gather: identity (zeros)
+    f = _linear(moe, state["unpool_slice"], "unpool_slice") if sliced else F.linear(moe, state["unpool"])  # all-gather: identity (zeros)
     stream2 = torch.empty_like(stream1)
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]
