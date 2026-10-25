@@ -6,7 +6,7 @@ FP32 split partials), as SGLang's F.linear in FP32. Above 8 tokens SGLang's BF16
 accumulation: 9..32 tokens a native tensor-core kernel (dev/gemv6.cu: mma.sync with hi and lo tiles into one FP32
 accumulator, split K reduced in FP32 over a thread-block cluster through distributed shared memory); above 32 one
 cuBLAS GEMM against the stacked [hi; lo] weight (FP32 out) and an FP32 add of the two halves. BF16 projections: at 1 token a native grid-stride GEMV (dev/gemv10.cu: W read in place, row-major, the whole grid
-sweeping one contiguous window; FP32 FMA and FP32 reductions, no split K), else at 8, 16 and 32 tokens a native
+sweeping one contiguous window; FP32 FMA and FP32 reductions, no split K), else at 8 tokens (pooler also 16) a native
 tensor-core streaming GEMM (dev/gemv12.cu: mma.sync with x as A and W, repacked losslessly into 512-B fragment atoms, as B;
 FP32 accumulators; split K reduced in FP32), else cuBLAS (as SGLang's bf16_gemm_dispatch on H200).
 Native kernels are built once at import (load_inline); if the build fails everything falls back to torch.
@@ -52,10 +52,8 @@ ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
 BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4, 1, 1, 132)],
             "o": [(1, 1024, 2, 4, 2, 1, 264)], "unpooler": [(1, 4096, 2, 4, 1, 1, 132)]}
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
-BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32, 1, 1), (16, 2, 2, 8, 32, 4, 4), (32, 2, 2, 8, 32, 4, 4)],
-            "pooler": [(8, 8, 8, 4, 128, 1, 1), (16, 8, 8, 4, 128, 8, 2), (32, 8, 8, 4, 128, 8, 2)],
-            "o": [(8, 1, 2, 8, 128, 1, 1), (16, 1, 4, 2, 128, 4, 4), (32, 1, 4, 2, 128, 4, 4)],
-            "unpooler": [(8, 4, 4, 4, 32, 1, 1), (16, 4, 4, 4, 128, 8, 2), (32, 4, 4, 4, 128, 8, 2)]}
+BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32, 1, 1)], "pooler": [(8, 8, 8, 4, 128, 1, 1), (16, 8, 8, 4, 128, 8, 2)],
+            "o": [(8, 1, 2, 8, 128, 1, 1)], "unpooler": [(8, 4, 4, 4, 32, 1, 1)]}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
