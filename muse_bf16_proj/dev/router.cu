@@ -67,16 +67,15 @@ __global__ void __launch_bounds__(NWARP * 32) router(const float4* __restrict__ 
 #pragma unroll
             for (int o = 16; o; o >>= 1) acc[r][t] += __shfl_xor_sync(0xffffffffu, acc[r][t], o);
     const bool split = gridDim.y > 1;
-    if (lane == 0) {
+    // every lane holds all RW * M sums: lane (r * M + t) % 32 writes (r, t), so the atomics issue in parallel
 #pragma unroll
-        for (int r = 0; r < RW; ++r)
+    for (int r = 0; r < RW; ++r)
 #pragma unroll
-            for (int t = 0; t < M; ++t)
-                if (t < m) {
-                    if (split) atomicAdd(ws + (size_t)t * n + r0 + r, acc[r][t]);
-                    else out[(size_t)t * n + r0 + r] = acc[r][t];
-                }
-    }
+        for (int t = 0; t < M; ++t)
+            if (t < m && lane == (r * M + t) % 32) {
+                if (split) atomicAdd(ws + (size_t)t * n + r0 + r, acc[r][t]);
+                else out[(size_t)t * n + r0 + r] = acc[r][t];
+            }
     if (!split) return;
     __threadfence();
     __syncthreads();

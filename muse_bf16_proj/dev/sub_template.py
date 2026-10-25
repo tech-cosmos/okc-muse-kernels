@@ -42,6 +42,7 @@ _ROUTER_SRC = r'''@@ROUTER@@'''
 _GEMV_SRC = r'''@@GEMV7@@'''
 _G10_SRC = r'''@@GEMV10@@'''
 _G12_SRC = r'''@@GEMV12@@'''
+_G13_SRC = r'''@@GEMV13@@'''
 _LT_SRC = r'''@@LT@@'''
 
 # Router FP32 kernel configs (mp, kb, rw, nwarp), chosen on the H100 (dev/rt.py).
@@ -52,6 +53,12 @@ ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
 # BF16 grid-stride GEMV configs per layer: (m, k, u, nv, minb, pf, blocks), chosen on the H100 (dev/g10.py).
 BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4, 1, 1, 132)],
             "o": [(1, 1024, 2, 4, 2, 1, 264)], "unpooler": [(1, 4096, 2, 4, 1, 1, 132)]}
+# BF16 m=1 GEMV over losslessly compressed weights (dev/gemv13.cu: 12 bits per weight), (m, k, u, nv, minb, pf,
+# blocks), chosen on the H100 (dev/g13.py); prepare() times them against gemv10 and F.linear and keeps the fastest.
+BF16_G13 = {"qkv_gate": [(1, 8192, 2, 4, 1, 1, 132), (1, 8192, 2, 2, 1, 2, 132)],
+            "pooler": [(1, 8192, 2, 4, 1, 1, 132), (1, 8192, 2, 2, 1, 2, 132)],
+            "unpooler": [(1, 4096, 2, 4, 1, 2, 132)]}
+G13_ESC = 8  # escapes per row (gemv13.cu ESC)
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
 BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32, 1, 1)], "pooler": [(8, 8, 8, 4, 128, 1, 1), (16, 8, 8, 4, 128, 8, 2)],
             "o": [(8, 1, 2, 8, 128, 1, 1)], "unpooler": [(8, 4, 4, 4, 32, 1, 1)]}  # unpooler m8: H200 5.7-7.3 (noisy)
@@ -64,19 +71,22 @@ _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
         _G10_SRC.replace("G10_CONFIGS", " ".join("G10_CASE(%d,%d,%d,%d,%d,%d)" % c[:6] for v in BF16_G10.values() for c in v)) + "\n" +
-        _G12_SRC.replace("G12_CONFIGS", " ".join("G12_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted({c[:4] + c[5:] for v in BF16_G12.values() for c in v}))))
+        _G12_SRC.replace("G12_CONFIGS", " ".join("G12_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted({c[:4] + c[5:] for v in BF16_G12.values() for c in v}))) + "\n" +
+        _G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d)" % c[1:6] for c in sorted({c for v in BF16_G13.values() for c in v}))))
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v7",
+        name="muse_proj_v8",
         cpp_sources="void pj_router(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
                     "void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                     "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t);",
-        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv", "g12_gemm"],
+                    "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                    "void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
+                    "int64_t, int64_t, int64_t, int64_t);",
+        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv", "g12_gemm", "g13_gemv"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -106,12 +116,45 @@ def _pack12(w, kc):
     return w.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
 
 
+def _pack13(w):
+    """Lossless 12-bit BF16 for gemv13: (sign|mantissa bytes, 4-bit exponent codes, escape header, scale), or None
+    if the weights don't fit (an exponent window of 16 with at most G13_ESC escapes per row)."""
+    n, k = w.shape
+    b = w.contiguous().view(torch.int16).int() & 0xFFFF
+    e = (b >> 7) & 0xFF
+    base = int(e.max()) - 15
+    if base < 1:
+        return None
+    code = e - base
+    esc = code < 0  # below the window (zeros, tiny values): code 0, byte 0, fixed up from the header
+    if int(esc.sum(1).max()) > G13_ESC:
+        return None
+    code = torch.where(esc, 0, code)
+    sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F)).to(torch.uint8).flatten()
+    sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=w.device)
+    nib = (code.flatten().view(-1, 8).long() << sh).sum(1)
+    nib = torch.where(nib >= 2 ** 31, nib - 2 ** 32, nib).int()
+    scale = 2.0 ** (base - 112)
+    hdr = torch.zeros(n, G13_ESC, 2, dtype=torch.float32, device=w.device)
+    rows, cols = esc.nonzero(as_tuple=True)  # row-major order
+    if len(rows):
+        slot = torch.arange(len(rows), device=w.device) - torch.searchsorted(rows, rows)
+        hdr[rows, slot, 0] = cols.int().view(torch.float32)
+        hdr[rows, slot, 1] = (w[rows, cols].float() - 2.0 ** (base - 127)) / scale
+    return sm, nib, hdr, scale
+
+
 def prepare(weights):
     st = {name: w.contiguous() for name, w in weights.items()}
     for name, cfgs in BF16_G12.items():
         for c in cfgs:
             if (name, c[1]) not in st:
                 st[(name, c[1])] = _pack12(weights[name], 1024 * c[1])
+    if _mod is not None:
+        for name in BF16_G13:
+            pk = _pack13(weights[name][:1024] if name == "unpooler" else weights[name])
+            if pk is not None:
+                st[("g13", name)] = pk
     r = weights["router"]
     hi = r.to(torch.bfloat16)
     lo = (r - hi.float()).to(torch.bfloat16)
@@ -136,7 +179,12 @@ def _run(st, layer, x, out, cand):
     if cand is None:
         return F.linear(x, st[layer][:out.shape[1]])
     kind, c = cand
-    if kind == "g12":
+    if kind == "g10":
+        _mod.g10_gemv(st[layer], x, out, *c[2:])  # W[:n] is the first n rows, in place
+    elif kind == "g13":
+        sm, nib, hdr, scale = st[("g13", layer)]
+        _mod.g13_gemv(sm, nib, hdr, x, out, scale, *c[2:])
+    elif kind == "g12":
         _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
     else:
         _lt.lt_gemm(st[layer], x, out, st["ltws"], list(c))
@@ -144,7 +192,7 @@ def _run(st, layer, x, out, cand):
 
 
 def _tune(st, reps=25):
-    """Per (layer, m): time F.linear, the native gemv12 config and each BF16_LT config as CUDA-graph replays with a
+    """Per (layer, m): time F.linear, the native gemv10/gemv13 (m=1) and gemv12 configs and each BF16_LT config as CUDA-graph replays with a
     cold L2 (read flush, as the judge) on random x; keep the fastest. Only shapes and weights are used."""
     picks = {}
     flush = torch.zeros(256 << 20, dtype=torch.uint8, device=st["qkv_gate"].device).view(torch.int64)
@@ -153,6 +201,13 @@ def _tune(st, reps=25):
     g.manual_seed(0)
     shapes = {}
     if _mod is not None:
+        for layer, cfgs in BF16_G10.items():
+            for c in cfgs:
+                shapes.setdefault((layer, c[0]), []).append(("g10", c))
+        for layer, cfgs in BF16_G13.items():
+            if ("g13", layer) in st:
+                for c in cfgs:
+                    shapes.setdefault((layer, c[0]), []).append(("g13", c))
         for layer, cfgs in BF16_G12.items():
             for c in cfgs:
                 shapes.setdefault((layer, c[0]), []).append(("g12", c))
@@ -228,12 +283,6 @@ def kernel_fn(data, st):
     if layer == "router":
         return _router(x, st, cfg["m"])
     m, n, k = cfg["m"], cfg["n"], cfg["k"]
-    if _mod is not None:
-        for c in BF16_G10.get(layer, ()):
-            if m == c[0] and k == c[1]:
-                out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
-                _mod.g10_gemv(st[layer], x, out, *c[2:])  # W[:n] is the first n rows, in place
-                return out
     c = st["pick"].get((layer, m))
     if c is None:
         return F.linear(x, st[layer][:n])

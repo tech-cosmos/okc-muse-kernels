@@ -107,16 +107,15 @@ __global__ void __launch_bounds__(NWARP * 32) router(const float4* __restrict__ 
 #pragma unroll
             for (int o = 16; o; o >>= 1) acc[r][t] += __shfl_xor_sync(0xffffffffu, acc[r][t], o);
     const bool split = gridDim.y > 1;
-    if (lane == 0) {
+    // every lane holds all RW * M sums: lane (r * M + t) % 32 writes (r, t), so the atomics issue in parallel
 #pragma unroll
-        for (int r = 0; r < RW; ++r)
+    for (int r = 0; r < RW; ++r)
 #pragma unroll
-            for (int t = 0; t < M; ++t)
-                if (t < m) {
-                    if (split) atomicAdd(ws + (size_t)t * n + r0 + r, acc[r][t]);
-                    else out[(size_t)t * n + r0 + r] = acc[r][t];
-                }
-    }
+        for (int t = 0; t < M; ++t)
+            if (t < m && lane == (r * M + t) % 32) {
+                if (split) atomicAdd(ws + (size_t)t * n + r0 + r, acc[r][t]);
+                else out[(size_t)t * n + r0 + r] = acc[r][t];
+            }
     if (!split) return;
     __threadfence();
     __syncthreads();
@@ -642,6 +641,161 @@ void g12_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tensor
     TORCH_CHECK(false, "g12: no config");
 }
 '''
+_G13_SRC = r'''// gemv13: gemv10 (grid-stride GEMV, m = 1) over losslessly compressed BF16 weights: 12 bits per weight.
+// prepare() splits W [n, KK] into a sign|mantissa byte plane (flat, row-major) and a 4-bit exponent code plane:
+// code c = e - base (base = max exponent - 15), so the decoded exponent is 112 | c (exact power-of-2 rescale of the
+// sum by 2^(base - 112)). Weights with e < base (zeros, tiny values: ~1 per 8K) are escapes: code 0, byte 0 (decodes
+// to D = 2^(base - 127) in true scale) and a per-row header of ESC (col, (true - D) / scale) pairs fixes the sum.
+// Nibble layout: 32-bit word f/8 holds weights f..f+7 (f % 8 == 0); weight 2p + h at bits 4p + 16h, so pair p's
+// exponents land at BF16 bits 7..10 / 23..26 with one shift. Decode per pair: prmt (sign replicate), shift, 2 lop3.
+// Chunk = U * 4096 weights (whole rows); thread t takes the 16 weights at u * 4096 + t * 16 (one uint4 of bytes and
+// one uint2 of codes per u). Its k positions are fixed, so x lives in registers as FP32.
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+namespace g13 {
+#define XI(k) (((k) >> 4) * 20 + ((k) & 15))
+constexpr int ESC = 8, MAXC = 16;  // escapes per row; chunks per virtual block
+__device__ __forceinline__ uint4 ld4(const uint4* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ uint2 ld2(const uint2* p) {
+    uint2 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v2.u32 {%0,%1}, [%2];" : "=r"(v.x), "=r"(v.y) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
+    unsigned r;
+    asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
+    return r;
+}
+// pair p (0..3) of a nibble word: exponent bits for BF16 pair at bits 7..10 and 23..26, OR 112 << 7
+template <int P>
+__device__ __forceinline__ unsigned expo(unsigned nw) {
+    const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
+    return (s & 0x07800780u) | 0x38003800u;
+}
+// 4 weights (bytes of sw) -> 2 BF16 pairs; nibble word nw, pairs P0, P0 + 1
+template <int P0>
+__device__ __forceinline__ void dec4(unsigned sw, unsigned nw, float* f) {
+    const unsigned q0 = (prmt(sw, 0x9180u) & 0x807f807fu) | expo<P0>(nw);
+    const unsigned q1 = (prmt(sw, 0xB3A2u) & 0x807f807fu) | expo<P0 + 1>(nw);
+    f[0] = __uint_as_float(q0 << 16); f[1] = __uint_as_float(q0 & 0xffff0000u);
+    f[2] = __uint_as_float(q1 << 16); f[3] = __uint_as_float(q1 & 0xffff0000u);
+}
+__device__ __forceinline__ float dot16(const uint4& s, const uint2& nb, const float* xp) {
+    float x[16];
+#pragma unroll
+    for (int i = 0; i < 16; i += 4) *reinterpret_cast<float4*>(x + i) = *reinterpret_cast<const float4*>(xp + i);
+    float f[16];
+    dec4<0>(s.x, nb.x, f); dec4<2>(s.y, nb.x, f + 4); dec4<0>(s.z, nb.y, f + 8); dec4<2>(s.w, nb.y, f + 12);
+    float a0 = 0.f, a1 = 0.f;
+#pragma unroll
+    for (int i = 0; i < 16; i += 2) { a0 = fmaf(f[i], x[i], a0); a1 = fmaf(f[i + 1], x[i + 1], a1); }
+    return a0 + a1;
+}
+
+template <int U, int NV, int MINB, int KK, int PF>
+__global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__ S, const uint2* __restrict__ N,
+                                                       const float2* __restrict__ H, const __nv_bfloat16* __restrict__ x,
+                                                       __nv_bfloat16* __restrict__ out, int n, float scale) {
+    constexpr int CE = U * 4096, RPC = CE / KK;
+    static_assert(CE % KK == 0 && KK % 512 == 0, "chunk must hold whole rows");
+    const int t = threadIdx.x & 255, vg = threadIdx.x >> 8, lane = t & 31, wp = t >> 5;
+    const int nch = n / RPC;
+    __shared__ float red_[NV][2][U * 8];
+    __shared__ __align__(16) float xs[KK / 16 * 20];  // 16-float groups padded to 20: no bank conflicts
+    __shared__ float2 hs_[NV][MAXC * RPC * ESC];  // this vb's escape headers: chunk j = j-th of c, c + G, ...
+    float (*red)[U * 8] = red_[vg];
+    const int G = gridDim.x * NV;
+    int c = blockIdx.x * NV + vg;
+    uint4 s[PF][U];
+    uint2 nb[PF][U];
+    // escapes: the first warp of each row (u, wp with (u * 4096 + wp * 512) % KK == 0), lanes e < ESC, add
+    // x[col] * (delta / scale) of the row's entry e to their partial sum before the warp reduction
+    auto load = [&](int p, int ch) {
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            const long i = (long)ch * (CE / 16) + u * 256 + t;
+            s[p][u] = ld4(S + i);
+            nb[p][u] = ld2(N + i);
+        }
+    };
+#pragma unroll
+    for (int p = 0; p < PF; ++p)
+        if (c + p * G < nch) load(p, c + p * G);
+    for (int i = t; i < MAXC * RPC * ESC; i += 256) {
+        const int ch = c + (i / (RPC * ESC)) * G;
+        if (ch < nch) hs_[vg][i] = __ldg(H + (long)ch * RPC * ESC + i % (RPC * ESC));
+    }
+    for (int i = threadIdx.x; i < KK / 8; i += 256 * NV) {
+        const uint4 a = __ldg(reinterpret_cast<const uint4*>(x) + i);
+        const unsigned v[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+        for (int j = 0; j < 4; ++j) { const int kk = XI(8 * i + 2 * j); xs[kk] = __uint_as_float(v[j] << 16); xs[kk + 1] = __uint_as_float(v[j] & 0xffff0000u); }
+    }
+    __syncthreads();
+    int par = 0, j = 0;
+    for (; c < nch; c += PF * G) {
+#pragma unroll
+        for (int p = 0; p < PF; ++p) {
+            const int cc = c + p * G;
+            if (cc < nch) {
+                float acc[U];
+#pragma unroll
+                for (int u = 0; u < U; ++u) {
+                    acc[u] = dot16(s[p][u], nb[p][u], xs + XI((u * 4096 + t * 16) % KK));
+#ifndef NOESC
+                    if ((u * 4096 + wp * 512) % KK == 0 && lane < ESC) {
+                        const float2 h = hs_[vg][((j + p) * RPC + (u * 4096 + wp * 512) / KK) * ESC + lane];
+                        acc[u] = fmaf(xs[XI(__float_as_int(h.x))], h.y, acc[u]);
+                    }
+#endif
+                }
+                const int cn = cc + PF * G;
+                if (cn < nch) load(p, cn);
+#pragma unroll
+                for (int u = 0; u < U; ++u) {
+                    float v = acc[u];
+#pragma unroll
+                    for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+                    if (lane == 0) red[par][u * 8 + wp] = v;
+                }
+                asm volatile("bar.sync %0, 256;" :: "r"(vg + 1));
+                if (t < RPC) {
+                    float sum = 0.f;
+#pragma unroll
+                    for (int u = 0; u < U; ++u)
+#pragma unroll
+                        for (int w = 0; w < 8; ++w)
+                            if ((u * 4096 + w * 512) / KK == t) sum += red[par][u * 8 + w];
+                    out[(long)cc * RPC + t] = __float2bfloat16(sum * scale);
+                }
+                par ^= 1;
+            }
+        }
+        j += PF;
+    }
+}
+}  // namespace g13
+
+void g13_gemv(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tensor x, torch::Tensor out, double scale,
+              int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks) {
+    const int k = x.size(1), n = out.size(1);
+    auto st = c10::cuda::getCurrentCUDAStream();
+    TORCH_CHECK(x.size(0) == 1, "g13: m == 1");
+    TORCH_CHECK((long)n * k <= (long)g13::MAXC * blocks * nv * u * 4096, "g13: too many chunks per virtual block");
+#define G13_CASE(K_, U_, V_, B_, P_) \
+    if (k == K_ && u == U_ && nv == V_ && minb == B_ && pf == P_) { \
+        g13::gemv<U_, V_, B_, K_, P_><<<blocks, 256 * V_, 0, st>>>((const uint4*)s.data_ptr(), (const uint2*)nb.data_ptr(), \
+        (const float2*)h.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, (float)scale); return; }
+    G13_CONFIGS
+    TORCH_CHECK(false, "g13: no config");
+}
+'''
 _LT_SRC = r'''// cuBLASLt BF16 GEMM with an explicit algo config: out[m,n] = x[m,k] @ W[n,k]^T, FP32 compute and accumulation.
 // Same library and kernel family SGLang's F.linear reaches (algo 66 on sm90), but with the tile / split-K / cluster
 // config picked per shape in prepare() (timed on the judge's own GPU) instead of cuBLAS's heuristic.
@@ -721,6 +875,12 @@ ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
 # BF16 grid-stride GEMV configs per layer: (m, k, u, nv, minb, pf, blocks), chosen on the H100 (dev/g10.py).
 BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4, 1, 1, 132)],
             "o": [(1, 1024, 2, 4, 2, 1, 264)], "unpooler": [(1, 4096, 2, 4, 1, 1, 132)]}
+# BF16 m=1 GEMV over losslessly compressed weights (dev/gemv13.cu: 12 bits per weight), (m, k, u, nv, minb, pf,
+# blocks), chosen on the H100 (dev/g13.py); prepare() times them against gemv10 and F.linear and keeps the fastest.
+BF16_G13 = {"qkv_gate": [(1, 8192, 2, 4, 1, 1, 132), (1, 8192, 2, 2, 1, 2, 132)],
+            "pooler": [(1, 8192, 2, 4, 1, 1, 132), (1, 8192, 2, 2, 1, 2, 132)],
+            "unpooler": [(1, 4096, 2, 4, 1, 2, 132)]}
+G13_ESC = 8  # escapes per row (gemv13.cu ESC)
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
 BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32, 1, 1)], "pooler": [(8, 8, 8, 4, 128, 1, 1), (16, 8, 8, 4, 128, 8, 2)],
             "o": [(8, 1, 2, 8, 128, 1, 1)], "unpooler": [(8, 4, 4, 4, 32, 1, 1)]}  # unpooler m8: H200 5.7-7.3 (noisy)
@@ -752,19 +912,22 @@ _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
         _G10_SRC.replace("G10_CONFIGS", " ".join("G10_CASE(%d,%d,%d,%d,%d,%d)" % c[:6] for v in BF16_G10.values() for c in v)) + "\n" +
-        _G12_SRC.replace("G12_CONFIGS", " ".join("G12_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted({c[:4] + c[5:] for v in BF16_G12.values() for c in v}))))
+        _G12_SRC.replace("G12_CONFIGS", " ".join("G12_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted({c[:4] + c[5:] for v in BF16_G12.values() for c in v}))) + "\n" +
+        _G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d)" % c[1:6] for c in sorted({c for v in BF16_G13.values() for c in v}))))
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v7",
+        name="muse_proj_v8",
         cpp_sources="void pj_router(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
                     "void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                     "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t);",
-        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv", "g12_gemm"],
+                    "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                    "void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
+                    "int64_t, int64_t, int64_t, int64_t);",
+        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv", "g12_gemm", "g13_gemv"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -794,12 +957,45 @@ def _pack12(w, kc):
     return w.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
 
 
+def _pack13(w):
+    """Lossless 12-bit BF16 for gemv13: (sign|mantissa bytes, 4-bit exponent codes, escape header, scale), or None
+    if the weights don't fit (an exponent window of 16 with at most G13_ESC escapes per row)."""
+    n, k = w.shape
+    b = w.contiguous().view(torch.int16).int() & 0xFFFF
+    e = (b >> 7) & 0xFF
+    base = int(e.max()) - 15
+    if base < 1:
+        return None
+    code = e - base
+    esc = code < 0  # below the window (zeros, tiny values): code 0, byte 0, fixed up from the header
+    if int(esc.sum(1).max()) > G13_ESC:
+        return None
+    code = torch.where(esc, 0, code)
+    sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F)).to(torch.uint8).flatten()
+    sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=w.device)
+    nib = (code.flatten().view(-1, 8).long() << sh).sum(1)
+    nib = torch.where(nib >= 2 ** 31, nib - 2 ** 32, nib).int()
+    scale = 2.0 ** (base - 112)
+    hdr = torch.zeros(n, G13_ESC, 2, dtype=torch.float32, device=w.device)
+    rows, cols = esc.nonzero(as_tuple=True)  # row-major order
+    if len(rows):
+        slot = torch.arange(len(rows), device=w.device) - torch.searchsorted(rows, rows)
+        hdr[rows, slot, 0] = cols.int().view(torch.float32)
+        hdr[rows, slot, 1] = (w[rows, cols].float() - 2.0 ** (base - 127)) / scale
+    return sm, nib, hdr, scale
+
+
 def prepare(weights):
     st = {name: w.contiguous() for name, w in weights.items()}
     for name, cfgs in BF16_G12.items():
         for c in cfgs:
             if (name, c[1]) not in st:
                 st[(name, c[1])] = _pack12(weights[name], 1024 * c[1])
+    if _mod is not None:
+        for name in BF16_G13:
+            pk = _pack13(weights[name][:1024] if name == "unpooler" else weights[name])
+            if pk is not None:
+                st[("g13", name)] = pk
     r = weights["router"]
     hi = r.to(torch.bfloat16)
     lo = (r - hi.float()).to(torch.bfloat16)
@@ -824,7 +1020,12 @@ def _run(st, layer, x, out, cand):
     if cand is None:
         return F.linear(x, st[layer][:out.shape[1]])
     kind, c = cand
-    if kind == "g12":
+    if kind == "g10":
+        _mod.g10_gemv(st[layer], x, out, *c[2:])  # W[:n] is the first n rows, in place
+    elif kind == "g13":
+        sm, nib, hdr, scale = st[("g13", layer)]
+        _mod.g13_gemv(sm, nib, hdr, x, out, scale, *c[2:])
+    elif kind == "g12":
         _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
     else:
         _lt.lt_gemm(st[layer], x, out, st["ltws"], list(c))
@@ -832,7 +1033,7 @@ def _run(st, layer, x, out, cand):
 
 
 def _tune(st, reps=25):
-    """Per (layer, m): time F.linear, the native gemv12 config and each BF16_LT config as CUDA-graph replays with a
+    """Per (layer, m): time F.linear, the native gemv10/gemv13 (m=1) and gemv12 configs and each BF16_LT config as CUDA-graph replays with a
     cold L2 (read flush, as the judge) on random x; keep the fastest. Only shapes and weights are used."""
     picks = {}
     flush = torch.zeros(256 << 20, dtype=torch.uint8, device=st["qkv_gate"].device).view(torch.int64)
@@ -841,6 +1042,13 @@ def _tune(st, reps=25):
     g.manual_seed(0)
     shapes = {}
     if _mod is not None:
+        for layer, cfgs in BF16_G10.items():
+            for c in cfgs:
+                shapes.setdefault((layer, c[0]), []).append(("g10", c))
+        for layer, cfgs in BF16_G13.items():
+            if ("g13", layer) in st:
+                for c in cfgs:
+                    shapes.setdefault((layer, c[0]), []).append(("g13", c))
         for layer, cfgs in BF16_G12.items():
             for c in cfgs:
                 shapes.setdefault((layer, c[0]), []).append(("g12", c))
@@ -916,12 +1124,6 @@ def kernel_fn(data, st):
     if layer == "router":
         return _router(x, st, cfg["m"])
     m, n, k = cfg["m"], cfg["n"], cfg["k"]
-    if _mod is not None:
-        for c in BF16_G10.get(layer, ()):
-            if m == c[0] and k == c[1]:
-                out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
-                _mod.g10_gemv(st[layer], x, out, *c[2:])  # W[:n] is the first n rows, in place
-                return out
     c = st["pick"].get((layer, m))
     if c is None:
         return F.linear(x, st[layer][:n])
