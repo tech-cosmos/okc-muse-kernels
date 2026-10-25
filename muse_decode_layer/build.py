@@ -62,6 +62,9 @@ layer = layer.replace("_G10_SRC = None  # @@G10@@\n", "_G10_SRC = r" + Q3 + g10 
 g12 = (here / "g12_src.cu").read_text()  # proj's gemv12 (m = 8)
 assert Q3 not in g12 and layer.count("_G12_SRC = None  # @@G12@@\n") == 1
 layer = layer.replace("_G12_SRC = None  # @@G12@@\n", "_G12_SRC = r" + Q3 + g12 + Q3 + "\n")
+lt = (here / "lt_src.cu").read_text()  # proj's cuBLASLt GEMM with an explicit algo config
+assert Q3 not in lt and layer.count("_LT_SRC = None  # @@LT@@\n") == 1
+layer = layer.replace("_LT_SRC = None  # @@LT@@\n", "_LT_SRC = r" + Q3 + lt + Q3 + "\n")
 out = "# okc: problem=muse_decode_layer\n" + layer.replace("# @@ATTENTION@@\n", "# ---- attention (attn_src.py) ----\n" + attn + "\n# ---- layer ----\n")
 assert "@@ATTENTION@@" not in out and "@@MOE@@" not in out and "attn_kernel_fn" in out
 (here / (sys.argv[1] if len(sys.argv) > 1 else "submission.py")).write_text(out)

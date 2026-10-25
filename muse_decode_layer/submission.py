@@ -6415,9 +6415,17 @@ LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference exper
 @triton.jit
 def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr, h_ptr, h32_ptr,
               NB: tl.constexpr, N: tl.constexpr, BGAIN: tl.constexpr, H32: tl.constexpr,
-              EPS_POST: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr):
+              EPS_POST: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr, pf_ptr=None, PF: tl.constexpr = 0,
+              PF_NT: tl.constexpr = 512):
     """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
-    s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32)."""
+    s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32).
+    PF > 0: the last PF programs instead L2-prefetch PF x PF_NT x 1 KB from pf_ptr (the router weight) and exit."""
+    if PF > 0:
+        if tl.program_id(0) >= tl.num_programs(0) - PF:
+            i = (tl.program_id(0) - (tl.num_programs(0) - PF)) * PF_NT + tl.arange(0, PF_NT)
+            tl.inline_asm_elementwise("cp.async.bulk.prefetch.L2.global [$1], 1024; mov.u32 $0, 0;", "=r,l",
+                                      [pf_ptr + i.to(tl.int64) * 256], dtype=tl.int32, is_pure=False, pack=1)
+            return
     row = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, N)
     in_b = cols < NB
@@ -6546,18 +6554,18 @@ def _router_plan(tokens):
     return 64, 64, 64, 8, 4
 
 
-def _route(state, h, h32, local_start, tokens):
+def _route(state, h, h32, local_start, tokens, router_pdl=False):
     bt, be, bk, ks, warps = _router_plan(tokens)
     dev = h.device
     part = torch.empty((ks, tokens, N_EXPERTS), dtype=torch.float32, device=dev)
     fp32 = tokens <= ROUTER_FP32_MAX_TOKENS
     if fp32:
         _router_fma[(N_EXPERTS // be, ks)](h32, state["router"], part, tokens, K=HIDDEN, E=N_EXPERTS, BT=bt, BE=be,
-                                           BK=bk, KS=ks, num_warps=warps)
+                                           BK=bk, KS=ks, num_warps=warps, launch_pdl=router_pdl)
     else:
         _router_split[(N_EXPERTS // be, ks, triton.cdiv(tokens, bt))](
             h, state["router_hi"], state["router_lo"], part, tokens, K=HIDDEN, E=N_EXPERTS, BT=bt, BE=be, BK=bk,
-            KS=ks, HILO=True, num_warps=warps)
+            KS=ks, HILO=True, num_warps=warps, launch_pdl=router_pdl)
     ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
     lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
     wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
@@ -6747,6 +6755,7 @@ def prepare(weights):
         # MuseSpark1xFp4Experts binds the post-expert norm's effective (1 + w) weight in BF16.
         "post_expert_w": (1.0 + weights["post_expert_norm"].float()).to(torch.bfloat16),
         "side_stream": torch.cuda.Stream(weights["qkv_gate"].device),
+        "hi_stream": torch.cuda.Stream(weights["qkv_gate"].device, priority=-1),
     }
     state["moe"] = _moe_prepare({"w13": weights["w13"], "w13_sf": weights["w13_sf"], "w13_gs": weights["w13_gs"],
                                  "w2": weights["w2"], "w2_sf": weights["w2_sf"], "w2_gs": weights["w2_gs"],
@@ -6761,6 +6770,7 @@ def prepare(weights):
             for e in range(LOCAL_EXPERTS)]
     _g10_lib()
     _g12_prepare(state)
+    _lt_prepare(state)
     torch.cuda.synchronize()
     return state
 
@@ -6881,6 +6891,10 @@ if UNPOOL_PDL:
 # moe_tk2 (decode experts, T <= 32) as PDL secondaries: gemm13 (TK2_PDL13) launches while _rmsnorm_gain (patched
 # to trigger at its start) runs; its producer warp streams the first weight stages and does the in-kernel routing
 # before the consumers' griddepcontrol.wait (right before their first x read). gemm2 (TK2_PDL2) waits at entry.
+POOLER_HI_PRIORITY = ()  # s5 dead: pooler first, but the router starves beside it (tie/worse)
+# boundary 1 L2-prefetches the FP32 router weight (8 MB) from extra programs at these token counts
+ROUTER_L2_PF_TOKENS = (1,)  # H100: d1 -0.8 us; T=8 +0.9 (the T=8 router is issue-bound, not HBM)
+ROUTER_AFTER_POOLER = ()  # s5: tie/worse (router starved beside the pooler); token counts: pooler first, router its PDL secondary (see kernel_fn)
 TK2_PDL13 = False  # s5: H100 tie (d1 +1, v1 -1, d32 -1 us): rmsnorm is only 1.7 us and the safe join loses its own PDL
 TK2_PDL2 = False
 if TK2_PDL13 or TK2_PDL2:
@@ -7125,6 +7139,123 @@ def _g10_lib():
     return _G10["lib"]
 
 
+# ---- cuBLASLt with explicit algo configs (lt_src.cu = r-proj dev/lt.cu @f7b1c8b) at T >= 16 ----
+# (layer, tokens): cfg (algo, tile, stages, split k, reduction, swizzle, custom option, cluster), proj's prepare-time
+# picks on the judge's H200 (r-proj profiles/submission.22109e72563f4cc3.log), us vs F.linear: pooler m16 22.0/24.3,
+# m32 22.2/24.6, m128 26.0/29.7, m256 28.2/34.4; qkv m128 18.9/20.0, m256 21.0/22.9. Not pooler m256: beside the
+# router (side stream) in the layer it is 60.7 vs F.linear 49.2 us (H100, verify 32 sliding).
+LT_CFG = {("pooler", 16): (66, 312, 35, 1, 0, 0, 1, 4), ("pooler", 32): (66, 13, 35, 1, 0, 0, 1, 4),
+          ("pooler", 128): (66, 143, 35, 1, 0, 0, 0, 2),
+          ("qkv_gate", 128): (66, 92, 35, 1, 0, 0, 0, 5), ("qkv_gate", 256): (66, 124, 35, 1, 0, 0, 0, 2)}
+_LT_SRC = r'''// cuBLASLt BF16 GEMM with an explicit algo config: out[m,n] = x[m,k] @ W[n,k]^T, FP32 compute and accumulation.
+// Same library and kernel family SGLang's F.linear reaches (algo 66 on sm90), but with the tile / split-K / cluster
+// config picked per shape in prepare() (timed on the judge's own GPU) instead of cuBLAS's heuristic.
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cublasLt.h>
+
+static cublasLtHandle_t lt_handle() {
+  static cublasLtHandle_t h = nullptr;
+  if (!h) cublasLtCreate(&h);
+  return h;
+}
+
+struct LtPlan {
+  cublasLtMatmulDesc_t op;
+  cublasLtMatrixLayout_t a, b, c;
+  cublasLtMatmulAlgo_t algo;
+};
+
+// cfg = (algo id, tile, stages, split k, reduction scheme, swizzle, custom option, cluster shape).
+// Returns 0 if the config is valid for the shape and fits the workspace.
+static int lt_make(LtPlan& p, int64_t m, int64_t n, int64_t k, const std::vector<int64_t>& cfg, int64_t wsbytes) {
+  cublasLtMatmulDescCreate(&p.op, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+  cublasOperation_t ta = CUBLAS_OP_T, tb = CUBLAS_OP_N;
+  cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof(ta));
+  cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof(tb));
+  cublasLtMatrixLayoutCreate(&p.a, CUDA_R_16BF, k, n, k);  // W, column-major [k, n]
+  cublasLtMatrixLayoutCreate(&p.b, CUDA_R_16BF, k, m, k);  // x, column-major [k, m]
+  cublasLtMatrixLayoutCreate(&p.c, CUDA_R_16BF, n, m, n);  // out, column-major [n, m]
+  if (cublasLtMatmulAlgoInit(lt_handle(), CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF,
+                             CUDA_R_16BF, (int)cfg[0], &p.algo) != CUBLAS_STATUS_SUCCESS) return 1;
+  uint32_t tile = cfg[1], stages = cfg[2], red = cfg[4], swz = cfg[5], cust = cfg[6];
+  int32_t sk = cfg[3];
+  uint16_t cl = cfg[7];
+  cublasLtMatmulAlgoConfigSetAttribute(&p.algo, CUBLASLT_ALGO_CONFIG_TILE_ID, &tile, 4);
+  cublasLtMatmulAlgoConfigSetAttribute(&p.algo, CUBLASLT_ALGO_CONFIG_STAGES_ID, &stages, 4);
+  cublasLtMatmulAlgoConfigSetAttribute(&p.algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &sk, 4);
+  if (sk > 1) cublasLtMatmulAlgoConfigSetAttribute(&p.algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &red, 4);
+  cublasLtMatmulAlgoConfigSetAttribute(&p.algo, CUBLASLT_ALGO_CONFIG_CTA_SWIZZLING, &swz, 4);
+  cublasLtMatmulAlgoConfigSetAttribute(&p.algo, CUBLASLT_ALGO_CONFIG_CUSTOM_OPTION, &cust, 4);
+  cublasLtMatmulAlgoConfigSetAttribute(&p.algo, CUBLASLT_ALGO_CONFIG_CLUSTER_SHAPE_ID, &cl, 2);
+  cublasLtMatmulHeuristicResult_t r;
+  if (cublasLtMatmulAlgoCheck(lt_handle(), p.op, p.a, p.b, p.c, p.c, &p.algo, &r) != CUBLAS_STATUS_SUCCESS) return 2;
+  if (r.workspaceSize > (size_t)wsbytes) return 3;
+  return 0;
+}
+
+static void lt_free(LtPlan& p) {
+  cublasLtMatrixLayoutDestroy(p.a);
+  cublasLtMatrixLayoutDestroy(p.b);
+  cublasLtMatrixLayoutDestroy(p.c);
+  cublasLtMatmulDescDestroy(p.op);
+}
+
+// Returns the cuBLAS status (0 = launched).
+int64_t lt_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tensor ws, std::vector<int64_t> cfg) {
+  int64_t m = x.size(0), k = x.size(1), n = out.size(1);
+  LtPlan p;
+  int64_t st = lt_make(p, m, n, k, cfg, ws.numel());
+  if (st == 0) {
+    float one = 1.f, zero = 0.f;
+    st = 100 + (int64_t)cublasLtMatmul(lt_handle(), p.op, &one, w.data_ptr(), p.a, x.data_ptr(), p.b, &zero,
+                                       out.data_ptr(), p.c, out.data_ptr(), p.c, &p.algo, ws.data_ptr(), ws.numel(),
+                                       at::cuda::getCurrentCUDAStream());
+    if (st == 100) st = 0;
+  }
+  lt_free(p);
+  return st;
+}
+'''
+_LT = {}
+
+
+def _lt_prepare(state):
+    """Build the cuBLASLt wrapper; keep the configs that launch on this GPU and match F.linear."""
+    state["lt_ok"] = {}
+    if not LT_CFG or _LT_SRC is None:
+        return
+    if "lib" not in _LT:
+        try:
+            from torch.utils.cpp_extension import load_inline
+            _LT["lib"] = load_inline(
+                name="muse_layer_lt1",
+                cpp_sources="int64_t lt_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::vector<int64_t>);",
+                cuda_sources=_LT_SRC, functions=["lt_gemm"], extra_ldflags=["-lcublasLt"], extra_cuda_cflags=["-O3"],
+                verbose=False)
+        except Exception as e:  # noqa: BLE001
+            print("layer cuBLASLt build failed, F.linear instead:", e)
+            _LT["lib"] = None
+    lib = _LT["lib"]
+    if lib is None:
+        return
+    w = state["dense"]
+    dev = w["pooler"].device
+    state["lt_ws"] = torch.empty(4 << 20, dtype=torch.uint8, device=dev)
+    g = torch.Generator(device=dev)
+    g.manual_seed(0)
+    for (key, m), cfg in LT_CFG.items():
+        x = torch.randn((m, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
+        out = torch.empty((m, w[key].shape[0]), dtype=torch.bfloat16, device=dev)
+        st = lib.lt_gemm(w[key], x, out, state["lt_ws"], list(cfg))
+        torch.cuda.synchronize()
+        ref = F.linear(x, w[key]).float()
+        if st == 0 and ((out.float() - ref).norm() / ref.norm()).item() < 1e-2:
+            state["lt_ok"][(key, m)] = cfg
+        else:
+            print("layer cuBLASLt config dropped:", key, m, cfg, st)
+
+
 def _g12_prepare(state):
     """gemv12's packed weights, FP32 split-K workspace (overwritten each call) and per-rg counters (left zeroed).
     All gemv12 calls run on the main stream, one at a time, so they share the workspace and counters."""
@@ -7152,7 +7283,25 @@ def _linear(x, w, key, state=None, sliding=False):
         lib.g12_gemm(state["g12"][key], x.contiguous(), out, state["g12_ws"], state["g12_cnt"], w.shape[0] // 8,
                      *G12_CFG[key], *pdl)
         return out
+    cfg = state.get("lt_ok", {}).get((key, x.shape[0])) if state is not None else None
+    if cfg is not None:
+        out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
+        _LT["lib"].lt_gemm(w, x.contiguous(), out, state["lt_ws"], list(cfg))
+        return out
     return F.linear(x, w)
+
+
+def _tail(moe, stream1, h, tokens, state, pdl):
+    """unpool -> second boundary: (next attention input, stream)."""
+    sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
+    f = _linear(moe, state["unpool_slice"], "unpool_slice", state) if sliced else F.linear(moe, state["unpool"])  # all-gather: identity (zeros)
+    stream2 = torch.empty_like(stream1)
+    hidden = torch.empty_like(h)
+    alpha, beta = state["res2"]
+    _boundary[(tokens,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
+                         NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
+                         EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, num_warps=16, launch_pdl=pdl)
+    return hidden, stream2
 
 
 def kernel_fn(data, state):
@@ -7176,16 +7325,48 @@ def kernel_fn(data, state):
     h = torch.empty((tokens, HIDDEN), dtype=torch.bfloat16, device=dev)
     h32 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev) if fp32_router else stream1
     alpha, beta = state["res1"]
-    _boundary[(tokens,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
-                         NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
-                         PDL=pdl, num_warps=16, launch_pdl=pdl)
+    npf = (state["router"].numel() * 4) // (512 * 1024) if tokens in ROUTER_L2_PF_TOKENS and fp32_router else 0
+    _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
+                               NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
+                               PDL=pdl, pf_ptr=state["router"], PF=npf, num_warps=16, launch_pdl=pdl)
     main_stream, side_stream = torch.cuda.current_stream(), state["side_stream"]
+    if tokens in ROUTER_AFTER_POOLER and pdl:
+        # The pooler GEMV (triggers its dependents at start) first; the router is its PDL secondary on the same
+        # stream (reads only h: no griddepcontrol.wait), so it fills SMs beside the pooler instead of delaying it;
+        # the rmsnorm waits for the pooler through an event (full edge) on the side stream.
+        pooled = _linear(h, dense["pooler"], "pooler", state)
+        pooled_done = torch.cuda.Event()
+        pooled_done.record(main_stream)
+        # p before the router: the side stream writes it, so it must not reuse a block _route frees (its partials)
+        p = torch.empty_like(pooled)
+        topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens, router_pdl=True)
+        side_stream.wait_event(pooled_done)
+        with torch.cuda.stream(side_stream):
+            _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=False, TRIG=False,
+                                     num_warps=8)
+        main_stream.wait_stream(side_stream)
+        if not torch.cuda.is_current_stream_capturing():
+            for t in (pooled, p):
+                t.record_stream(side_stream)
+        moe = _experts_moe(p, topk_weights, local_ids, state)
+        return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
     side_stream.wait_stream(main_stream)
     with torch.cuda.stream(side_stream):
         topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
         # The experts' bucketing too, off the main stream's path.
         bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) and TK2_MAX_TOKENS < tokens <= BUCKET_SIDE_MAX_TOKENS else None
-    pooled = _linear(h, dense["pooler"], "pooler", state)
+    if tokens in POOLER_HI_PRIORITY:
+        # the pooler on a high-priority stream: its CTAs go ahead of the router's remaining waves
+        hi = state["hi_stream"]
+        hi.wait_stream(main_stream)
+        with torch.cuda.stream(hi):
+            pooled = _linear(h, dense["pooler"], "pooler", state)
+        main_stream.wait_stream(hi)
+        if not torch.cuda.is_current_stream_capturing():
+            h.record_stream(hi)
+            pooled.record_stream(main_stream)
+    else:
+        pooled = _linear(h, dense["pooler"], "pooler", state)
     p = torch.empty_like(pooled)
     tk2_pdl = TK2_PDL13 and tokens <= TK2_MAX_TOKENS and _use_moe(tokens)
     if tk2_pdl:
@@ -7204,12 +7385,4 @@ def kernel_fn(data, state):
         moe = _experts_moe(p, topk_weights, local_ids, state, bucket)  # all-reduce: identity
     else:
         moe = (_experts_marlin if HAVE_SGL else _experts_local)(p, topk_weights, local_ids, state)
-    sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
-    f = _linear(moe, state["unpool_slice"], "unpool_slice", state) if sliced else F.linear(moe, state["unpool"])  # all-gather: identity (zeros)
-    stream2 = torch.empty_like(stream1)
-    hidden = torch.empty_like(h)
-    alpha, beta = state["res2"]
-    _boundary[(tokens,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
-                         NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
-                         EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, num_warps=16, launch_pdl=pdl)
-    return hidden, stream2, topk_ids
+    return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
