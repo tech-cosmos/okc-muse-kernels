@@ -1,6 +1,7 @@
 import sys; sys.path.insert(0,'.')
 import torch, bench, submission, reference
 w, st = bench.state()
+import os; submission.TK2_BLK = {b: int(os.environ.get("BLK", "0")) for b in range(1, 33)}
 worst = {}
 for bs in [16, 32, 8, 2, 24]:
     for sd in range(40):

@@ -62,7 +62,7 @@ CUDA_SRC = r"""
 #include <cudaTypedefs.h>
 
 // launch, optionally as a PDL secondary (programmatic stream serialization: CUDA-graph capturable)
-static int g_pdl = 7, g_twpf = 0;  // g_pdl bits: 1 decode gemm2, 2 decode norm2, 4 big-M kernels
+static int g_pdl = 7, g_twpf = 0, g_blk = 0;  // g_pdl bits: 1 decode gemm2, 2 decode norm2, 4 big-M kernels
 template <typename... KA, typename... AA>
 static int launch_k(void (*k)(KA...), int grid, int block, int smem, cudaStream_t st, bool pdl, AA... args) {
   cudaLaunchConfig_t lc = {};
@@ -79,6 +79,7 @@ static int launch_k(void (*k)(KA...), int grid, int block, int smem, cudaStream_
   return (int)cudaGetLastError();
 }
 int64_t moe_set_pdl(int64_t v, int64_t twpf) { g_pdl = (int)v; g_twpf = (int)twpf; return 0; }
+int64_t moe_set_blk(int64_t v) { g_blk = (int)v; return 0; }
 
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
@@ -1061,12 +1062,25 @@ static int launch_tk(const void* wq, const void* s2, const void* lut, const void
 // plain stores (no atomics, no zeroing). GATED (gemm13): every CTA computes the routing itself (deterministic,
 // identical in all CTAs; CTA 0 publishes meta / sroutes / inv for the later kernels), epilogue silu(gate) * up
 // -> bf16 inter[pos]. !GATED (gemm2): routing from meta, epilogue writes FP32 y[pos] (x global scale later).
+// row R (local index in its expert's rows, ng token groups) -> row pair rp, group gi. blk = 0 or ng = 1: groups one
+// after the other (rp fastest); else blocks of blk rps cycle through the groups, so a CTA re-reads the same weights
+// for the next group right away (from L2)
+__device__ __forceinline__ int tk2_map(int local, int ng, int blk, int rpe, int& gi) {
+  if (ng == 1 || !blk) {
+    gi = local / rpe;
+    return local & (rpe - 1);
+  }
+  const int b = local / (blk * ng), w = local - b * blk * ng;
+  gi = w / blk;
+  return b * blk + (w - gi * blk);
+}
+
 template <int NRT, int NC, int NSTG, bool GATED>
 __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
     const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, const uint32_t* __restrict__ lut,
     const float* __restrict__ gs, const __nv_bfloat16* __restrict__ X, const int* __restrict__ ids, int nroutes,
     int start, int count, int* __restrict__ meta, int* __restrict__ sroutes, int* __restrict__ inv,
-    void* __restrict__ Out) {
+    void* __restrict__ Out, int flags) {
   static_assert(NC == 8, "routing uses 8 warps x 32 ids");
   constexpr int RPE = NRT / 2;
   constexpr int NQ = 64 / NC;
@@ -1083,9 +1097,10 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], NC * 32); }
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
+  const int blk = flags & 0xFFFF;
   // PDL: let the next kernel's CTAs launch as soon as SMs free up (they wait for us before reading our output)
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
-  {
+  if (GATED || (flags >> 16)) {
     // routing (M * 8 <= 256 routes): warp w takes routes [32 w, 32 w + 32); gemm2 recomputes it (same result)
     // instead of reading gemm13's meta, so its producer can stream w2 before gemm13 has finished
     int e = -1, rank = 0;
@@ -1139,6 +1154,10 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
       if (tid < 32) meta[1 + tid] = s_e[tid];
       if (tid == 0) meta[0] = s_nact;
     }
+  } else {  // gemm2 not a PDL secondary: gemm13's routing
+    if (tid < 33) s_off[tid] = meta[33 + tid];
+    if (tid < 32) s_e[tid] = meta[1 + tid];
+    if (tid == 0) s_nact = meta[0];
   }
   __syncthreads();
   const int nact = s_nact;
@@ -1163,7 +1182,8 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
       for (int R = r0; R < r1; ++R) {
         while (s_rs[a + 1] <= R) ++a;
         const int e = s_e[a];
-        const int lr = (R - s_rs[a]) & (RPE - 1);
+        int gi;
+        const int lr = tk2_map(R - s_rs[a], (s_rs[a + 1] - s_rs[a]) / RPE, blk, RPE, gi);
         const uint4* src = Wq + ((size_t)e * NRT * 64 + lr * 64) * 32;
         const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
         for (int q = 0; q < NQ; ++q, ++i) {
@@ -1181,15 +1201,25 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
   }
   if (!GATED) asm volatile("griddepcontrol.wait;" ::: "memory");  // inter is gemm13's output
   uint4 xf[NQ][2];
-  int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0, st = 0, ph = 0, rb = 0;
+  int a = 0, seg_end = -1, seg_start = 0, rpb = 0, off = 0, n = 0, st = 0, ph = 0, rb = 0;
   float gsc = 0.f;
   const uint4* wsm = smem + warp * 32 + lane;
   for (int R = r0; R < r1; ++R) {
     if (R >= seg_end) {
       while (s_rs[a + 1] <= R) ++a;
-      const int gi = (R - s_rs[a]) / RPE;
-      seg_start = s_rs[a] + gi * RPE;  // segment = (expert, token group)
-      seg_end = seg_start + RPE;
+      // segment = rows of one (expert, token group) in a row: the whole expert, or blk rps when it has > 1 group
+      const int ng = (s_rs[a + 1] - s_rs[a]) / RPE;
+      int gi;
+      const int lr = tk2_map(R - s_rs[a], ng, blk, RPE, gi);
+      if (ng == 1 || !blk) {
+        rpb = 0;
+        seg_start = s_rs[a] + gi * RPE;
+        seg_end = seg_start + RPE;
+      } else {
+        rpb = lr - lr % blk;
+        seg_start = R - lr % blk;
+        seg_end = seg_start + blk;
+      }
       const int e = s_e[a];
       gsc = gs[e] * 256.0f;
       off = s_off[e] + gi * 8;
@@ -1239,7 +1269,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
 #pragma unroll
       for (int r = 0; r < 4; ++r) red[((warp * 2 + ii) * 4 + r) * 32 + lane] = acc[ii][r];
     asm volatile("bar.sync 1, %0;" ::"n"(NC * 32) : "memory");
-    const int rp = (R - seg_start) & (RPE - 1);
+    const int rp = rpb + (R - seg_start);
     const int ct = tid, l = ct & 31, gg = l >> 2, tt = l & 3;
     if (GATED) {
       if (ct < 128) {
@@ -1285,7 +1315,7 @@ static int launch_tk2(const void* wq, const void* s2, const void* lut, const voi
   }
   return launch_k(moe_tk2<NRT, NC, NSTG, GATED>, grid, (NC + 1) * 32, SMEM, st, !GATED && (g_pdl & 1),
       (const uint4*)wq, (const uint32_t*)s2, (const uint32_t*)lut, (const float*)gs, (const __nv_bfloat16*)x,
-      (const int*)ids, nroutes, start, count, (int*)meta, (int*)sroutes, (int*)inv, out);
+      (const int*)ids, nroutes, start, count, (int*)meta, (int*)sroutes, (int*)inv, out, g_blk | ((!GATED && (g_pdl & 1)) << 16));
 }
 
 #define SK_DISPATCH(NRT, XR)                                                                 \
@@ -2004,7 +2034,8 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "torch::Tensor, torch::Tensor);"
         "int64_t moe_norm2_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, int64_t, int64_t, double, torch::Tensor);"
-        "int64_t moe_set_pdl(int64_t, int64_t);")
+        "int64_t moe_set_pdl(int64_t, int64_t);"
+        "int64_t moe_set_blk(int64_t);")
 
 
 def _lib():
@@ -2015,7 +2046,7 @@ def _lib():
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=CUDA_SRC,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tb_launch",
                                       "moe_gather_launch", "moe_tw_launch",
-                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_set_pdl"],
+                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_set_pdl", "moe_set_blk"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
     return _LIB
@@ -2152,13 +2183,14 @@ def _plan(M):
 
 
 PLAN_OVERRIDE = None
-PDL_DECODE = {1: 0, 8: 2, 16: 1, 32: 3}  # per-bs PDL bits for the decode path (judge A/B, s5)
+PDL_DECODE = {}  # per-bs PDL bits for the decode path (default 2: norm2 only; judge s5: gemm2 as PDL secondary loses)
 TB_RT = 0  # big-M moe_tb on (1) or off (0: old moe_big path)
 TB_CFG = 48  # RT*10 + stages
 TW_CFG = 218  # big-M wgmma kernel moe_tw: RT*100 + KG*10 + stages (0: off)
 TB_PACK = ()  # RT values packed in prepare for moe_tb
 _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
+TK2_BLK = {32: 2}  # per-bs tk2_map block (0: token groups one after the other)
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 
@@ -2178,7 +2210,8 @@ def kernel_fn(data, st):
     y = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
     out = torch.empty((M, H), dtype=torch.bfloat16, device=dev)
     if M <= 32 and TK2_NSTG:
-        lib.moe_set_pdl(PDL_DECODE.get(M, 3), 0)
+        lib.moe_set_pdl(PDL_DECODE.get(M, 2), 0)
+        lib.moe_set_blk(TK2_BLK.get(M, 0))
         inv = torch.empty(M * TOP_K, dtype=torch.int32, device=dev)
         y32 = torch.empty((M * TOP_K, H), dtype=torch.float32, device=dev)
         lib.moe_tk2_launch(1, TK2_NSTG, st["w13q"], st["w13s2"], st["lut"], st["gs13"], x, ids, st["start"], st["count"],
