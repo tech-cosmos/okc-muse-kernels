@@ -1,7 +1,7 @@
 # STATE-moe (muse_moe_w4a16)
 
 ## Board
-- Best: submit 5706bc37ac4041ff @6a1cda0, **1.589x** (2026-10-25 ~21:15Z). Top of board 2.52x (#10 2.37x).
+- Best: submit 5706bc37ac4041ff @6a1cda0, **1.589x** (2026-10-25 ~20:30Z). Top of board 2.52x (#10 2.37x).
 - Check of same code 58a1676977ea4978: 1.586x. Per shape (H200, us; SGLang from the same run):
   | load | bs | SGLang | ours | x | floor | experts touched (seed 7) |
   |---|---|---|---|---|---|---|
