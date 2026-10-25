@@ -1,7 +1,7 @@
 import os
 d = os.path.dirname(os.path.abspath(__file__))
 s = open(os.path.join(d, "sub_template.py")).read()
-for key, f in (("@@ROUTER@@", "router.cu"), ("@@GEMV7@@", "gemv7.cu"), ("@@GEMV10@@", "gemv10.cu"), ("@@GEMV12@@", "gemv12.cu"), ("@@GEMV13@@", "gemv13.cu"), ("@@GEMV14@@", "gemv14.cu"), ("@@LT@@", "lt.cu")):
+for key, f in (("@@ROUTER@@", "router.cu"), ("@@GEMV7@@", "gemv7.cu"), ("@@GEMV10@@", "gemv10.cu"), ("@@GEMV12@@", "gemv12.cu"), ("@@GEMV13@@", "gemv13.cu"), ("@@GEMV14@@", "gemv14.cu"), ("@@GEMV15@@", "gemv15.cu"), ("@@LT@@", "lt.cu")):
     src = open(os.path.join(d, f)).read()
     assert "'''" not in src
     s = s.replace(key, src)
