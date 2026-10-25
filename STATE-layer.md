@@ -1,10 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-25 ~21:00Z (end of session 2).
+Updated 2026-10-25 ~21:40Z (end of session 3: probes only, no judge runs; main unchanged = v8).
 
 ## Board
 - **Best scored: 12744959 = dbe255a (v7), 1.555x, 14,550 us/step, layer rank 220.** Board #1 2.285x (9,900 us),
-  #20 2.03x. Budget 2026-10-25: 6 of 6 submits, 9 of 20 checks used (all spent on submits today: none left).
+  #20 2.03x. Budget 2026-10-25: 6 of 6 submits (CLAUDE.md cap; okc says 6/10), 9 of 20 checks used.
 - **QUEUED: main (v8, c33532e + comment-only change) checked fc3e60d0 = 1.581x [1.557, ...] > 1.555 board.
   SUBMIT IT FIRST after 00:00 UTC 2026-10-26** (`okc submit muse_decode_layer/submission.py --json`).
 - v8 per shape, H200 (SGLang / ours, us): d1 172.7/105.5, d1f 183.2/113.7, d16 269.8/183.7, d16f 444.0/260.4,
@@ -33,6 +33,9 @@ Updated 2026-10-25 ~21:00Z (end of session 2).
   BF16 GEMMs at 55-65% of HBM peak (proj), experts at decode 16/32 + big-M (moe).
 
 ## Next (ranked)
+0. Biggest lever in the whole layer = experts at T>=16 (2.3-3x their byte floor, see NOTES s3); that is moe's lane:
+   re-copy moe_src.py the moment they post a faster moe_big / decode kernel. If moe doesn't take the big-M redesign
+   (Request in COORD), it's worth doing here: wgmma with dequantized A in registers, B = x via TMA, more rows per warp.
 1. After 00:00 UTC: submit v8 (see above).
 2. Watch ~/COORD.md Handoffs / r-moe and r-proj commits: re-copy moe_src.py on every moe speedup (T=1..256 all
    use it now), rebuild, `bench.py test`, local bench vs variants/, check. Proj: their gemv7 BF16 m=1 is ~3-5%
@@ -44,6 +47,8 @@ Updated 2026-10-25 ~21:00Z (end of session 2).
 4. Routing risk: diag check f5fdc570 once failed a timed rep's routing (3.18e-2 > 0.03). Not seen since (6 runs).
 
 ## Dead ends (details in NOTES)
+- s3: proj gemv7 as layer GEMVs (ties cuBLAS m1, loses m2-8); pooler before router fork; router grid sweeps (noise);
+  L2 bulk prefetch inside boundary CTAs (-0.7 us) or concurrent on a side stream (+3 us); moe_big config sweep.
 - Multi-CTA boundary (atomics + spin barrier); one-pass boundary (4 sums): both slower.
 - PDL on glue after cuBLAS: no gain. Side-stream moe bucketing at T>=128: +29..67 us on the judge.
 - L2 prefetch of the next weight on a side stream (load kernel or cp.async.bulk.prefetch.L2): GEMM speeds up but

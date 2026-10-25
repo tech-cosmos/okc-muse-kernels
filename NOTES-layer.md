@@ -67,3 +67,28 @@
   Local H100 1-5 us better than v7. check fc3e60d0: **1.581x** (v7 check 1.564x); decode 32 sliding 218.3 on moe vs
   225.0 Marlin (440361a9), so Marlin is no longer used anywhere. Not submitted: 6/6 submits used on 2026-10-25.
   QUEUED for after 00:00 UTC. v8 per shape in STATE-layer.md.
+
+## Session 3 (2026-10-25 20:44Z-21:40Z): no judge runs (no candidate beat noise); probes only
+- Budget correction: okc shows 6/10 scored used for 10-25 but CLAUDE.md caps submits at 6/day, so v8 still waits
+  for 00:00 UTC. 11 checks left today, none spent.
+- DEAD: proj's gemv7 (r-proj 955bbc6) as the layer's BF16 GEMMs (tools/g7bench.py, H100 graph+cold L2, incl. launch):
+  m1 qkv 20.8 vs cuBLAS(+splitK reduce) 20.8, o 12.2/11.8, pooler 30.5/31.2, unpool 11.4/12.0; m2/m8 g7 is 10-25%
+  SLOWER. So owning the GEMVs buys no time by itself; it only pays if glue gets fused into them (~2-3 us each).
+- DEAD: pooler before the router fork (event fork): the router's 1024 CTAs then wait behind the pooler and routing
+  becomes critical (moe gemm13 starts 2.8 us later). Router grid sweeps (RPLAN be,bk,ks,warps at T<=8) all within
+  local noise (same config 192 vs 199 us on verify 1: GPU shared); the 3.5-4 us pooler start delay at d1 stays.
+- DEAD: L2 bulk prefetch (cp.async.bulk.prefetch.L2 via tl.inline_asm_elementwise, one 1 KB chunk per thread) in extra
+  CTAs of boundary 1, of the pooler weight: bench d1 -0.7 us at 8 MB, 0 at 16/24 MB (boundary itself grows
+  4.3 -> 6.2 us: issue cost). Gotcha: a 64-element tensor in a 512-thread program issues 8x (replicated layout).
+  tools/pfprobe.py: a 4 us 1-CTA kernel + prefetch CTAs saves only ~2 us on the next 64 MB GEMV.
+- DEAD: prefetching the NEXT weight concurrently on a side stream during a big GEMV (tools/pfprobe2.py): +3 us
+  (fork + HBM contention). Every big kernel here is HBM-saturated enough that overlap is zero-sum or worse.
+- Layer routing per scored shape (tools/route_hist.py, reference front, sliding, seeds 99/7/11): local routes /
+  distinct local experts: d1 2-3/2-3, d16 23-24/6-10, d32 48-55/9-11 (top expert 13-20), v1 10-11/6-9,
+  v16 163-181/17-18 (top 45-49), v32 318-353/18-21 (top 91-97). 27 MB per expert (w13 16+2, w2 8+1).
+  => expert byte floors on H200: d1 ~17 us (ours ~39), d32 ~56 (ours 131), v16 ~100 (ours ~290), v32 ~112 (ours 335).
+- moe_big variants on that routing (tools/big_sweep.py: NS,NW,MB in (8,8,2) default, (4,8,2), (4,16,2), (8,16,1),
+  (4,8,3), (4,16,3), (8,4,4)): default best (v16 221.6 us route+13+2, v32 328.3; others +5-30%). Outputs identical.
+  Rough budget of gemm13 at T=256 (H100 ~214 us): HBM 107, mma 52 (34 GFLOP incl. NG rounding 5->8 groups),
+  smem B-fragment reads ~72 (each warp re-reads x for only 16 rows), dequant ~41: they add up instead of overlapping
+  (one __syncthreads per 64-k chunk keeps the 8 warps in lockstep). Posted to moe as a Request.
