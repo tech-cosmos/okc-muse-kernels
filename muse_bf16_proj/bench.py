@@ -20,7 +20,7 @@ TESTS = [(1, "qkv_gate", "normal"), (7, "pooler", "normal"), (33, "o", "normal")
 LAYERS = ["qkv_gate", "o", "pooler", "unpooler", "router"]
 LOADS = [("decode 1", 1), ("decode 16", 16), ("decode 32", 32), ("verify 1", 8), ("verify 16", 128), ("verify 32", 256)]
 # SGLang's H200 per-shape times (us) from the judge; fill in from the first check.
-SGLANG_H200 = {}
+SGLANG_H200 = {('decode 1', 'qkv_gate'): 14.24, ('decode 1', 'o'): 6.66, ('decode 1', 'pooler'): 21.66, ('decode 1', 'unpooler'): 6.98, ('decode 1', 'router'): 10.59, ('decode 16', 'qkv_gate'): 14.19, ('decode 16', 'o'): 6.67, ('decode 16', 'pooler'): 21.34, ('decode 16', 'unpooler'): 18.69, ('decode 16', 'router'): 14.82, ('decode 32', 'qkv_gate'): 14.5, ('decode 32', 'o'): 7.01, ('decode 32', 'pooler'): 21.63, ('decode 32', 'unpooler'): 18.78, ('decode 32', 'router'): 15.31, ('verify 1', 'qkv_gate'): 14.46, ('verify 1', 'o'): 6.69, ('verify 1', 'pooler'): 21.31, ('verify 1', 'unpooler'): 7.15, ('verify 1', 'router'): 26.3, ('verify 16', 'qkv_gate'): 17.15, ('verify 16', 'o'): 7.17, ('verify 16', 'pooler'): 24.78, ('verify 16', 'unpooler'): 20.08, ('verify 16', 'router'): 16.51, ('verify 32', 'qkv_gate'): 19.87, ('verify 32', 'o'): 9.22, ('verify 32', 'pooler'): 30.67, ('verify 32', 'unpooler'): 24.16, ('verify 32', 'router'): 17.73}  # check c77613c2
 
 _W = None
 _STATE = None

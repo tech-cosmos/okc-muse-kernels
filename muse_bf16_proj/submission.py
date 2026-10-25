@@ -5,7 +5,8 @@ Router (FP32 weights, FP32 output): up to 8 tokens a native true-FP32 split-K ke
 FP32 split partials), as SGLang's F.linear in FP32. Above 8 tokens SGLang's BF16 hi + lo split with FP32
 accumulation: 9..32 tokens a native tensor-core kernel (dev/gemv6.cu: mma.sync with hi and lo tiles into one FP32
 accumulator, split K reduced in FP32 over a thread-block cluster through distributed shared memory); above 32 one
-cuBLAS GEMM against the stacked [hi; lo] weight (FP32 out) and an FP32 add of the two halves. BF16 projections: cuBLAS (as SGLang's bf16_gemm_dispatch on H200).
+cuBLAS GEMM against the stacked [hi; lo] weight (FP32 out) and an FP32 add of the two halves. BF16 projections: at 1 token the same native kernel (BF16 weights, one tile per mma), else cuBLAS (as SGLang's
+bf16_gemm_dispatch on H200).
 Native kernels are built once at import (load_inline); if the build fails everything falls back to torch.
 """
 
@@ -165,7 +166,7 @@ _GEMV_SRC = r'''// Skinny GEMM out[m, n] = x[m, k] @ W[n, k]^T for small m: BF16
 #include <cuda_bf16.h>
 #include <cooperative_groups.h>
 
-namespace g6 {
+namespace g7 {
 namespace cg = cooperative_groups;
 
 __device__ __forceinline__ void mma(float* d, const uint4& a, unsigned b0, unsigned b1) {
@@ -183,30 +184,31 @@ __device__ __forceinline__ uint4 ldw(const uint4* p) {
 
 template <int MT, int NWR, int NWK, int U, int NA, bool F32OUT>
 __global__ void __launch_bounds__(NWR * NWK * 32) gemv(const uint4* __restrict__ w, const __nv_bfloat16* __restrict__ x,
-                                                       void* __restrict__ out, int m, int n, int k, int cs) {
+                                                       void* __restrict__ out, int m, int n, int k, int cs, int ilv) {
     constexpr int TOK = MT * 8, RB = NWR * 16, NT = NWR * NWK * 32;
     extern __shared__ __align__(16) unsigned char smem[];
     __nv_bfloat16* xs = reinterpret_cast<__nv_bfloat16*>(smem);
     float* red = reinterpret_cast<float*>(smem);
     const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, wr = warp % NWR, wk = warp / NWR;
     const int ks = blockIdx.x % cs, rest = blockIdx.x / cs, nrg = n / RB, rg = rest % nrg, tg = rest / nrg;
-    const int KB = k / cs, k0 = ks * KB, XS = KB + 8;
-    const int XBYTES = max(TOK * XS * 2, NWK * TOK * RB * 4);  // smem row stride (elements): +16 B breaks bank conflicts
-    // stage x[tg*TOK .. +TOK, k0 .. k0+KB) (rows >= m zeroed)
-    for (int i = threadIdx.x; i < TOK * KB / 8; i += NT) {
+    // x rows actually present in this token group (rows past m read a shared 16-B zero line instead)
+    const int mr = min(TOK, m - tg * TOK);
+    const int KB = k / cs, k0 = ks * KB, XS = KB + 8;  // smem row stride (elements): +16 B breaks bank conflicts
+    const int XBYTES = max(mr * XS * 2 + 16, NWK * TOK * RB * 4);
+    if (threadIdx.x == 0) *reinterpret_cast<uint4*>(smem + mr * XS * 2) = make_uint4(0, 0, 0, 0);
+    for (int i = threadIdx.x; i < mr * KB / 8; i += NT) {
         const int r = i / (KB / 8), c = (i % (KB / 8)) * 8, tok = tg * TOK + r;
-        __nv_bfloat16* d = xs + r * XS + c;
-        if (tok < m) {
-            const unsigned sa = (unsigned)__cvta_generic_to_shared(d);
-            asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(sa), "l"(x + (size_t)tok * k + k0 + c));
-        } else {
-            *reinterpret_cast<uint4*>(d) = make_uint4(0, 0, 0, 0);
-        }
+        const unsigned sa = (unsigned)__cvta_generic_to_shared(xs + r * XS + c);
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(sa), "l"(x + (size_t)tok * k + k0 + c));
     }
     asm volatile("cp.async.commit_group;");
     const int KT = KB / 16 / NWK, kt16 = k >> 4, s = rg * NWR + wr;
     const int tl0 = wk * KT;  // first k-tile of this warp, local to the block's K range
-    const uint4* wp = w + ((size_t)s * kt16 + (k0 >> 4) + tl0) * NA * 32 + lane;
+    // ilv: W packed so tile t of every warp of the grid is adjacent ([t][grid warp][NA][512 B]): the whole grid
+    // sweeps memory sequentially. Otherwise [stripe][k-tile][NA][512 B].
+    const int nwt = gridDim.x * (NWR * NWK), gw = blockIdx.x * (NWR * NWK) + warp;
+    const uint4* wp = ilv ? w + (size_t)gw * NA * 32 + lane : w + ((size_t)s * kt16 + (k0 >> 4) + tl0) * NA * 32 + lane;
+    const size_t tstride = ilv ? (size_t)nwt * NA * 32 : (size_t)NA * 32;
     uint4* ring = reinterpret_cast<uint4*>(smem + XBYTES) + (size_t)warp * U * NA * 32 + lane;
 #pragma unroll
     for (int u = 0; u < U; ++u) {
@@ -214,7 +216,7 @@ __global__ void __launch_bounds__(NWR * NWK * 32) gemv(const uint4* __restrict__
         for (int q = 0; q < NA; ++q)
             if (u < KT) {
                 const unsigned sa = (unsigned)__cvta_generic_to_shared(ring + (u * NA + q) * 32);
-                asm volatile("cp.async.cg.shared.global.L2::256B [%0], [%1], 16;" ::"r"(sa), "l"(wp + (u * NA + q) * 32));
+                asm volatile("cp.async.cg.shared.global.L2::256B [%0], [%1], 16;" ::"r"(sa), "l"(wp + u * tstride + q * 32));
             }
         asm volatile("cp.async.commit_group;");
     }
@@ -225,8 +227,15 @@ __global__ void __launch_bounds__(NWR * NWK * 32) gemv(const uint4* __restrict__
     __syncthreads();
     // ldmatrix row address: lane l -> matrix l/8, row l%8; matrices (j, k lo), (j, k hi), (j+1, k lo), (j+1, k hi)
     const int lr = lane & 7, lm = lane >> 3;
-    const unsigned xbase = (unsigned)__cvta_generic_to_shared(xs) +
-                           2u * (unsigned)(((lm >> 1) * 8 + lr) * XS + (lm & 1) * 8 + tl0 * 16);
+    const unsigned xs0 = (unsigned)__cvta_generic_to_shared(xs), xzero = xs0 + 2u * (unsigned)(mr * XS);
+    unsigned xb[(MT + 1) / 2];  // per ldmatrix: this lane's row address at the warp's first k-tile, or the zero line
+    bool xvalid[(MT + 1) / 2];
+#pragma unroll
+    for (int jj = 0; jj < (MT + 1) / 2; ++jj) {
+        const int row = jj * 16 + (lm >> 1) * 8 + lr;
+        xvalid[jj] = row < mr;
+        xb[jj] = xs0 + 2u * (unsigned)(row * XS + (lm & 1) * 8 + tl0 * 16);
+    }
     for (int t = 0; t < KT; ++t) {
         const int slot = t % U;
         asm volatile("cp.async.wait_group %0;" ::"n"(U - 1));
@@ -236,7 +245,7 @@ __global__ void __launch_bounds__(NWR * NWK * 32) gemv(const uint4* __restrict__
 #pragma unroll
         for (int j = 0; j < MT; j += 2) {
             unsigned b0, b1, b2 = 0, b3 = 0;
-            const unsigned addr = xbase + 2u * (unsigned)(j * 8 * XS + t * 16);
+            const unsigned addr = xvalid[j / 2] ? xb[j / 2] + 32u * t : xzero;
             if (j + 1 < MT)
                 asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
                              : "=r"(b0), "=r"(b1), "=r"(b2), "=r"(b3) : "r"(addr));
@@ -253,7 +262,7 @@ __global__ void __launch_bounds__(NWR * NWK * 32) gemv(const uint4* __restrict__
             for (int q = 0; q < NA; ++q) {
                 const unsigned sa = (unsigned)__cvta_generic_to_shared(ring + (slot * NA + q) * 32);
                 asm volatile("cp.async.cg.shared.global.L2::256B [%0], [%1], 16;" ::"r"(sa),
-                             "l"(wp + ((t + U) * NA + q) * 32));
+                             "l"(wp + (t + U) * tstride + q * 32));
             }
         }
         asm volatile("cp.async.commit_group;");
@@ -286,8 +295,7 @@ __global__ void __launch_bounds__(NWR * NWK * 32) gemv(const uint4* __restrict__
     };
     if (cs == 1) {
         if (NWK > 1) __syncthreads();
-        if (NWK == 1 || true)
-            for (int e = threadIdx.x; e < E; e += NT) store(e, red[e]);
+        for (int e = threadIdx.x; e < E; e += NT) store(e, red[e]);
         return;
     }
     cg::cluster_group cl = cg::this_cluster();
@@ -302,12 +310,13 @@ __global__ void __launch_bounds__(NWR * NWK * 32) gemv(const uint4* __restrict__
 }
 
 template <int MT, int NWR, int NWK, int U, int NA, bool F32OUT>
-int launch(const torch::Tensor& w, const torch::Tensor& x, torch::Tensor& out, int n, int cs, int tgs, bool query) {
+int launch(const torch::Tensor& w, const torch::Tensor& x, torch::Tensor& out, int n, int cs, int tgs, int ilv, bool query) {
     const int m = (int)x.size(0), k = (int)x.size(1);
     constexpr int TOK = MT * 8, RB = NWR * 16, NT = NWR * NWK * 32;
-    TORCH_CHECK(n % RB == 0 && k % (cs * 16 * NWK) == 0 && tgs * TOK >= m, "g6: bad shape/config");
+    TORCH_CHECK(n % RB == 0 && k % (cs * 16 * NWK) == 0 && tgs * TOK >= m, "g7: bad shape/config");
     const int KB = k / cs;
-    const size_t sx = (size_t)TOK * (KB + 8) * 2, sr = (size_t)NWK * TOK * RB * 4;
+    const int mr = m < TOK ? m : TOK;
+    const size_t sx = (size_t)mr * (KB + 8) * 2 + 16, sr = (size_t)NWK * TOK * RB * 4;
     const size_t sm = (sx > sr ? sx : sr) + (size_t)NWR * NWK * U * NA * 512;
     auto kern = gemv<MT, NWR, NWK, U, NA, F32OUT>;
     static int set = 0;  // per instantiation
@@ -334,33 +343,35 @@ int launch(const torch::Tensor& w, const torch::Tensor& x, torch::Tensor& out, i
         return nc;
     }
     cudaLaunchKernelEx(&cfg, kern, reinterpret_cast<const uint4*>(w.data_ptr()),
-                       reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), out.data_ptr(), m, n, k, cs);
+                       reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), out.data_ptr(), m, n, k, cs, ilv);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return 0;
 }
-}  // namespace g6
+}  // namespace g7
 
-#define G6_CASE(MT, NWR, NWK, U, NA)                                                     \
+#define G7_CASE(MT, NWR, NWK, U, NA)                                                     \
     if (mt == MT && nwr == NWR && nwk == NWK && u == U && na == NA) {                    \
-        if (f32) return g6::launch<MT, NWR, NWK, U, NA, true>(w, x, out, n, cs, tgs, query);   \
-        else return g6::launch<MT, NWR, NWK, U, NA, false>(w, x, out, n, cs, tgs, query); \
+        if (f32) return g7::launch<MT, NWR, NWK, U, NA, true>(w, x, out, n, cs, tgs, ilv, query);   \
+        else return g7::launch<MT, NWR, NWK, U, NA, false>(w, x, out, n, cs, tgs, ilv, query); \
                                                                                   \
     }
 
-static int64_t g6_run(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t n, int64_t mt, int64_t nwr,
+static int64_t g7_run(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t n, int64_t mt, int64_t nwr,
                       int64_t nwk, int64_t u, int64_t na, int64_t cs, int64_t tgs, bool query) {
     const bool f32 = out.scalar_type() == torch::kFloat32;
-    G6_CONFIGS
-    TORCH_CHECK(false, "g6: no such config");
+    const int ilv = (int)(na >> 4);
+    na &= 15;
+    G7_CONFIGS
+    TORCH_CHECK(false, "g7: no such config");
     return 0;
 }
-void g6_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t n, int64_t mt, int64_t nwr, int64_t nwk,
+void g7_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t n, int64_t mt, int64_t nwr, int64_t nwk,
              int64_t u, int64_t na, int64_t cs, int64_t tgs) {
-    g6_run(w, x, out, n, mt, nwr, nwk, u, na, cs, tgs, false);
+    g7_run(w, x, out, n, mt, nwr, nwk, u, na, cs, tgs, false);
 }
-int64_t g6_occ(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t n, int64_t mt, int64_t nwr, int64_t nwk,
+int64_t g7_occ(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t n, int64_t mt, int64_t nwr, int64_t nwk,
                int64_t u, int64_t na, int64_t cs, int64_t tgs) {
-    return g6_run(w, x, out, n, mt, nwr, nwk, u, na, cs, tgs, true);
+    return g7_run(w, x, out, n, mt, nwr, nwk, u, na, cs, tgs, true);
 }
 '''
 
@@ -369,17 +380,21 @@ ROUTER_F32 = [(1, (1, 2048, 1, 8)), (8, (8, 512, 2, 8)), (16, (16, 512, 2, 8))]
 ROUTER_F32 = [c for c in ROUTER_F32 if c[0] <= 8]
 # Router hi/lo tensor-core configs (n, mt, nwr, nwk, stages, na, cluster, token groups), chosen on the H100 (dev/g5.py).
 ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
+# BF16 GEMV configs per (layer, max m), same tuple layout (na = 1), chosen on the H100 (dev/g5.py, KER=7).
+BF16_GEMV = {"qkv_gate": [(1, (2304, 1, 2, 2, 8, 1, 4, 1))], "pooler": [(1, (4096, 1, 2, 4, 16, 1, 1, 1))],
+             "o": [(1, (8192, 1, 2, 4, 8, 1, 1, 1))], "unpooler": [(1, (1024, 1, 2, 4, 8, 1, 4, 1))]}
+_G7 = sorted({c[1:6] for _, c in ROUTER_HL} | {c[1:6] for v in BF16_GEMV.values() for _, c in v})
 _SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
-        _GEMV_SRC.replace("G6_CONFIGS", " ".join("G6_CASE(%d,%d,%d,%d,%d)" % c[1:6] for _, c in ROUTER_HL)))
+        _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)))
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v3",
+        name="muse_proj_v4",
         cpp_sources="void pj_router(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
-                    "void g6_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
+                    "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t);",
-        cuda_sources=_SRC, functions=["pj_router", "g6_gemv"],
+        cuda_sources=_SRC, functions=["pj_router", "g7_gemv"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -395,6 +410,8 @@ def _pack(w):
 
 def prepare(weights):
     st = {name: w.contiguous() for name, w in weights.items()}
+    for name in BF16_GEMV:  # fragment-packed copy for the native GEMV ([stripe][k-tile][lane][8])
+        st[name + "_p"] = _pack(weights[name]).contiguous()
     r = weights["router"]
     hi = r.to(torch.bfloat16)
     lo = (r - hi.float()).to(torch.bfloat16)
@@ -419,7 +436,7 @@ def _router(x, st, m):
         for mmax, cfg in ROUTER_HL:
             if m <= mmax:
                 out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
-                _mod.g6_gemv(st["router_hl_p"], x, out, *cfg)
+                _mod.g7_gemv(st["router_hl_p"], x, out, *cfg)
                 return out
     if m <= ROUTER_FP32_MAX_TOKENS:
         return F.linear(x.float(), st["router"])
@@ -432,4 +449,11 @@ def kernel_fn(data, st):
     layer = cfg["layer"]
     if layer == "router":
         return _router(x, st, cfg["m"])
-    return F.linear(x, st[layer][: cfg["n"]])
+    m, n = cfg["m"], cfg["n"]
+    if _mod is not None:
+        for mmax, c in BF16_GEMV.get(layer, ()):
+            if m <= mmax and c[0] == n:
+                out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
+                _mod.g7_gemv(st[layer + "_p"], x, out, *c)
+                return out
+    return F.linear(x, st[layer][:n])
