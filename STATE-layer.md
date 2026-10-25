@@ -1,26 +1,24 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-25 ~23:10Z (end of session 5: main v17 checked 1.8045x (v15 1.818x); submit main after 00:00Z).
+Updated 2026-10-25 ~23:35Z (session 6: main v20 checked 1.856x; submit main after 00:00Z).
 
 ## Board
 - **Best scored: 5fc7a807 = v10 (64bfdcf), 1.728x, 13,094 us/step.** Board #1 2.285x (10-25 19:30Z).
-- **main = v17 (5cf795f): check 842b5e2c 1.8045x. v15 (3508986) check 58f0ef6f 1.818x, v16 check f8e06892 1.811x:
-  all noise-equal (+-1%); v17 = v15 + cuBLASLt qkv m256 etc. (v32 +1-2%). FIRST THING after 00:00Z 2026-10-26:
-  `okc submit muse_decode_layer/submission.py --json` (main = v17, code identical to check 842b5e2c).**
-- Budget 2026-10-25: 9 of 9 submits used, 18 of 20 checks used. v18 (moe RT=4 682dd87) check b55c49e3 1.798x:
-  v32 sliding -4%: reverted; stay on moe c39a176 unless moe ships a big-M that wins in the layer.
-- v15 per shape, H200 check 58f0ef6f (SGLang / ours, us): d1 171.0/80.7, d1f 182.8/92.5, d16 269.5/162.9,
-  d16f 431.9/234.1, d32 264.8/190.3, d32f 617.0/343.3, v1 267.3/135.7, v1f 273.8/144.6, v16 523.6/297.5,
-  v16f 703.6/394.0, v32 718.8/382.3, v32f 1060.3/553.1. Judge per-shape noise: identical code moves up to 4%.
-- Per shape speedup (v15): d1 2.12/1.98, d16 1.65/1.85, **d32 1.39/1.80**, v1 1.97/1.89, v16 1.76/1.79, v32 1.88/1.92.
+- **main = v20 (164ea45): check 85410ccd 1.856x, 12,188 us (best check). FIRST THING after 00:00Z 2026-10-26:
+  `okc submit muse_decode_layer/submission.py --json` (main = v20, code identical to check 85410ccd)** if not done
+  yet (see NOTES s6 end / COORD Judge runs).
+- v20 per shape, H200 check 85410ccd (ours, us; SGLang in brackets): d1 80.4/89.7 (172/182), d16 160.1/234.2
+  (261/431), d32 195.4/349.4 (261/622), v1 135.9/147.0 (268/280), v16 272.4/369.0 (524/717), v32 360.1/539.4
+  (722/1095). Per-shape speedup: d1 2.14/2.03, d16 1.63/1.84, **d32 1.34/1.78**, v1 1.97/1.90, v16 1.92/1.94,
+  v32 2.00/2.03. Judge per-shape noise: identical code moves up to 4%; total ~+-1%.
 - Floors (us): d1 40/44, d16 77/137, d32 85/208, v1 62/66, v16 127/189, v32 144/267.
 
 ## Code (muse_decode_layer/)
 - `layer.py` = the layer. Inlined by **`python build.py` -> submission.py** (never edit submission.py by hand):
   `attn_src.py` = ~/attn submission.py @82866c6 (kernel_fn -> attn_kernel_fn, constexpr np2 fix, csl::decode patched
-  to trigger PDL dependents); `moe_src.py` = r-moe c39a176 (names prefixed `_moe_`; T>32 = its kernel_fn (moe_tw); layer.py patches moe_norm2 to
+  to trigger PDL dependents); `moe_src.py` = r-moe b42c782 (names prefixed `_moe_`; T>32 = its kernel_fn (moe_twf: gemm13+gemm2 in one persistent launch); layer.py patches moe_norm2 to
   trigger dependents); `g10_src.cu` = proj gemv10 (r-proj d894f4e, m=1), `g12_src.cu` = proj gemv12 (r-proj e71d015,
-  m=8), `lt_src.cu` = proj cuBLASLt explicit-algo GEMM (LT_CFG fixed H200 picks, `_lt_prepare`); layer.py `_g10_lib` builds g10/g12 in one load_inline and text-patches them (PDL trigger, PDL-secondary launch).
+  m=8), `g13_src.cu`/`g14_src.cu` = proj gemv13 (m=1)/gemv14 (m=8) over lossless 12-bit BF16 (r-proj 21bec6b; packs `_pack13/_pack14` in `_g12_prepare`, used for qkv+pooler (G13_CFG/G14_CFG) when the weight compresses, built in `_g10_lib`), `lt_src.cu` = proj cuBLASLt explicit-algo GEMM (LT_CFG fixed H200 picks, `_lt_prepare`); layer.py `_g10_lib` builds g10/g12 in one load_inline and text-patches them (PDL trigger, PDL-secondary launch).
   Re-copy: `git -C ~/r-moe show <c>:muse_moe_w4a16/submission.py > moe_src.py` (check the 68-int route meta
   matches `_moe_bucket`, and that the patch anchors in layer.py/build.py still match: asserts fire at import).
 - Pipeline: qkv `_linear` (gemv10 T=1, gemv12 T=8, cuBLASLt pick at T=128/256, else cuBLAS) -> attn -> o `_linear` -> `_boundary` -> side stream:
@@ -57,6 +55,8 @@ Updated 2026-10-25 ~23:10Z (end of session 5: main v17 checked 1.8045x (v15 1.81
 4. Routing risk: diag check f5fdc570 once failed a timed rep's routing (3.18e-2 > 0.03). Not seen since (13 runs).
 
 ## Dead ends (details in NOTES)
+- s6: moe twf at decode T=16/32 (+22/+25 us H100); L2 prefetch of the unpool W from twf CTAs at their work-counter
+  exhaustion (PF 16-40 MB: +1..5 us); gemv14 for o (verify full) and unpool slice at T=8 (+0.6..1.5 us).
 - s5: moe_tw at decode T=16/32 (+14/+29 us); Triton split-K skinny GEMM (ties cuBLAS); tk2 gemm13 as PDL secondary
   of rmsnorm (tie); pooler-first / priority-stream pooler at T=8 (router starves: +2-3); router W L2 prefetch (T=8
   router is issue-bound); tl.dot FP32 router; cuBLASLt pooler m256 in the layer (+11.5 beside the router); pooler

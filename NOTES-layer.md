@@ -163,3 +163,25 @@
 - v18 (2e79b56): moe_src = r-moe 682dd87 (moe_tw RT=4, their judge 1.985 -> 2.033x): H100 layer worse (v16 337/482 vs
   332/478, v32 430/681 vs 417/675); check b55c49e3 1.7978x: v32 sliding 1.816 (v15/v17 1.880/1.895). Reverted to
   c39a176 (f2cb10b; submission.py byte-identical to v17 5cf795f). Told moe (COORD Requests).
+
+## Session 6 (2026-10-25 23:05-~00:05Z)
+- v19 (9de3707): moe_src.py = r-moe b42c782 (moe_twf: gemm13+gemm2 of the big-M path in ONE persistent launch,
+  per-expert done flags; route now zeroes meta[68..99], so layer `_moe_bucket` allocates meta[100]). H100 v16
+  333/480 -> 320/466, v32 419/676 -> 414/669 (2 interleaved rounds). check d1690865 **1.835x**: v16 297.5 -> 266.0,
+  v32 382.3 -> 353.2 (sliding, H200 us).
+- Judge profile v32 (T=256): moe_twf 204, moe_norm "45" = mostly its PDL wait for twf's tail. H100 timeline
+  (tools/timeline.py): twf 117 -> 370 us, moe_norm starts at 332 (first twf CTA exits) and really takes ~10 us:
+  ~38 us twf tail with SMs going idle (told moe).
+- DEAD: twf at decode T=16/32 (layer TW_TOKENS path rewritten to twf): H100 d16 +22, d32 +25 us vs tk2.
+- DEAD: L2 prefetch of the unpool W (first 16/24/40 MB, cp.async.bulk.prefetch.L2, 1/grid slice per CTA) issued by
+  each twf producer when the work counter runs out (patched kernel + launcher signature): v16/v32 +1..5 us, monotone
+  in PF size. The counter runs out near the start of the tail, so the prefetch contends with the last items' loads.
+- v20 (164ea45, main): proj's gemv13 (m=1) / gemv14 (m=8) over lossless 12-bit BF16 weights (r-proj 21bec6b:
+  g13_src.cu/g14_src.cu extracted from its submission, _compress/_nib/_pack13/_pack14 copied; GEMV_PDL trigger
+  patched in; g14 shares g12_ws/g12_cnt on the main stream) for qkv_gate + pooler at T=1 and T=8; falls back to
+  gemv10/12 per weight if _compress returns None (> 8 escapes in a row). H100 d1 106.7/128.4 -> 100.7/122.5,
+  v1 171.1/185.3 -> 165.7/179.8. check 85410ccd **1.856x, 12,188 us**: d1 80.4 (83.2), v1 135.9 (138.2).
+- DEAD: gemv14 for o (verify full; sliding o is a PDL secondary, kept g12) and unpool_slice at T=8, proj's cfgs
+  (1,2,4,128,1) / (4,8,4,32,1): verify 1 +1.3 / +0.6 us H100.
+- Not done (small): proj's pj_router at T=8 takes BF16 x; our router deliberately reads the FP32 boundary output
+  (routing-precision risk), and the win is ~2 us at v1 only (~0.25% total).
