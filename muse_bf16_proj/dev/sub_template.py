@@ -72,8 +72,10 @@ BF16_G14 = {"qkv_gate": [(8, 2, 2, 4, 32, 1)], "o": [(8, 1, 2, 4, 128, 1), (8, 1
 BF16_G15 = {"pooler": [(16, 4, 4, 4, 64, 1)]}
 # gemv15 with W as the mma A operand (16 rows), x via ldmatrix and x staged by TMA bulk copies multicast over a cluster of
 # mc blocks sharing the k-chunk (dev/gemv16.cu), (m, kcu, wg, pf, runs, xp, mc), H100 (dev/g16.py): unpooler m16 (S=1,
-# no split-K) 23.2 vs cuBLAS 25.5.
-BF16_G16 = {"unpooler": [(16, 4, 4, 4, 128, 1, 2), (16, 4, 8, 2, 128, 1, 2)]}
+# no split-K) 23.0 vs cuBLAS 25.5; qkv m16 (S=2 + multicast: clusters of 4) 16.9 vs 18.1; pooler m16 (S=2, partials pushed
+# over DSMEM) 25.2 vs 27.5. H200 (check ae0e03fa, unpooler only): 21.8 vs lt 21.4, not picked.
+BF16_G16 = {"unpooler": [(16, 4, 4, 4, 128, 1, 2), (16, 4, 8, 2, 128, 1, 2)],
+            "qkv_gate": [(16, 4, 4, 4, 48, 1, 2), (16, 4, 4, 4, 36, 1, 2)], "pooler": [(16, 4, 4, 4, 64, 1, 1)]}
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
 BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32, 1, 1)], "pooler": [(8, 8, 8, 4, 128, 1, 1), (16, 8, 8, 4, 128, 8, 2)],
             "o": [(8, 1, 2, 8, 128, 1, 1)], "unpooler": [(8, 4, 4, 4, 32, 1, 1)]}  # unpooler m8: H200 5.7-7.3 (noisy)

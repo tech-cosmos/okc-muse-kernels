@@ -1298,6 +1298,7 @@ __global__ void __launch_bounds__(LB, 1) gemm(const uint4* __restrict__ WS, cons
     cg::cluster_group cl = cg::this_cluster();
     const int mr = (blockIdx.x % (S * MC)) / S;  // rank among the MC blocks of the cluster sharing this k-chunk
     const unsigned bar = ((unsigned)__cvta_generic_to_shared(part + NG * M * 16) + 7u) & ~7u;
+    if (MC == 1 && S > 1) asm volatile("barrier.cluster.arrive.relaxed.aligned;");  // peers started: waited before DSMEM stores
     if constexpr (MC > 1) {
         // x[:, chunk] by TMA bulk copies multicast to the MC blocks with the same k-chunk: block mr copies rows
         // r % MC == mr; one mbarrier per block collects all M rows.
@@ -1329,9 +1330,9 @@ __global__ void __launch_bounds__(LB, 1) gemm(const uint4* __restrict__ WS, cons
     uint2 wn_[PF];
 #pragma unroll
     for (int p = 0; p < PF; ++p) { ws_[p] = ldw(wbs + p * WG * 32); wn_[p] = ld2(wbn + p * WG * 32); }
-    float acc[NT][4];
+    float acc[NT][4], acc2[NT][4];  // k-steps s = 0 / 1 accumulate separately: two independent mma chains
 #pragma unroll
-    for (int j = 0; j < NT; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.f;
+    for (int j = 0; j < NT; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = acc2[j][0] = acc2[j][1] = acc2[j][2] = acc2[j][3] = 0.f;
     // ldmatrix row address: matrix q = lane / 8 (x4: n-tile pair member q / 2, k half q % 2), row = lane % 8
     const unsigned xbase = (unsigned)__cvta_generic_to_shared(xs) + ((lane >> 4) * 8 + (lane & 7)) * XS + ((lane >> 3) & 1) * 16;
     for (int a = 0; a < NA; a += PF) {
@@ -1361,13 +1362,13 @@ __global__ void __launch_bounds__(LB, 1) gemm(const uint4* __restrict__ WS, cons
                 for (int j = 0; j + 1 < NT; j += 2) {
                     unsigned b0, b1, b2, b3;
                     ldsm4(xbase + j * 8 * XS + kb + s * 32, b0, b1, b2, b3);
-                    mma(acc[j], af, b0, b1);
-                    mma(acc[j + 1], af, b2, b3);
+                    mma(s ? acc2[j] : acc[j], af, b0, b1);
+                    mma(s ? acc2[j + 1] : acc[j + 1], af, b2, b3);
                 }
                 if (NT & 1) {
                     unsigned b0, b1;
                     ldsm2(xbase + (NT - 1) * 8 * XS + kb + s * 32, b0, b1);  // lanes 0-15 give addresses (q/2 = 0)
-                    mma(acc[NT - 1], af, b0, b1);
+                    mma(s ? acc2[NT - 1] : acc[NT - 1], af, b0, b1);
                 }
             }
         }
@@ -1376,11 +1377,12 @@ __global__ void __launch_bounds__(LB, 1) gemm(const uint4* __restrict__ WS, cons
 #pragma unroll
     for (int j = 0; j < NT; ++j)
 #pragma unroll
-        for (int e = 0; e < 4; ++e) accf[((wp * NT + j) * 4 + e) * 32 + lane] = acc[j][e];
+        for (int e = 0; e < 4; ++e) accf[((wp * NT + j) * 4 + e) * 32 + lane] = acc[j][e] + acc2[j][e];
 #ifdef G16_NORED
     return;
 #endif
     if (MC > 1) asm volatile("cp.async.wait_group 0;");
+    if (MC == 1 && S > 1) asm volatile("barrier.cluster.wait.aligned;");
     __syncthreads();
 #ifdef G16_SYNCONLY
     return;
@@ -1404,7 +1406,11 @@ __global__ void __launch_bounds__(LB, 1) gemm(const uint4* __restrict__ WS, cons
         }
 #endif
         if (S == 1) out[(long)tok * n + (rg0 + rgl) * 16 + row16] = __float2bfloat16(s * scale);
-        else part[i] = s;
+        else {  // slice q = i / (ne / S) is summed by cluster rank q (of this row run): push into its part, slot ks
+            const int q = i / (ne / S);
+            float* dst = q == ks ? part : cl.map_shared_rank(part, mr * S + q);
+            dst[ks * (ne / S) + i - q * (ne / S)] = s;
+        }
     }
     if (S == 1) {
         if (MC > 1) cl.sync();  // peers' multicast copies into this block are done (own barrier), keep peers alive anyway
@@ -1413,16 +1419,16 @@ __global__ void __launch_bounds__(LB, 1) gemm(const uint4* __restrict__ WS, cons
 #ifdef G16_NOP2
     return;
 #endif
-    cl.sync();
-    const int e0 = ks * ne / S, e1 = (ks + 1) * ne / S;
-    for (int i = e0 + t; i < e1; i += blockDim.x) {
+    cl.sync();  // every block's slices are in its owner's part
+    const int sl = ne / S;
+    for (int i = t; i < sl; i += blockDim.x) {
         float v = 0.f;
-        for (int q = 0; q < S; ++q) v += cl.map_shared_rank(part, mr * S + (q + ks) % S)[i];
-        const int l = i & 31, e = (i >> 5) & 3, nt = (i >> 7) % NT, rgl = (i >> 7) / NT;
+        for (int q = 0; q < S; ++q) v += part[q * sl + i];
+        const int ig = ks * sl + i;
+        const int l = ig & 31, e = (ig >> 5) & 3, nt = (ig >> 7) % NT, rgl = (ig >> 7) / NT;
         const int row16 = (l >> 2) + 8 * (e >> 1), tok = nt * 8 + (l & 3) * 2 + (e & 1);
         out[(long)tok * n + (rg0 + rgl) * 16 + row16] = __float2bfloat16(v * scale);
     }
-    cl.sync();
 }
 }  // namespace g16
 // nrg_all: 16-row groups of the packed weight; bk: row runs (clusters), each n/16/bk groups x WG warps, S = k/KC blocks.
@@ -1547,8 +1553,10 @@ BF16_G14 = {"qkv_gate": [(8, 2, 2, 4, 32, 1)], "o": [(8, 1, 2, 4, 128, 1), (8, 1
 BF16_G15 = {"pooler": [(16, 4, 4, 4, 64, 1)]}
 # gemv15 with W as the mma A operand (16 rows), x via ldmatrix and x staged by TMA bulk copies multicast over a cluster of
 # mc blocks sharing the k-chunk (dev/gemv16.cu), (m, kcu, wg, pf, runs, xp, mc), H100 (dev/g16.py): unpooler m16 (S=1,
-# no split-K) 23.2 vs cuBLAS 25.5.
-BF16_G16 = {"unpooler": [(16, 4, 4, 4, 128, 1, 2), (16, 4, 8, 2, 128, 1, 2)]}
+# no split-K) 23.0 vs cuBLAS 25.5; qkv m16 (S=2 + multicast: clusters of 4) 16.9 vs 18.1; pooler m16 (S=2, partials pushed
+# over DSMEM) 25.2 vs 27.5. H200 (check ae0e03fa, unpooler only): 21.8 vs lt 21.4, not picked.
+BF16_G16 = {"unpooler": [(16, 4, 4, 4, 128, 1, 2), (16, 4, 8, 2, 128, 1, 2)],
+            "qkv_gate": [(16, 4, 4, 4, 48, 1, 2), (16, 4, 4, 4, 36, 1, 2)], "pooler": [(16, 4, 4, 4, 64, 1, 1)]}
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
 BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32, 1, 1)], "pooler": [(8, 8, 8, 4, 128, 1, 1), (16, 8, 8, 4, 128, 8, 2)],
             "o": [(8, 1, 2, 8, 128, 1, 1)], "unpooler": [(8, 4, 4, 4, 32, 1, 1)]}  # unpooler m8: H200 5.7-7.3 (noisy)
