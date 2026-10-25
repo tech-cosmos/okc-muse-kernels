@@ -1,46 +1,52 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-25 ~21:10 UTC (session 2).
+Updated 2026-10-25 ~23:00 UTC (session 3).
 
 ## Board
-- **Best: submit fd765502babc4c69 = 25e165b, 1.1251x (CI 1.108-1.142), rank 831.** #1 1.61x, ~#10 1.53x.
-- main = 955bbc6 (= 25e165b + BF16 m=1 on gemv7): check c62f7f1d 1.1235x, same within noise (m1 shapes +3-6%).
+- **Best: submit a55d6b55a2604db3 = e71d015, 1.1757x (CI 1.158-1.193).** (#1 1.61x, #2-#11 1.53-1.56x.)
+- Previous: 3c377a1a (ec649e1, m1 gemv10) 1.1739x; fd765502 (25e165b) 1.1251x.
 
-## Per-shape H200 (us), SGLang / ours (check c62f7f1d); floor in TASK.md
+## Per-shape H200 (us), SGLang / ours (check 1c6ae4b6 = e71d015); floor in TASK.md
 | load | qkv_gate | o | pooler | unpooler | router |
 |---|---|---|---|---|---|
-| decode 1 (m1) | 13.97/13.29 | 6.69/6.66 | 21.10/20.47 | 6.82/6.39 | 10.56/**5.17** |
-| decode 16 | 14.02/14.03 | 7.10/7.18 | 21.55/21.50 | 18.35/18.49 | 14.53/**7.37** |
-| decode 32 | 14.35/14.72 | 6.88/6.93 | 21.76/21.89 | 18.56/18.71 | 15.30/**8.91** |
-| verify 1 (m8) | 14.14/14.37 | 6.85/6.88 | 21.31/21.43 | 6.94/7.06 | 26.11/**8.05** |
-| verify 16 (m128) | 16.96/17.20 | 7.57/7.55 | 24.54/25.19 | 19.87/19.75 | 16.42/**10.32** |
-| verify 32 (m256) | 19.46/19.38 | 9.38/9.30 | 30.66/30.94 | 24.08/23.80 | 17.50/**11.18** |
+| decode 1 (m1) | 14.05/**11.50** | 7.01/**6.55** | 21.78/**18.23** | 7.04/**4.54** | 10.54/**5.32** |
+| decode 16 | 13.68/14.04 | 6.53/6.55 | 21.44/21.54 | 18.74/18.68 | 14.85/**7.38** |
+| decode 32 | 14.29/14.18 | 6.75/6.68 | 21.58/21.37 | 19.04/18.72 | 15.15/**8.57** |
+| verify 1 (m8) | 14.14/**13.36** | 6.85/6.74 | 21.26/**19.06** | 6.96/**5.71** | 26.30/**7.91** |
+| verify 16 (m128) | ~17.0 cuBLAS | ~7.4 | ~25 | ~20 | 16.4/**10.3** |
+| verify 32 (m256) | ~19.4 cuBLAS | ~9.2 | ~31 | ~24 | 17.5/**11.1** |
 Floors: qkv 7.9, o 3.5, pooler 14.0, unpooler 1.75 (m<=8) / 14.1, router 1.8; m256: 9.8/4.5/17.4/17.4/2.7.
-The BF16 shapes are ~85% of our time and still at cuBLAS speed: that is where the remaining ~1.4x is.
+Still at cuBLAS speed: all BF16 shapes at m = 16, 32, 128, 256 (4 of 6 loads). That's where the remaining gap is.
 
 ## Code on main (submission.py is GENERATED: edit dev/sub_template.py + dev/*.cu, run `python dev/build_sub.py`)
-- Router m<=8: true-FP32 split-K kernel dev/router.cu. m 9-32: hi/lo mma kernel dev/gemv7.cu (NA=2, cluster DSMEM
-  split K), configs ROUTER_HL. m>32: one cuBLAS GEMM vs stacked [hi; lo] (FP32 out) + add.
-- BF16 m=1: dev/gemv7.cu configs BF16_GEMV; other m: F.linear (cuBLAS) = SGLang.
-- bench.py: `python bench.py test` (39 cases), `python bench.py bench [filter]` (graph, cold L2; SGLang H200 times
-  filled in -> prints a projected geomean). dev/g5.py (KER=5/6/7 sweeps, env DEEP/WIDE/ILV), dev/g8.py (gemv8).
+- Router: m<=8 true-FP32 dev/router.cu; m 9-32 hi/lo mma dev/gemv7.cu; m>32 one cuBLAS GEMM vs stacked [hi; lo].
+- BF16 m=1: dev/gemv10.cu (grid-stride over chunks of whole rows, W row-major in place, fat 1024-thread blocks
+  share one x copy in smem; FP32 FMA). Configs BF16_G10.
+- BF16 m=8: dev/gemv12.cu (mma.sync m16n8k16, x = A, W = B repacked by _pack12 into 512-B atoms [ks][rg][atom][lane];
+  block = (k-chunk, NG 8-row groups) x WG warps each; x chunk cp.async'd into smem first; per-warp smem slots summed;
+  S>1: FP32 partials in st["ws12"] + counter st["cnt12"], last block of a rg writes BF16). Configs BF16_G12.
+- Other m: F.linear (cuBLAS) = SGLang.
+- bench.py: `python bench.py test` (39 cases), `python bench.py bench [filter]`. Sweeps: dev/g10.py, dev/g12.py
+  ("M,KCU,WG,PF;..." bk...), dev/g11.py (dead variant). Phase timers: /tmp/pj/dbg12.py style (globaltimer per block).
 
-## Budget 2026-10-25: checks used 4/20, scored 3/10.
+## Budget 2026-10-25: checks 6/20, scored 5/10. (Resets 00:00 UTC.)
 
-## What I learned (see NOTES for numbers)
-- H100 pure grid-stride read (dev/rd.py): 37.7 MB 14.85 us, 67 MB 23.8 us. cuBLAS m1: 18.2 / 28.0. Every GEMV
-  structure I built (gemv5-8: register or cp.async-ring W, cluster/DSMEM or atomic split-K, one-wave or many-block
-  grids, sequential-sweep layout, 32-128 KB/SM in flight) lands at cuBLAS +-5% for m1 and is worse for m>=16.
-- H100 -> H200 ratios carried over 1:1 for the m1 kernel (no hidden H200 headroom for this design).
-- m>=16 with swap-AB + x in smem: x traffic = m/RB of W traffic; need RB >= 128-256 rows per block, x pipelined.
-- Clusters: grid must be <= cudaOccupancyMaxActiveClusters * cs or it runs 2 waves (cs 8/16 are tight).
+## What I learned (numbers in NOTES)
+- A graph's kernel launch costs ~1.8-2.6 us over an empty graph (more blocks -> more). Reader slope 3.24 TB/s (H100).
+- Read pattern: only high-occupancy grid-stride or block-contiguous (threads interleaved at 16 B) reads approach
+  peak; per-warp contiguous streams spread over the buffer are ~10-15% slower.
+- x staging traffic = blocks * (m*k_chunk*2): keep blocks fat (1024 threads) and few. Issue x BEFORE W (x requests
+  queued behind a 17 MB W prologue took 5-8 us).
+- float atomicAdd on smem = CAS loop. Cluster size 4 at 1 block/SM: only 30 clusters fit (2 waves for 32).
+- H200 gains exceed H100 gains for these kernels (H100 +1% -> H200 +6% at qkv m8). Don't drop marginal H100 wins.
+- gemv12 m8 qkv (S=4): end phase (slot sum, stcg partials, fence, counter, re-read) ~2.8 us; warps finish with a
+  ~1.8 us spread inside a block. m16/m32: gemv12 5-25% slower than cuBLAS on H100 (smem LDS + mma.sync pressure).
 
 ## Next (ranked)
-1. BISECT from the fast reader: take rd.py's grid-stride kernel (1056x256 thr, 4x16 B loads/thread in flight,
-   W read in plain row-major order) and add m=1 math on CUDA cores (x row in smem as FP32/BF16, FMA, warp-shuffle
-   reduce, atomics per row chunk). If it stays near read speed, grow it (m<=8 with packed B, then mma); if adding
-   the math slows it, that's the culprit to profile. Target qkv m1 ~15 us H100 (~11 on H200).
-2. m16/32: block = 128-256 rows (each warp 2-4 stripes sharing B frags), x chunks pipelined in smem; or try
-   cuBLASLt algo search / DeepGEMM / FlashInfer GEMMs (in the judge image only) for m=16..256.
-3. Router m<=8 FP32 (5.2-8 us vs 1.8 floor) and m128/256 (10-11 us vs 2.2-2.7): native hi/lo with RB=256 blocks.
-4. Handoff (posted in COORD): router hi/lo kernel for layer.
+1. gemv12 split-K end phase: release/acquire atomics instead of fence+atomic; or red.global into ws + one counter;
+   or no split K where n/8 divides 128 (o, pooler m8 already S=1). Also slot sum cost (WG-deep).
+2. m16/m32 (decode 16/32 = 2 loads): gemv12 with TT=1/2 is compute/smem-heavy: try ldmatrix for x A frags (x row
+   major in smem, ldmatrix.x4 gives a0..a3 for 16 tokens x 16 k: but our k permutation must match: permute x columns
+   when staging so ldmatrix yields the right slots), and more warps per rg (WG 4-8) so fewer rgs per block.
+3. m128/256 (verify 16/32): cuBLAS ~20-30% over floor; would need a wgmma/TMA kernel (or DeepGEMM in the judge).
+4. Router m<=8 (5.3-7.9 us vs 1.8 floor): FP32 weights 8 MB; a gemv10-style FP32 kernel might give ~4.

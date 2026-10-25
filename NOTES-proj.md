@@ -68,3 +68,13 @@
   (ATOMS.CAST.SPIN): never use it for reductions; (2) x staging queued behind the W prologue takes 5-8 us (globaltimer
   per phase, /tmp/pj/dbg11.py); issuing no W before x lands: staging 1.5 us; (3) loop = W-bound ~2.9 TB/s; (4) split-K
   end phase (stcg partials, fence, counter, re-read) ~3 us serialized. qkv m8 best so far 19.7 (cuBLAS 18.1).
+- dev/gemv12.cu (m=8): one warp group per 8-row group (block = NG rgs x WG warps, all concurrent, no unit loop), x
+  chunk cp.async'd first, per-warp smem slots (WG-deep sums), S=1 where n/8 divides the grid. H100 vs cuBLAS:
+  qkv m8 17.8 (18.0, S=4), pooler m8 26.3 (27.5, KC=K), o 9.2 (9.4), unpooler-1k 7.3 (9.3; 32 blocks x 512 best: x
+  staging 64 KB/block). m16/m32: 5-25% slower than cuBLAS. Phase timers (qkv m8): staged 1.0, warp loop ends
+  9.5-13.6 (1.8 spread inside a block), split-K end ~2.8 us. Late-W-prologue variant (G12_LATE_W): no change.
+- cuBLAS swap-AB (W @ x^T) at m16-256: no faster than F.linear.
+- Bug caught by bench test: gemv12 left partials in the router's self-zeroing st["ws"] -> router m8 failed. gemv12 has
+  its own ws12/cnt12 now. Rule: every split-K kernel gets its own workspace.
+- check 1c6ae4b67d9d4e46 (e71d015): 1.1772x; H200 verify1: qkv 13.36 (14.14), o 6.74 (6.85), pooler 19.06 (21.26),
+  unpooler 5.71 (6.96). submit a55d6b55a2604db3: 1.1757x (CI 1.158-1.193). New best.
