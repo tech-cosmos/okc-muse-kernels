@@ -3,8 +3,8 @@
 Updated 2026-10-25 ~21:10 UTC (session 2).
 
 ## Board
-- **Best: submit fd765502babc4c69 = 4355a16, 1.1251x (CI 1.108-1.142), rank 831.** #1 1.61x, ~#10 1.53x.
-- main = 574e423 (= 4355a16 + BF16 m=1 on gemv7): check c62f7f1d 1.1235x, same within noise (m1 shapes +3-6%).
+- **Best: submit fd765502babc4c69 = 25e165b, 1.1251x (CI 1.108-1.142), rank 831.** #1 1.61x, ~#10 1.53x.
+- main = 955bbc6 (= 25e165b + BF16 m=1 on gemv7): check c62f7f1d 1.1235x, same within noise (m1 shapes +3-6%).
 
 ## Per-shape H200 (us), SGLang / ours (check c62f7f1d); floor in TASK.md
 | load | qkv_gate | o | pooler | unpooler | router |
