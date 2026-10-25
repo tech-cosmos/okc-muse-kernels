@@ -47,18 +47,27 @@ Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
 ## Ranked ideas
-1. Decode (4 of 6 loads, 1.1-1.95x): cut instructions per weight word. Old kernel ~22 instr/word of which
-   dq+mma = 13; rest = per-item overhead (items are tiny: 1 rt pair x 8 kc per warp): smem red zeroing,
-   atomics, 3 barriers, epilogue, pointer setup (LDL!). Options: bigger items (R=2) at same regs; or
-   moe_big-style decode with split-K across CTAs + fp32 red.global into a zeroed accum (zero it in a
-   multi-CTA route kernel), gemm2 computing silu*up from fp32 partials while staging x, pipelined across
-   items (flattened (item, kc) issue cursor). Check every candidate with ncu inst count + issue %.
-2. bs1: 3 experts; moe_big gemm2 has only 96 items -> idle SMs; needs split-K.
-3. Big-M: ~2.1 TB/s locally (ncu: issue 48%, DRAM 57%). Tail: items/CTA ~3-6. Fuse gemm13+gemm2 in one
-   persistent launch with per-expert completion counters; scale LUT LDS -> fewer ops.
-4. Fuse norm into gemm2; route ~2 us.
+1. Big-M (bs128 1.82x, bs256 1.75x; 2 of 6 shapes) is now the largest gap: 2.7 / 2.1 TB/s on H200 vs ~4 for
+   decode. Profile moe_big on the ncu proxy (`/tmp/ncu_t.sh 256 old118`-style; sk_ncu.py's "old" mode
+   forces the old path for any M). Ideas: TMA weights + x per kc staged once per CTA (moe_big structure, but
+   bulk copies, 1 CTA/SM, consumer warps = row tiles), persistent rows balanced by cost; fuse route.
+2. Decode bs32 (1.52x): experts with > 8 tokens re-read weights per 8-token group (+9.4% bytes at bs32,
+   +3.2% bs16 on typical routings). 16-token groups with an NG=2 path (tried, see dead ends) need (a) no
+   spills (NG=2 path out of the hot loop or a separate kernel instantiation chosen per CTA) and (b) CTA ranges
+   balanced by cost (NG=2 rows ~1.3x), not row count.
+3. Launch overhead: PDL (programmatic dependent launch: cudaLaunchKernelEx + griddepcontrol) so gemm2/norm
+   prologues (barrier init, LUT, meta) overlap the previous kernel; norm2 fused into gemm2 is hard (needs all
+   of y per token: a grid-wide dependency).
+4. Decode instruction trims (H200 is close to issue-bound again at bs8/16): LUT index ops (12/unit), 4-rt units
+   (needs 16 KB/stage), all-lane mbarrier arrive vs lane-0 arrive.
+5. Clean-up: remove moe_sk / moe_tk / moe_gemm / route2 / act from submission.py (compile time ~40 s now).
 
 ## Dead ends
+- moe_tk2 with 16-token groups + per-segment NG=2 path (s3): proxy 3-14% slower on most routings (spills
+  48-64 B; rows balanced by count while NG=2 rows cost more), one bs32 routing 12% faster. Reverted.
+- Register-ring stream-K decode (moe_sk, s3): ~19-21 instr/word, latency-bound (13.9 cycles/issue at 4
+  warps/scheduler); TMA ring + x in registers is what worked.
+- moe_tk with NC=16 consumer warps: worse than NC=8 (proxy 186 vs 159 at bs16).
 - moe_big with 2 row tiles/warp (8 warps): spills at 128 regs, worse. 16 warps x 1 rt, 1 CTA/SM: worse
   than 8 warps x 2 CTA/SM (tail: halving item size helped 10%). NS=4: worse than NS=8.
 - moe_stream (decode): old item structure + per-lane cp.async ring of weights AND x (no barriers, D=7 ahead
