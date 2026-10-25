@@ -956,9 +956,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk(const uint4* __restri
   for (int R = r0; R < r1; ++R) {
     if (R >= seg_end) {  // new (expert, token group) segment: x fragments for this warp's k chunks
       while (s_rs[a + 1] <= R) ++a;
-      seg_start = s_rs[a];
-      seg_end = s_rs[a + 1];
-      const int gi = (R - seg_start) / RPE;
+      const int gi = (R - s_rs[a]) / RPE;
+      seg_start = s_rs[a] + gi * RPE;  // segment = (expert, token group)
+      seg_end = seg_start + RPE;
       const int e = s_e[a];
       off = s_off[e] + gi * 8;
       n = min(8, s_off[e + 1] - off);
@@ -1160,9 +1160,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
   for (int R = r0; R < r1; ++R) {
     if (R >= seg_end) {
       while (s_rs[a + 1] <= R) ++a;
-      seg_start = s_rs[a];
-      seg_end = s_rs[a + 1];
-      const int gi = (R - seg_start) / RPE;
+      const int gi = (R - s_rs[a]) / RPE;
+      seg_start = s_rs[a] + gi * RPE;  // segment = (expert, token group)
+      seg_end = seg_start + RPE;
       const int e = s_e[a];
       gsc = gs[e] * 256.0f;
       off = s_off[e] + gi * 8;
