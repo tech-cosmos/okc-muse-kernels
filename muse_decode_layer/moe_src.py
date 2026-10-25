@@ -246,7 +246,7 @@ __global__ void __launch_bounds__(1024) moe_route(const int* __restrict__ ids, i
     }
     base[tid] = incl - c;
     meta[33 + tid] = incl - c;
-    if (tid == 31) meta[65] = incl;
+    if (tid == 31) { meta[65] = incl; meta[66] = 0; meta[67] = 0; }
     // rank among active experts: heavier first, ties by id
     int rank = 0;
     for (int j = 0; j < 32; ++j) {
@@ -329,6 +329,198 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
   *reinterpret_cast<uint4*>(out + (size_t)tok * NOUT + tid * 8) = o;
 }
 
+
+__device__ __forceinline__ uint32_t smem_u32(const void* p) {
+  return (uint32_t)__cvta_generic_to_shared(p);
+}
+__device__ __forceinline__ void cp_async16(void* dst, const void* src, int bytes) {
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(smem_u32(dst)), "l"(src), "r"(bytes));
+}
+__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
+template <int N>
+__device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+
+
+template <int NS, int NG, int NW, typename F>
+__device__ __forceinline__ void big_kloop(float (&acc)[8][4], const F& issue, const uint4* __restrict__ sb, int rt,
+                                          const uint4* xs, const uint4* wsm, const uint32_t* slut,
+                                          int warp, int lane, int g, int t) {
+  constexpr int XS = 64 * 9, WS = NW * 32;
+      
+#pragma unroll
+  for (int gi = 0; gi < 8; ++gi)
+#pragma unroll
+    for (int r = 0; r < 4; ++r) acc[gi][r] = 0.f;
+  uint4 sc, scn = __ldg(sb + ((size_t)rt * 8) * 32 + lane);
+#pragma unroll 1
+  for (int kc0 = 0; kc0 < 64; kc0 += NS) {
+    if ((kc0 & 7) == 0) {
+      sc = scn;
+      if (kc0 < 56) scn = __ldg(sb + ((size_t)rt * 8 + (kc0 >> 3) + 1) * 32 + lane);
+    } else {
+      sc.x = sc.z; sc.y = sc.w;  // NS == 4, second half of the scale group
+    }
+#pragma unroll
+    for (int u = 0; u < NS; ++u) {
+      const int kc = kc0 + u;
+      cp_wait<NS - 2>();
+      __syncthreads();
+      if (kc + NS - 1 < 64) issue(kc + NS - 1);
+      cp_commit();
+      const uint4 wv = wsm[u * WS + warp * 32 + lane];
+      const uint32_t sw = u4get(sc, u >> 1) >> ((u & 1) * 16);
+      const uint32_t s0 = slut[sw & 0xFF], s1 = slut[(sw >> 8) & 0xFF];
+#pragma unroll
+      for (int jp = 0; jp < 2; ++jp) {
+        uint32_t af[2][4];
+#pragma unroll
+        for (int jj = 0; jj < 2; ++jj) dq(u4get(wv, jp * 2 + jj), s0, s1, af[jj]);
+#pragma unroll
+        for (int gi = 0; gi < 8; ++gi) {
+          if (gi < NG) {
+            const uint4 b = xs[u * XS + (gi * 8 + g) * 9 + t * 2 + jp];
+            mma16816(acc[gi], af[0], b.x, b.y);
+            mma16816(acc[gi], af[1], b.z, b.w);
+          }
+        }
+      }
+    }
+  }
+}
+
+// Big-M grouped GEMM. Item = (active expert, 256 packed rows); each of the 16 warps owns one 16-row tile
+// over the full K (gated: warps 0-7 gate tiles, 8-15 the matching up tiles), so every weight is
+// dequantized once per 64-token pass. All tokens' activations for a 64-wide k chunk are staged in smem
+// (shared by the 16 warps) together with each warp's weights for that chunk, in an NS-stage cp.async
+// ring. Items are taken from a global counter (heaviest experts first).
+template <bool GATED, int NS, int NW, int MB>
+__global__ void __launch_bounds__(NW * 32, MB) moe_big(
+    const uint4* __restrict__ Wq, const uint4* __restrict__ Ws, const float* __restrict__ gs,
+    const uint32_t* __restrict__ lut, const __nv_bfloat16* __restrict__ X,
+    int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
+  constexpr int NRT = GATED ? 2 * NOUT / 16 : NOUT / 16;
+  constexpr int IPE = GATED ? NOUT / (8 * NW) : NOUT / (16 * NW);  // items per expert
+  constexpr int XS = 64 * 9;                             // uint4 per x stage (64 rows, 144 B stride)
+  constexpr int WS = NW * 32;                            // uint4 per weight stage
+  constexpr int HW = NW / 2;
+  static_assert(NS == 4 || NS == 8, "NS");
+  extern __shared__ uint4 smem[];
+  uint4* xs = smem;
+  uint4* wsm = smem + NS * XS;
+  __shared__ uint32_t slut[256];
+  __shared__ int s_item;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
+  for (int i = tid; i < 256; i += NW * 32) slut[i] = lut[i];
+  const int nitems = meta[0] * IPE;
+  int* counter = meta + (GATED ? 66 : 67);
+  for (;;) {
+    __syncthreads();
+    if (tid == 0) s_item = atomicAdd(counter, 1);
+    __syncthreads();
+    const int item = s_item;
+    if (item >= nitems) break;
+    const int a = item / IPE, rb = item - a * IPE;
+    const int e = meta[1 + a];
+    const int off = meta[33 + e];
+    const int n = meta[34 + e] - off;
+    const uint4* wb = Wq + (size_t)e * NRT * 64 * 32;
+    const uint4* sb = Ws + (size_t)e * NRT * 8 * 32;
+    const int rt = GATED ? ((warp >= HW) ? NOUT / 16 : 0) + rb * HW + (warp % HW) : rb * NW + warp;
+    const float gsc = gs[e] * 256.0f;
+    for (int p0 = 0; p0 < n; p0 += 64) {
+      const int nv = min(64, n - p0);
+      const int ng = (nv + 7) >> 3;
+      // x chunks this thread copies: c = tid + h * NW * 32 -> row c >> 3, 16 B segment c & 7
+      constexpr int XH = 512 / (NW * 32);
+      const uint4* xsrc[XH];
+      uint4* xdst[XH];
+      int xbytes[XH];
+      bool xdo[XH];
+#pragma unroll
+      for (int h = 0; h < XH; ++h) {
+        const int c = tid + h * NW * 32, xrow = c >> 3;
+        xdo[h] = xrow < ng * 8;
+        xbytes[h] = xrow < nv ? 16 : 0;
+        int src = 0;
+        if (xrow < nv) src = GATED ? (sroutes[off + p0 + xrow] >> 3) : (off + p0 + xrow);
+        xsrc[h] = reinterpret_cast<const uint4*>(X + (size_t)src * KD) + (c & 7);
+        xdst[h] = xs + xrow * 9 + (c & 7);
+      }
+      const uint4* wsrc = wb + (size_t)rt * 64 * 32 + lane;
+      uint4* wdst = wsm + warp * 32 + lane;
+      auto issue = [&](int kc) {
+        const int s = kc % NS;
+#pragma unroll
+        for (int h = 0; h < XH; ++h)
+          if (xdo[h]) cp_async16(xdst[h] + s * XS, xsrc[h] + kc * 8, xbytes[h]);
+        cp_async16(wdst + s * WS, wsrc + kc * 32, 16);
+      };
+#pragma unroll
+      for (int s = 0; s < NS - 1; ++s) { issue(s); cp_commit(); }
+      float acc[8][4];
+      switch (ng) {
+        case 1: big_kloop<NS, 1, NW>(acc, issue, sb, rt, xs, wsm, slut, warp, lane, g, t); break;
+        case 2: big_kloop<NS, 2, NW>(acc, issue, sb, rt, xs, wsm, slut, warp, lane, g, t); break;
+        case 3: case 4: big_kloop<NS, 4, NW>(acc, issue, sb, rt, xs, wsm, slut, warp, lane, g, t); break;
+        default: big_kloop<NS, 8, NW>(acc, issue, sb, rt, xs, wsm, slut, warp, lane, g, t); break;
+      }
+      cp_wait<0>();
+      __syncthreads();
+      float* red = reinterpret_cast<float*>(smem);  // gated: up tiles hand their values to the gate warps
+      if (GATED && warp >= HW) {
+#pragma unroll
+        for (int gi = 0; gi < 8; ++gi)
+          if (gi < ng)
+#pragma unroll
+            for (int r = 0; r < 4; ++r) red[(((warp - HW) * 8 + gi) * 4 + r) * 32 + lane] = acc[gi][r];
+      }
+      if (GATED) __syncthreads();
+      if (!GATED || warp < HW) {
+#pragma unroll
+        for (int gi = 0; gi < 8; ++gi) {
+          if (gi < ng) {
+#pragma unroll
+            for (int r = 0; r < 4; ++r) {
+              const int col = rt * 16 + g + ((r & 2) ? 8 : 0);
+              const int tok = p0 + gi * 8 + t * 2 + (r & 1);
+              if (tok < n) {
+                const float v = acc[gi][r] * gsc;
+                if (GATED) {
+                  const float u = red[((warp * 8 + gi) * 4 + r) * 32 + lane] * gsc;
+                  Out[(size_t)(off + tok) * NOUT + col] = __float2bfloat16(v / (1.0f + __expf(-v)) * u);
+                } else {
+                  Out[(size_t)sroutes[off + tok] * NOUT + col] = __float2bfloat16(v);
+                }
+              }
+            }
+          }
+        }
+      }
+      __syncthreads();  // red / stage buffers are reused by the next pass
+    }
+  }
+}
+
+template <bool GATED, int NS, int NW, int MB>
+static int launch_big(const void* wq, const void* ws, const void* gs, const void* lut, const void* x,
+                      const void* meta, const void* sroutes, void* out, cudaStream_t st) {
+  static int grid = 0;
+  constexpr int SMEM = NS * (64 * 9 + NW * 32) * 16;
+  if (!grid) {
+    int dev, nsm, occ;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
+    cudaFuncSetAttribute(moe_big<GATED, NS, NW, MB>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, moe_big<GATED, NS, NW, MB>, NW * 32, SMEM);
+    if (occ < 1) occ = 1;
+    grid = nsm * occ;
+  }
+  moe_big<GATED, NS, NW, MB><<<grid, NW * 32, SMEM, st>>>(
+      (const uint4*)wq, (const uint4*)ws, (const float*)gs, (const uint32_t*)lut, (const __nv_bfloat16*)x,
+      (int*)meta, (const int*)sroutes, (__nv_bfloat16*)out);
+  return (int)cudaGetLastError();
+}
+
 template <int R, int G, bool GATED, int MB = (R * G == 1) ? 4 : 2>
 static int launch_gemm(const void* wq, const void* ws, const void* gs, const void* lut, const void* x,
                        const void* meta, const void* sroutes, void* out, cudaStream_t st) {
@@ -359,6 +551,11 @@ static int launch_gemm(const void* wq, const void* ws, const void* gs, const voi
     case CFG(1, 4): return launch_gemm<1, 4, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
     case CFG(2, 4): return launch_gemm<2, 4, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
     case CFG(1, 8): return launch_gemm<1, 8, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
+    case 104: return launch_big<GATED, 4, 8, 2>(wq, ws, gs, lut, x, meta, sr, out, st);     \
+    case 108: return launch_big<GATED, 8, 16, 1>(wq, ws, gs, lut, x, meta, sr, out, st);    \
+    case 118: return launch_big<GATED, 8, 8, 2>(wq, ws, gs, lut, x, meta, sr, out, st);     \
+    case 144: return launch_big<GATED, 4, 4, 4>(wq, ws, gs, lut, x, meta, sr, out, st);     \
+    case 148: return launch_big<GATED, 8, 4, 2>(wq, ws, gs, lut, x, meta, sr, out, st);     \
   }                                                                                         \
   return -1;
 
@@ -505,11 +702,11 @@ def _plan(M):
         return 10, 10
     if M <= 32:
         return 11, 11
-    return 22, 22
+    return 118, 118
 
 
 PLAN_OVERRIDE = None
-_CFGS = (10, 11, 21, 22, 41, 42, 14, 24, 18)
+_CFGS = (10, 11, 21, 22, 41, 42, 14, 24, 18, 104, 108, 118, 144, 148)
 
 
 def kernel_fn(data, st):
@@ -521,7 +718,7 @@ def kernel_fn(data, st):
     tw = data["topk_weights"].float().contiguous()
     M = x.shape[0]
     dev = x.device
-    meta = torch.empty(66, dtype=torch.int32, device=dev)
+    meta = torch.empty(68, dtype=torch.int32, device=dev)
     sroutes = torch.empty(M * TOP_K, dtype=torch.int32, device=dev)
     inter = torch.empty((M * TOP_K, I), dtype=torch.bfloat16, device=dev)
     y = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)

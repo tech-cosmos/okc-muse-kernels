@@ -373,7 +373,7 @@ def _use_moe(tokens):
 def _moe_bucket(state, local_ids):
     """moe_src's route kernel: this GPU's routes bucketed by expert (meta, sorted route ids)."""
     dev = local_ids.device
-    meta = torch.empty(66, dtype=torch.int32, device=dev)
+    meta = torch.empty(68, dtype=torch.int32, device=dev)
     sroutes = torch.empty(local_ids.numel(), dtype=torch.int32, device=dev)
     state["moe"]["lib"].moe_route_launch(local_ids, 0, LOCAL_EXPERTS, meta, sroutes)
     return meta, sroutes
