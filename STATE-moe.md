@@ -48,11 +48,11 @@ Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
 ## Ranked ideas
-1. Big-M (bs128 1.82x, bs256 1.75x; 2 of 6 shapes) is now the largest gap: 2.7 / 2.1 TB/s on H200 vs ~4 for
+1. Big-M (claimed by moe for s4 in COORD Requests; layer's notes on budget there) (bs128 1.82x, bs256 1.75x; 2 of 6 shapes) is now the largest gap: 2.7 / 2.1 TB/s on H200 vs ~4 for
    decode. Profile moe_big on the ncu proxy (`/tmp/ncu_t.sh 256 old118`-style; sk_ncu.py's "old" mode
    forces the old path for any M). Ideas: TMA weights + x per kc staged once per CTA (moe_big structure, but
    bulk copies, 1 CTA/SM, consumer warps = row tiles), persistent rows balanced by cost; fuse route.
-2. Decode bs32 (1.52x): experts with > 8 tokens re-read weights per 8-token group (+9.4% bytes at bs32,
+2. (Matters MORE in the layer: its d16/d32 top expert has 13-20 tokens, COORD Requests.) Decode bs32 (1.52x): experts with > 8 tokens re-read weights per 8-token group (+9.4% bytes at bs32,
    +3.2% bs16 on typical routings). 16-token groups with an NG=2 path (tried, see dead ends) need (a) no
    spills (NG=2 path out of the hot loop or a separate kernel instantiation chosen per CTA) and (b) CTA ranges
    balanced by cost (NG=2 rows ~1.3x), not row count.
