@@ -61,6 +61,26 @@ CUDA_SRC = r"""
 #include <cuda.h>
 #include <cudaTypedefs.h>
 
+// launch, optionally as a PDL secondary (programmatic stream serialization: CUDA-graph capturable)
+static int g_pdl = 4, g_twpf = 0, g_blk = 0;  // g_pdl bits: 1 decode gemm2, 2 decode norm2, 4 big-M kernels
+template <typename... KA, typename... AA>
+static int launch_k(void (*k)(KA...), int grid, int block, int smem, cudaStream_t st, bool pdl, AA... args) {
+  cudaLaunchConfig_t lc = {};
+  lc.gridDim = dim3(grid);
+  lc.blockDim = dim3(block);
+  lc.dynamicSmemBytes = smem;
+  lc.stream = st;
+  cudaLaunchAttribute la[1];
+  la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  la[0].val.programmaticStreamSerializationAllowed = 1;
+  lc.attrs = la;
+  lc.numAttrs = pdl ? 1 : 0;
+  cudaLaunchKernelEx(&lc, k, ((KA)args)...);
+  return (int)cudaGetLastError();
+}
+int64_t moe_set_pdl(int64_t v, int64_t twpf) { g_pdl = (int)v; g_twpf = (int)twpf; return 0; }
+int64_t moe_set_blk(int64_t v) { g_blk = (int)v; return 0; }
+
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 
@@ -233,6 +253,7 @@ __global__ void __launch_bounds__(1024) moe_route(const int* __restrict__ ids, i
                                                   int* __restrict__ meta, int* __restrict__ sroutes) {
   __shared__ int cnt[32], base[32], fill[32];
   const int tid = threadIdx.x;
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (tid < 32) { cnt[tid] = 0; fill[tid] = 0; }
   __syncthreads();
   for (int i = tid; i < nroutes; i += blockDim.x) {
@@ -251,6 +272,7 @@ __global__ void __launch_bounds__(1024) moe_route(const int* __restrict__ ids, i
     base[tid] = incl - c;
     meta[33 + tid] = incl - c;
     if (tid == 31) { meta[65] = incl; meta[66] = 0; meta[67] = 0; }
+    meta[68 + tid] = 0;  // moe_twf: gemm13 items done per expert
     // rank among active experts: heavier first, ties by id
     int rank = 0;
     for (int j = 0; j < 32; ++j) {
@@ -282,6 +304,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     float4 a = wp[0], b = wp[1];
     wv[0] = a.x; wv[1] = a.y; wv[2] = a.z; wv[3] = a.w; wv[4] = b.x; wv[5] = b.y; wv[6] = b.z; wv[7] = b.w;
   }
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
   float v[8][8], ss[8];
   bool loc[8];
 #pragma unroll
@@ -800,6 +823,7 @@ __global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y, co
     float4 a = wp[0], b = wp[1];
     wv[0] = a.x; wv[1] = a.y; wv[2] = a.z; wv[3] = a.w; wv[4] = b.x; wv[5] = b.y; wv[6] = b.z; wv[7] = b.w;
   }
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
   float v[8][8], ss[8];
   bool loc[8];
 #pragma unroll
@@ -885,6 +909,9 @@ __device__ __forceinline__ void mbar_wait(uint64_t* b, int parity) {
       "{\n.reg .pred p;\nWAIT_%=:\n"
       "mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
       "@!p bra WAIT_%=;\n}\n" ::"r"(smem_u32(b)), "r"(parity) : "memory");
+}
+__device__ __forceinline__ void prefetch_l2(const void* src, int bytes) {
+  asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(src), "r"(bytes) : "memory");
 }
 __device__ __forceinline__ void bulk_g2s(void* dst, const void* src, int bytes, uint64_t* bar) {
   asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
@@ -1036,12 +1063,25 @@ static int launch_tk(const void* wq, const void* s2, const void* lut, const void
 // plain stores (no atomics, no zeroing). GATED (gemm13): every CTA computes the routing itself (deterministic,
 // identical in all CTAs; CTA 0 publishes meta / sroutes / inv for the later kernels), epilogue silu(gate) * up
 // -> bf16 inter[pos]. !GATED (gemm2): routing from meta, epilogue writes FP32 y[pos] (x global scale later).
+// row R (local index in its expert's rows, ng token groups) -> row pair rp, group gi. blk = 0 or ng = 1: groups one
+// after the other (rp fastest); else blocks of blk rps cycle through the groups, so a CTA re-reads the same weights
+// for the next group right away (from L2)
+__device__ __forceinline__ int tk2_map(int local, int ng, int blk, int rpe, int& gi) {
+  if (ng == 1 || !blk) {
+    gi = local / rpe;
+    return local & (rpe - 1);
+  }
+  const int b = local / (blk * ng), w = local - b * blk * ng;
+  gi = w / blk;
+  return b * blk + (w - gi * blk);
+}
+
 template <int NRT, int NC, int NSTG, bool GATED>
 __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
     const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, const uint32_t* __restrict__ lut,
     const float* __restrict__ gs, const __nv_bfloat16* __restrict__ X, const int* __restrict__ ids, int nroutes,
     int start, int count, int* __restrict__ meta, int* __restrict__ sroutes, int* __restrict__ inv,
-    void* __restrict__ Out) {
+    void* __restrict__ Out, int flags) {
   static_assert(NC == 8, "routing uses 8 warps x 32 ids");
   constexpr int RPE = NRT / 2;
   constexpr int NQ = 64 / NC;
@@ -1058,8 +1098,12 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], NC * 32); }
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
-  if (GATED) {
-    // routing (M * 8 <= 256 routes): warp w takes routes [32 w, 32 w + 32)
+  const int blk = flags & 0xFFFF;
+  // PDL: let the next kernel's CTAs launch as soon as SMs free up (they wait for us before reading our output)
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  if (GATED || (flags >> 16)) {
+    // routing (M * 8 <= 256 routes): warp w takes routes [32 w, 32 w + 32); gemm2 recomputes it (same result)
+    // instead of reading gemm13's meta, so its producer can stream w2 before gemm13 has finished
     int e = -1, rank = 0;
     if (warp < 8) {
       s_wc[warp][lane] = 0;
@@ -1104,14 +1148,14 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
     if (e >= 0) {
       const int i = warp * 32 + lane, pos = s_wc[warp][e] + rank;
       s_srt[pos] = i;
-      if (blockIdx.x == 0) { sroutes[pos] = i; inv[i] = pos; }
+      if (GATED && blockIdx.x == 0) { sroutes[pos] = i; inv[i] = pos; }
     }
-    if (blockIdx.x == 0 && tid < 33) {
+    if (GATED && blockIdx.x == 0 && tid < 33) {
       meta[33 + tid] = s_off[tid];
       if (tid < 32) meta[1 + tid] = s_e[tid];
       if (tid == 0) meta[0] = s_nact;
     }
-  } else {
+  } else {  // gemm2 not a PDL secondary: gemm13's routing
     if (tid < 33) s_off[tid] = meta[33 + tid];
     if (tid < 32) s_e[tid] = meta[1 + tid];
     if (tid == 0) s_nact = meta[0];
@@ -1139,7 +1183,8 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
       for (int R = r0; R < r1; ++R) {
         while (s_rs[a + 1] <= R) ++a;
         const int e = s_e[a];
-        const int lr = (R - s_rs[a]) & (RPE - 1);
+        int gi;
+        const int lr = tk2_map(R - s_rs[a], (s_rs[a + 1] - s_rs[a]) / RPE, blk, RPE, gi);
         const uint4* src = Wq + ((size_t)e * NRT * 64 + lr * 64) * 32;
         const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
         for (int q = 0; q < NQ; ++q, ++i) {
@@ -1155,16 +1200,27 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
     }
     return;
   }
+  if (!GATED) asm volatile("griddepcontrol.wait;" ::: "memory");  // inter is gemm13's output
   uint4 xf[NQ][2];
-  int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0, st = 0, ph = 0, rb = 0;
+  int a = 0, seg_end = -1, seg_start = 0, rpb = 0, off = 0, n = 0, st = 0, ph = 0, rb = 0;
   float gsc = 0.f;
   const uint4* wsm = smem + warp * 32 + lane;
   for (int R = r0; R < r1; ++R) {
     if (R >= seg_end) {
       while (s_rs[a + 1] <= R) ++a;
-      const int gi = (R - s_rs[a]) / RPE;
-      seg_start = s_rs[a] + gi * RPE;  // segment = (expert, token group)
-      seg_end = seg_start + RPE;
+      // segment = rows of one (expert, token group) in a row: the whole expert, or blk rps when it has > 1 group
+      const int ng = (s_rs[a + 1] - s_rs[a]) / RPE;
+      int gi;
+      const int lr = tk2_map(R - s_rs[a], ng, blk, RPE, gi);
+      if (ng == 1 || !blk) {
+        rpb = 0;
+        seg_start = s_rs[a] + gi * RPE;
+        seg_end = seg_start + RPE;
+      } else {
+        rpb = lr - lr % blk;
+        seg_start = R - lr % blk;
+        seg_end = seg_start + blk;
+      }
       const int e = s_e[a];
       gsc = gs[e] * 256.0f;
       off = s_off[e] + gi * 8;
@@ -1214,7 +1270,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(
 #pragma unroll
       for (int r = 0; r < 4; ++r) red[((warp * 2 + ii) * 4 + r) * 32 + lane] = acc[ii][r];
     asm volatile("bar.sync 1, %0;" ::"n"(NC * 32) : "memory");
-    const int rp = (R - seg_start) & (RPE - 1);
+    const int rp = rpb + (R - seg_start);
     const int ct = tid, l = ct & 31, gg = l >> 2, tt = l & 3;
     if (GATED) {
       if (ct < 128) {
@@ -1258,10 +1314,9 @@ static int launch_tk2(const void* wq, const void* s2, const void* lut, const voi
     cudaFuncSetAttribute(moe_tk2<NRT, NC, NSTG, GATED>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
-  moe_tk2<NRT, NC, NSTG, GATED><<<grid, (NC + 1) * 32, SMEM, st>>>(
+  return launch_k(moe_tk2<NRT, NC, NSTG, GATED>, grid, (NC + 1) * 32, SMEM, st, !GATED && (g_pdl & 1),
       (const uint4*)wq, (const uint32_t*)s2, (const uint32_t*)lut, (const float*)gs, (const __nv_bfloat16*)x,
-      (const int*)ids, nroutes, start, count, (int*)meta, (int*)sroutes, (int*)inv, out);
-  return (int)cudaGetLastError();
+      (const int*)ids, nroutes, start, count, (int*)meta, (int*)sroutes, (int*)inv, out, g_blk | ((!GATED && (g_pdl & 1)) << 16));
 }
 
 #define SK_DISPATCH(NRT, XR)                                                                 \
@@ -1525,13 +1580,19 @@ static int launch_tb(const void* wb, const void* sb, const void* gs, const void*
 // inter in that order too. 2 consumer warpgroups (warp w: RT 16-row tiles), 1 producer warp, 1 CTA/SM.
 struct TMaps { CUtensorMap m[4]; };  // box rows 8, 16, 32, 64
 
-template <int RT, bool GATED>
+// NW = consumer warps: 8 (RT 2, 2 consumer WGs + a producer WG, setmaxnreg) or 16 (RT 1, 4 consumer WGs + a
+// producer warp; same weight/scale packing: warp 2w+r of NW 16 = (warp w, tile r) of NW 8; gated: even warps gate,
+// odd warps up, joined through smem in the epilogue).
+template <int RT, bool GATED, int NW = 8>
 struct TWC {
   static constexpr int XB = 64 * 128;
-  static constexpr int WB = 8 * RT * 512;
-  static constexpr int SB = 8 * RT * 64;
+  static constexpr int WB = NW * RT * 512;
+  static constexpr int SB = NW * RT * 64;
   static constexpr int STG = XB + WB + SB;
-  static constexpr int NRB = (GATED ? 2 * NOUT : NOUT) / 16 / (8 * RT);
+  static constexpr int NRB = (GATED ? 2 * NOUT : NOUT) / 16 / (NW * RT);
+  static constexpr int XCH = (NW == 16 && GATED) ? 8 * 32 * 32 * 4 : 0;  // gate/up exchange
+  static constexpr int THREADS = NW == 16 ? 16 * 32 + 32 : 384;
+  static constexpr int PS = RT == 4 ? 32 : 64;  // tokens per pass
 };
 
 __device__ __forceinline__ void wg_fence() { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
@@ -1552,11 +1613,44 @@ __device__ __forceinline__ uint64_t sw128_desc(const void* p) {
 
 //@@WGMMA@@
 
-template <int RT, int KG, int N, int NSTG, bool GATED>
+template <int RT, int N, bool GATED, int NW>
+__device__ __forceinline__ void tw_epi(float (&acc)[RT][N / 2], int lane, int warp, int nv, int off, int rb, float gsc,
+                                       const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
+  const int g = lane >> 2, t = lane & 3;
+  constexpr int H = GATED ? RT / 2 : RT;
+#pragma unroll
+  for (int r = 0; r < H; ++r) {
+    const int tile = rb * NW * H + warp * H + r;
+#pragma unroll
+    for (int gi = 0; gi < N / 8; ++gi) {
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const int tok = gi * 8 + t * 2 + (q & 1);
+        if (tok < nv) {
+          const int col = tile * 16 + g + ((q & 2) ? 8 : 0);
+          const float v = acc[r][gi * 4 + q] * gsc;
+          if (GATED) {
+            const float u = acc[r + H][gi * 4 + q] * gsc;
+            // logical (permuted) position of physical k = col for gemm2's B
+            const int c = col & 63;
+            const int lc = (col & ~63) | (((c >> 2) & 3) << 4) | (((c >> 1) & 1) << 3) | ((c >> 4) << 1) | (c & 1);
+            Out[(size_t)(off + tok) * NOUT + lc] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+          } else {
+            Out[(size_t)sroutes[off + tok] * NOUT + col] = __float2bfloat16(v);
+          }
+        }
+      }
+    }
+  }
+}
+
+// DYN: one main loop for both GEMMs (moe_twf), epilogue picked by g2 at run time
+template <int RT, int KG, int N, int NSTG, bool GATED, int NW, bool DYN = false>
 __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
                                         const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
-                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
-  using C = TWC<RT, GATED>;
+                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out,
+                                        bool g2 = false) {
+  using C = TWC<RT, GATED, NW>;
   constexpr int NA = N / 2;
   float acc[RT][NA];
 #pragma unroll
@@ -1572,8 +1666,10 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
     uint4 wv[RT];
 #pragma unroll
     for (int r = 0; r < RT; ++r) wv[r] = reinterpret_cast<const uint4*>(sb + C::XB)[(warp * RT + r) * 32 + lane];
-    uint32_t sc[RT / 2];
-    if (RT == 4) {
+    uint32_t sc[(RT + 1) / 2];
+    if (NW == 16) {
+      sc[0] = *reinterpret_cast<const uint16_t*>(sb + C::XB + C::WB + (((warp >> 1) * 32 + lane) * 2 + (warp & 1)) * 2);
+    } else if (RT == 4) {
       const uint2 v = *reinterpret_cast<const uint2*>(sb + C::XB + C::WB + (warp * 32 + lane) * RT * 2);
       sc[0] = v.x; sc[RT / 2 - 1] = v.y;
     } else {
@@ -1631,39 +1727,47 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
   }
   mbar_arrive(&empty[pst]);
   const int g = lane >> 2, t = lane & 3;
-  constexpr int H = GATED ? RT / 2 : RT;
+  if (NW == 16 && GATED) {
+    float* xb = reinterpret_cast<float*>(const_cast<char*>(smem) + NSTG * C::STG) + (warp >> 1) * 32 * 32;
+    if (warp & 1) {
 #pragma unroll
-  for (int r = 0; r < H; ++r) {
-    const int tile = rb * 8 * H + warp * H + r;
+      for (int i = 0; i < NA; ++i) xb[i * 32 + lane] = acc[0][i];
+    }
+    asm volatile("bar.sync %0, 64;" ::"r"(1 + (warp >> 1)) : "memory");
+    if (!(warp & 1)) {
+      const int tile = rb * 8 + (warp >> 1);
 #pragma unroll
-    for (int gi = 0; gi < N / 8; ++gi) {
+      for (int gi = 0; gi < N / 8; ++gi)
 #pragma unroll
-      for (int q = 0; q < 4; ++q) {
-        const int tok = gi * 8 + t * 2 + (q & 1);
-        if (tok < nv) {
-          const int col = tile * 16 + g + ((q & 2) ? 8 : 0);
-          const float v = acc[r][gi * 4 + q] * gsc;
-          if (GATED) {
-            const float u = acc[r + H][gi * 4 + q] * gsc;
-            // logical (permuted) position of physical k = col for gemm2's B
+        for (int q = 0; q < 4; ++q) {
+          const int tok = gi * 8 + t * 2 + (q & 1);
+          if (tok < nv) {
+            const int col = tile * 16 + g + ((q & 2) ? 8 : 0);
+            const float v = acc[0][gi * 4 + q] * gsc;
+            const float u = xb[(gi * 4 + q) * 32 + lane] * gsc;
             const int c = col & 63;
             const int lc = (col & ~63) | (((c >> 2) & 3) << 4) | (((c >> 1) & 1) << 3) | ((c >> 4) << 1) | (c & 1);
             Out[(size_t)(off + tok) * NOUT + lc] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
-          } else {
-            Out[(size_t)sroutes[off + tok] * NOUT + col] = __float2bfloat16(v);
           }
         }
-      }
     }
+    asm volatile("bar.sync %0, 64;" ::"r"(1 + (warp >> 1)) : "memory");
+    return;
+  }
+  if constexpr (DYN) {
+    if (g2) tw_epi<RT, N, false, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
+    else tw_epi<RT, N, true, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
+  } else {
+    tw_epi<RT, N, GATED, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
   }
 }
 
-template <int RT, int KG, int NSTG, bool GATED>
-__global__ void __launch_bounds__(384, 1) moe_tw(
+template <int RT, int KG, int NSTG, bool GATED, int NW>
+__global__ void __launch_bounds__(TWC<RT, GATED, NW>::THREADS, 1) moe_tw(
     const char* __restrict__ Wb, const char* __restrict__ Sb, const float* __restrict__ gs,
     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps,
-    int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
-  using C = TWC<RT, GATED>;
+    int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, int pfk) {
+  using C = TWC<RT, GATED, NW>;
   constexpr int NRB = C::NRB;
   extern __shared__ __align__(1024) uint4 smem_tw[];
   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
@@ -1671,10 +1775,14 @@ __global__ void __launch_bounds__(384, 1) moe_tw(
   __shared__ int s_e[32], s_off[33], s_cum[33], s_item[NSTG];
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
+  for (int i = tid; i < 256; i += C::THREADS) slut[i] = lut[i];
+  // PDL: gemm13 waits for moe_gather (and so moe_route) before reading meta, then lets gemm2 launch; gemm2 reads
+  // meta (complete by then) and only waits (producer) before its first copy of gemm13's output
+  if (GATED) asm volatile("griddepcontrol.wait;" ::: "memory");
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (tid < 33) s_off[tid] = meta[33 + tid];
   if (tid == 0) {
-    for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 8 * 32); }
+    for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], NW * 32); }
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
   __syncthreads();
@@ -1682,7 +1790,7 @@ __global__ void __launch_bounds__(384, 1) moe_tw(
     const int nact = meta[0];
     const int e = tid < nact ? meta[1 + tid] : 0;
     s_e[tid] = e;
-    const int np = tid < nact ? ((s_off[e + 1] - s_off[e] + 63) >> 6) * NRB : 0;
+    const int np = tid < nact ? ((s_off[e + 1] - s_off[e] + C::PS - 1) / C::PS) * NRB : 0;
     int incl = np;
 #pragma unroll
     for (int o = 1; o < 32; o <<= 1) {
@@ -1694,13 +1802,26 @@ __global__ void __launch_bounds__(384, 1) moe_tw(
   }
   __syncthreads();
   const int nitems = s_cum[32];
-  if (warp >= 8) {
-    asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
-    if (warp > 8 || lane != 0) return;
+  if (warp >= NW) {
+    if (NW == 8) asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
+    if (warp > NW || lane != 0) return;
     int* counter = meta + (GATED ? 66 : 67);
     int st = 0, ph = 0, i = 0;
-    for (;;) {
-      const int item = atomicAdd(counter, 1);
+    int item = atomicAdd(counter, 1);
+    if (!GATED) {
+      if (item < nitems && pfk) {  // L2-prefetch the first item's first pfk k chunks while gemm13 finishes
+        int a = 0;
+        while (s_cum[a + 1] <= item) ++a;
+        const int rem = item - s_cum[a], p = rem / NRB, rb = rem - p * NRB;
+        const int e = s_e[a];
+        const char* wsrc = Wb + ((size_t)e * NRB + rb) * 64 * C::WB;
+        const char* ssrc = Sb + ((size_t)e * NRB + rb) * 64 * C::SB;
+        prefetch_l2(wsrc, pfk * C::WB);
+        prefetch_l2(ssrc, pfk * C::SB);
+      }
+      asm volatile("griddepcontrol.wait;" ::: "memory");
+    }
+    for (;; item = atomicAdd(counter, 1)) {
       if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
       if (item >= nitems) {
         s_item[st] = -1;
@@ -1711,7 +1832,7 @@ __global__ void __launch_bounds__(384, 1) moe_tw(
       while (s_cum[a + 1] <= item) ++a;
       const int rem = item - s_cum[a], p = rem / NRB, rb = rem - p * NRB;
       const int e = s_e[a];
-      const int off = s_off[e] + p * 64, nv = min(64, s_off[e + 1] - off);
+      const int off = s_off[e] + p * C::PS, nv = min(C::PS, s_off[e + 1] - off);
       const int mi = nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
       const char* wsrc = Wb + ((size_t)e * NRB + rb) * 64 * C::WB;
       const char* ssrc = Sb + ((size_t)e * NRB + rb) * 64 * C::SB;
@@ -1729,7 +1850,7 @@ __global__ void __launch_bounds__(384, 1) moe_tw(
     }
     return;
   }
-  asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory");
+  if (NW == 8) asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory");
   int st = 0, ph = 0;
   for (;;) {
     mbar_wait(&full[st], ph);
@@ -1739,9 +1860,17 @@ __global__ void __launch_bounds__(384, 1) moe_tw(
     while (s_cum[a + 1] <= item) ++a;
     const int rem = item - s_cum[a], p = rem / NRB, rb = rem - p * NRB;
     const int e = s_e[a];
-    const int off = s_off[e] + p * 64, nv = min(64, s_off[e + 1] - off);
+    const int off = s_off[e] + p * C::PS, nv = min(C::PS, s_off[e + 1] - off);
     const float gsc = gs[e] * 256.0f;
-#define TWI(NN) tw_item<RT, KG, NN, NSTG, GATED>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, Out)
+#define TWI(NN) tw_item<RT, KG, NN, NSTG, GATED, NW>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, Out)
+    if (C::PS == 32) {  // N <= 32 only: ptxas sizes the wgmma pipeline for the largest variant in the function
+    switch ((nv + 7) >> 3) {
+      case 1: TWI(8); break;
+      case 2: TWI(16); break;
+      case 3: TWI(24); break;
+      default: TWI(32); break;
+    }
+    } else {
     switch ((nv + 7) >> 3) {
       case 1: TWI(8); break;
       case 2: TWI(16); break;
@@ -1752,32 +1881,35 @@ __global__ void __launch_bounds__(384, 1) moe_tw(
       case 7: TWI(56); break;
       default: TWI(64); break;
     }
+    }
 #undef TWI
   }
 }
 
-template <int RT, int KG, int NSTG, bool GATED>
+template <int RT, int KG, int NSTG, bool GATED, int NW = 8>
 static int launch_tw(const void* wb, const void* sb, const void* gs, const void* lut, const TMaps& maps,
                      const void* meta, const void* sroutes, void* out, cudaStream_t st) {
   static int grid = 0;
-  constexpr int SMEM = NSTG * TWC<RT, GATED>::STG + 1024;
+  using C = TWC<RT, GATED, NW>;
+  constexpr int SMEM = NSTG * C::STG + C::XCH + 1024;
   if (!grid) {
     int dev, nsm;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
-    cudaFuncSetAttribute(moe_tw<RT, KG, NSTG, GATED>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    cudaFuncSetAttribute(moe_tw<RT, KG, NSTG, GATED, NW>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
-  moe_tw<RT, KG, NSTG, GATED><<<grid, 384, SMEM, st>>>(
+  return launch_k(moe_tw<RT, KG, NSTG, GATED, NW>, grid, C::THREADS, SMEM, st, (g_pdl & 4) != 0,
       (const char*)wb, (const char*)sb, (const float*)gs, (const uint32_t*)lut, maps,
-      (int*)meta, (const int*)sroutes, (__nv_bfloat16*)out);
-  return (int)cudaGetLastError();
+      (int*)meta, (const int*)sroutes, (__nv_bfloat16*)out, g_twpf);
 }
 
 // xg[pos] = x[sroutes[pos] >> 3] with each 64-chunk K-permuted (logical word (j*2+h)*4+t <- physical word 8t+2j+h).
 __global__ void __launch_bounds__(256) moe_gather(const uint32_t* __restrict__ X, const int* __restrict__ meta,
                                                   const int* __restrict__ sroutes, uint32_t* __restrict__ XG) {
   const int pos = blockIdx.x;
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of moe_route
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (pos >= meta[65]) return;
   const uint32_t* src = X + (size_t)(sroutes[pos] >> 3) * (KD / 2);
   uint32_t* dst = XG + (size_t)pos * (KD / 2);
@@ -1816,10 +1948,9 @@ int64_t moe_route_launch(torch::Tensor ids, int64_t start, int64_t count, torch:
 int64_t moe_norm_launch(torch::Tensor y, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1, int64_t start,
                         int64_t count, double eps, torch::Tensor out) {
   const int M = (int)out.size(0);
-  moe_norm<<<M, 512, 0, at::cuda::getCurrentCUDAStream()>>>(
+  return launch_k(moe_norm, M, 512, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const __nv_bfloat16*)y.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
       (const float*)w1.data_ptr(), (int)start, (int)count, (float)eps, (__nv_bfloat16*)out.data_ptr());
-  return (int64_t)cudaGetLastError();
 }
 int64_t moe_tb_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tensor sb_, torch::Tensor gs_,
                       torch::Tensor lut_, torch::Tensor x_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
@@ -1855,9 +1986,8 @@ static void tw_maps(TMaps& maps, void* ptr, int64_t rows) {
   }
 }
 int64_t moe_gather_launch(torch::Tensor x, torch::Tensor meta, torch::Tensor sroutes, torch::Tensor xg) {
-  moe_gather<<<(int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+  return launch_k(moe_gather, (int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const uint32_t*)x.data_ptr(), (const int*)meta.data_ptr(), (const int*)sroutes.data_ptr(), (uint32_t*)xg.data_ptr());
-  return (int64_t)cudaGetLastError();
 }
 int64_t moe_tw_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tensor sb_, torch::Tensor gs_,
                       torch::Tensor lut_, torch::Tensor xb_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
@@ -1872,7 +2002,176 @@ int64_t moe_tw_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tens
     return launch_tw<RT, KG, NS, false>(wb, sb, gs, lut, maps, meta, sr, out, st);            \
   }
   TW(2, 4, 8) TW(2, 2, 8) TW(2, 1, 8) TW(4, 1, 8)
+  if (cfg == 1118) {  // NW 16, RT 1 (uses the RT 2 packing)
+    if (gated) return launch_tw<1, 1, 8, true, 16>(wb, sb, gs, lut, maps, meta, sr, out, st);
+    return launch_tw<1, 1, 8, false, 16>(wb, sb, gs, lut, maps, meta, sr, out, st);
+  }
   return -1;
+}
+// ---- moe_twf: gemm13 and gemm2 of the big-M path in ONE persistent launch (RT 4, 32-token passes). The work
+// counter hands out all gemm13 items (heaviest experts first), then all gemm2 items in the same expert order. A
+// gemm13 item's consumers bump done[e] after writing their inter rows; a gemm2 item's producer waits for done[e] ==
+// (gemm13 items of e) before its first copy of inter. All gemm13 items are handed out before any gemm2 item and
+// never wait, and the grid is 1 CTA per SM (all resident), so this cannot deadlock. CTAs that finish gemm13 early
+// start on gemm2 instead of idling through gemm13's tail.
+#ifndef NEEDK
+#define NEEDK 1
+#endif
+template <int RT, int NSTG>
+__global__ void __launch_bounds__(384, 1) moe_twf(
+    const char* __restrict__ W13, const char* __restrict__ S13, const float* __restrict__ gs13,
+    const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
+    const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
+    int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
+    __nv_bfloat16* __restrict__ Y) {
+  using CG = TWC<RT, true, 8>;
+  using CN = TWC<RT, false, 8>;
+  static_assert(CG::STG == CN::STG, "stage layout");
+  constexpr int PS = CG::PS;
+  extern __shared__ __align__(1024) uint4 smem_tw[];
+  char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
+  __shared__ uint32_t slut[256];
+  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG];
+  __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
+  int* done = meta + 68;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  if (tid < 33) s_off[tid] = meta[33 + tid];
+  if (tid == 0) {
+    for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 8 * 32); }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  __syncthreads();
+  if (tid < 32) {
+    const int nact = meta[0];
+    const int e = tid < nact ? meta[1 + tid] : 0;
+    s_e[tid] = e;
+    const int npass = tid < nact ? (s_off[e + 1] - s_off[e] + PS - 1) / PS : 0;
+#pragma unroll
+    for (int gq = 0; gq < 2; ++gq) {
+      int incl = npass * (gq ? CN::NRB : CG::NRB);
+#pragma unroll
+      for (int o = 1; o < 32; o <<= 1) {
+        const int v = __shfl_up_sync(0xffffffffu, incl, o);
+        if (tid >= o) incl += v;
+      }
+      s_cum[gq][tid + 1] = incl;
+      if (tid == 0) s_cum[gq][0] = 0;
+    }
+  }
+  __syncthreads();
+  const int n13 = s_cum[0][32], nitems = n13 + s_cum[1][32];
+  // item -> (gemm2?, active slot a, pass p, row block rb)
+  auto decode = [&](int item, int& g2, int& a, int& p, int& rb) {
+    g2 = item >= n13;
+    const int it = g2 ? item - n13 : item;
+    const int* cum = s_cum[g2];
+    a = 0;
+    while (cum[a + 1] <= it) ++a;
+    const int nrb = g2 ? CN::NRB : CG::NRB;
+    const int rem = it - cum[a];
+    p = rem / nrb;
+    rb = rem - p * nrb;
+  };
+  if (warp >= 8) {
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
+    if (warp > 8 || lane != 0) return;
+    int* counter = meta + 66;
+    int st = 0, ph = 0, i = 0;
+    for (int item = atomicAdd(counter, 1);; item = atomicAdd(counter, 1)) {
+      if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+      if (item >= nitems) {
+        s_item[st] = -1;
+        mbar_arrive(&full[st]);
+        break;
+      }
+      int g2, a, p, rb;
+      decode(item, g2, a, p, rb);
+      const int e = s_e[a];
+      const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
+      const int mi = nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
+      const int nrb = g2 ? CN::NRB : CG::NRB;
+      const char* wsrc = (g2 ? W2 : W13) + ((size_t)e * nrb + rb) * 64 * CG::WB;
+      const char* ssrc = (g2 ? S2 : S13) + ((size_t)e * nrb + rb) * 64 * CG::SB;
+      const CUtensorMap* map = g2 ? &maps2.m[mi] : &maps13.m[mi];
+      const int bytes = CG::WB + CG::SB + (1024 << mi);
+      if (g2) {
+        const int need = ((s_off[e + 1] - s_off[e] + PS - 1) / PS) * CG::NRB;
+        int v;
+        for (;;) {
+          asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(v) : "l"(done + e) : "memory");
+          if (v >= need * NEEDK) break;
+          __nanosleep(64);
+        }
+        asm volatile("fence.proxy.async.global;" ::: "memory");
+      }
+      for (int kc = 0; kc < 64; ++kc, ++i) {
+        if (kc && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+        char* sb = smem + st * CG::STG;
+        if (kc == 0) s_item[st] = item;
+        mbar_expect_tx(&full[st], bytes);
+        tma2d(sb, map, kc * 64, off, &full[st]);
+        bulk_g2s(sb + CG::XB, wsrc + (size_t)kc * CG::WB, CG::WB, &full[st]);
+        bulk_g2s(sb + CG::XB + CG::WB, ssrc + (size_t)kc * CG::SB, CG::SB, &full[st]);
+        if (++st == NSTG) { st = 0; ph ^= 1; }
+      }
+    }
+    return;
+  }
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory");
+  int st = 0, ph = 0;
+  for (;;) {
+    mbar_wait(&full[st], ph);
+    const int item = s_item[st];
+    if (item < 0) break;
+    int g2, a, p, rb;
+    decode(item, g2, a, p, rb);
+    const int e = s_e[a];
+    const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
+    const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
+    __nv_bfloat16* out = g2 ? Y : Inter;
+#define TWI(NN) tw_item<RT, 1, NN, NSTG, true, 8, true>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2)
+    switch ((nv + 7) >> 3) {
+      case 1: TWI(8); break;
+      case 2: TWI(16); break;
+      case 3: TWI(24); break;
+      default: TWI(32); break;
+    }
+#undef TWI
+    if (!g2) {
+      // release this item's inter rows to gemm2 producers on other SMs (their TMA reads them: async proxy)
+      asm volatile("fence.proxy.async.global;" ::: "memory");
+      asm volatile("bar.sync 1, 256;" ::: "memory");
+      if (tid == 0) {
+        __threadfence();
+        atomicAdd(done + e, 1);
+      }
+    }
+  }
+}
+
+int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_,
+                       torch::Tensor s2_, torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_,
+                       torch::Tensor sr_, torch::Tensor inter_, torch::Tensor y_) {
+  constexpr int RT = 4, NSTG = 8;
+  constexpr int SMEM = NSTG * TWC<RT, true, 8>::STG + 1024;
+  static int grid = 0;
+  if (!grid) {
+    int dev, nsm;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
+    cudaFuncSetAttribute(moe_twf<RT, NSTG>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    grid = nsm;
+  }
+  TMaps m13, m2;
+  tw_maps(m13, xg_.data_ptr(), xg_.size(0));
+  tw_maps(m2, inter_.data_ptr(), inter_.size(0));
+  return launch_k(moe_twf<RT, NSTG>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+      (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
+      (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
+      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr());
 }
 int64_t moe_tk2_launch(int64_t gated, int64_t nstg, torch::Tensor wq_, torch::Tensor s2_, torch::Tensor lut_,
                        torch::Tensor gs_, torch::Tensor x_, torch::Tensor ids_, int64_t start, int64_t count,
@@ -1915,11 +2214,10 @@ int64_t moe_act_launch(torch::Tensor acc13, torch::Tensor meta, torch::Tensor sr
 int64_t moe_norm2_launch(torch::Tensor acc2, torch::Tensor inv, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1,
                          torch::Tensor gs, int64_t start, int64_t count, double eps, torch::Tensor out) {
   const int M = (int)out.size(0);
-  moe_norm2<<<M, 512, 0, at::cuda::getCurrentCUDAStream()>>>(
+  return launch_k(moe_norm2, M, 512, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 2) != 0,
       (const float*)acc2.data_ptr(), (const int*)inv.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
       (const float*)w1.data_ptr(), (const float*)gs.data_ptr(), (int)start, (int)count, (float)eps,
       (__nv_bfloat16*)out.data_ptr());
-  return (int64_t)cudaGetLastError();
 }
 """
 
@@ -1957,6 +2255,8 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "int64_t moe_tb_launch(int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_gather_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
+        "int64_t moe_twf_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_tw_launch(int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_route2_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, "
@@ -1964,7 +2264,9 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "int64_t moe_act_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
         "torch::Tensor, torch::Tensor);"
         "int64_t moe_norm2_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-        "torch::Tensor, int64_t, int64_t, double, torch::Tensor);")
+        "torch::Tensor, int64_t, int64_t, double, torch::Tensor);"
+        "int64_t moe_set_pdl(int64_t, int64_t);"
+        "int64_t moe_set_blk(int64_t);")
 
 
 def _lib():
@@ -1974,8 +2276,8 @@ def _lib():
         h = hashlib.sha256(CUDA_SRC.encode()).hexdigest()[:12]
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=CUDA_SRC,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tb_launch",
-                                      "moe_gather_launch", "moe_tw_launch",
-                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch"],
+                                      "moe_gather_launch", "moe_tw_launch", "moe_twf_launch",
+                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_set_pdl", "moe_set_blk"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
     return _LIB
@@ -2087,7 +2389,7 @@ def prepare(weights):
     st["w2s"] = torch.stack(w2s)
     del w13q, w13s, w2q, w2s
     if TW_CFG:
-        rt = TW_CFG // 100
+        rt = 2 if TW_CFG >= 1000 else TW_CFG // 100
         if rt not in TB_PACK:
             st[f"w13b{rt}"], st[f"w13sb{rt}"] = _tb_pack(st["w13q"], st["w13s"], True, rt)
             st[f"w2b{rt}"], st[f"w2sb{rt}"] = _tb_pack(st["w2q"], st["w2s"], False, rt)
@@ -2112,9 +2414,12 @@ def _plan(M):
 
 
 PLAN_OVERRIDE = None
+# PDL / row order are set once in the library (g_pdl = 4: big-M kernels only, g_blk = 0); moe_set_pdl / moe_set_blk
+# change them for experiments. Judge s5: decode PDL (gemm2 or norm2) and tk2_map blk 2 at bs32 lose on the H200.
 TB_RT = 0  # big-M moe_tb on (1) or off (0: old moe_big path)
 TB_CFG = 48  # RT*10 + stages
-TW_CFG = 218  # big-M wgmma kernel moe_tw: RT*100 + KG*10 + stages (0: off)
+TW_CFG = 418  # big-M wgmma kernel moe_tw: RT*100 + KG*10 + stages (0: off)
+TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
 TB_PACK = ()  # RT values packed in prepare for moe_tb
 _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
@@ -2131,7 +2436,7 @@ def kernel_fn(data, st):
     tw = data["topk_weights"].float().contiguous()
     M = x.shape[0]
     dev = x.device
-    meta = torch.empty(68, dtype=torch.int32, device=dev)
+    meta = torch.empty(100, dtype=torch.int32, device=dev)
     sroutes = torch.empty(M * TOP_K, dtype=torch.int32, device=dev)
     inter = torch.empty((M * TOP_K, I), dtype=torch.bfloat16, device=dev)
     y = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
@@ -2161,9 +2466,14 @@ def kernel_fn(data, st):
     lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
     if TW_CFG:
         # inter here holds gemm2's B in the K-permuted order (see moe_tw)
-        rt = TW_CFG // 100
+        rt = 2 if TW_CFG >= 1000 else TW_CFG // 100
         xg = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
         lib.moe_gather_launch(x, meta, sroutes, xg)
+        if TWF and rt == 4:
+            lib.moe_twf_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["lut"], xg,
+                               meta, sroutes, inter, y)
+            lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out)
+            return out
         lib.moe_tw_launch(1, TW_CFG, st[f"w13b{rt}"], st[f"w13sb{rt}"], st["gs13"], st["lut"], xg, meta, sroutes, inter)
         lib.moe_tw_launch(0, TW_CFG, st[f"w2b{rt}"], st[f"w2sb{rt}"], st["gs2"], st["lut"], inter, meta, sroutes, y)
         lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out)
