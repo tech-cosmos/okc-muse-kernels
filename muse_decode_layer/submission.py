@@ -4196,6 +4196,8 @@ _moe_CUDA_SRC = r"""
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <stdint.h>
+#include <cuda.h>
+#include <cudaTypedefs.h>
 
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
@@ -5414,6 +5416,516 @@ static int launch_tk2(const void* wq, const void* s2, const void* lut, const voi
   }                                                                                          \
   return -1;
 
+// ---- moe_tb: big-M (M > 32) grouped GEMM on a TMA ring, 1 CTA/SM, 8 consumer warps + 1 producer warp.
+// Item = (active expert, 64-token pass, row block of 8 warps x RT 16-row tiles), taken by the producer from a
+// global counter (meta[66] / meta[67], zeroed by moe_route), heaviest experts first. A stage = one 64-wide k
+// chunk: the item's weights (one bulk copy; prepare packs [e][rb][kc][warp][RT][lane]), their scales
+// ([e][rb][kc][warp][lane][RT] u16) and the pass's activation rows (one 128 B copy per token, 144 B smem stride).
+// Gated: a warp's RT tiles are RT/2 gate tiles + the matching up tiles -> silu(gate) * up in registers.
+template <int RT, bool GATED>
+struct TBC {
+  static constexpr int WB = 8 * RT * 512;
+  static constexpr int SB = 8 * RT * 64;
+  static constexpr int XB = 64 * 144;
+  static constexpr int STG = WB + SB + XB;
+  static constexpr int NRB = (GATED ? 2 * NOUT : NOUT) / 16 / (8 * RT);
+};
+
+template <int RT, bool GATED>
+__device__ __forceinline__ void tb_ldw(const char* sb, int warp, int lane, uint4 (&wv)[RT], uint32_t (&sc)[RT / 2]) {
+  using C = TBC<RT, GATED>;
+#pragma unroll
+  for (int r = 0; r < RT; ++r) wv[r] = reinterpret_cast<const uint4*>(sb)[(warp * RT + r) * 32 + lane];
+  if (RT == 4) {
+    const uint2 v = *reinterpret_cast<const uint2*>(sb + C::WB + (warp * 32 + lane) * RT * 2);
+    sc[0] = v.x; sc[RT / 2 - 1] = v.y;
+  } else {
+    sc[0] = *reinterpret_cast<const uint32_t*>(sb + C::WB + (warp * 32 + lane) * RT * 2);
+  }
+}
+
+template <int RT, int NG>
+__device__ __forceinline__ void tb_half(float (&acc)[RT][8][4], const uint4 (&wv)[RT], const uint32_t (&sc)[RT / 2],
+                                        const uint4 (&b)[NG], int jp, const uint32_t* slut) {
+#pragma unroll
+  for (int r = 0; r < RT; ++r) {
+    const uint32_t sw = sc[r >> 1] >> ((r & 1) * 16);
+    const uint32_t s0 = slut[sw & 0xFF], s1 = slut[(sw >> 8) & 0xFF];
+    uint32_t af[2][4];
+    dq(u4get(wv[r], jp * 2), s0, s1, af[0]);
+    dq(u4get(wv[r], jp * 2 + 1), s0, s1, af[1]);
+#pragma unroll
+    for (int gi = 0; gi < NG; ++gi) {
+      mma16816(acc[r][gi], af[0], b[gi].x, b[gi].y);
+      mma16816(acc[r][gi], af[1], b[gi].z, b[gi].w);
+    }
+  }
+}
+
+// The caller has waited for full[st]. Software-pipelined: the next stage's weights and scales are fetched
+// before the second half of this stage's MMAs.
+template <int RT, int NG, int NSTG, bool GATED>
+__device__ __forceinline__ void tb_kloop(float (&acc)[RT][8][4], const char* smem, uint64_t* full, uint64_t* empty,
+                                         int& st, int& ph, const uint32_t* slut, int warp, int lane, int g, int t) {
+  using C = TBC<RT, GATED>;
+#pragma unroll
+  for (int r = 0; r < RT; ++r)
+#pragma unroll
+    for (int gi = 0; gi < 8; ++gi)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) acc[r][gi][q] = 0.f;
+  uint4 wv[RT];
+  uint32_t sc[RT / 2];
+  tb_ldw<RT, GATED>(smem + st * C::STG, warp, lane, wv, sc);
+#pragma unroll 1
+  for (int kc = 0; kc < 64; ++kc) {
+    const uint4* xs = reinterpret_cast<const uint4*>(smem + st * C::STG + C::WB + C::SB);
+    {
+      uint4 b[NG];
+#pragma unroll
+      for (int gi = 0; gi < NG; ++gi) b[gi] = xs[(gi * 8 + g) * 9 + t * 2];
+      tb_half<RT, NG>(acc, wv, sc, b, 0, slut);
+    }
+    uint4 b[NG];
+#pragma unroll
+    for (int gi = 0; gi < NG; ++gi) b[gi] = xs[(gi * 8 + g) * 9 + t * 2 + 1];
+    uint4 wn[RT];
+    uint32_t sn[RT / 2];
+    const int cst = st;
+    if (++st == NSTG) { st = 0; ph ^= 1; }
+    if (kc < 63) {
+      mbar_wait(&full[st], ph);
+      tb_ldw<RT, GATED>(smem + st * C::STG, warp, lane, wn, sn);
+    }
+    mbar_arrive(&empty[cst]);
+    tb_half<RT, NG>(acc, wv, sc, b, 1, slut);
+#pragma unroll
+    for (int r = 0; r < RT; ++r) wv[r] = wn[r];
+#pragma unroll
+    for (int r = 0; r < RT / 2; ++r) sc[r] = sn[r];
+  }
+}
+
+template <int RT, int NSTG, bool GATED>
+__global__ void __launch_bounds__(384, 1) moe_tb(
+    const char* __restrict__ Wb, const char* __restrict__ Sb, const float* __restrict__ gs,
+    const uint32_t* __restrict__ lut, const __nv_bfloat16* __restrict__ X,
+    int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
+  using C = TBC<RT, GATED>;
+  constexpr int NRB = C::NRB;
+  extern __shared__ __align__(128) uint4 smem_tb[];
+  char* smem = reinterpret_cast<char*>(smem_tb);
+  __shared__ uint32_t slut[256];
+  __shared__ int s_e[32], s_off[33], s_cum[33], s_item[NSTG];
+  __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
+  for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
+  if (tid < 33) s_off[tid] = meta[33 + tid];
+  if (tid == 0) {
+    for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 8 * 32); }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  __syncthreads();
+  if (tid < 32) {
+    const int nact = meta[0];
+    const int e = tid < nact ? meta[1 + tid] : 0;
+    s_e[tid] = e;
+    const int np = tid < nact ? ((s_off[e + 1] - s_off[e] + 63) >> 6) * NRB : 0;
+    int incl = np;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+      const int v = __shfl_up_sync(0xffffffffu, incl, o);
+      if (tid >= o) incl += v;
+    }
+    s_cum[tid + 1] = incl;
+    if (tid == 0) s_cum[0] = 0;
+  }
+  __syncthreads();
+  const int nitems = s_cum[32];
+  if (warp >= 8) {
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
+    if (warp > 8) return;
+    int* counter = meta + (GATED ? 66 : 67);
+    int st = 0, ph = 0, i = 0;
+    for (;;) {
+      int item = 0;
+      if (lane == 0) item = atomicAdd(counter, 1);
+      item = __shfl_sync(0xffffffffu, item, 0);
+      if (item >= nitems) {
+        if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+        if (lane == 0) { s_item[st] = -1; mbar_arrive(&full[st]); }
+        break;
+      }
+      int a = 0;
+      while (s_cum[a + 1] <= item) ++a;
+      const int rem = item - s_cum[a], p = rem / NRB, rb = rem - p * NRB;
+      const int e = s_e[a];
+      const int off = s_off[e] + p * 64, nv = min(64, s_off[e + 1] - off);
+      const char* wsrc = Wb + ((size_t)e * NRB + rb) * 64 * C::WB;
+      const char* ssrc = Sb + ((size_t)e * NRB + rb) * 64 * C::SB;
+      const char* xsrc[2];
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        const int row = lane + 32 * h;
+        int src = 0;
+        if (row < nv) src = GATED ? (sroutes[off + row] >> 3) : (off + row);
+        xsrc[h] = reinterpret_cast<const char*>(X + (size_t)src * KD);
+      }
+      const int bytes = C::WB + C::SB + nv * 128;
+      for (int kc = 0; kc < 64; ++kc, ++i) {
+        if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+        char* sb = smem + st * C::STG;
+        if (lane == 0) {
+          if (kc == 0) s_item[st] = item;
+          mbar_expect_tx(&full[st], bytes);
+        }
+        __syncwarp();
+        if (lane == 0) bulk_g2s(sb, wsrc + (size_t)kc * C::WB, C::WB, &full[st]);
+        if (lane == 1) bulk_g2s(sb + C::WB, ssrc + (size_t)kc * C::SB, C::SB, &full[st]);
+#pragma unroll
+        for (int h = 0; h < 2; ++h)
+          if (lane + 32 * h < nv) bulk_g2s(sb + C::WB + C::SB + (lane + 32 * h) * 144, xsrc[h] + kc * 128, 128, &full[st]);
+        if (++st == NSTG) { st = 0; ph ^= 1; }
+      }
+    }
+    return;
+  }
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory");
+  int st = 0, ph = 0;
+  for (;;) {
+    mbar_wait(&full[st], ph);
+    const int item = s_item[st];
+    if (item < 0) break;
+    int a = 0;
+    while (s_cum[a + 1] <= item) ++a;
+    const int rem = item - s_cum[a], p = rem / NRB, rb = rem - p * NRB;
+    const int e = s_e[a];
+    const int off = s_off[e] + p * 64, nv = min(64, s_off[e + 1] - off);
+    const float gsc = gs[e] * 256.0f;
+    float acc[RT][8][4];
+    switch ((nv + 7) >> 3) {
+      case 1: tb_kloop<RT, 1, NSTG, GATED>(acc, smem, full, empty, st, ph, slut, warp, lane, g, t); break;
+      case 2: tb_kloop<RT, 2, NSTG, GATED>(acc, smem, full, empty, st, ph, slut, warp, lane, g, t); break;
+      case 3: tb_kloop<RT, 3, NSTG, GATED>(acc, smem, full, empty, st, ph, slut, warp, lane, g, t); break;
+      case 4: tb_kloop<RT, 4, NSTG, GATED>(acc, smem, full, empty, st, ph, slut, warp, lane, g, t); break;
+      case 5: tb_kloop<RT, 5, NSTG, GATED>(acc, smem, full, empty, st, ph, slut, warp, lane, g, t); break;
+      case 6: tb_kloop<RT, 6, NSTG, GATED>(acc, smem, full, empty, st, ph, slut, warp, lane, g, t); break;
+      case 7: tb_kloop<RT, 7, NSTG, GATED>(acc, smem, full, empty, st, ph, slut, warp, lane, g, t); break;
+      default: tb_kloop<RT, 8, NSTG, GATED>(acc, smem, full, empty, st, ph, slut, warp, lane, g, t); break;
+    }
+    constexpr int H = GATED ? RT / 2 : RT;
+#pragma unroll
+    for (int r = 0; r < H; ++r) {
+      const int tile = rb * 8 * H + warp * H + r;
+#pragma unroll
+      for (int gi = 0; gi < 8; ++gi) {
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          const int tok = gi * 8 + t * 2 + (q & 1);
+          if (tok < nv) {
+            const int col = tile * 16 + g + ((q & 2) ? 8 : 0);
+            const float v = acc[r][gi][q] * gsc;
+            if (GATED) {
+              const float u = acc[r + H][gi][q] * gsc;
+              Out[(size_t)(off + tok) * NOUT + col] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+            } else {
+              Out[(size_t)sroutes[off + tok] * NOUT + col] = __float2bfloat16(v);
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+template <int RT, int NSTG, bool GATED>
+static int launch_tb(const void* wb, const void* sb, const void* gs, const void* lut, const void* x,
+                     const void* meta, const void* sroutes, void* out, cudaStream_t st) {
+  static int grid = 0;
+  constexpr int SMEM = NSTG * TBC<RT, GATED>::STG;
+  if (!grid) {
+    int dev, nsm;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
+    cudaFuncSetAttribute(moe_tb<RT, NSTG, GATED>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    grid = nsm;
+  }
+  moe_tb<RT, NSTG, GATED><<<grid, 384, SMEM, st>>>(
+      (const char*)wb, (const char*)sb, (const float*)gs, (const uint32_t*)lut, (const __nv_bfloat16*)x,
+      (int*)meta, (const int*)sroutes, (__nv_bfloat16*)out);
+  return (int)cudaGetLastError();
+}
+
+// ---- moe_tw: big-M (M > 32) grouped GEMM with wgmma (A = dequantized weights from registers, B = activations
+// from smem via a TMA tensor map, SW128). Same items / producer / weight packing as moe_tb, but activations come
+// from a gathered, K-permuted copy (moe_gather: row pos = route in expert order; within each 64-chunk logical
+// k = j*16 + h*8 + 2t + b holds physical k = 16t + 4j + 2h + b, the order _pack_weight uses), and gemm13 writes
+// inter in that order too. 2 consumer warpgroups (warp w: RT 16-row tiles), 1 producer warp, 1 CTA/SM.
+struct TMaps { CUtensorMap m[4]; };  // box rows 8, 16, 32, 64
+
+template <int RT, bool GATED>
+struct TWC {
+  static constexpr int XB = 64 * 128;
+  static constexpr int WB = 8 * RT * 512;
+  static constexpr int SB = 8 * RT * 64;
+  static constexpr int STG = XB + WB + SB;
+  static constexpr int NRB = (GATED ? 2 * NOUT : NOUT) / 16 / (8 * RT);
+};
+
+__device__ __forceinline__ void wg_fence() { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
+__device__ __forceinline__ void wg_commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
+template <int K>
+__device__ __forceinline__ void wg_wait() { asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(K) : "memory"); }
+__device__ __forceinline__ void fence_r(uint32_t& r) { asm volatile("" : "+r"(r)::"memory"); }
+__device__ __forceinline__ void fence_f(float& r) { asm volatile("" : "+f"(r)::"memory"); }
+__device__ __forceinline__ void tma2d(void* dst, const CUtensorMap* map, int c0, int c1, uint64_t* bar) {
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
+      ::"r"(smem_u32(dst)), "l"(map), "r"(c0), "r"(c1), "r"(smem_u32(bar)) : "memory");
+}
+__device__ __forceinline__ uint64_t sw128_desc(const void* p) {
+  return (uint64_t)((smem_u32(p) & 0x3FFFF) >> 4) | ((uint64_t)1 << 16) | ((uint64_t)(1024 >> 4) << 32) |
+         ((uint64_t)1 << 62);
+}
+
+//@@WGMMA@@
+
+template <int RT, int KG, int N, int NSTG, bool GATED>
+__device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
+                                        const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
+                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
+  using C = TWC<RT, GATED>;
+  constexpr int NA = N / 2;
+  float acc[RT][NA];
+#pragma unroll
+  for (int r = 0; r < RT; ++r)
+#pragma unroll
+    for (int i = 0; i < NA; ++i) acc[r][i] = 0.f;
+  uint32_t afA[KG][RT][4], afB[KG][RT][4];
+  int pst = -1;
+#pragma unroll 1
+  for (int kc = 0; kc < 64; ++kc) {
+    const char* sb = smem + st * C::STG;
+    if (kc) mbar_wait(&full[st], ph);
+    uint4 wv[RT];
+#pragma unroll
+    for (int r = 0; r < RT; ++r) wv[r] = reinterpret_cast<const uint4*>(sb + C::XB)[(warp * RT + r) * 32 + lane];
+    uint32_t sc[RT / 2];
+    if (RT == 4) {
+      const uint2 v = *reinterpret_cast<const uint2*>(sb + C::XB + C::WB + (warp * 32 + lane) * RT * 2);
+      sc[0] = v.x; sc[RT / 2 - 1] = v.y;
+    } else {
+      sc[0] = *reinterpret_cast<const uint32_t*>(sb + C::XB + C::WB + (warp * 32 + lane) * RT * 2);
+    }
+    uint32_t s0[RT], s1[RT];
+#pragma unroll
+    for (int r = 0; r < RT; ++r) {
+      const uint32_t sw = sc[r >> 1] >> ((r & 1) * 16);
+      s0[r] = slut[sw & 0xFF];
+      s1[r] = slut[(sw >> 8) & 0xFF];
+    }
+    const uint64_t d0 = sw128_desc(sb);
+#pragma unroll
+    for (int j0 = 0; j0 < 4; j0 += KG) {
+      // ring slot = group parity (KG == 4: stage parity, tracked by kc)
+      const bool odd = (KG == 4) ? (kc & 1) : ((j0 / KG) & 1);
+#pragma unroll
+      for (int jj = 0; jj < KG; ++jj)
+#pragma unroll
+        for (int r = 0; r < RT; ++r) {
+          if (odd) dq(u4get(wv[r], j0 + jj), s0[r], s1[r], afB[jj][r]);
+          else dq(u4get(wv[r], j0 + jj), s0[r], s1[r], afA[jj][r]);
+        }
+      wg_fence();
+#pragma unroll
+      for (int jj = 0; jj < KG; ++jj)
+#pragma unroll
+        for (int r = 0; r < RT; ++r) wgmma_bf16<N>(acc[r], odd ? afB[jj][r] : afA[jj][r], d0 + (j0 + jj) * 2);
+      wg_commit();
+      wg_wait<1>();
+#pragma unroll
+      for (int jj = 0; jj < KG; ++jj)
+#pragma unroll
+        for (int r = 0; r < RT; ++r)
+#pragma unroll
+          for (int i = 0; i < 4; ++i) {
+            if (odd) fence_r(afA[jj][r][i]);
+            else fence_r(afB[jj][r][i]);
+          }
+      if (j0 == 0 && pst >= 0) mbar_arrive(&empty[pst]);
+    }
+    pst = st;
+    if (++st == NSTG) { st = 0; ph ^= 1; }
+  }
+  wg_wait<0>();
+#pragma unroll
+  for (int r = 0; r < RT; ++r) {
+#pragma unroll
+    for (int jj = 0; jj < KG; ++jj)
+#pragma unroll
+      for (int i = 0; i < 4; ++i) { fence_r(afA[jj][r][i]); fence_r(afB[jj][r][i]); }
+#pragma unroll
+    for (int i = 0; i < NA; ++i) fence_f(acc[r][i]);
+  }
+  mbar_arrive(&empty[pst]);
+  const int g = lane >> 2, t = lane & 3;
+  constexpr int H = GATED ? RT / 2 : RT;
+#pragma unroll
+  for (int r = 0; r < H; ++r) {
+    const int tile = rb * 8 * H + warp * H + r;
+#pragma unroll
+    for (int gi = 0; gi < N / 8; ++gi) {
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const int tok = gi * 8 + t * 2 + (q & 1);
+        if (tok < nv) {
+          const int col = tile * 16 + g + ((q & 2) ? 8 : 0);
+          const float v = acc[r][gi * 4 + q] * gsc;
+          if (GATED) {
+            const float u = acc[r + H][gi * 4 + q] * gsc;
+            // logical (permuted) position of physical k = col for gemm2's B
+            const int c = col & 63;
+            const int lc = (col & ~63) | (((c >> 2) & 3) << 4) | (((c >> 1) & 1) << 3) | ((c >> 4) << 1) | (c & 1);
+            Out[(size_t)(off + tok) * NOUT + lc] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+          } else {
+            Out[(size_t)sroutes[off + tok] * NOUT + col] = __float2bfloat16(v);
+          }
+        }
+      }
+    }
+  }
+}
+
+template <int RT, int KG, int NSTG, bool GATED>
+__global__ void __launch_bounds__(384, 1) moe_tw(
+    const char* __restrict__ Wb, const char* __restrict__ Sb, const float* __restrict__ gs,
+    const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps,
+    int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
+  using C = TWC<RT, GATED>;
+  constexpr int NRB = C::NRB;
+  extern __shared__ __align__(1024) uint4 smem_tw[];
+  char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
+  __shared__ uint32_t slut[256];
+  __shared__ int s_e[32], s_off[33], s_cum[33], s_item[NSTG];
+  __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
+  if (tid < 33) s_off[tid] = meta[33 + tid];
+  if (tid == 0) {
+    for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 8 * 32); }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  __syncthreads();
+  if (tid < 32) {
+    const int nact = meta[0];
+    const int e = tid < nact ? meta[1 + tid] : 0;
+    s_e[tid] = e;
+    const int np = tid < nact ? ((s_off[e + 1] - s_off[e] + 63) >> 6) * NRB : 0;
+    int incl = np;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+      const int v = __shfl_up_sync(0xffffffffu, incl, o);
+      if (tid >= o) incl += v;
+    }
+    s_cum[tid + 1] = incl;
+    if (tid == 0) s_cum[0] = 0;
+  }
+  __syncthreads();
+  const int nitems = s_cum[32];
+  if (warp >= 8) {
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
+    if (warp > 8 || lane != 0) return;
+    int* counter = meta + (GATED ? 66 : 67);
+    int st = 0, ph = 0, i = 0;
+    for (;;) {
+      const int item = atomicAdd(counter, 1);
+      if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+      if (item >= nitems) {
+        s_item[st] = -1;
+        mbar_arrive(&full[st]);
+        break;
+      }
+      int a = 0;
+      while (s_cum[a + 1] <= item) ++a;
+      const int rem = item - s_cum[a], p = rem / NRB, rb = rem - p * NRB;
+      const int e = s_e[a];
+      const int off = s_off[e] + p * 64, nv = min(64, s_off[e + 1] - off);
+      const int mi = nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
+      const char* wsrc = Wb + ((size_t)e * NRB + rb) * 64 * C::WB;
+      const char* ssrc = Sb + ((size_t)e * NRB + rb) * 64 * C::SB;
+      const int bytes = C::WB + C::SB + (1024 << mi);
+      for (int kc = 0; kc < 64; ++kc, ++i) {
+        if (kc && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+        char* sb = smem + st * C::STG;
+        if (kc == 0) s_item[st] = item;
+        mbar_expect_tx(&full[st], bytes);
+        tma2d(sb, &maps.m[mi], kc * 64, off, &full[st]);
+        bulk_g2s(sb + C::XB, wsrc + (size_t)kc * C::WB, C::WB, &full[st]);
+        bulk_g2s(sb + C::XB + C::WB, ssrc + (size_t)kc * C::SB, C::SB, &full[st]);
+        if (++st == NSTG) { st = 0; ph ^= 1; }
+      }
+    }
+    return;
+  }
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory");
+  int st = 0, ph = 0;
+  for (;;) {
+    mbar_wait(&full[st], ph);
+    const int item = s_item[st];
+    if (item < 0) break;
+    int a = 0;
+    while (s_cum[a + 1] <= item) ++a;
+    const int rem = item - s_cum[a], p = rem / NRB, rb = rem - p * NRB;
+    const int e = s_e[a];
+    const int off = s_off[e] + p * 64, nv = min(64, s_off[e + 1] - off);
+    const float gsc = gs[e] * 256.0f;
+#define TWI(NN) tw_item<RT, KG, NN, NSTG, GATED>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, Out)
+    switch ((nv + 7) >> 3) {
+      case 1: TWI(8); break;
+      case 2: TWI(16); break;
+      case 3: TWI(24); break;
+      case 4: TWI(32); break;
+      case 5: TWI(40); break;
+      case 6: TWI(48); break;
+      case 7: TWI(56); break;
+      default: TWI(64); break;
+    }
+#undef TWI
+  }
+}
+
+template <int RT, int KG, int NSTG, bool GATED>
+static int launch_tw(const void* wb, const void* sb, const void* gs, const void* lut, const TMaps& maps,
+                     const void* meta, const void* sroutes, void* out, cudaStream_t st) {
+  static int grid = 0;
+  constexpr int SMEM = NSTG * TWC<RT, GATED>::STG + 1024;
+  if (!grid) {
+    int dev, nsm;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
+    cudaFuncSetAttribute(moe_tw<RT, KG, NSTG, GATED>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    grid = nsm;
+  }
+  moe_tw<RT, KG, NSTG, GATED><<<grid, 384, SMEM, st>>>(
+      (const char*)wb, (const char*)sb, (const float*)gs, (const uint32_t*)lut, maps,
+      (int*)meta, (const int*)sroutes, (__nv_bfloat16*)out);
+  return (int)cudaGetLastError();
+}
+
+// xg[pos] = x[sroutes[pos] >> 3] with each 64-chunk K-permuted (logical word (j*2+h)*4+t <- physical word 8t+2j+h).
+__global__ void __launch_bounds__(256) moe_gather(const uint32_t* __restrict__ X, const int* __restrict__ meta,
+                                                  const int* __restrict__ sroutes, uint32_t* __restrict__ XG) {
+  const int pos = blockIdx.x;
+  if (pos >= meta[65]) return;
+  const uint32_t* src = X + (size_t)(sroutes[pos] >> 3) * (KD / 2);
+  uint32_t* dst = XG + (size_t)pos * (KD / 2);
+#pragma unroll
+  for (int i = 0; i < KD / 2 / 256; ++i) {
+    const int o = threadIdx.x + 256 * i, w = o & 31, t = w & 3, jh = w >> 2;
+    dst[o] = src[(o & ~31) | (8 * t + jh)];
+  }
+}
+
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
@@ -5446,6 +5958,59 @@ int64_t moe_norm_launch(torch::Tensor y, torch::Tensor ids, torch::Tensor tw, to
       (const __nv_bfloat16*)y.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
       (const float*)w1.data_ptr(), (int)start, (int)count, (float)eps, (__nv_bfloat16*)out.data_ptr());
   return (int64_t)cudaGetLastError();
+}
+int64_t moe_tb_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tensor sb_, torch::Tensor gs_,
+                      torch::Tensor lut_, torch::Tensor x_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
+  cudaStream_t st = at::cuda::getCurrentCUDAStream();
+  const void *wb = PTR(wb_), *sb = PTR(sb_), *gs = PTR(gs_), *lut = PTR(lut_), *x = PTR(x_), *meta = PTR(meta_),
+             *sr = PTR(sr_);
+  void* out = out_.data_ptr();
+#define TB(RT, NS)                                                                       \
+  if (cfg == RT * 10 + NS) {                                                             \
+    if (gated) return launch_tb<RT, NS, true>(wb, sb, gs, lut, x, meta, sr, out, st);    \
+    return launch_tb<RT, NS, false>(wb, sb, gs, lut, x, meta, sr, out, st);              \
+  }
+  TB(4, 8) TB(2, 8)
+  return -1;
+}
+static PFN_cuTensorMapEncodeTiled_v12000 g_encode = nullptr;
+// 4 tensor maps (box rows 8/16/32/64, box cols 64, SW128) over a bf16 [rows, KD] buffer. Encoded at every launch
+// from the buffer actually passed (under graph capture they are baked into the kernel node with that buffer).
+static void tw_maps(TMaps& maps, void* ptr, int64_t rows) {
+  if (!g_encode) {
+    cudaDriverEntryPointQueryResult q;
+    cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled", (void**)&g_encode, 12000, cudaEnableDefault, &q);
+  }
+  for (int i = 0; i < 4; ++i) {
+    cuuint64_t dims[2] = {(cuuint64_t)KD, (cuuint64_t)rows};
+    cuuint64_t strides[1] = {(cuuint64_t)KD * 2};
+    cuuint32_t box[2] = {64, (cuuint32_t)(8 << i)};
+    cuuint32_t es[2] = {1, 1};
+    CUresult r = g_encode(&maps.m[i], CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, ptr, dims, strides, box, es,
+                          CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                          CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled failed ", (int)r);
+  }
+}
+int64_t moe_gather_launch(torch::Tensor x, torch::Tensor meta, torch::Tensor sroutes, torch::Tensor xg) {
+  moe_gather<<<(int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      (const uint32_t*)x.data_ptr(), (const int*)meta.data_ptr(), (const int*)sroutes.data_ptr(), (uint32_t*)xg.data_ptr());
+  return (int64_t)cudaGetLastError();
+}
+int64_t moe_tw_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tensor sb_, torch::Tensor gs_,
+                      torch::Tensor lut_, torch::Tensor xb_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
+  cudaStream_t st = at::cuda::getCurrentCUDAStream();
+  const void *wb = PTR(wb_), *sb = PTR(sb_), *gs = PTR(gs_), *lut = PTR(lut_), *meta = PTR(meta_), *sr = PTR(sr_);
+  void* out = out_.data_ptr();
+  TMaps maps;
+  tw_maps(maps, xb_.data_ptr(), xb_.size(0));
+#define TW(RT, KG, NS)                                                                       \
+  if (cfg == RT * 100 + KG * 10 + NS) {                                                      \
+    if (gated) return launch_tw<RT, KG, NS, true>(wb, sb, gs, lut, maps, meta, sr, out, st);  \
+    return launch_tw<RT, KG, NS, false>(wb, sb, gs, lut, maps, meta, sr, out, st);            \
+  }
+  TW(2, 4, 8) TW(2, 2, 8) TW(2, 1, 8) TW(4, 1, 8)
+  return -1;
 }
 int64_t moe_tk2_launch(int64_t gated, int64_t nstg, torch::Tensor wq_, torch::Tensor s2_, torch::Tensor lut_,
                        torch::Tensor gs_, torch::Tensor x_, torch::Tensor ids_, int64_t start, int64_t count,
@@ -5496,6 +6061,25 @@ int64_t moe_norm2_launch(torch::Tensor acc2, torch::Tensor inv, torch::Tensor id
 }
 """
 
+
+def _moe__gen_wgmma():
+    out = ["template <int N> __device__ __forceinline__ void wgmma_bf16(float* d, const uint32_t* a, uint64_t desc);"]
+    for n in range(8, 72, 8):
+        na = n // 2
+        dl = ", ".join(f"%{i}" for i in range(na))
+        al = ", ".join(f"%{na + i}" for i in range(4))
+        outs = ", ".join(f'"+f"(d[{i}])' for i in range(na))
+        out.append(
+            f"template <> __device__ __forceinline__ void wgmma_bf16<{n}>(float* d, const uint32_t* a, uint64_t desc) {{\n"
+            f'  asm volatile("{{\\n.reg .pred p;\\nsetp.ne.b32 p, %{na + 5}, 0;\\n"\n'
+            f'    "wgmma.mma_async.sync.aligned.m64n{n}k16.f32.bf16.bf16 {{{dl}}}, {{{al}}}, %{na + 4}, p, 1, 1, 0;\\n}}\\n"\n'
+            f'    : {outs}\n'
+            f'    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(desc), "r"(1));\n}}')
+    return "\n".join(out)
+
+
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace("//@@WGMMA@@", _moe__gen_wgmma())
+
 _moe__LIB = None
 _moe__CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor);"
@@ -5508,6 +6092,11 @@ _moe__CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::T
         "torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_tk2_launch(int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
+        "int64_t moe_tb_launch(int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
+        "int64_t moe_gather_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
+        "int64_t moe_tw_launch(int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_route2_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, int64_t);"
         "int64_t moe_act_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
@@ -5522,7 +6111,8 @@ def _moe__lib():
         from torch.utils.cpp_extension import load_inline
         h = hashlib.sha256(_moe_CUDA_SRC.encode()).hexdigest()[:12]
         _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=_moe_CUDA_SRC,
-                           functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch",
+                           functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tb_launch",
+                                      "moe_gather_launch", "moe_tw_launch",
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
@@ -5585,6 +6175,29 @@ def _moe__pair_scales(ps):
     return torch.cat((v[: n // 2], v[n // 2:]), dim=-1).contiguous()
 
 
+def _moe__tb_pack(wq, ws, gated, rt):
+    """moe_tb layout: weights [E][rb][kc][warp][RT][lane] uint4, scales [E][rb][kc][warp][lane][RT] u16.
+    Gated: warp w of block rb owns gate tiles rb*8*H + w*H + (0..H) and the matching up tiles (H = RT/2)."""
+    E, nrt = wq.shape[0], wq.shape[1]
+    nrb = nrt // (8 * rt)
+    rb = torch.arange(nrb).view(-1, 1, 1)
+    w = torch.arange(8).view(1, -1, 1)
+    r = torch.arange(rt).view(1, 1, -1)
+    if gated:
+        h = rt // 2
+        tile = (r >= h).long() * (nrt // 2) + rb * 8 * h + w * h + r % h
+    else:
+        tile = rb * 8 * rt + w * rt + r
+    tile = tile.to(wq.device)
+    W, S = [], []
+    for e in range(E):
+        we = wq[e].reshape(nrt, 64, 128)[tile]                                   # rb w r kc lane*4
+        W.append(we.permute(0, 3, 1, 2, 4).contiguous())
+        se = ws[e].view(torch.int16).reshape(nrt, 8, 32, 8).permute(0, 1, 3, 2).reshape(nrt, 64, 32)[tile]
+        S.append(se.permute(0, 3, 1, 4, 2).contiguous())                         # rb kc w lane r
+    return torch.stack(W), torch.stack(S)
+
+
 def _moe__scale_lut(device):
     """e4m3 byte -> bf16x2 of (value * 2^118), both halves."""
     v = torch.arange(256, dtype=torch.int32).to(torch.uint8).view(torch.float8_e4m3fn).float() * (2.0 ** 118)
@@ -5611,6 +6224,14 @@ def _moe_prepare(weights):
     st["w2q"] = torch.stack(w2q)
     st["w2s"] = torch.stack(w2s)
     del w13q, w13s, w2q, w2s
+    if _moe_TW_CFG:
+        rt = _moe_TW_CFG // 100
+        if rt not in _moe_TB_PACK:
+            st[f"w13b{rt}"], st[f"w13sb{rt}"] = _moe__tb_pack(st["w13q"], st["w13s"], True, rt)
+            st[f"w2b{rt}"], st[f"w2sb{rt}"] = _moe__tb_pack(st["w2q"], st["w2s"], False, rt)
+    for rt in _moe_TB_PACK:
+        st[f"w13b{rt}"], st[f"w13sb{rt}"] = _moe__tb_pack(st["w13q"], st["w13s"], True, rt)
+        st[f"w2b{rt}"], st[f"w2sb{rt}"] = _moe__tb_pack(st["w2q"], st["w2s"], False, rt)
     st["gs13"] = weights["w13_gs"][:_moe_LOCAL].float().contiguous()
     st["gs2"] = weights["w2_gs"][:_moe_LOCAL].float().contiguous()
     st["lut"] = _moe__scale_lut(dev)
@@ -5629,6 +6250,10 @@ def _moe__plan(M):
 
 
 _moe_PLAN_OVERRIDE = None
+_moe_TB_RT = 0  # big-M moe_tb on (1) or off (0: old moe_big path)
+_moe_TB_CFG = 48  # RT*10 + stages
+_moe_TW_CFG = 218  # big-M wgmma kernel moe_tw: RT*100 + KG*10 + stages (0: off)
+_moe_TB_PACK = ()  # RT values packed in prepare for moe_tb
 _moe__CFGS = (10, 11, 22, 118)
 _moe_SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
 _moe_TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
@@ -5672,6 +6297,21 @@ def _moe_kernel_fn(data, st):
     p13, p2 = _moe_PLAN_OVERRIDE(M) if _moe_PLAN_OVERRIDE else _moe__plan(M)
     assert p13 in _moe__CFGS and p2 in _moe__CFGS, (p13, p2)
     lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
+    if _moe_TW_CFG:
+        # inter here holds gemm2's B in the K-permuted order (see moe_tw)
+        rt = _moe_TW_CFG // 100
+        xg = torch.empty((M * _moe_TOP_K, _moe_H), dtype=torch.bfloat16, device=dev)
+        lib.moe_gather_launch(x, meta, sroutes, xg)
+        lib.moe_tw_launch(1, _moe_TW_CFG, st[f"w13b{rt}"], st[f"w13sb{rt}"], st["gs13"], st["lut"], xg, meta, sroutes, inter)
+        lib.moe_tw_launch(0, _moe_TW_CFG, st[f"w2b{rt}"], st[f"w2sb{rt}"], st["gs2"], st["lut"], inter, meta, sroutes, y)
+        lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], _moe_POST_NORM_EPS, out)
+        return out
+    if _moe_TB_RT:
+        rt = _moe_TB_CFG // 10
+        lib.moe_tb_launch(1, _moe_TB_CFG, st[f"w13b{rt}"], st[f"w13sb{rt}"], st["gs13"], st["lut"], x, meta, sroutes, inter)
+        lib.moe_tb_launch(0, _moe_TB_CFG, st[f"w2b{rt}"], st[f"w2sb{rt}"], st["gs2"], st["lut"], inter, meta, sroutes, y)
+        lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], _moe_POST_NORM_EPS, out)
+        return out
     lib.moe_gemm13(p13, st["w13q"], st["w13s"], st["gs13"], st["lut"], x, meta, sroutes, inter)
     lib.moe_gemm2(p2, st["w2q"], st["w2s"], st["gs2"], st["lut"], inter, meta, sroutes, y)
     lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], _moe_POST_NORM_EPS, out)
@@ -6010,6 +6650,7 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 # bs32 204/211, bs128 466/340, bs256 617/471.
 BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
 TK2_MAX_TOKENS = 32  # moe's TMA decode kernel (moe_tk2: route fused into gemm13, 3 launches) at T <= this
+# T > 32: moe's kernel_fn = route, gather, wgmma moe_tw gemm13/gemm2, norm (r-moe c39a176)
 MARLIN_TOKENS = ()  # moe 6a1cda0 at T=32 beat Marlin on the judge: decode 32 sliding 218.3 (fc3e60d0) vs 225.0 (440361a9)
 
 
@@ -6031,7 +6672,7 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
     st = state["moe"]
     lib = st["lib"]
     m = x.shape[0]
-    if m <= TK2_MAX_TOKENS and _moe_TK2_NSTG:
+    if (m <= TK2_MAX_TOKENS and _moe_TK2_NSTG) or (m > 32 and _moe_TW_CFG and bucket is None):
         return _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                                "config": {"local_start": 0, "local_count": LOCAL_EXPERTS}}, st)
     dev = x.device

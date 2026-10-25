@@ -373,6 +373,7 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 # bs32 204/211, bs128 466/340, bs256 617/471.
 BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
 TK2_MAX_TOKENS = 32  # moe's TMA decode kernel (moe_tk2: route fused into gemm13, 3 launches) at T <= this
+# T > 32: moe's kernel_fn = route, gather, wgmma moe_tw gemm13/gemm2, norm (r-moe c39a176)
 MARLIN_TOKENS = ()  # moe 6a1cda0 at T=32 beat Marlin on the judge: decode 32 sliding 218.3 (fc3e60d0) vs 225.0 (440361a9)
 
 
@@ -394,7 +395,7 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
     st = state["moe"]
     lib = st["lib"]
     m = x.shape[0]
-    if m <= TK2_MAX_TOKENS and _moe_TK2_NSTG:
+    if (m <= TK2_MAX_TOKENS and _moe_TK2_NSTG) or (m > 32 and _moe_TW_CFG and bucket is None):
         return _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                                "config": {"local_start": 0, "local_count": LOCAL_EXPERTS}}, st)
     dev = x.device
