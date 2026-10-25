@@ -126,7 +126,10 @@ PDL_TOKENS = (1, 8)
 # At T=1 the unpool GEMV launches as a PDL secondary of moe_norm2 (patched to trigger at its start), so its first
 # weight loads overlap norm2 (norm2 reads ~128 KB: little HBM contention).
 UNPOOL_PDL = True
-GEMV_PDL_SECONDARY = ("unpool_slice", "o")
+# GEMVs launched as PDL secondaries (they load W, then griddepcontrol.wait), per (tokens, sliding layer). H100:
+# T=1 o (after csl, patched to trigger) -1..-3 us, unpool (after norm2) -3; T=8 o after sliding attention -1.9,
+# after full attention +1.3; T=8 unpool tie.
+GEMV_PDL_SECONDARY = {(1, True): ("unpool_slice", "o"), (1, False): ("unpool_slice", "o"), (8, True): ("o",)}
 LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference experts (tests of the Marlin-side glue)  # PDL after a cuBLAS producer: no gain (H100 o GEMM + boundary 12.64 vs 12.74 us)
 
 
@@ -516,6 +519,29 @@ def _g10_lib():
                     "        la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0; \\\n"
                     "        cudaLaunchKernelEx(&lc, g10::gemv<M_, U_, V_, B_, K_, P_>, (const uint4*)w.data_ptr(), \\\n"
                     "                           (const uint4*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), (int)n); return; }"))
+            if UNPOOL_PDL:  # gemv12 too: as a PDL secondary it L2-prefetches its W slice, then griddepcontrol.wait
+                reps = [
+                    ("int* __restrict__ cnt, int n, int nrg_all, int k, int bk) {",
+                     "int* __restrict__ cnt, int n, int nrg_all, int k, int bk, int pdl) {"),
+                    ("    for (int i = t; i < M * (KC / 8); i += blockDim.x) {\n        const int r = i / (KC / 8), q = i % (KC / 8);",
+                     "    if (pdl) {\n"
+                     "        const char* pb = (const char*)(W + ((long)ks * nrg_all + rg0) * KC);\n"
+                     "        for (long o = (long)t * 128; o < (long)NG * KC * 16; o += (long)blockDim.x * 128)\n"
+                     "            asm volatile(\"prefetch.global.L2 [%0];\" :: \"l\"(pb + o));\n"
+                     "        asm volatile(\"griddepcontrol.wait;\" ::: \"memory\");\n    }\n"
+                     "    for (int i = t; i < M * (KC / 8); i += blockDim.x) {\n        const int r = i / (KC / 8), q = i % (KC / 8);"),
+                    ("int64_t kcu, int64_t wg, int64_t pf, int64_t bk) {", "int64_t kcu, int64_t wg, int64_t pf, int64_t bk, int64_t pdl) {"),
+                    ("        g12::gemm<M_, U_, G_, P_><<<S * bk, threads, sm, s>>>((const uint4*)w.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), \\\n"
+                     "        (__nv_bfloat16*)out.data_ptr(), ws.data_ptr<float>(), cnt.data_ptr<int>(), n, nrg_all, k, bk); return; }",
+                     "        cudaLaunchConfig_t lc = {}; lc.gridDim = S * bk; lc.blockDim = threads; lc.dynamicSmemBytes = sm; \\\n"
+                     "        lc.stream = s; cudaLaunchAttribute la[1]; la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; \\\n"
+                     "        la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0; \\\n"
+                     "        cudaLaunchKernelEx(&lc, g12::gemm<M_, U_, G_, P_>, (const uint4*)w.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), \\\n"
+                     "        (__nv_bfloat16*)out.data_ptr(), ws.data_ptr<float>(), cnt.data_ptr<int>(), n, (int)nrg_all, k, (int)bk, (int)pdl); return; }"),
+                ]
+                for x_, y_ in reps:
+                    assert src.count(x_) == 1, x_
+                    src = src.replace(x_, y_)
             if GEMV_PDL:  # let the next kernel (boundary / rmsnorm, launched with PDL) start its prologue early
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src.count(anchor) == 1, anchor
@@ -525,7 +551,7 @@ def _g10_lib():
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
                             "int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");\n"
                             "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                            "int64_t, int64_t, int64_t, int64_t, int64_t);",
+                            "int64_t, int64_t, int64_t, int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");",
                 cuda_sources=src, functions=["g10_gemv", "g12_gemm"],
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
@@ -545,19 +571,20 @@ def _g12_prepare(state):
     state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
 
 
-def _linear(x, w, key, state=None):
+def _linear(x, w, key, state=None, sliding=False):
     """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), gemv12 at 8 (FP32 accumulate and
     split-K partials), else cuBLAS."""
     lib = _G10.get("lib")
     if x.shape[0] == 1 and lib is not None and key in G10_CFG and x.shape[1] == G10_CFG[key][0]:
         out = torch.empty((1, w.shape[0]), dtype=torch.bfloat16, device=x.device)
-        pdl = (int(key in GEMV_PDL_SECONDARY),) if UNPOOL_PDL else ()
+        pdl = (int(key in GEMV_PDL_SECONDARY.get((1, sliding), ())),) if UNPOOL_PDL else ()
         lib.g10_gemv(w, x.contiguous(), out, *G10_CFG[key][1:], *pdl)
         return out
     if x.shape[0] == G12_TOKENS and state is not None and "g12" in state and key in G12_CFG:
         out = torch.empty((G12_TOKENS, w.shape[0]), dtype=torch.bfloat16, device=x.device)
+        pdl = (int(key in GEMV_PDL_SECONDARY.get((G12_TOKENS, sliding), ())),) if UNPOOL_PDL else ()
         lib.g12_gemm(state["g12"][key], x.contiguous(), out, state["g12_ws"], state["g12_cnt"], w.shape[0] // 8,
-                     *G12_CFG[key])
+                     *G12_CFG[key], *pdl)
         return out
     return F.linear(x, w)
 
@@ -575,7 +602,7 @@ def kernel_fn(data, state):
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
         "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
         "seq_lens": data["seq_lens"], "config": cfg}).view(tokens, hq * d)
-    a = _linear(o, dense["o"], "o", state)  # all-reduce: identity
+    a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
 
     fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
     pdl = GLUE_PDL or (GEMV_PDL and tokens in PDL_TOKENS and _G10.get("lib") is not None)
