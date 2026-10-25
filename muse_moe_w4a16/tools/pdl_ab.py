@@ -16,4 +16,4 @@ for bs in bss:
                 lib.moe_set_pdl(*v)
                 res[v].append(bench.time_graph(lambda: submission.kernel_fn(d, st), 30))
     print(bs, "  ".join("%s %.1f" % (v, statistics.median(res[v])) for v in vs), flush=True)
-lib.moe_set_pdl(1, 16)
+lib.moe_set_pdl(4, 0)

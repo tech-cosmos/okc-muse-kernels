@@ -62,7 +62,7 @@ CUDA_SRC = r"""
 #include <cudaTypedefs.h>
 
 // launch, optionally as a PDL secondary (programmatic stream serialization: CUDA-graph capturable)
-static int g_pdl = 7, g_twpf = 0, g_blk = 0;  // g_pdl bits: 1 decode gemm2, 2 decode norm2, 4 big-M kernels
+static int g_pdl = 4, g_twpf = 0, g_blk = 0;  // g_pdl bits: 1 decode gemm2, 2 decode norm2, 4 big-M kernels
 template <typename... KA, typename... AA>
 static int launch_k(void (*k)(KA...), int grid, int block, int smem, cudaStream_t st, bool pdl, AA... args) {
   cudaLaunchConfig_t lc = {};
@@ -2183,14 +2183,14 @@ def _plan(M):
 
 
 PLAN_OVERRIDE = None
-PDL_DECODE = {}  # per-bs PDL bits for the decode path (default 2: norm2 only; judge s5: gemm2 as PDL secondary loses)
+# PDL / row order are set once in the library (g_pdl = 4: big-M kernels only, g_blk = 0); moe_set_pdl / moe_set_blk
+# change them for experiments. Judge s5: decode PDL (gemm2 or norm2) and tk2_map blk 2 at bs32 lose on the H200.
 TB_RT = 0  # big-M moe_tb on (1) or off (0: old moe_big path)
 TB_CFG = 48  # RT*10 + stages
 TW_CFG = 218  # big-M wgmma kernel moe_tw: RT*100 + KG*10 + stages (0: off)
 TB_PACK = ()  # RT values packed in prepare for moe_tb
 _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
-TK2_BLK = {32: 2}  # per-bs tk2_map block (0: token groups one after the other)
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 
@@ -2210,8 +2210,6 @@ def kernel_fn(data, st):
     y = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
     out = torch.empty((M, H), dtype=torch.bfloat16, device=dev)
     if M <= 32 and TK2_NSTG:
-        lib.moe_set_pdl(PDL_DECODE.get(M, 2), 0)
-        lib.moe_set_blk(TK2_BLK.get(M, 0))
         inv = torch.empty(M * TOP_K, dtype=torch.int32, device=dev)
         y32 = torch.empty((M * TOP_K, H), dtype=torch.float32, device=dev)
         lib.moe_tk2_launch(1, TK2_NSTG, st["w13q"], st["w13s2"], st["lut"], st["gs13"], x, ids, st["start"], st["count"],
@@ -2231,7 +2229,6 @@ def kernel_fn(data, st):
         lib.moe_sk_launch(0, sk[1], st["w2q"], st["w2s2"], st["lut"], inter, meta, sroutes, acc2)
         lib.moe_norm2_launch(acc2, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], POST_NORM_EPS, out)
         return out
-    lib.moe_set_pdl(7, 0)
     p13, p2 = PLAN_OVERRIDE(M) if PLAN_OVERRIDE else _plan(M)
     assert p13 in _CFGS and p2 in _CFGS, (p13, p2)
     lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)

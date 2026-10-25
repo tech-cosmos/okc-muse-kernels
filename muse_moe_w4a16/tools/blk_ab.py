@@ -11,7 +11,7 @@ for bs in bss:
     for sd in range(9000, 9000 + ns):
         d = reference.generate_input(bs=bs, sharding="ep8", seed=sd)
         for v in vs:
-            submission.TK2_BLK = {bs: v}
+            st["lib"].moe_set_blk(v)
             res[v].append(bench.time_graph(lambda: submission.kernel_fn(d, st), 30))
     print(bs, "  ".join("blk%d %.1f (mean %.1f)" % (v, statistics.median(res[v]), statistics.mean(res[v])) for v in vs), flush=True)
     print("   per seed:", [[round(res[v][i], 1) for v in vs] for i in range(ns)], flush=True)
