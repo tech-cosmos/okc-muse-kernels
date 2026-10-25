@@ -509,7 +509,7 @@ if UNPOOL_PDL:
 # before the consumers' griddepcontrol.wait (right before their first x read). gemm2 (TK2_PDL2) waits at entry.
 POOLER_HI_PRIORITY = ()  # s5 dead: pooler first, but the router starves beside it (tie/worse)
 # boundary 1 L2-prefetches the FP32 router weight (8 MB) from extra programs at these token counts
-ROUTER_L2_PF_TOKENS = (1,)  # H100: d1 -0.8 us; T=8 +0.9 (the T=8 router is issue-bound, not HBM)
+ROUTER_L2_PF_TOKENS = ()  # judge f8e06892: d1 -2% (noise?); off. Was (1,): H100: d1 -0.8 us; T=8 +0.9 (the T=8 router is issue-bound, not HBM)
 ROUTER_AFTER_POOLER = ()  # s5: tie/worse (router starved beside the pooler); token counts: pooler first, router its PDL secondary (see kernel_fn)
 TK2_PDL13 = False  # s5: H100 tie (d1 +1, v1 -1, d32 -1 us): rmsnorm is only 1.7 us and the safe join loses its own PDL
 TK2_PDL2 = False
@@ -626,8 +626,8 @@ def _g10_lib():
 # picks on the judge's H200 (r-proj profiles/submission.22109e72563f4cc3.log), us vs F.linear: pooler m16 22.0/24.3,
 # m32 22.2/24.6, m128 26.0/29.7, m256 28.2/34.4; qkv m128 18.9/20.0, m256 21.0/22.9. Not pooler m256: beside the
 # router (side stream) in the layer it is 60.7 vs F.linear 49.2 us (H100, verify 32 sliding).
-LT_CFG = {("pooler", 16): (66, 312, 35, 1, 0, 0, 1, 4), ("pooler", 32): (66, 13, 35, 1, 0, 0, 1, 4),
-          ("pooler", 128): (66, 143, 35, 1, 0, 0, 0, 2),
+# Judge check f8e06892 (pooler m16/m32 too): d16 +0.7%, d32 -2.6% vs v15 (noise ~2%): m16/m32 not used.
+LT_CFG = {("pooler", 128): (66, 143, 35, 1, 0, 0, 0, 2),
           ("qkv_gate", 128): (66, 92, 35, 1, 0, 0, 0, 5), ("qkv_gate", 256): (66, 124, 35, 1, 0, 0, 0, 2)}
 _LT_SRC = None  # @@LT@@
 _LT = {}
