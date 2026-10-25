@@ -87,3 +87,10 @@
 - check c569b69329a44aed (a0424fc, m8 + pooler m16): 1.1772x; pooler m16 19.92 (SGLang 21.57). unpooler m8 7.27
   (0.973x) although check 1c6ae4b6 had 5.71 (1.219x) with the same code: its config uses 32 blocks (32 SMs): fragile.
   Not submitted (expected gain over 1.1757 within noise; 1 submit left today).
+- gemv12 R=2 (two rgs per warp sharing x frags): no gain at m16, spills at m32 (qkv m32 36.7 us). Reverted (v7 kernel).
+- check b1b6c641c76a43dc (b8f0a3b, unpooler m8 on 64 blocks): 1.1729x; unpooler m8 7.20 (0.942x), o m8 0.958.
+- check 9ddb59a548b24cc9 (385b40e, unpooler m8 back on cuBLAS): 1.1621x; even cuBLAS unpooler m8 = 7.46 vs SGLang's
+  7.17 (same kernel!): that shape swings +-0.3 us per run, and whole runs of near-identical code give 1.162-1.177.
+  Judge noise ~+-1%: single-shape gains < ~5% are not measurable in one check.
+- main (after 385b40e) = a0424fc's code (m8 qkv/pool/o/unpooler-b32 + pooler m16 on gemv12), check c569b693 1.1772x.
+  NOT submitted (best on board stays a55d6b55 1.1757x). Next session: submit it together with the next real gain.
