@@ -1,67 +1,43 @@
 # okc: problem=muse_decode_layer
-"""SGLang's decoder layer for Muse Spark Open, as one H200 runs it under TP8/EP8, at SGLang commit
-a55ab7d5ae1bba59ac351e55026fe7f7644ecc5f (MuseSpark1xDecoderLayer.forward), with the same modules:
+"""Muse Spark Open decoder layer (TP8/EP8, one GPU), as SGLang's MuseSpark1xDecoderLayer.forward computes it,
+with fewer kernels:
 
-  qkv_gate projection              bf16_gemm_dispatch (cuBLAS on H200)
-  FusedQKNorm (Triton)             per-head RMSNorm of q and k, read from the fused projection,
-                                   with the interleaved RoPE fused in on sliding layers
-  cache store, q to FP8            as FlashAttentionBackend and set_kv_buffer do for an FP8 cache
-                                   (cast, then the store_cache JIT kernel at the step's rows)
-  flash_attn_with_kvcache (FA3)    paged, causal, window (2047, 0) on sliding layers
-  FusedRMSNormGate (JIT)           per-head output norm x sigmoid(gate)
-  o projection                     bf16_gemm_dispatch; then the all-reduce (identity here)
-  FusedPostNormResidualPreNorm     post-attention norm + residual gate + pre-FFN norm (JIT);
-                                   it also writes the FP32 router input up to 8 tokens
-  router                           FP32 F.linear up to 8 tokens, above that two BF16 GEMMs
-                                   on a hi/lo split of the weight (MuseSpark1xRouter); on a
-                                   side stream, overlapping the pooler
-  FusedMuseSparkRouting (JIT)      sigmoid, biased top-8, renormalize (on the side stream)
-  pooler                           bf16_gemm_dispatch, replicated on every GPU
-  pre-expert norm                  MuseSpark1xRMSNorm (F.rms_norm)
-  experts                          moe_align_block_size, two moe_wna16_marlin_gemm (W4A16),
-                                   silu_and_mul, Triton post-expert norm weighted sum
-                                   (MuseSpark1xFp4Experts._forward_marlin); then the
-                                   all-reduce (identity here)
-  unpooler                         up to 8 tokens, this GPU's 1/8 slice of the weight, then
-                                   the all-gather (identity here: zeros in the other columns);
-                                   above that, the whole weight (bf16_gemm_dispatch)
-  FusedPostNormResidualPreNorm     post-FFN norm + residual gate + the next layer's pre-attention
-                                   norm (JIT)
-
-Differs from SGLang:
-  * The step's positions, cache rows, FA3 lengths and FA3 scheduler metadata come in with the
-    inputs; SGLang builds them once per step for all layers.
-  * All-reduces are the identity; the all-gather is a zero pad of the unpooler's output."""
+  qkv_gate projection      cuBLAS (F.linear), as SGLang's bf16_gemm_dispatch on H200
+  attention                our muse_attention_decode kernels (attn_src.py, inlined by build.py): QK-norm, RoPE,
+                           FP8 cache store, attention over the paged FP8 cache, output RMSNorm x sigmoid(gate)
+  o projection             cuBLAS
+  boundary 1               one Triton kernel: post-attention norm, residual gate, pre-FFN norm (BF16 h, and the
+                           FP32 h SGLang's router reads up to 8 tokens)
+  router + routing         side stream, overlapping the pooler: a split-K Triton GEMV (FP32 up to 8 tokens, BF16
+                           hi/lo weight pair with FP32 accumulation above, as MuseSpark1xRouter), then one Triton
+                           kernel: sum the splits, sigmoid, biased top-8, renormalize, this GPU's expert ids
+  pooler                   cuBLAS
+  pre-expert norm          Triton
+  experts                  SGLang's Marlin W4A16 MoE path (judge image), a dequantizing fallback locally
+  unpooler                 cuBLAS (this GPU's 1024-row slice up to 8 tokens)
+  boundary 2               one Triton kernel: post-FFN norm (the all-gather's zero columns implicit), residual gate,
+                           next layer's pre-attention norm"""
 
 from typing import TypedDict
 
-import types
-
 import torch
 import torch.nn.functional as F
-from sgl_kernel.flash_attn import flash_attn_with_kvcache
-from sgl_kernel.scalar_type import scalar_types
-from torch import nn
+import triton
+import triton.language as tl
 
-from sglang.kernels.ops.activation.activation import silu_and_mul
-from sglang.kernels.ops.kvcache.kvcache import store_cache
-from sglang.kernels.ops.moe.moe_wna16_marlin import moe_wna16_marlin_gemm
-from sglang.kernels.ops.muse_spark_v12.fused_muse_spark_routing import FusedMuseSparkRouting
-from sglang.kernels.ops.muse_spark_v12.fused_norm_gate import FusedRMSNormGate
-from sglang.kernels.ops.muse_spark_v12.fused_norm_residual import FusedPostNormResidualPreNorm
-from sglang.kernels.ops.muse_spark_v12.fused_post_expert_norm_weighted_sum_triton import (
-    fused_post_expert_norm_weighted_sum,
-)
-from sglang.kernels.ops.muse_spark_v12.fused_qk_norm import FusedQKNorm
-from sglang.srt.layers.moe.fused_moe_triton import moe_align_block_size
-from sglang.srt.layers.muse_spark_layers import (
-    MuseSpark1xNormPreservingResidualConnection,
-    MuseSpark1xRMSNorm,
-    MuseSpark1xRMSNormWithInputScale,
-)
-from sglang.srt.layers.quantization.marlin_utils import marlin_make_workspace
-from sglang.srt.layers.quantization.marlin_utils_fp4 import prepare_moe_nvfp4_layer_for_marlin
-from sglang.srt.layers.quantization.unquant import _bf16_gemm_dispatch_impl
+try:
+    from sgl_kernel.scalar_type import scalar_types
+    from sglang.kernels.ops.activation.activation import silu_and_mul
+    from sglang.kernels.ops.moe.moe_wna16_marlin import moe_wna16_marlin_gemm
+    from sglang.kernels.ops.muse_spark_v12.fused_post_expert_norm_weighted_sum_triton import (
+        fused_post_expert_norm_weighted_sum,
+    )
+    from sglang.srt.layers.moe.fused_moe_triton import moe_align_block_size
+    from sglang.srt.layers.quantization.marlin_utils import marlin_make_workspace
+    from sglang.srt.layers.quantization.marlin_utils_fp4 import prepare_moe_nvfp4_layer_for_marlin
+    HAVE_SGL = True
+except ImportError:
+    HAVE_SGL = False
 
 # ---- attention (attn_src.py) ----
 """Gated attention decode in two Triton launches.
@@ -93,6 +69,14 @@ try:  # Gluon (Triton's low-level dialect, ships with triton 3.8): the verify fu
     HAVE_GLUON = True
 except ImportError:
     HAVE_GLUON = False
+
+
+from triton.runtime.jit import constexpr_function as _constexpr_function
+
+
+@_constexpr_function
+def _np2_jit(n):
+    return 1 << max(0, int(n) - 1).bit_length()
 
 
 class Config(TypedDict):
@@ -3154,7 +3138,7 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
         # query load stalls the warps, so the pipeline prologue's page loads hit L2. The sum is used only at the
         # end. (Also touching the first tile's cache rows ties; on sliding layers, whose chunk starts at the
         # window, it loses: decode 1 sliding +0.26 us.)
-        PF_N: tl.constexpr = triton.next_power_of_2(CHUNK // PAGE // 32 + 2)
+        PF_N: tl.constexpr = _np2_jit(CHUNK // PAGE // 32 + 2)
         pf_p = tl.minimum(split * CHUNK // PAGE + tl.arange(0, PF_N) * 32, MAX_PAGES - 1)
         pf = tl.sum(tl.load(pt_ptr + b.to(tl.int64) * MAX_PAGES + pf_p), 0)
     if SEQ_IN:
@@ -4175,86 +4159,207 @@ class Weights(TypedDict):
 
 class Config(TypedDict):
     batch: int            # B sequences
-    q_len: int            # L: 1 for decode, 8 for a verify block (causal inside it); 200-16384 on muse_prefill_layer
+    q_len: int            # L: 1 for decode, 8 for a verify block (causal inside it)
     tokens: int           # T = B * L, request-major
     hidden: int           # 8192
     num_q_heads: int      # 16 per GPU under TP8
     num_kv_heads: int     # 2
     head_dim: int         # 64
-    page_size: int        # 1 in the scored cases (as SGLang serves Muse on H200), 64 in some tests
-    window: int           # 2048 on sliding-window layers (a token and the 2,047 before it); 0 = all
+    page_size: int        # 1 in the scored cases, 64 in some tests
+    window: int           # 2048 on sliding-window layers; 0 = all
     rope_theta: float     # 500000 on sliding-window layers (interleaved RoPE); 0 = no RoPE
     qk_scale_factor: float
     sm_scale: float       # 1/8
-    kv_scale: float       # the cache scales' value: 1 in the scored cases (SGLang leaves them unset)
+    kv_scale: float       # the cache scales' value: 1 in the scored cases
     n_experts: int        # 256
     top_k: int            # 8
-    local_experts: int    # 32: this GPU computes experts local_start .. local_start + 31
+    local_experts: int    # 32
 
 
 class Inputs(TypedDict):
     stream: torch.Tensor      # float32 [T, 8192], the residual stream
-    attn_input: torch.Tensor  # bfloat16 [T, 8192], the normalized stream (the previous layer's boundary wrote it)
+    attn_input: torch.Tensor  # bfloat16 [T, 8192]
     k_cache: torch.Tensor     # float8_e4m3fn [pages, page_size, 2, 64], written in place
     v_cache: torch.Tensor     # float8_e4m3fn [pages, page_size, 2, 64], written in place
-    positions: torch.Tensor   # int64 [T], each new token's position
-    cache_loc: torch.Tensor   # int64 [T], each new token's flat cache row
+    positions: torch.Tensor   # int64 [T]
+    cache_loc: torch.Tensor   # int64 [T]
     cache_seqlens: torch.Tensor  # int32 [B], seq_lens + L
-    cu_seqlens_q: torch.Tensor   # int32 [B+1], 0, L, 2L, ...
-    scheduler_metadata: torch.Tensor | None  # int32, FA3's tile schedule on full-attention decode steps
-    k_scale: torch.Tensor     # float32 [], key = e4m3 * k_scale
+    cu_seqlens_q: torch.Tensor   # int32 [B+1]
+    scheduler_metadata: torch.Tensor | None
+    k_scale: torch.Tensor     # float32 []
     v_scale: torch.Tensor     # float32 []
-    page_table: torch.Tensor  # int32 [B, max_pages], physical page of each logical page (-1 unused)
-    seq_lens: torch.Tensor    # int32 [B], cached tokens per request; the block starts at this position
-    local_start: torch.Tensor # int32 [1], this GPU's first expert (a multiple of 32; its weights are w13[0], ...)
+    page_table: torch.Tensor  # int32 [B, max_pages]
+    seq_lens: torch.Tensor    # int32 [B]
+    local_start: torch.Tensor # int32 [1]
     config: Config
 
 
 HIDDEN = 8192
+D_EXPERT = 4096
 RMS_EPS = 1e-5
 POST_NORM_EPS = 1e-8
-FP8 = torch.float8_e4m3fn
 N_EXPERTS = 256
 TOP_K = 8
 LOCAL_EXPERTS = 32
-D_EXPERT = 4096
-# MuseSpark1xRouter switches to the split BF16 GEMMs above this many tokens.
-ROUTER_FP32_MAX_TOKENS = 8
-# Up to this many tokens the unpooler runs on this GPU's slice and is all-gathered.
+ROUTER_MULTIPLIER = 0.1767766952966369
+ROUTE_EPS = 1e-15
+ROUTER_FP32_MAX_TOKENS = 8  # MuseSpark1xRouter: FP32 F.linear up to here, BF16 hi/lo GEMMs above
 SLICED_UNPOOL_MAX_TOKENS = 8
 UNPOOL_SLICE = HIDDEN // 8
-# MuseSpark1xFp4Experts' candidates, smallest first.
 BLOCK_SIZE_M_CANDIDATES = (8, 16, 32, 48, 64)
-ROPE_POSITIONS = 1 << 21
-ROPE_THETA = 500_000.0
+RESIDUAL_TEMPERATURE = 0.3
+RESIDUAL_GATE_EPS = 1e-3
 
 
-def _gemm(x, w):
-    return _bf16_gemm_dispatch_impl(x, w, None)
+# ---- boundaries: post-norm of the branch, residual gate, pre-norm of the new stream ----
+
+@triton.jit
+def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr, h_ptr, h32_ptr,
+              NB: tl.constexpr, N: tl.constexpr, BGAIN: tl.constexpr, H32: tl.constexpr,
+              EPS_POST: tl.constexpr, EPS: tl.constexpr):
+    """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
+    s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32)."""
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, N)
+    in_b = cols < NB
+    b = tl.load(br_ptr + row * NB + cols, mask=in_b, other=0.0).to(tl.float32)
+    if BGAIN:
+        b = b * tl.load(bgain_ptr + cols, mask=in_b, other=0.0)
+    s = tl.load(s_ptr + row * N + cols)
+    alpha = tl.load(alpha_ptr + cols)
+    beta = tl.load(beta_ptr + cols)
+    rb = tl.rsqrt(tl.sum(b * b, 0) / N + EPS_POST)
+    s = alpha * s + beta * (b * rb)
+    tl.store(s_out_ptr + row * N + cols, s)
+    rs = tl.rsqrt(tl.sum(s * s, 0) / N + EPS)
+    h = s * rs * tl.load(gain_ptr + cols)
+    tl.store(h_ptr + row * N + cols, h.to(tl.bfloat16))
+    if H32:
+        tl.store(h32_ptr + row * N + cols, h)
 
 
-def _param(w):
-    return nn.Parameter(w.contiguous(), requires_grad=False)
+@triton.jit
+def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr):
+    """One row: rmsnorm(x) (1 + w), BF16 in and out."""
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, N)
+    x = tl.load(x_ptr + row * N + cols).to(tl.float32)
+    r = tl.rsqrt(tl.sum(x * x, 0) / N + EPS)
+    tl.store(out_ptr + row * N + cols, (x * r * tl.load(gain_ptr + cols)).to(tl.bfloat16))
 
 
-def _norm(cls, w, size, eps, **kw):
-    """A Muse norm module holding w (applied as 1 + w), as the checkpoint loads it."""
-    norm = cls(size, eps=eps, has_weight=w is not None, zero_centered_gamma=True, **kw)
-    if w is not None:
-        norm.weight = _param(w)
-        norm.precompute_effective_weight()
-    return norm
+# ---- router: split-K logits, then routing ----
+
+@triton.jit
+def _router_split(h_ptr, w_ptr, wlo_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr,
+                  BT: tl.constexpr, BE: tl.constexpr, BK: tl.constexpr, KS: tl.constexpr, HILO: tl.constexpr):
+    """part[ks, t, e] = sum over this split's K of h[t, k] w[e, k]. HILO: h BF16, w = hi + lo (BF16 pair, both
+    [E, K]), FP32 accumulation; else h and w FP32 in FP32 FMA (ieee)."""
+    pe = tl.program_id(0)
+    ks = tl.program_id(1)
+    pt = tl.program_id(2)
+    e = pe * BE + tl.arange(0, BE)
+    t = pt * BT + tl.arange(0, BT)
+    t_ok = t < T
+    acc = tl.zeros((BT, BE), dtype=tl.float32)
+    k_per = K // KS
+    for k0 in tl.range(ks * k_per, ks * k_per + k_per, BK):
+        k = k0 + tl.arange(0, BK)
+        h = tl.load(h_ptr + t[:, None] * K + k[None, :], mask=t_ok[:, None], other=0.0)
+        w = tl.load(w_ptr + e[None, :] * K + k[:, None])
+        if HILO:
+            wl = tl.load(wlo_ptr + e[None, :] * K + k[:, None])
+            acc = tl.dot(h, w, acc)
+            acc = tl.dot(h, wl, acc)
+        else:
+            acc = tl.dot(h, w, acc, input_precision="ieee")
+    tl.store(part_ptr + (ks * T + t[:, None]) * E + e[None, :], acc, mask=t_ok[:, None])
 
 
-def _residual(w):
-    gate = MuseSpark1xNormPreservingResidualConnection(HIDDEN, temperature=0.3)
-    gate.gate = _param(w)
-    gate.precompute_coefficients()
-    return gate
+@triton.jit
+def _router_fma(h_ptr, w_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr, BT: tl.constexpr, BE: tl.constexpr,
+                BK: tl.constexpr, KS: tl.constexpr):
+    """Up to BT tokens, FP32: part[ks, t, e] = sum over this split's K of h[t, k] w[e, k], in FP32 FMAs."""
+    pe = tl.program_id(0)
+    ks = tl.program_id(1)
+    e = pe * BE + tl.arange(0, BE)
+    t = tl.arange(0, BT)
+    t_ok = t < T
+    acc = tl.zeros((BT, BE), dtype=tl.float32)
+    k_per = K // KS
+    for k0 in tl.range(ks * k_per, ks * k_per + k_per, BK):
+        k = k0 + tl.arange(0, BK)
+        w = tl.load(w_ptr + e[:, None] * K + k[None, :])
+        h = tl.load(h_ptr + t[:, None] * K + k[None, :], mask=t_ok[:, None], other=0.0)
+        acc += tl.sum(h[:, None, :] * w[None, :, :], 2)
+    tl.store(part_ptr + (ks * T + t[:, None]) * E + e[None, :], acc, mask=t_ok[:, None])
 
+
+@triton.jit
+def _routing(part_ptr, bias_ptr, ls_ptr, ids_ptr, lids_ptr, wts_ptr, T, E: tl.constexpr, KS: tl.constexpr,
+             TOPK: tl.constexpr, LOCAL: tl.constexpr, MULT: tl.constexpr, REPS: tl.constexpr):
+    """One token: scores = sigmoid(MULT logits); the top TOPK of scores + bias (lowest index on ties);
+    weights = picked scores / (their sum + REPS); local ids = (id - local_start) mod E, -1 off this GPU."""
+    t = tl.program_id(0)
+    e = tl.arange(0, E)
+    logit = tl.zeros((E,), dtype=tl.float32)
+    for ks in tl.static_range(KS):
+        logit += tl.load(part_ptr + (ks * T + t) * E + e)
+    score = 1.0 / (1.0 + tl.exp(-logit * MULT))
+    key = score + tl.load(bias_ptr + e)
+    j = tl.arange(0, TOPK)
+    ids = tl.zeros((TOPK,), dtype=tl.int32)
+    picked = tl.zeros((TOPK,), dtype=tl.float32)
+    for i in tl.static_range(TOPK):
+        best = tl.max(key, 0)
+        idx = tl.min(tl.where(key == best, e, E), 0)
+        sc = tl.sum(tl.where(e == idx, score, 0.0), 0)
+        ids = tl.where(j == i, idx, ids)
+        picked = tl.where(j == i, sc, picked)
+        key = tl.where(e == idx, float("-inf"), key)
+    wts = picked / (tl.sum(picked, 0) + REPS)
+    ls = tl.load(ls_ptr)
+    loc = (ids - ls + E) % E
+    loc = tl.where(loc < LOCAL, loc, -1)
+    tl.store(ids_ptr + t * TOPK + j, ids)
+    tl.store(lids_ptr + t * TOPK + j, loc)
+    tl.store(wts_ptr + t * TOPK + j, wts)
+
+
+def _router_plan(tokens):
+    """(BT, BE, BK, KS, warps) for the split-K router."""
+    if tokens <= ROUTER_FP32_MAX_TOKENS:  # H100 T=1: 5.8 us (cuBLAS FP32 8.1, 23.6 at T=8)
+        return triton.next_power_of_2(tokens), 2, 1024, 8, 4
+    if tokens <= 64:
+        return 16 if tokens <= 16 else 32 if tokens <= 32 else 64, 32, 64, 16, 4
+    return 64, 64, 64, 8, 4
+
+
+def _route(state, h, h32, local_start, tokens):
+    bt, be, bk, ks, warps = _router_plan(tokens)
+    dev = h.device
+    part = torch.empty((ks, tokens, N_EXPERTS), dtype=torch.float32, device=dev)
+    fp32 = tokens <= ROUTER_FP32_MAX_TOKENS
+    if fp32:
+        _router_fma[(N_EXPERTS // be, ks)](h32, state["router"], part, tokens, K=HIDDEN, E=N_EXPERTS, BT=bt, BE=be,
+                                           BK=bk, KS=ks, num_warps=warps)
+    else:
+        _router_split[(N_EXPERTS // be, ks, triton.cdiv(tokens, bt))](
+            h, state["router_hi"], state["router_lo"], part, tokens, K=HIDDEN, E=N_EXPERTS, BT=bt, BE=be, BK=bk,
+            KS=ks, HILO=True, num_warps=warps)
+    ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
+    lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
+    wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
+    _routing[(tokens,)](part, state["router_bias"], local_start, ids, lids, wts, tokens, E=N_EXPERTS, KS=ks,
+                        TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, num_warps=2)
+    return ids, lids, wts
+
+
+# ---- experts ----
 
 def _marlin_bank(weights):
     """The local experts in Marlin's layout, via SGLang's own loader step."""
+    import types
     device = weights["w13"].device
     layer = types.SimpleNamespace(
         quant_config=types.SimpleNamespace(group_size=16),
@@ -4269,65 +4374,20 @@ def _marlin_bank(weights):
         w2_weight_scale_2=weights["w2_gs"].contiguous(),
     )
     prepare_moe_nvfp4_layer_for_marlin(layer)
-    expert_map = torch.full((N_EXPERTS,), -1, dtype=torch.int32, device=device)
-    expert_map[:LOCAL_EXPERTS] = torch.arange(LOCAL_EXPERTS, dtype=torch.int32, device=device)
     return {
         "w13": layer.w13_weight.data, "w13_s": layer.w13_weight_scale.data, "w13_gs": layer.w13_weight_scale_2.data,
         "w2": layer.w2_weight.data, "w2_s": layer.w2_weight_scale.data, "w2_gs": layer.w2_weight_scale_2.data,
-        "expert_map": expert_map, "size_n": layer.intermediate_size_per_partition,
+        "size_n": layer.intermediate_size_per_partition,
         "workspace": marlin_make_workspace(device, max_blocks_per_sm=4),
     }
 
 
-def prepare(weights):
-    device = weights["qkv_gate"].device
-    router = weights["router"]
-    hi = router.to(torch.bfloat16)
-    lo = (router - hi.float()).to(torch.bfloat16)
-    # [2^21, 64] float32 cos | sin, as SGLang's RotaryEmbedding builds it.
-    inv_freq = 1.0 / (ROPE_THETA ** (torch.arange(0, 64, 2, dtype=torch.float, device=device) / 64))
-    freqs = torch.einsum("i,j -> ij", torch.arange(ROPE_POSITIONS, dtype=torch.float, device=device), inv_freq)
-    pre_ffn = _norm(MuseSpark1xRMSNorm, weights["pre_ffn_norm"], HIDDEN, RMS_EPS)
-    next_pre_attn = _norm(MuseSpark1xRMSNorm, weights["next_pre_attn_norm"], HIDDEN, RMS_EPS)
-    post_attn = _norm(MuseSpark1xRMSNorm, None, HIDDEN, POST_NORM_EPS, is_post_norm=True,
-                      post_norm_gain_center_type="one", residual_id=1)
-    post_ffn = _norm(MuseSpark1xRMSNormWithInputScale, weights["post_ffn_norm"], HIDDEN, POST_NORM_EPS,
-                     is_post_norm=True, post_norm_gain_center_type="one", residual_id=2)
-    post_expert = _norm(MuseSpark1xRMSNormWithInputScale, weights["post_expert_norm"], D_EXPERT, POST_NORM_EPS,
-                        is_post_norm=True, post_norm_gain_center_type="one", residual_id=2)
-    state = {
-        "dense": {name: weights[name].contiguous() for name in ("qkv_gate", "o", "pooler", "unpooler")},
-        "router": router.contiguous(),
-        "router_hi_t": hi.t().contiguous(),
-        "router_lo_t": lo.t().contiguous(),
-        "routing": FusedMuseSparkRouting(expert_bias=weights["router_bias"].float().contiguous(), route_scale=1.0,
-                                         router_output_multiplier=0.1767766952966369,
-                                         router_score_division_eps=1e-15),
-        "cos_sin": torch.cat((freqs.cos(), freqs.sin()), dim=-1),
-        "qk_norm": FusedQKNorm(head_dim=64, num_q_heads=16, num_kv_heads=2, eps=RMS_EPS),
-        "o_norm_gate": FusedRMSNormGate(MuseSpark1xRMSNorm(64, eps=RMS_EPS, has_weight=False), True, 64),
-        "attn_boundary": FusedPostNormResidualPreNorm(post_attn, _residual(weights["attn_residual_gate"]), pre_ffn),
-        "ffn_boundary": FusedPostNormResidualPreNorm(post_ffn, _residual(weights["ffn_residual_gate"]), next_pre_attn),
-        "pre_expert_norm": _norm(MuseSpark1xRMSNorm, weights["pre_expert_norm"], D_EXPERT, RMS_EPS),
-        # MuseSpark1xFp4Experts binds the post-expert norm's effective (1 + w) weight.
-        "post_expert_w": post_expert._get_effective_weight().detach().to(torch.bfloat16),
-        "bank": _marlin_bank(weights),
-        "side_stream": torch.cuda.Stream(device),
-        "_modules": (pre_ffn, next_pre_attn, post_attn, post_ffn, post_expert),
-    }
-    del freqs
-    torch.cuda.synchronize()
-    return state
-
-
-def _experts(x, topk_weights, topk_ids, state):
-    """MuseSpark1xFp4Experts._marlin_expert_outputs and its post-expert-norm finalize."""
+def _experts_marlin(x, topk_weights, local_ids, state):
+    """MuseSpark1xFp4Experts._marlin_expert_outputs and its post-expert-norm finalize; local_ids -1 off this GPU."""
     bank = state["bank"]
     num_tokens, size_k = x.shape
     size_n = bank["size_n"]
     gemm1_n = 2 * size_n
-    local_ids = bank["expert_map"][topk_ids].contiguous()
-    topk_weights = topk_weights.to(torch.float32).contiguous()
     for block_size_m in BLOCK_SIZE_M_CANDIDATES:
         if num_tokens * TOP_K / LOCAL_EXPERTS / block_size_m < 0.9:
             break
@@ -4354,51 +4414,103 @@ def _experts(x, topk_weights, topk_ids, state):
         slot_expert_ids=local_ids)
 
 
+def _experts_local(x, topk_weights, local_ids, state):
+    """Local test fallback (no SGLang): every local expert on every token from BF16 copies made in prepare,
+    each output post-normed (scale, round to BF16, RMSNorm) and kept by its routing weight."""
+    out = torch.zeros(x.shape, dtype=torch.float32, device=x.device)
+    w = state["post_expert_w"].float()
+    for e, (w13, w2) in enumerate(state["experts_bf16"]):
+        g = (topk_weights * (local_ids == e)).sum(-1)
+        h = x @ w13.T
+        y = (F.silu(h[:, :D_EXPERT]) * h[:, D_EXPERT:]) @ w2.T
+        y = (y.float() * w).to(torch.bfloat16).float()
+        out += g[:, None] * y * torch.rsqrt(y.pow(2).mean(-1, keepdim=True) + POST_NORM_EPS)
+    return out.to(torch.bfloat16)
+
+
+# ---- prepare / kernel_fn ----
+
+def _residual(gate):
+    w = gate.float() / RESIDUAL_TEMPERATURE
+    beta = torch.sigmoid(w)
+    alpha = torch.sqrt(torch.clamp(torch.sigmoid(-w) * (1.0 + beta), min=RESIDUAL_GATE_EPS))
+    return alpha.contiguous(), beta.contiguous()
+
+
+def prepare(weights):
+    router = weights["router"].contiguous()
+    hi = router.to(torch.bfloat16)
+    lo = (router - hi.float()).to(torch.bfloat16)
+    gain = lambda name: (1.0 + weights[name].float()).contiguous()  # noqa: E731
+    state = {
+        "dense": {name: weights[name].contiguous() for name in ("qkv_gate", "o", "pooler")},
+        "unpool_slice": weights["unpooler"][:UNPOOL_SLICE].contiguous(),
+        "unpool": weights["unpooler"].contiguous(),
+        "router": router, "router_hi": hi.contiguous(), "router_lo": lo.contiguous(),
+        "router_bias": weights["router_bias"].float().contiguous(),
+        "res1": _residual(weights["attn_residual_gate"]), "res2": _residual(weights["ffn_residual_gate"]),
+        "pre_ffn": gain("pre_ffn_norm"), "post_ffn": gain("post_ffn_norm"), "next_pre_attn": gain("next_pre_attn_norm"),
+        "pre_expert": gain("pre_expert_norm"),
+        # MuseSpark1xFp4Experts binds the post-expert norm's effective (1 + w) weight in BF16.
+        "post_expert_w": (1.0 + weights["post_expert_norm"].float()).to(torch.bfloat16),
+        "side_stream": torch.cuda.Stream(weights["qkv_gate"].device),
+    }
+    if HAVE_SGL:
+        state["bank"] = _marlin_bank(weights)
+    else:
+        from nvfp4 import dequantize
+        state["experts_bf16"] = [
+            (dequantize(weights["w13"][e], weights["w13_sf"][e], weights["w13_gs"][e]).to(torch.bfloat16),
+             dequantize(weights["w2"][e], weights["w2_sf"][e], weights["w2_gs"][e]).to(torch.bfloat16))
+            for e in range(LOCAL_EXPERTS)]
+    torch.cuda.synchronize()
+    return state
+
+
 def kernel_fn(data, state):
     cfg = data["config"]
     batch, length, tokens = cfg["batch"], cfg["q_len"], cfg["tokens"]
-    hq, hkv, d = cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
+    hq, d = cfg["num_q_heads"], cfg["head_dim"]
     dense = state["dense"]
-    # Attention: MuseSpark1xAttention.forward.
-    qkv = _gemm(data["attn_input"], dense["qkv_gate"])
-    # Attention: QK-norm, RoPE, cache store, attention, output norm and gate in our attention kernels.
+    dev = data["stream"].device
+    qkv = F.linear(data["attn_input"], dense["qkv_gate"])
     o = attn_kernel_fn({
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
         "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
         "seq_lens": data["seq_lens"], "config": cfg}).view(tokens, hq * d)
-    attn_output = _gemm(o, dense["o"])  # all-reduce: identity
+    a = F.linear(o, dense["o"])  # all-reduce: identity
 
-    # Post-attention boundary, router and MoE block: MuseSpark1xMoE._forward_experts.
-    split_router = tokens > ROUTER_FP32_MAX_TOKENS
-    ffn_input, stream, router_input = state["attn_boundary"](
-        data["stream"], attn_output, branch_dtype=torch.bfloat16, router_dtype=None if split_router else torch.float32)
-    # The router and routing run on a side stream, overlapping the pooler on the main one.
+    fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
+    stream1 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev)
+    h = torch.empty((tokens, HIDDEN), dtype=torch.bfloat16, device=dev)
+    h32 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev) if fp32_router else stream1
+    alpha, beta = state["res1"]
+    _boundary[(tokens,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
+                         NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
+                         num_warps=16)
     main_stream, side_stream = torch.cuda.current_stream(), state["side_stream"]
     side_stream.wait_stream(main_stream)
-    expert_input = _gemm(ffn_input, dense["pooler"])
     with torch.cuda.stream(side_stream):
-        if split_router:
-            logits = torch.mm(ffn_input, state["router_hi_t"], out_dtype=torch.float32)
-            logits += torch.mm(ffn_input, state["router_lo_t"], out_dtype=torch.float32)
-        else:
-            logits = F.linear(router_input, state["router"])
-        topk_weights, topk_ids = state["routing"](None, logits, TOP_K, True)
+        topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
+    pooled = F.linear(h, dense["pooler"])
+    p = torch.empty_like(pooled)
+    _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, num_warps=8)
     main_stream.wait_stream(side_stream)
     if not torch.cuda.is_current_stream_capturing():
-        for tensor in (topk_weights, topk_ids):
-            tensor.record_stream(main_stream)
-    # This GPU's experts start at local_start: as SGLang's expert_map on that EP rank.
-    local_ids = (topk_ids - data["local_start"]) % N_EXPERTS
-    # all-reduce: identity
-    expert_output = _experts(state["pre_expert_norm"](expert_input), topk_weights, local_ids, state)
-    if tokens <= SLICED_UNPOOL_MAX_TOKENS:
-        unpooled = _gemm(expert_output, dense["unpooler"][:UNPOOL_SLICE])
-        ffn_output = F.pad(unpooled, (0, HIDDEN - UNPOOL_SLICE))  # all-gather: identity
-    else:
-        ffn_output = _gemm(expert_output, dense["unpooler"])
-
-    # Post-FFN boundary, with the next layer's pre-attention norm.
-    next_attn_input, stream, _ = state["ffn_boundary"](stream, ffn_output, branch_dtype=torch.bfloat16)
-    return next_attn_input, stream, topk_ids
+        for t in (topk_ids, local_ids, topk_weights):
+            t.record_stream(main_stream)
+        for t in (h, h32):
+            t.record_stream(side_stream)
+    experts = _experts_marlin if HAVE_SGL else _experts_local
+    moe = experts(p, topk_weights, local_ids, state)  # all-reduce: identity
+    sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
+    f = F.linear(moe, state["unpool_slice"] if sliced else state["unpool"])  # all-gather: identity (zeros)
+    stream2 = torch.empty_like(stream1)
+    hidden = torch.empty_like(h)
+    alpha, beta = state["res2"]
+    _boundary[(tokens,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
+                         NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
+                         EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, num_warps=16)
+    return hidden, stream2, topk_ids
