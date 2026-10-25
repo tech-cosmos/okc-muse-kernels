@@ -130,7 +130,7 @@
 - DEAD: _red_fin (decode full's last attention kernel) triggering dependents early: decode 1 full +2.5 us.
 - H100 noise now: other agents' runs move the same file by up to 4 us at d1: A/B interleaved, >= 2 rounds.
 
-## Session 5 (2026-10-25 22:11-23:30Z)
+## Session 5 (2026-10-25 22:11-23:10Z)
 - v15 (3508986): moe_src.py = r-moe c39a176 (moe_tw: wgmma big-M experts, dequantized NVFP4 A in registers, TMA B
   from a gathered K-permuted x). T > 32 experts now go through `_moe_kernel_fn` (route, gather, tw gemm13/gemm2,
   norm). H100 v16 333.8/481.7 (v14 338.7/494.6), v32 417.8/674.7 (471.1/726.9).

@@ -1,6 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-25 ~23:30Z (end of session 5: main v17 checked 1.8045x (v15 1.818x); submit main after 00:00Z).
+Updated 2026-10-25 ~23:10Z (end of session 5: main v17 checked 1.8045x (v15 1.818x); submit main after 00:00Z).
 
 ## Board
 - **Best scored: 5fc7a807 = v10 (64bfdcf), 1.728x, 13,094 us/step.** Board #1 2.285x (10-25 19:30Z).
