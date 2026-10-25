@@ -109,3 +109,30 @@
 - check 556e63a8ac264fb3 (42dac99, tuner also over gemv12 + lt at m8): 1.2268x. H200 tune: lt beat gemv12 at every
   m8 shape (pooler m8 22.2 vs g12 23.2, unpooler m8 9.8 vs 10.9 = lt split-K 8). submit 22109e72563f4cc3: 1.2334x
   (CI 1.215-1.252), proj rank 379. Per-shape in STATE.
+
+## Session 5 (2026-10-25 22:22- UTC)
+- Router m8 FP32 kernel: lane-0 serial atomics -> per-lane atomics: H100 m8 9.98 -> 9.50 (small). g7 (hi/lo) is faster
+  at m8 (8.56) but SGLang keeps true FP32 at m<=8, so FP32 stays there. g7 at m128/256: 25-40 us (useless; cuBLAS 3-kernel
+  path 12.9/13.9 H100).
+- KEY FINDING: gemv10 at m=1 = a bare grid-stride reader (/tmp/pj/ic.py: 37.7 MB 15.5 us vs gemv10 qkv 15.7; 67 MB 24.8 vs
+  24.8). An empty kernel costs 2.05 us over an empty graph (H100); reader intercept ~3.5 us, slope 3.16 TB/s. So m=1 is
+  AT the bandwidth limit: the only way down is fewer bytes. Top teams (1.55-1.61x) must be compressing.
+- Lossless 12-bit BF16 (TASK.md allows lossless compression): exponent entropy 2.54 bits (randn/sqrt(k) weights);
+  window of 16 exponents below the max: escapes 0.014% (~1.15/row at k=8192), max per row well under 8.
+  Format: sign|mantissa byte (s m6..m0) + 4-bit code c = e - base; decode a BF16 pair with prmt(sel 0x9180 / 0xB3A2,
+  sign-replicate) & 0x807f807f | ((nibword shifted) & 0x07800780 | 0x38003800): exponent 112|c, sum rescaled by
+  2^(base-112) (exact). Escapes: code 0, byte 0 (decodes to 2^(base-127)); header per row ESC=8 x (col, (true-D)/scale).
+- dev/gemv13.cu (m=1, gemv10 structure, CUDA-core FMA): pitfalls hit: (1) x in registers (32 regs) + 1024 threads = 64-reg
+  cap -> spills at PF=2; x as FP32 in smem instead; (2) x smem at 64-B lane stride = 4-way bank conflicts -> pad 16-float
+  groups to 20; (3) per-chunk escape header loads cost ~1.1-1.4 us (!) whatever the form (cp.async+serial loop, per-lane
+  regs) -> load ALL of the virtual block's headers into smem at kernel start, issued BEFORE the W prologue (with x).
+  H100: qkv m1 15.7 -> 14.0, pooler 24.8 -> 20.5; o (k=1024) and unpooler-1k: gemv10 still better.
+- dev/gemv14.cu (m=8, gemv12 + decode straight into B fragments, ~2 ops/weight, escapes fixed in the epilogue from staged
+  x, needs XR == XP): H100 qkv m8 16.2 (g12 17.8, cuBLAS 18.0), pooler m8 23.5 (26.3/28.1), o 8.7 (8.9), unp1k 8.7 (9.0).
+  m16/m32: gemv12's structure loses (split-K end phase/x staging): pooler m16 26.3 vs cuBLAS 28.3 but qkv m32 21.5 vs 18.2.
+- Integration: prepare() packs (_compress/_pack13/_pack14) and the tuner picks among g10/g13 at m=1 (F.linear dropped at
+  m=1: it won a tie by noise in 720c8278) and F.linear/g12/g14/lt at m8/m16.
+- check 720c8278cc0e4e14 (3e807e3): 1.2371x; pooler m1 15.49 (was 17.77), qkv m1 11.27.
+- check 416ae38fd88a441d (64487e7, loads reordered): 1.2435x. submit a6f4d701eb1e47f2: 1.2319x (noise; board keeps 1.2334).
+- check fb5ef6d91d4342b3 (20f475d, + gemv14 at m8): 1.2439x; verify1: pooler 16.33 (18.76), qkv 13.02 (13.93); the total
+  is noise-limited (other loads +-2%). H200 tune: g14 wins pooler m8 (20.3 vs lt 22.5) and qkv m8; lt keeps o/unp m8.

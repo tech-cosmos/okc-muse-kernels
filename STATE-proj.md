@@ -1,11 +1,12 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-25 ~21:45 UTC (session 3).
+Updated 2026-10-25 ~23:10 UTC (session 5).
 
 ## Board
 - **Best: submit 22109e72563f4cc3 = 42dac99, 1.2334x (CI 1.215-1.252), proj rank 379.** (#1 1.61x, #10 ~1.53x.)
 - Previous: 202a2485 (134eda6, lt v9) 1.2111x; a55d6b55 (e71d015) 1.1757x.
-- main = 42dac99 (+ notes).
+- main = 20f475d: check fb5ef6d9 1.2439x (gemv13 m1 + gemv14 m8 over lossless 12-bit weights). SUBMIT IT after 00:00Z
+  (8/9 scored used on 10-25) unless something better is checked first.
 
 ## Per-shape H200 speedup vs SGLang (submit 22109e72; SGLang us in bench.py SGLANG_H200)
 | load | qkv_gate | o | pooler | unpooler | router |
@@ -50,7 +51,19 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   R=2 row groups per warp (spills), gemv9 warp stream-K, CUDA-core math at m>=8, cuBLAS swap-AB.
 - unpooler m8 on gemv12 with 32 blocks: H200 5.71 once, 7.04/7.27 twice (same code): few-SM configs are fragile.
 
+## Lossless 12-bit weights (session 5): the big lever
+- m=1 was already AT a bare reader's speed: only fewer bytes help. _compress in dev/sub_template.py: sign|mantissa byte
+  + 4-bit exponent code (window 16 below max exp), escapes (~1/row) fixed from a per-row header. 25% fewer bytes.
+- gemv13 (m=1, CUDA cores) and gemv14 (m=8, gemv12 + decode) are in; tuner picks per shape. Not yet: m16/m32 (needs a
+  better kernel than gemv12's structure), m128/m256 (cuBLASLt; would need own wgmma + decode), router (FP32: exponent
+  compression gives 28/32 bits only).
+
 ## Next (ranked)
+0. Compressed m16/m32 kernel that beats cuBLASLt (decode 16/32 loads: qkv 1.0x, unpooler 1.0x, pooler 1.12-1.16x):
+   bytes -25% => ~-3.5 us pooler/unpooler, -2 us qkv per shape if the kernel reaches reader speed. Idea: gemv13-style
+   grid-stride over whole rows (no split K: k=8192 rows) with tensor cores (mma m16n8k16, W as A = 16 rows, x as B),
+   x chunk in smem; or split-K with a cluster/DSMEM reduction.
+   Also o m1/unp1k m1 (k <= 4096: gemv13 fixed costs lose to gemv10).
 1. Remaining gap is mostly unpooler m16-256 (~1.0x, cuBLAS ~3.6 TB/s already: near practical) and qkv m16/m32 (1.01;
    floor 7.9 vs ~13.7): a native kernel that hits m1-gemv10 speed at m16/32 (gemv10 qkv m1 = 11.5 on H200).
 2. Tuner: more candidates for weak shapes (qkv m16/32: sweep was noisy, 2-rep screen; try a 6-rep screen of the top
