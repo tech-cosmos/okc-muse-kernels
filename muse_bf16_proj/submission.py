@@ -5,7 +5,8 @@ Router (FP32 weights, FP32 output): up to 8 tokens a native true-FP32 split-K ke
 FP32 split partials), as SGLang's F.linear in FP32. Above 8 tokens SGLang's BF16 hi + lo split with FP32
 accumulation: 9..32 tokens a native tensor-core kernel (dev/gemv6.cu: mma.sync with hi and lo tiles into one FP32
 accumulator, split K reduced in FP32 over a thread-block cluster through distributed shared memory); above 32 one
-cuBLAS GEMM against the stacked [hi; lo] weight (FP32 out) and an FP32 add of the two halves. BF16 projections: at 1 token the same native kernel (BF16 weights, one tile per mma), else cuBLAS (as SGLang's
+cuBLAS GEMM against the stacked [hi; lo] weight (FP32 out) and an FP32 add of the two halves. BF16 projections: at 1 token a native grid-stride GEMV (dev/gemv10.cu: W read in place, row-major, the whole grid
+sweeping one contiguous window; FP32 FMA and FP32 reductions, no split K), else cuBLAS (as SGLang's
 bf16_gemm_dispatch on H200).
 Native kernels are built once at import (load_inline); if the build fails everything falls back to torch.
 """
@@ -374,27 +375,136 @@ int64_t g7_occ(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t n, i
     return g7_run(w, x, out, n, mt, nwr, nwk, u, na, cs, tgs, true);
 }
 '''
+_G10_SRC = r'''// gemv10: grid-stride GEMV for small m, W plain row-major BF16 [n, KK], KK <= U*2048.
+// The flat W is cut into chunks of U*256*8 elements (U*4 KB), each a whole number of rows. A block is NV groups
+// of 256 threads sharing one copy of x in smem; group g of block b is "virtual block" v = b*NV + g and takes chunks
+// v, v+G, v+2G, ... (G = grid*NV): at any time the grid reads one contiguous window of W, like a pure grid-stride
+// reader. Thread t loads the U uint4 at u*2048 + t*8 of the chunk (PF chunks in flight), dots them with x in
+// FP32, warps reduce by shuffles, the group sums each row's warps in smem (named barrier) and writes BF16.
+// No split-K, no atomics, no workspace. Big blocks keep the per-block x reads (k*2*m bytes each) small.
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+namespace g10 {
+__device__ __forceinline__ uint4 ldw(const uint4* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ float lo(unsigned u) { return __uint_as_float(u << 16); }
+__device__ __forceinline__ float hi(unsigned u) { return __uint_as_float(u & 0xffff0000u); }
+__device__ __forceinline__ void dot8(float& a, const uint4& w, const uint4& x) {
+    a = fmaf(lo(w.x), lo(x.x), a); a = fmaf(hi(w.x), hi(x.x), a);
+    a = fmaf(lo(w.y), lo(x.y), a); a = fmaf(hi(w.y), hi(x.y), a);
+    a = fmaf(lo(w.z), lo(x.z), a); a = fmaf(hi(w.z), hi(x.z), a);
+    a = fmaf(lo(w.w), lo(x.w), a); a = fmaf(hi(w.w), hi(x.w), a);
+}
+template <int M, int U, int NV, int MINB, int KK, int PF>
+__global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__ W, const uint4* __restrict__ x,
+                                                       __nv_bfloat16* __restrict__ out, int n) {
+    constexpr int CE = U * 2048, RPC = CE / KK, K8 = KK / 8;
+    constexpr int NA = KK >= 2048 ? CE / KK : U;      // accumulators per thread (distinct rows among its u)
+    constexpr int EPR = KK >= 2048 ? 8 : KK / 256;    // red entries per row
+    static_assert(CE % KK == 0, "chunk must hold whole rows");
+    const int t = threadIdx.x & 255, vg = threadIdx.x >> 8, lane = t & 31, wp = t >> 5;
+    const int nch = n / RPC;
+    extern __shared__ uint4 xs[];  // x[M][KK]
+    __shared__ float red_[NV][2][NA * 8][M];
+    float (*red)[NA * 8][M] = red_[vg];
+    const int G = gridDim.x * NV;
+    int c = blockIdx.x * NV + vg;
+    uint4 w[PF][U];
+#pragma unroll
+    for (int p = 0; p < PF; ++p)
+        if (c + p * G < nch) {
+#pragma unroll
+            for (int u = 0; u < U; ++u) w[p][u] = ldw(W + (long)(c + p * G) * (CE / 8) + u * 256 + t);
+        }
+    for (int i = threadIdx.x; i < M * K8; i += 256 * NV) xs[i] = __ldg(x + i);
+    __syncthreads();
+    int par = 0;
+    for (; c < nch; c += PF * G) {
+#pragma unroll
+        for (int p = 0; p < PF; ++p) {
+            const int cc = c + p * G;
+            if (cc < nch) {
+                float acc[NA][M];
+#pragma unroll
+                for (int a = 0; a < NA; ++a)
+#pragma unroll
+                    for (int i = 0; i < M; ++i) acc[a][i] = 0.f;
+#pragma unroll
+                for (int u = 0; u < U; ++u) {
+                    const int kx = (u * 256 + t) % K8, a = KK >= 2048 ? u * 2048 / KK : u;
+#pragma unroll
+                    for (int i = 0; i < M; ++i) dot8(acc[a][i], w[p][u], xs[i * K8 + kx]);
+                }
+                const int cn = cc + PF * G;
+                if (cn < nch) {
+#pragma unroll
+                    for (int u = 0; u < U; ++u) w[p][u] = ldw(W + (long)cn * (CE / 8) + u * 256 + t);
+                }
+#pragma unroll
+                for (int a = 0; a < NA; ++a)
+#pragma unroll
+                    for (int i = 0; i < M; ++i) {
+                        float v = acc[a][i];
+#pragma unroll
+                        for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+                        if (lane == 0) red[par][a * 8 + wp][i] = v;
+                    }
+                asm volatile("bar.sync %0, 256;" :: "r"(vg + 1));
+                if (t < RPC * M) {
+                    const int r = t / M, i = t % M;
+                    float s = 0.f;
+#pragma unroll
+                    for (int q = 0; q < EPR; ++q) s += red[par][r * EPR + q][i];
+                    out[(long)i * n + (long)cc * RPC + r] = __float2bfloat16(s);
+                }
+                par ^= 1;
+            }
+        }
+    }
+}
+}  // namespace g10
+void g10_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t u, int64_t nv, int64_t minb, int64_t pf,
+              int64_t blocks) {
+    const int m = x.size(0), k = x.size(1), n = out.size(1);
+    auto s = c10::cuda::getCurrentCUDAStream();
+    const int sm = m * k * 2;
+#define G10_CASE(M_, K_, U_, V_, B_, P_) \
+    if (m == M_ && k == K_ && u == U_ && nv == V_ && minb == B_ && pf == P_) { \
+        if (sm > 48 * 1024) cudaFuncSetAttribute(g10::gemv<M_, U_, V_, B_, K_, P_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        g10::gemv<M_, U_, V_, B_, K_, P_><<<blocks, 256 * V_, sm, s>>>((const uint4*)w.data_ptr(), (const uint4*)x.data_ptr(), \
+        (__nv_bfloat16*)out.data_ptr(), n); return; }
+    G10_CONFIGS
+    TORCH_CHECK(false, "g10: no config");
+}
+'''
 
 # Router FP32 kernel configs (mp, kb, rw, nwarp), chosen on the H100 (dev/rt.py).
 ROUTER_F32 = [(1, (1, 2048, 1, 8)), (8, (8, 512, 2, 8)), (16, (16, 512, 2, 8))]
 ROUTER_F32 = [c for c in ROUTER_F32 if c[0] <= 8]
 # Router hi/lo tensor-core configs (n, mt, nwr, nwk, stages, na, cluster, token groups), chosen on the H100 (dev/g5.py).
 ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
-# BF16 GEMV configs per (layer, max m), same tuple layout (na = 1), chosen on the H100 (dev/g5.py, KER=7).
-BF16_GEMV = {"qkv_gate": [(1, (2304, 1, 2, 2, 8, 1, 4, 1))], "pooler": [(1, (4096, 1, 2, 4, 16, 1, 1, 1))],
-             "o": [(1, (8192, 1, 2, 4, 8, 1, 1, 1))], "unpooler": [(1, (1024, 1, 2, 4, 8, 1, 4, 1))]}
-_G7 = sorted({c[1:6] for _, c in ROUTER_HL} | {c[1:6] for v in BF16_GEMV.values() for _, c in v})
+# BF16 grid-stride GEMV configs per layer: (m, k, u, nv, minb, pf, blocks), chosen on the H100 (dev/g10.py).
+BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4, 1, 1, 132)],
+            "o": [(1, 1024, 2, 4, 2, 1, 264)], "unpooler": [(1, 4096, 2, 4, 1, 1, 132)]}
+_G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
-        _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)))
+        _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
+        _G10_SRC.replace("G10_CONFIGS", " ".join("G10_CASE(%d,%d,%d,%d,%d,%d)" % c[:6] for v in BF16_G10.values() for c in v)))
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v4",
+        name="muse_proj_v5",
         cpp_sources="void pj_router(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
-                    "int64_t, int64_t, int64_t);",
-        cuda_sources=_SRC, functions=["pj_router", "g7_gemv"],
+                    "int64_t, int64_t, int64_t);\n"
+                    "void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t);",
+        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -410,8 +520,6 @@ def _pack(w):
 
 def prepare(weights):
     st = {name: w.contiguous() for name, w in weights.items()}
-    for name in BF16_GEMV:  # fragment-packed copy for the native GEMV ([stripe][k-tile][lane][8])
-        st[name + "_p"] = _pack(weights[name]).contiguous()
     r = weights["router"]
     hi = r.to(torch.bfloat16)
     lo = (r - hi.float()).to(torch.bfloat16)
@@ -449,11 +557,11 @@ def kernel_fn(data, st):
     layer = cfg["layer"]
     if layer == "router":
         return _router(x, st, cfg["m"])
-    m, n = cfg["m"], cfg["n"]
+    m, n, k = cfg["m"], cfg["n"], cfg["k"]
     if _mod is not None:
-        for mmax, c in BF16_GEMV.get(layer, ()):
-            if m <= mmax and c[0] == n:
+        for c in BF16_G10.get(layer, ()):
+            if m == c[0] and k == c[1]:
                 out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
-                _mod.g7_gemv(st[layer + "_p"], x, out, *c)
+                _mod.g10_gemv(st[layer], x, out, *c[2:])  # W[:n] is the first n rows, in place
                 return out
     return F.linear(x, st[layer][:n])

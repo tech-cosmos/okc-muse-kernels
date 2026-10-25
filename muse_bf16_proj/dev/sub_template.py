@@ -5,7 +5,8 @@ Router (FP32 weights, FP32 output): up to 8 tokens a native true-FP32 split-K ke
 FP32 split partials), as SGLang's F.linear in FP32. Above 8 tokens SGLang's BF16 hi + lo split with FP32
 accumulation: 9..32 tokens a native tensor-core kernel (dev/gemv6.cu: mma.sync with hi and lo tiles into one FP32
 accumulator, split K reduced in FP32 over a thread-block cluster through distributed shared memory); above 32 one
-cuBLAS GEMM against the stacked [hi; lo] weight (FP32 out) and an FP32 add of the two halves. BF16 projections: at 1 token the same native kernel (BF16 weights, one tile per mma), else cuBLAS (as SGLang's
+cuBLAS GEMM against the stacked [hi; lo] weight (FP32 out) and an FP32 add of the two halves. BF16 projections: at 1 token a native grid-stride GEMV (dev/gemv10.cu: W read in place, row-major, the whole grid
+sweeping one contiguous window; FP32 FMA and FP32 reductions, no split K), else cuBLAS (as SGLang's
 bf16_gemm_dispatch on H200).
 Native kernels are built once at import (load_inline); if the build fails everything falls back to torch.
 """
@@ -38,27 +39,30 @@ class Inputs(TypedDict):
 
 _ROUTER_SRC = r'''@@ROUTER@@'''
 _GEMV_SRC = r'''@@GEMV7@@'''
+_G10_SRC = r'''@@GEMV10@@'''
 
 # Router FP32 kernel configs (mp, kb, rw, nwarp), chosen on the H100 (dev/rt.py).
 ROUTER_F32 = [(1, (1, 2048, 1, 8)), (8, (8, 512, 2, 8)), (16, (16, 512, 2, 8))]
 ROUTER_F32 = [c for c in ROUTER_F32 if c[0] <= 8]
 # Router hi/lo tensor-core configs (n, mt, nwr, nwk, stages, na, cluster, token groups), chosen on the H100 (dev/g5.py).
 ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
-# BF16 GEMV configs per (layer, max m), same tuple layout (na = 1), chosen on the H100 (dev/g5.py, KER=7).
-BF16_GEMV = {"qkv_gate": [(1, (2304, 1, 2, 2, 8, 1, 4, 1))], "pooler": [(1, (4096, 1, 2, 4, 16, 1, 1, 1))],
-             "o": [(1, (8192, 1, 2, 4, 8, 1, 1, 1))], "unpooler": [(1, (1024, 1, 2, 4, 8, 1, 4, 1))]}
-_G7 = sorted({c[1:6] for _, c in ROUTER_HL} | {c[1:6] for v in BF16_GEMV.values() for _, c in v})
+# BF16 grid-stride GEMV configs per layer: (m, k, u, nv, minb, pf, blocks), chosen on the H100 (dev/g10.py).
+BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4, 1, 1, 132)],
+            "o": [(1, 1024, 2, 4, 2, 1, 264)], "unpooler": [(1, 4096, 2, 4, 1, 1, 132)]}
+_G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
-        _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)))
+        _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
+        _G10_SRC.replace("G10_CONFIGS", " ".join("G10_CASE(%d,%d,%d,%d,%d,%d)" % c[:6] for v in BF16_G10.values() for c in v)))
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v4",
+        name="muse_proj_v5",
         cpp_sources="void pj_router(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
-                    "int64_t, int64_t, int64_t);",
-        cuda_sources=_SRC, functions=["pj_router", "g7_gemv"],
+                    "int64_t, int64_t, int64_t);\n"
+                    "void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t);",
+        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -74,8 +78,6 @@ def _pack(w):
 
 def prepare(weights):
     st = {name: w.contiguous() for name, w in weights.items()}
-    for name in BF16_GEMV:  # fragment-packed copy for the native GEMV ([stripe][k-tile][lane][8])
-        st[name + "_p"] = _pack(weights[name]).contiguous()
     r = weights["router"]
     hi = r.to(torch.bfloat16)
     lo = (r - hi.float()).to(torch.bfloat16)
@@ -113,11 +115,11 @@ def kernel_fn(data, st):
     layer = cfg["layer"]
     if layer == "router":
         return _router(x, st, cfg["m"])
-    m, n = cfg["m"], cfg["n"]
+    m, n, k = cfg["m"], cfg["n"], cfg["k"]
     if _mod is not None:
-        for mmax, c in BF16_GEMV.get(layer, ()):
-            if m <= mmax and c[0] == n:
+        for c in BF16_G10.get(layer, ()):
+            if m == c[0] and k == c[1]:
                 out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
-                _mod.g7_gemv(st[layer + "_p"], x, out, *c)
+                _mod.g10_gemv(st[layer], x, out, *c[2:])  # W[:n] is the first n rows, in place
                 return out
     return F.linear(x, st[layer][:n])
