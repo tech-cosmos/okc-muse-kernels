@@ -101,8 +101,8 @@ __device__ __forceinline__ uint32_t u4get(const uint4& v, int i) {
 }
 
 // meta: [0] nact, [1..33) active experts (by load, descending), [33..66) offsets (33 entries).
-template <int R, int G, bool GATED>
-__global__ void __launch_bounds__(256) moe_gemm(
+template <int R, int G, bool GATED, int MB>
+__global__ void __launch_bounds__(256, MB) moe_gemm(
     const uint4* __restrict__ Wq, const uint4* __restrict__ Ws, const float* __restrict__ gs,
     const uint32_t* __restrict__ lut, const __nv_bfloat16* __restrict__ X,
     const int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
@@ -329,7 +329,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
   *reinterpret_cast<uint4*>(out + (size_t)tok * NOUT + tid * 8) = o;
 }
 
-template <int R, int G, bool GATED>
+template <int R, int G, bool GATED, int MB = (R * G == 1) ? 4 : 2>
 static int launch_gemm(const void* wq, const void* ws, const void* gs, const void* lut, const void* x,
                        const void* meta, const void* sroutes, void* out, cudaStream_t st) {
   static int grid = 0;
@@ -337,11 +337,11 @@ static int launch_gemm(const void* wq, const void* ws, const void* gs, const voi
     int dev, nsm, occ;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, moe_gemm<R, G, GATED>, 256, 0);
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, moe_gemm<R, G, GATED, MB>, 256, 0);
     if (occ < 1) occ = 1;
     grid = nsm * occ;
   }
-  moe_gemm<R, G, GATED><<<grid, 256, 0, st>>>(
+  moe_gemm<R, G, GATED, MB><<<grid, 256, 0, st>>>(
       (const uint4*)wq, (const uint4*)ws, (const float*)gs, (const uint32_t*)lut, (const __nv_bfloat16*)x,
       (const int*)meta, (const int*)sroutes, (__nv_bfloat16*)out);
   return (int)cudaGetLastError();
@@ -350,6 +350,7 @@ static int launch_gemm(const void* wq, const void* ws, const void* gs, const voi
 #define CFG(R, G) (R * 10 + G)
 #define DISPATCH(GATED)                                                                     \
   switch (cfg) {                                                                            \
+    case 10: return launch_gemm<1, 1, GATED, 3>(wq, ws, gs, lut, x, meta, sr, out, st);    \
     case CFG(1, 1): return launch_gemm<1, 1, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
     case CFG(2, 1): return launch_gemm<2, 1, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
     case CFG(2, 2): return launch_gemm<2, 2, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
@@ -500,13 +501,15 @@ def prepare(weights):
 
 # (R, G) per batch size for gemm13 / gemm2: R row tiles (x16 rows) per item, G token groups of 8 per pass.
 def _plan(M):
+    if M == 1:
+        return 10, 10
     if M <= 32:
         return 11, 11
     return 22, 22
 
 
 PLAN_OVERRIDE = None
-_CFGS = (11, 21, 22, 41, 42, 14, 24, 18)
+_CFGS = (10, 11, 21, 22, 41, 42, 14, 24, 18)
 
 
 def kernel_fn(data, st):
