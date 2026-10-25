@@ -4,7 +4,7 @@ import torch, bench, submission, reference
 w, st = bench.state()
 for cfg in [int(c) for c in sys.argv[1:]]:
     submission.TW_CFG = cfg
-    rt = cfg // 100
+    rt = 2 if cfg >= 1000 else cfg // 100
     if cfg and f"w13b{rt}" not in st:
         st[f"w13b{rt}"], st[f"w13sb{rt}"] = submission._tb_pack(st["w13q"], st["w13s"], True, rt)
         st[f"w2b{rt}"], st[f"w2sb{rt}"] = submission._tb_pack(st["w2q"], st["w2s"], False, rt)
