@@ -2423,6 +2423,7 @@ TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
 TB_PACK = ()  # RT values packed in prepare for moe_tb
 _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
+TK2_MAX = 32  # M above this: big-M path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 
@@ -2441,7 +2442,7 @@ def kernel_fn(data, st):
     inter = torch.empty((M * TOP_K, I), dtype=torch.bfloat16, device=dev)
     y = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
     out = torch.empty((M, H), dtype=torch.bfloat16, device=dev)
-    if M <= 32 and TK2_NSTG:
+    if M <= TK2_MAX and TK2_NSTG:
         inv = torch.empty(M * TOP_K, dtype=torch.int32, device=dev)
         y32 = torch.empty((M * TOP_K, H), dtype=torch.float32, device=dev)
         lib.moe_tk2_launch(1, TK2_NSTG, st["w13q"], st["w13s2"], st["lut"], st["gs13"], x, ids, st["start"], st["count"],
