@@ -6092,6 +6092,7 @@ def prepare(weights):
              dequantize(weights["w2"][e], weights["w2_sf"][e], weights["w2_gs"][e]).to(torch.bfloat16))
             for e in range(LOCAL_EXPERTS)]
     _g10_lib()
+    _g12_prepare(state)
     torch.cuda.synchronize()
     return state
 
@@ -6206,10 +6207,156 @@ void g10_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t u, in
     TORCH_CHECK(false, "g10: no config");
 }
 '''
+_G12_SRC = r'''// r-proj e71d015 muse_bf16_proj/dev/gemv12.cu (proj agent's gemv12, m=8 tensor-core streaming GEMM), copied verbatim
+// gemv12: tensor-core streaming GEMM for m = 8..32 (out[m, n] = x[m, k] @ W[n, k]^T, BF16 in, FP32 accumulate).
+// mma.sync m16n8k16 with x as A (tokens) and W as B. W is repacked in prepare() into 512-B atoms = 8 rows x 32 k,
+// lane l holding row l/4, k (l%4)*8..+8 (one uint4 = the B fragments of two k16 mmas; x's A fragments use the same
+// k permutation); layout [ks][rg][KC/32 atoms][lane] (ks = k-chunk of KC = 1024*KCU, rg = 8-row group).
+// Block b = (ks = b / bk, a run of NG rgs); it is NG groups of WG warps, group gi streams rg0+gi's KC/32 atoms
+// (warp wi takes atoms wi, wi+WG, ...; PF in flight in registers). x[:, chunk] is staged in smem first (cp.async;
+// it must not queue behind the W stream). Each warp's FP32 C fragments go to its own smem slot; WG slots summed.
+// One k-chunk: BF16 written directly. Else FP32 partials [S][m][n] in a workspace, a per-rg counter, and the last
+// of the S blocks of a rg sums them in FP32 and writes BF16 (counters re-zeroed).
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+namespace g12 {
+__device__ __forceinline__ uint4 ldw(const uint4* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+template <int M, int KCU, int WG, int PF>
+__global__ void __launch_bounds__(1024, 1) gemm(const uint4* __restrict__ W, const __nv_bfloat16* __restrict__ x,
+                                                __nv_bfloat16* __restrict__ out, float* __restrict__ ws,
+                                                int* __restrict__ cnt, int n, int nrg_all, int k, int bk) {
+    constexpr int KC = 1024 * KCU, TT = (M + 15) / 16, XS = KC * 2 + 64;  // x row stride in smem (bytes), padded
+    constexpr int NT = M < 16 ? M : 16, NA = KC / 32 / WG;               // atoms per warp
+    static_assert(NA % PF == 0, "PF must divide the atoms per warp");
+    extern __shared__ __align__(16) unsigned char smem[];
+    unsigned char* xs = smem;                        // x[M][KC] (row stride XS)
+    float4* accp = (float4*)(smem + M * XS);         // [warps][TT][32 lanes] C fragments
+    __shared__ int flag[64];
+    const int t = threadIdx.x, lane = t & 31, wp = t >> 5, g = lane >> 2, c = lane & 3;
+    const int gi = wp / WG, wi = wp % WG, NG = blockDim.x / (32 * WG);
+    const int S = k / KC, ks = blockIdx.x / bk, rg0 = (blockIdx.x % bk) * NG, rg = rg0 + gi;
+    for (int i = t; i < M * (KC / 8); i += blockDim.x) {
+        const int r = i / (KC / 8), q = i % (KC / 8);
+        const unsigned sa = (unsigned)__cvta_generic_to_shared(xs + r * XS + q * 16);
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa), "l"((const uint4*)(x + (long)r * k + (long)ks * KC) + q));
+    }
+    asm volatile("cp.async.commit_group;");
+    const uint4* wb = W + (((long)ks * nrg_all + rg) * (KC / 32) + wi) * 32 + lane;  // atom j: wb + j*WG*32
+    uint4 w[PF];
+#ifndef G12_LATE_W
+#pragma unroll
+    for (int p = 0; p < PF; ++p) w[p] = ldw(wb + p * WG * 32);
+#endif
+    asm volatile("cp.async.wait_all;");
+    __syncthreads();
+#ifdef G12_LATE_W
+#pragma unroll
+    for (int p = 0; p < PF; ++p) w[p] = ldw(wb + p * WG * 32);
+#endif
+    float acc[TT][4];
+#pragma unroll
+    for (int tt = 0; tt < TT; ++tt) acc[tt][0] = acc[tt][1] = acc[tt][2] = acc[tt][3] = 0.f;
+    for (int a = 0; a < NA; a += PF) {
+#pragma unroll
+        for (int p = 0; p < PF; ++p) {
+            const int kb = ((a + p) * WG + wi) * 32 + c * 8;
+#pragma unroll
+            for (int tt = 0; tt < TT; ++tt) {
+                uint4 xa = *(const uint4*)(xs + (tt * 16 + g) * XS + kb * 2);
+                uint4 xb = make_uint4(0, 0, 0, 0);
+                if (NT > 8) xb = *(const uint4*)(xs + (tt * 16 + g + 8) * XS + kb * 2);
+                mma(acc[tt], xa.x, xb.x, xa.y, xb.y, w[p].x, w[p].y);
+                mma(acc[tt], xa.z, xb.z, xa.w, xb.w, w[p].z, w[p].w);
+            }
+            if (a + p + PF < NA) w[p] = ldw(wb + (a + p + PF) * WG * 32);
+        }
+    }
+#pragma unroll
+    for (int tt = 0; tt < TT; ++tt) accp[(wp * TT + tt) * 32 + lane] = make_float4(acc[tt][0], acc[tt][1], acc[tt][2], acc[tt][3]);
+    __syncthreads();
+    // outputs i = ((rgl * M + tok) * 8 + row8): sum the WG warp slots of group rgl
+    const int ne = NG * M * 8;
+    auto total = [&](int i) {
+        const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+        const int tt = tok >> 4, h = (tok >> 3) & 1, l = (tok & 7) * 4 + (row8 >> 1), e = h * 2 + (row8 & 1);
+        const float* base = (const float*)accp + ((rgl * WG) * TT + tt) * 128 + l * 4 + e;
+        float s = 0.f;
+#pragma unroll
+        for (int q = 0; q < WG; ++q) s += base[q * TT * 128];
+        return s;
+    };
+    if (S == 1) {
+        for (int i = t; i < ne; i += blockDim.x) {
+            const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+            out[(long)tok * n + (rg0 + rgl) * 8 + row8] = __float2bfloat16(total(i));
+        }
+        return;
+    }
+    for (int i = t; i < ne; i += blockDim.x) {
+        const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+        __stcg(ws + ((long)ks * M + tok) * n + (rg0 + rgl) * 8 + row8, total(i));
+    }
+    __threadfence();
+    __syncthreads();
+    if (t < NG) {
+        const int last = atomicAdd(cnt + rg0 + t, 1) == S - 1;
+        flag[t] = last;
+        if (last) cnt[rg0 + t] = 0;
+    }
+    __syncthreads();
+    __threadfence();
+    for (int i = t; i < ne; i += blockDim.x) {
+        const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+        if (flag[rgl]) {
+            float s = 0.f;
+            for (int q = 0; q < S; ++q) s += __ldcg(ws + ((long)q * M + tok) * n + (rg0 + rgl) * 8 + row8);
+            out[(long)tok * n + (rg0 + rgl) * 8 + row8] = __float2bfloat16(s);
+        }
+    }
+}
+}  // namespace g12
+// nrg_all: 8-row groups of the packed weight; bk: blocks per k-chunk; each block takes n/8/bk rgs with WG warps each.
+void g12_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tensor ws, torch::Tensor cnt, int64_t nrg_all,
+              int64_t kcu, int64_t wg, int64_t pf, int64_t bk) {
+    const int m = x.size(0), k = x.size(1), n = out.size(1);
+    auto s = c10::cuda::getCurrentCUDAStream();
+    const int S = k / (1024 * kcu), ng = n / 8 / bk, threads = ng * wg * 32;
+    const int sm = m * (1024 * kcu * 2 + 64) + threads / 32 * ((m + 15) / 16) * 512;
+    TORCH_CHECK(n / 8 % bk == 0 && threads <= 1024 && ng <= 64 && sm <= 227 * 1024 && (S == 1 || m * n * S <= 8 * 32 * 8192), "g12: shape");
+#define G12_CASE(M_, U_, G_, P_) \
+    if (m == M_ && kcu == U_ && wg == G_ && pf == P_) { \
+        cudaFuncSetAttribute(g12::gemm<M_, U_, G_, P_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        g12::gemm<M_, U_, G_, P_><<<S * bk, threads, sm, s>>>((const uint4*)w.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), \
+        (__nv_bfloat16*)out.data_ptr(), ws.data_ptr<float>(), cnt.data_ptr<int>(), n, nrg_all, k, bk); return; }
+    G12_CONFIGS
+    TORCH_CHECK(false, "g12: no config");
+}
+'''
 # (k, u, nv, minb, pf, blocks) per weight, m = 1, chosen by proj on the H100 (dev/g10.py)
 G10_CFG = {"qkv_gate": (8192, 4, 4, 1, 1, 132), "pooler": (8192, 4, 4, 1, 1, 132), "o": (1024, 2, 4, 2, 1, 264),
            "unpool_slice": (4096, 2, 4, 1, 1, 132)}
 _G10 = {}
+
+
+# (kcu, wg, pf, bk) per weight, m = 8 (verify 1): the proj agent's gemv12 (g12_src.cu = r-proj e71d015), its H100 picks
+G12_CFG = {"qkv_gate": (2, 2, 4, 32), "pooler": (8, 8, 4, 128), "o": (1, 2, 8, 128), "unpool_slice": (4, 4, 4, 32)}
+G12_TOKENS = 8
+
+
+def _pack12(w, kc):
+    """proj's gemv12 layout: [k-chunk][8-row group][kc/32 atoms][lane][8] (atom = 8 rows x 32 k), lossless."""
+    n, k = w.shape
+    return w.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
 
 
 def _g10_lib():
@@ -6219,24 +6366,45 @@ def _g10_lib():
             import hashlib
             from torch.utils.cpp_extension import load_inline
             cases = " ".join("G10_CASE(1,%d,%d,%d,%d,%d)" % c[:5] for c in sorted(set(G10_CFG.values())))
-            src = _G10_SRC.replace("G10_CONFIGS", cases)
+            cases12 = " ".join("G12_CASE(%d,%d,%d,%d)" % ((G12_TOKENS,) + c[:3]) for c in sorted(set(G12_CFG.values())))
+            src = _G10_SRC.replace("G10_CONFIGS", cases) + "\n" + _G12_SRC.replace("G12_CONFIGS", cases12)
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
-                            "int64_t, int64_t);",
-                cuda_sources=src, functions=["g10_gemv"],
+                            "int64_t, int64_t);\n"
+                            "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                            "int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources=src, functions=["g10_gemv", "g12_gemm"],
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
-            print("layer: gemv10 build failed, cuBLAS at 1 token:", e)
+            print("layer: gemv10/12 build failed, cuBLAS:", e)
     return _G10["lib"]
 
 
-def _linear(x, w, key):
-    """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), else cuBLAS."""
+def _g12_prepare(state):
+    """gemv12's packed weights, FP32 split-K workspace (overwritten each call) and per-rg counters (left zeroed).
+    All gemv12 calls run on the main stream, one at a time, so they share the workspace and counters."""
+    if _G10.get("lib") is None:
+        return
+    dev = state["unpool_slice"].device
+    w = {**state["dense"], "unpool_slice": state["unpool_slice"]}
+    state["g12"] = {key: _pack12(w[key], 1024 * c[0]) for key, c in G12_CFG.items()}
+    state["g12_ws"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=dev)
+    state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
+
+
+def _linear(x, w, key, state=None):
+    """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), gemv12 at 8 (FP32 accumulate and
+    split-K partials), else cuBLAS."""
     lib = _G10.get("lib")
     if x.shape[0] == 1 and lib is not None and key in G10_CFG and x.shape[1] == G10_CFG[key][0]:
         out = torch.empty((1, w.shape[0]), dtype=torch.bfloat16, device=x.device)
         lib.g10_gemv(w, x.contiguous(), out, *G10_CFG[key][1:])
+        return out
+    if x.shape[0] == G12_TOKENS and state is not None and "g12" in state and key in G12_CFG:
+        out = torch.empty((G12_TOKENS, w.shape[0]), dtype=torch.bfloat16, device=x.device)
+        lib.g12_gemm(state["g12"][key], x.contiguous(), out, state["g12_ws"], state["g12_cnt"], w.shape[0] // 8,
+                     *G12_CFG[key])
         return out
     return F.linear(x, w)
 
@@ -6247,14 +6415,14 @@ def kernel_fn(data, state):
     hq, d = cfg["num_q_heads"], cfg["head_dim"]
     dense = state["dense"]
     dev = data["stream"].device
-    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate")
+    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state)
     o = attn_kernel_fn({
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
         "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
         "seq_lens": data["seq_lens"], "config": cfg}).view(tokens, hq * d)
-    a = _linear(o, dense["o"], "o")  # all-reduce: identity
+    a = _linear(o, dense["o"], "o", state)  # all-reduce: identity
 
     fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
     stream1 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev)
@@ -6270,7 +6438,7 @@ def kernel_fn(data, state):
         topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
         # The experts' bucketing too, off the main stream's path.
         bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) and TK2_MAX_TOKENS < tokens <= BUCKET_SIDE_MAX_TOKENS else None
-    pooled = _linear(h, dense["pooler"], "pooler")
+    pooled = _linear(h, dense["pooler"], "pooler", state)
     p = torch.empty_like(pooled)
     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=GLUE_PDL, num_warps=8,
                              launch_pdl=GLUE_PDL)
@@ -6285,7 +6453,7 @@ def kernel_fn(data, state):
     else:
         moe = (_experts_marlin if HAVE_SGL else _experts_local)(p, topk_weights, local_ids, state)
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
-    f = _linear(moe, state["unpool_slice"], "unpool_slice") if sliced else F.linear(moe, state["unpool"])  # all-gather: identity (zeros)
+    f = _linear(moe, state["unpool_slice"], "unpool_slice", state) if sliced else F.linear(moe, state["unpool"])  # all-gather: identity (zeros)
     stream2 = torch.empty_like(stream1)
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]

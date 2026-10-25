@@ -457,6 +457,7 @@ def prepare(weights):
              dequantize(weights["w2"][e], weights["w2_sf"][e], weights["w2_gs"][e]).to(torch.bfloat16))
             for e in range(LOCAL_EXPERTS)]
     _g10_lib()
+    _g12_prepare(state)
     torch.cuda.synchronize()
     return state
 
@@ -464,10 +465,22 @@ def prepare(weights):
 # ---- BF16 GEMV at 1 token: the proj agent's gemv10 (g10_src.cu = r-proj d894f4e, inlined by build.py) ----
 
 _G10_SRC = None  # @@G10@@
+_G12_SRC = None  # @@G12@@
 # (k, u, nv, minb, pf, blocks) per weight, m = 1, chosen by proj on the H100 (dev/g10.py)
 G10_CFG = {"qkv_gate": (8192, 4, 4, 1, 1, 132), "pooler": (8192, 4, 4, 1, 1, 132), "o": (1024, 2, 4, 2, 1, 264),
            "unpool_slice": (4096, 2, 4, 1, 1, 132)}
 _G10 = {}
+
+
+# (kcu, wg, pf, bk) per weight, m = 8 (verify 1): the proj agent's gemv12 (g12_src.cu = r-proj e71d015), its H100 picks
+G12_CFG = {"qkv_gate": (2, 2, 4, 32), "pooler": (8, 8, 4, 128), "o": (1, 2, 8, 128), "unpool_slice": (4, 4, 4, 32)}
+G12_TOKENS = 8
+
+
+def _pack12(w, kc):
+    """proj's gemv12 layout: [k-chunk][8-row group][kc/32 atoms][lane][8] (atom = 8 rows x 32 k), lossless."""
+    n, k = w.shape
+    return w.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
 
 
 def _g10_lib():
@@ -477,24 +490,45 @@ def _g10_lib():
             import hashlib
             from torch.utils.cpp_extension import load_inline
             cases = " ".join("G10_CASE(1,%d,%d,%d,%d,%d)" % c[:5] for c in sorted(set(G10_CFG.values())))
-            src = _G10_SRC.replace("G10_CONFIGS", cases)
+            cases12 = " ".join("G12_CASE(%d,%d,%d,%d)" % ((G12_TOKENS,) + c[:3]) for c in sorted(set(G12_CFG.values())))
+            src = _G10_SRC.replace("G10_CONFIGS", cases) + "\n" + _G12_SRC.replace("G12_CONFIGS", cases12)
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
-                            "int64_t, int64_t);",
-                cuda_sources=src, functions=["g10_gemv"],
+                            "int64_t, int64_t);\n"
+                            "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                            "int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources=src, functions=["g10_gemv", "g12_gemm"],
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
-            print("layer: gemv10 build failed, cuBLAS at 1 token:", e)
+            print("layer: gemv10/12 build failed, cuBLAS:", e)
     return _G10["lib"]
 
 
-def _linear(x, w, key):
-    """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), else cuBLAS."""
+def _g12_prepare(state):
+    """gemv12's packed weights, FP32 split-K workspace (overwritten each call) and per-rg counters (left zeroed).
+    All gemv12 calls run on the main stream, one at a time, so they share the workspace and counters."""
+    if _G10.get("lib") is None:
+        return
+    dev = state["unpool_slice"].device
+    w = {**state["dense"], "unpool_slice": state["unpool_slice"]}
+    state["g12"] = {key: _pack12(w[key], 1024 * c[0]) for key, c in G12_CFG.items()}
+    state["g12_ws"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=dev)
+    state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
+
+
+def _linear(x, w, key, state=None):
+    """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), gemv12 at 8 (FP32 accumulate and
+    split-K partials), else cuBLAS."""
     lib = _G10.get("lib")
     if x.shape[0] == 1 and lib is not None and key in G10_CFG and x.shape[1] == G10_CFG[key][0]:
         out = torch.empty((1, w.shape[0]), dtype=torch.bfloat16, device=x.device)
         lib.g10_gemv(w, x.contiguous(), out, *G10_CFG[key][1:])
+        return out
+    if x.shape[0] == G12_TOKENS and state is not None and "g12" in state and key in G12_CFG:
+        out = torch.empty((G12_TOKENS, w.shape[0]), dtype=torch.bfloat16, device=x.device)
+        lib.g12_gemm(state["g12"][key], x.contiguous(), out, state["g12_ws"], state["g12_cnt"], w.shape[0] // 8,
+                     *G12_CFG[key])
         return out
     return F.linear(x, w)
 
@@ -505,14 +539,14 @@ def kernel_fn(data, state):
     hq, d = cfg["num_q_heads"], cfg["head_dim"]
     dense = state["dense"]
     dev = data["stream"].device
-    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate")
+    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state)
     o = attn_kernel_fn({
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
         "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
         "seq_lens": data["seq_lens"], "config": cfg}).view(tokens, hq * d)
-    a = _linear(o, dense["o"], "o")  # all-reduce: identity
+    a = _linear(o, dense["o"], "o", state)  # all-reduce: identity
 
     fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
     stream1 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev)
@@ -528,7 +562,7 @@ def kernel_fn(data, state):
         topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
         # The experts' bucketing too, off the main stream's path.
         bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) and TK2_MAX_TOKENS < tokens <= BUCKET_SIDE_MAX_TOKENS else None
-    pooled = _linear(h, dense["pooler"], "pooler")
+    pooled = _linear(h, dense["pooler"], "pooler", state)
     p = torch.empty_like(pooled)
     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=GLUE_PDL, num_warps=8,
                              launch_pdl=GLUE_PDL)
@@ -543,7 +577,7 @@ def kernel_fn(data, state):
     else:
         moe = (_experts_marlin if HAVE_SGL else _experts_local)(p, topk_weights, local_ids, state)
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
-    f = _linear(moe, state["unpool_slice"], "unpool_slice") if sliced else F.linear(moe, state["unpool"])  # all-gather: identity (zeros)
+    f = _linear(moe, state["unpool_slice"], "unpool_slice", state) if sliced else F.linear(moe, state["unpool"])  # all-gather: identity (zeros)
     stream2 = torch.empty_like(stream1)
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]
