@@ -183,6 +183,7 @@ __global__ void __launch_bounds__(128) decode(const unsigned short* __restrict__
 
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, c = lane & 3;
     const int h = (blockIdx.x >> 4) & 1, wk = warp;
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     unsigned rank;
     asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(rank));
     const int b = blockIdx.x / 32;
@@ -484,6 +485,7 @@ __global__ void __launch_bounds__(128) verify(const unsigned short* __restrict__
 
     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, c = lane & 3;
     const int h = (blockIdx.x >> 4) & 1, wk = warp;
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     const int tok = blockIdx.x >> 5, b = tok / L, jt = tok % L;  // this cluster's query token (row of qkv / out)
     unsigned rank;
     asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(rank));
@@ -5761,6 +5763,7 @@ PDL_TOKENS = (1, 8)
 # At T=1 the unpool GEMV launches as a PDL secondary of moe_norm2 (patched to trigger at its start), so its first
 # weight loads overlap norm2 (norm2 reads ~128 KB: little HBM contention).
 UNPOOL_PDL = True
+GEMV_PDL_SECONDARY = ("unpool_slice", "o")
 LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference experts (tests of the Marlin-side glue)  # PDL after a cuBLAS producer: no gain (H100 o GEMM + boundary 12.64 vs 12.74 us)
 
 
@@ -6426,7 +6429,7 @@ def _linear(x, w, key, state=None):
     lib = _G10.get("lib")
     if x.shape[0] == 1 and lib is not None and key in G10_CFG and x.shape[1] == G10_CFG[key][0]:
         out = torch.empty((1, w.shape[0]), dtype=torch.bfloat16, device=x.device)
-        pdl = (int(key == "unpool_slice"),) if UNPOOL_PDL else ()
+        pdl = (int(key in GEMV_PDL_SECONDARY),) if UNPOOL_PDL else ()
         lib.g10_gemv(w, x.contiguous(), out, *G10_CFG[key][1:], *pdl)
         return out
     if x.shape[0] == G12_TOKENS and state is not None and "g12" in state and key in G12_CFG:
