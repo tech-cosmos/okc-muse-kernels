@@ -43,3 +43,23 @@
   **1.4586x, 15,508 us** (5th submit of 2026-10-25; 1 left today).
   v6 per shape (sglang/ours): d1 171.9/104.0, d1f 180.0/110.4, d16 258.6/178.5, d16f 431.9/255.2, d32 255.6/219.0,
   d32f 606.1/378.4, v1 262.8/157.1, v1f 281.3/174.1, v16 518.3/391.5, v16f 690.9/471.9, v32 705.3/578.3, v32f 1044.5/737.8.
+
+## Session 2 (2026-10-25 20:24Z-)
+- v7 (dbe255a): moe_src.py = r-moe db182ea (big-M kernel moe_big for M>32; route meta grew 66 -> 68 ints, so
+  `_moe_bucket` allocates 68). Local H100: verify 16 399->351 / 572->506, verify 32 603->486 / 871->742 us.
+  check 440361a9: 1.564x [1.541, 1.588]. submit 12744959: **1.555x, 14,550 us, layer rank 220** (6th submit of 10-25).
+  v7 per shape (sglang/ours): d1 173.9/103.7, d1f 182.5/110.0, d16 259.7/177.3, d16f 444.8/262.8, d32 261.0/225.0,
+  d32f 614.1/368.1, v1 272.1/164.3, v1f 281.8/171.2, v16 525.0/336.9, v16f 700.1/424.2, v32 699.5/448.3, v32f 1071.7/623.9.
+  Per load: d1 1.67, d16 1.54, d32 1.34 (weakest; Marlin ~125 of 225 at sliding), v1 1.65, v16 1.59, v32 1.61.
+- DEAD: L2 prefetch of the o weight on a side stream (tools/l2pf.py, l2pf2.py). Standalone, a GEMM after its weight
+  is L2-resident is much faster (o 13.9 -> 5.8 us H100). In the layer: (a) Triton evict_last load kernel forked after
+  qkv: o GEMM 8.9 -> 5.9 but attention starts 7 us later (prefetch CTAs hold the SMs): +4.5 us net; (b) bulk
+  cp.async.bulk.prefetch.L2 from 64 one-warp CTAs: o 6.7, attention +2 us later and slower: +1.5 us net;
+  (c) any fork at the very START of the graph (side stream root node) delays the first main-stream kernel: +9 us.
+- DEAD: GEMV with PDL that loads its W tile before griddepcontrol.wait (tools/pdl_gemv.py): in a graph it does start
+  during the producer, but the producer (latency-bound load chain) slows by as much as the overlap gains (HBM queueing):
+  zero-sum (23.4 vs 23.7 us). Also the plain Triton GEMV is 11 us vs cuBLAS 9.7 for o at m1.
+- DEAD: torch.mm(out_dtype=float32) for the GEMMs: same time as F.linear (tools/mm_variants.py).
+- DEAD: one-pass boundary (both norms from 4 simultaneous row sums): 4.6/4.3 vs 4.3/3.9 us at T=1, mixed at T=256.
+- Glue at decode 1 is at the launch floor: an empty kernel is ~2.4 us, boundary 3.8-4.3. Remaining layer-side lever
+  is launch count (14 kernels on the critical path at T=1, 3 of them cuBLAS splitK reduces).
