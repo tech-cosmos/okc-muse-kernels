@@ -44,6 +44,16 @@ def test():
         ok, msg = reference.check_implementation(data, out, w)
         bad += not ok
         print(f"{'PASS' if ok else 'FAIL'} {c} {msg}", flush=True)
+    # the judge keeps several copies of the prepared state (clones): nothing may depend on state addresses
+    st2 = {k: (v.clone() if isinstance(v, torch.Tensor) else v) for k, v in st.items()}
+    for bs in (1, 16, 128, 256):
+        data = reference.generate_input(sharding="ep8", bs=bs, seed=3000 + bs)
+        out = submission.kernel_fn(data, st2)
+        torch.cuda.synchronize()
+        ok, msg = reference.check_implementation(data, out, w)
+        bad += not ok
+        print(f"{'PASS' if ok else 'FAIL'} cloned state bs {bs} {msg}", flush=True)
+    del st2
     return bad
 
 

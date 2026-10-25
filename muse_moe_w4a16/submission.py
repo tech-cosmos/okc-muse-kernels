@@ -1836,25 +1836,23 @@ int64_t moe_tb_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tens
   return -1;
 }
 static PFN_cuTensorMapEncodeTiled_v12000 g_encode = nullptr;
-// 4 tensor maps (box rows 8/16/32/64, box cols 64, SW128) over a bf16 [rows, KD] buffer -> CPU uint8 [4, 128]
-torch::Tensor moe_tw_maps(torch::Tensor buf) {
+// 4 tensor maps (box rows 8/16/32/64, box cols 64, SW128) over a bf16 [rows, KD] buffer. Encoded at every launch
+// from the buffer actually passed (under graph capture they are baked into the kernel node with that buffer).
+static void tw_maps(TMaps& maps, void* ptr, int64_t rows) {
   if (!g_encode) {
     cudaDriverEntryPointQueryResult q;
     cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled", (void**)&g_encode, 12000, cudaEnableDefault, &q);
   }
-  auto out = torch::zeros({4, (int64_t)sizeof(CUtensorMap)}, torch::dtype(torch::kUInt8));
   for (int i = 0; i < 4; ++i) {
-    CUtensorMap* m = reinterpret_cast<CUtensorMap*>(out.data_ptr<uint8_t>() + i * sizeof(CUtensorMap));
-    cuuint64_t dims[2] = {(cuuint64_t)KD, (cuuint64_t)buf.size(0)};
+    cuuint64_t dims[2] = {(cuuint64_t)KD, (cuuint64_t)rows};
     cuuint64_t strides[1] = {(cuuint64_t)KD * 2};
     cuuint32_t box[2] = {64, (cuuint32_t)(8 << i)};
     cuuint32_t es[2] = {1, 1};
-    CUresult r = g_encode(m, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, buf.data_ptr(), dims, strides, box, es,
+    CUresult r = g_encode(&maps.m[i], CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, ptr, dims, strides, box, es,
                           CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
                           CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
     TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled failed ", (int)r);
   }
-  return out;
 }
 int64_t moe_gather_launch(torch::Tensor x, torch::Tensor meta, torch::Tensor sroutes, torch::Tensor xg) {
   moe_gather<<<(int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
@@ -1862,12 +1860,12 @@ int64_t moe_gather_launch(torch::Tensor x, torch::Tensor meta, torch::Tensor sro
   return (int64_t)cudaGetLastError();
 }
 int64_t moe_tw_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tensor sb_, torch::Tensor gs_,
-                      torch::Tensor lut_, torch::Tensor maps_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
+                      torch::Tensor lut_, torch::Tensor xb_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
   cudaStream_t st = at::cuda::getCurrentCUDAStream();
   const void *wb = PTR(wb_), *sb = PTR(sb_), *gs = PTR(gs_), *lut = PTR(lut_), *meta = PTR(meta_), *sr = PTR(sr_);
   void* out = out_.data_ptr();
   TMaps maps;
-  memcpy(&maps, maps_.data_ptr(), sizeof(TMaps));
+  tw_maps(maps, xb_.data_ptr(), xb_.size(0));
 #define TW(RT, KG, NS)                                                                       \
   if (cfg == RT * 100 + KG * 10 + NS) {                                                      \
     if (gated) return launch_tw<RT, KG, NS, true>(wb, sb, gs, lut, maps, meta, sr, out, st);  \
@@ -1958,7 +1956,6 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "torch::Tensor, torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_tb_launch(int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
-        "torch::Tensor moe_tw_maps(torch::Tensor);"
         "int64_t moe_gather_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_tw_launch(int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
@@ -1977,7 +1974,7 @@ def _lib():
         h = hashlib.sha256(CUDA_SRC.encode()).hexdigest()[:12]
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=CUDA_SRC,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tb_launch",
-                                      "moe_tw_maps", "moe_gather_launch", "moe_tw_launch",
+                                      "moe_gather_launch", "moe_tw_launch",
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
@@ -2090,11 +2087,6 @@ def prepare(weights):
     st["w2s"] = torch.stack(w2s)
     del w13q, w13s, w2q, w2s
     if TW_CFG:
-        rmax = 257 * TOP_K
-        st["xg"] = torch.zeros((rmax, H), dtype=torch.bfloat16, device=dev)
-        st["interp"] = torch.zeros((rmax, I), dtype=torch.bfloat16, device=dev)
-        st["maps_x"] = lib.moe_tw_maps(st["xg"])
-        st["maps_i"] = lib.moe_tw_maps(st["interp"])
         rt = TW_CFG // 100
         if rt not in TB_PACK:
             st[f"w13b{rt}"], st[f"w13sb{rt}"] = _tb_pack(st["w13q"], st["w13s"], True, rt)
@@ -2167,12 +2159,13 @@ def kernel_fn(data, st):
     p13, p2 = PLAN_OVERRIDE(M) if PLAN_OVERRIDE else _plan(M)
     assert p13 in _CFGS and p2 in _CFGS, (p13, p2)
     lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
-    if TW_CFG and M * TOP_K <= st["xg"].shape[0]:
+    if TW_CFG:
+        # inter here holds gemm2's B in the K-permuted order (see moe_tw)
         rt = TW_CFG // 100
-        lib.moe_gather_launch(x, meta, sroutes, st["xg"])
-        lib.moe_tw_launch(1, TW_CFG, st[f"w13b{rt}"], st[f"w13sb{rt}"], st["gs13"], st["lut"], st["maps_x"], meta, sroutes,
-                          st["interp"])
-        lib.moe_tw_launch(0, TW_CFG, st[f"w2b{rt}"], st[f"w2sb{rt}"], st["gs2"], st["lut"], st["maps_i"], meta, sroutes, y)
+        xg = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
+        lib.moe_gather_launch(x, meta, sroutes, xg)
+        lib.moe_tw_launch(1, TW_CFG, st[f"w13b{rt}"], st[f"w13sb{rt}"], st["gs13"], st["lut"], xg, meta, sroutes, inter)
+        lib.moe_tw_launch(0, TW_CFG, st[f"w2b{rt}"], st[f"w2sb{rt}"], st["gs2"], st["lut"], inter, meta, sroutes, y)
         lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out)
         return out
     if TB_RT:
