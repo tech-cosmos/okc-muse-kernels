@@ -46,3 +46,25 @@
   1:1; there is NO extra H200 headroom for the same kernel.
 - Conclusion: four GEMV structures all land at cuBLAS +-5% at m1, while the pure grid-stride reader is ~20% faster
   (H100). Next: bisect from the reader upward (see STATE).
+
+## Session 3 (2026-10-25 20:30- UTC)
+- Probe (/tmp, numbers here): empty graph 2.88 us; a nop kernel adds 1.8 us (1 block) / 2.6 us (1056 blocks); 2 nops +3.0.
+  The ~4 us "intercept" in every shape's time is mostly launch, not DRAM ramp. Reader slope 3.24 TB/s (H100).
+- dev/gemv9.cu (CUDA-core warp stream-K, W row-major, atomics+counter finalize): 25-40% SLOWER than cuBLAS. x per tile
+  via __ldg or smem made no difference. Warp-contiguous streams are slow (rd2 mode0 too: 17 vs 14.6 us).
+- dev/gemv10.cu (m=1): grid-stride like the fastest reader: chunk = U*4 KB = whole rows, virtual block (256 thr) v takes
+  chunks v, v+G, ...; FP32 FMA, warp shuffle + smem per chunk, no split K, no atomics. Key: x staging traffic =
+  blocks * k * 2 bytes (1056 blocks * 16 KB = 17 MB of L2 reads!) -> fat blocks (NV=4 groups of 256 share one x copy,
+  grid 132). Also STACK spills at 40 regs were deadly (check cuobjdump -res-usage). H100 m1: qkv 15.9 (cuBLAS 18.2),
+  o 8.6 (9.1), pooler 24.7 (28.3), unpooler 6.3 (9.1). CUDA-core at m=8: 28 us (compute-bound) -> tensor cores for m>1.
+- check e5329f3904b840df (ec649e1 = d894f4e after rebase): 1.1602x. H200: qkv m1 11.61 (SGLang 14.14), o 6.55 (7.04),
+  pooler 17.92 (21.68), unpooler 4.59 (7.01): H200 gains are LARGER than H100's for this kernel.
+- submit 3c377a1a274a444f (same code): 1.1739x (CI 1.156-1.192). New best.
+- Reader layouts (H100, /tmp/pj/rd3.py): block-contiguous ranges (block b reads [b*S, (b+1)*S), threads interleaved
+  16 B) are within ~2% of grid-stride. red.global.add.v4.f32 costs ~1 us per ~70K ops (v4 as cheap as v1 per op).
+- dev/gemv11.cu (m = 8..32, WIP): mma m16n8k16, x = A, W = B; W repacked to 512-B atoms (8 rows x 32 k, lane l: row l/4,
+  k (l%4)*8..+8 = B frags of two k16 mmas; x A frags use the same k permutation); layout [ks][rg][atom][lane]; block =
+  (k-chunk, run of rgs), x chunk staged in smem. Findings: (1) float atomicAdd on SHARED memory = CAS spin loop
+  (ATOMS.CAST.SPIN): never use it for reductions; (2) x staging queued behind the W prologue takes 5-8 us (globaltimer
+  per phase, /tmp/pj/dbg11.py); issuing no W before x lands: staging 1.5 us; (3) loop = W-bound ~2.9 TB/s; (4) split-K
+  end phase (stcg partials, fence, counter, re-read) ~3 us serialized. qkv m8 best so far 19.7 (cuBLAS 18.1).
