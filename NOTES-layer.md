@@ -92,3 +92,13 @@
   Rough budget of gemm13 at T=256 (H100 ~214 us): HBM 107, mma 52 (34 GFLOP incl. NG rounding 5->8 groups),
   smem B-fragment reads ~72 (each warp re-reads x for only 16 rows), dequant ~41: they add up instead of overlapping
   (one __syncthreads per 64-k chunk keeps the 8 warps in lockstep). Posted to moe as a Request.
+- Lead raised the submit cap to 9/day (CLAUDE.md 05f0479). Submitted v8 (main @4c21a41, 13/13 local): a7650536
+  **1.5760x [1.552, 1.600], 14,353 us, layer rank 207** (board best now).
+- v9 (fc6c0ea): proj's gemv10 (r-proj d894f4e, grid-stride m=1 GEMV, W in place, FP32 accumulate; g10_src.cu inlined
+  by build.py as a raw string, own load_inline) for qkv / o / pooler / unpool slice at T=1 only (layer `_linear`).
+  H100 standalone (graph+cold L2 incl. launch, tools/g7bench.py): qkv 18.6 vs cuBLAS 20.9, o 11.5/11.8, pooler
+  27.5/30.7, unpool 9.4/11.2. Layer H100 decode 1: 118.8/142.5 vs v8 123-128/148-151.
+  check 9261f31b: 1.5948x [1.571, 1.619]; submit dd2b45c6: 1.5663x [1.543, 1.590] (board keeps 1.576).
+  d1 held in both runs (H200 sliding/full: v8 104.3-105.5/113.4-113.7 -> v9 97.0-98.0/105.0-105.2), but the submit
+  run had d32 236.1 (218-222 in the other 3 runs), v32 476.9/657.8 (450-469/624-632): shapes v9 doesn't touch, so
+  judge/input variance at T>=32 (expert counts vary per input). Not resubmitting unchanged code (rule).

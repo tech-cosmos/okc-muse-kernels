@@ -3,22 +3,22 @@
 Updated 2026-10-25 ~21:40Z (end of session 3: probes only, no judge runs; main unchanged = v8).
 
 ## Board
-- **Best scored: 12744959 = dbe255a (v7), 1.555x, 14,550 us/step, layer rank 220.** Board #1 2.285x (9,900 us),
-  #20 2.03x. Budget 2026-10-25: 6 of 6 submits (CLAUDE.md cap; okc says 6/10), 9 of 20 checks used.
-- **QUEUED: main (v8, c33532e + comment-only change) checked fc3e60d0 = 1.581x [1.557, ...] > 1.555 board.
-  SUBMIT IT FIRST after 00:00 UTC 2026-10-26** (`okc submit muse_decode_layer/submission.py --json`).
-- v8 per shape, H200 (SGLang / ours, us): d1 172.7/105.5, d1f 183.2/113.7, d16 269.8/183.7, d16f 444.0/260.4,
-  d32 268.2/218.3, d32f 631.3/369.6, v1 267.7/157.9, v1f 281.0/169.3, v16 545.3/341.8, v16f 720.1/427.3,
-  v32 735.6/469.5, v32f 1074.9/631.9. (Judge noise: SGLang's own times move +-5% between runs.)
-  Per load ~: d1 1.63, d16 1.55, d32 1.42, v1 1.69, v16 1.62, v32 1.61.
+- **Best scored: a7650536 = v8 (main @4c21a41), 1.576x, 14,353 us/step, layer rank 207-209.** Board #1 2.285x.
+- **main = v9 (fc6c0ea)**: v8 + proj gemv10 at T=1. check 9261f31b 1.595x; submit dd2b45c6 1.566x (noise at T>=32,
+  see NOTES s3; d1 gain held: 97-98/105 vs 104-105.5/113.5 us). Submit the NEXT real change on top of v9.
+- Budget 2026-10-25: 8 of 9 submits (cap raised to 9 by the lead), 10 of 20 checks used.
+- v9 per shape, H200 check 9261f31b (SGLang / ours, us): d1 170.5/97.0, d1f 180.3/105.0, d16 262.1/177.8,
+  d16f 434.6/257.1, d32 255.7/217.8, d32f 617.0/365.7, v1 260.5/153.5, v1f 269.6/162.4, v16 514.3/328.6,
+  v16f 673.5/415.5, v32 740.2/454.9, v32f 1102.4/623.5. Judge noise: same code moves up to 8% at d32/v32.
 - Floors (us): d1 40/44, d16 77/137, d32 85/208, v1 62/66, v16 127/189, v32 144/267. Weights: sliding 46, full 16.
 
 ## Code (muse_decode_layer/)
-- `layer.py` = the layer; `attn_src.py` = ~/attn submission.py @82866c6; `moe_src.py` = r-moe 6a1cda0
+- `layer.py` = the layer; `g10_src.cu` = proj's gemv10 CUDA (r-proj d894f4e; re-copy `_G10_SRC` from their
+  submission.py when they improve it; configs in layer.py G10_CFG); `attn_src.py` = ~/attn submission.py @82866c6; `moe_src.py` = r-moe 6a1cda0
   (`git show <commit>:muse_moe_w4a16/submission.py > moe_src.py`; check the route meta size, now 68 ints, matches
   `_moe_bucket`). **`python build.py` writes submission.py** (inlines both; attention kernel_fn -> attn_kernel_fn +
   constexpr np2 fix; moe names prefixed `_moe_`). Never edit submission.py by hand.
-- Pipeline: qkv F.linear -> attn kernels -> o F.linear -> `_boundary` -> side stream: router + `_routing`
+- Pipeline: qkv `_linear` (gemv10 at T=1, else cuBLAS) -> attn kernels -> o F.linear -> `_boundary` -> side stream: router + `_routing`
   (+ moe bucketing <= 16 tokens) || pooler F.linear -> `_rmsnorm_gain` -> moe experts (all T now; Marlin code kept,
   MARLIN_TOKENS = ()) -> unpooler F.linear (1024-row slice <= 8 tokens) -> `_boundary`.
 - bench.py `test` / `bench [file] [filter]` / `prof`; tools/timeline.py <file> "<load> <layer>" (per-kernel
@@ -36,11 +36,11 @@ Updated 2026-10-25 ~21:40Z (end of session 3: probes only, no judge runs; main u
 0. Biggest lever in the whole layer = experts at T>=16 (2.3-3x their byte floor, see NOTES s3); that is moe's lane:
    re-copy moe_src.py the moment they post a faster moe_big / decode kernel. If moe doesn't take the big-M redesign
    (Request in COORD), it's worth doing here: wgmma with dequantized A in registers, B = x via TMA, more rows per warp.
-1. After 00:00 UTC: submit v8 (see above).
-2. Watch ~/COORD.md Handoffs / r-moe and r-proj commits: re-copy moe_src.py on every moe speedup (T=1..256 all
-   use it now), rebuild, `bench.py test`, local bench vs variants/, check. Proj: their gemv7 BF16 m=1 is ~3-5%
-   faster than cuBLAS on H200 (qkv 13.3 vs 14.0, pooler 20.5 vs 21.1): worth taking when they post it, also
-   their router hi/lo kernel for m 9-32 (but my router is off the critical path, so low value).
+1. Watch ~/COORD.md Handoffs / r-moe and r-proj commits: re-copy moe_src.py on every moe speedup (T=1..256 all
+   use it), re-copy g10_src.cu when proj improves gemv10 or extends it to m=8 (verify 1 = T=8; gemv7 loses there),
+   rebuild, `bench.py test`, `bench.py bench` vs variants/sub_v8.py (gitignored, regenerate from git), check.
+2. gemv10 is ours at T=1 now, so its epilogue can take glue: unpool GEMV + boundary 2 (last-CTA), o GEMV +
+   boundary 1; each saves a launch + gap (~2-3 us at d1).
 3. Small layer fusions (each ~1-3 us): pre-expert rmsnorm into moe gemm13's x staging for T<=32 (needs a
    patched copy of moe CUDA: x*r*g rounded to BF16 = identical to now); remove splitK reduces once GEMMs are ours;
    boundary into the unpool GEMM epilogue at T<=8 (last-CTA pattern) if we own that GEMV.
