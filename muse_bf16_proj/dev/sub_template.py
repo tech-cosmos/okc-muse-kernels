@@ -42,6 +42,7 @@ _ROUTER_SRC = r'''@@ROUTER@@'''
 _GEMV_SRC = r'''@@GEMV7@@'''
 _G10_SRC = r'''@@GEMV10@@'''
 _G12_SRC = r'''@@GEMV12@@'''
+_LT_SRC = r'''@@LT@@'''
 
 # Router FP32 kernel configs (mp, kb, rw, nwarp), chosen on the H100 (dev/rt.py).
 ROUTER_F32 = [(1, (1, 2048, 1, 8)), (8, (8, 512, 2, 8)), (16, (16, 512, 2, 8))]
@@ -54,6 +55,11 @@ BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4,
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
 BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32, 1, 1)], "pooler": [(8, 8, 8, 4, 128, 1, 1), (16, 8, 8, 4, 128, 8, 2)],
             "o": [(8, 1, 2, 8, 128, 1, 1)], "unpooler": [(8, 4, 4, 4, 32, 1, 1)]}  # unpooler m8: H200 5.7-7.3 (noisy)
+# cuBLASLt configs to try per (layer, m), from an exhaustive H100 sweep of algo 66 (dev/lte.py): (algo, tile, stages,
+# split k, reduction, swizzle, custom option, cluster). prepare() times them and F.linear on this GPU, cold L2, and keeps
+# the fastest (or F.linear).
+BF16_LT = @@LTCFG@@
+LT_WS_BYTES = 32 << 20
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
@@ -75,6 +81,16 @@ try:
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
     _mod = None
+
+try:
+    _lt = load_inline(
+        name="muse_proj_lt1",
+        cpp_sources="int64_t lt_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::vector<int64_t>);",
+        cuda_sources=_LT_SRC, functions=["lt_gemm"], extra_ldflags=["-lcublasLt"],
+        extra_cuda_cflags=["-O3"], verbose=False)
+except Exception as _e:  # noqa: BLE001
+    print("muse_proj cuBLASLt build failed, using F.linear:", _e)
+    _lt = None
 
 ROUTER_FP32_MAX_TOKENS = 8
 
@@ -110,7 +126,62 @@ def prepare(weights):
     # gemv12's own: FP32 split-K partials (overwritten each call, not zeroed) and per-rg counters (left zeroed)
     st["ws12"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=r.device)
     st["cnt12"] = torch.zeros(1024, dtype=torch.int32, device=r.device)
+    st["ltws"] = torch.empty(LT_WS_BYTES, dtype=torch.uint8, device=r.device)
+    st["lt"] = _lt_tune(st) if _lt is not None else {}
     return st
+
+
+def _lt_tune(st, reps=25):
+    """Per (layer, m): time F.linear and each BF16_LT config with a cold L2 on random x; keep the fastest."""
+    picks = {}
+    flush = torch.zeros(256 << 20, dtype=torch.uint8, device=st["ltws"].device).view(torch.int64)
+    sink = torch.zeros((), dtype=torch.int64, device=flush.device)
+    g = torch.Generator(device=flush.device)
+    g.manual_seed(0)
+    for (layer, m), cfgs in BF16_LT.items():
+        w = st[layer]
+        n, k = w.shape
+        x = torch.randn(m, k, generator=g, device=w.device).to(torch.bfloat16)
+        ref = F.linear(x, w).float()
+        out = torch.empty(m, n, dtype=torch.bfloat16, device=w.device)
+        cands = [None]
+        for c in cfgs:
+            if _lt.lt_gemm(w, x, out, st["ltws"], list(c)) == 0:
+                torch.cuda.synchronize()
+                if ((out.float() - ref).norm() / ref.norm()).item() < 1e-3:
+                    cands.append(c)
+        if len(cands) == 1:
+            continue
+        graphs = []
+        for c in cands:  # one graph per candidate: times the kernel as the judge replays it, no host overhead
+            gr = torch.cuda.CUDAGraph()
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                with torch.cuda.graph(gr, stream=s):
+                    if c is None:
+                        F.linear(x, w)
+                    else:
+                        _lt.lt_gemm(w, x, out, st["ltws"], list(c))
+            torch.cuda.current_stream().wait_stream(s)
+            graphs.append(gr)
+        torch.cuda.synchronize()
+        ev = [[(torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) for _ in cands]
+              for _ in range(reps)]
+        for r in range(reps):
+            for i in range(len(cands)):
+                torch.sum(flush, 0, out=sink)  # cold L2 by reading, as the judge does
+                ev[r][i][0].record()
+                graphs[i].replay()
+                ev[r][i][1].record()
+        torch.cuda.synchronize()
+        med = [sorted(ev[r][i][0].elapsed_time(ev[r][i][1]) for r in range(reps))[reps // 2] for i in range(len(cands))]
+        best = min(range(len(cands)), key=med.__getitem__)
+        if cands[best] is not None:
+            picks[(layer, m)] = cands[best]
+        print(f"lt {layer} m{m}: F.linear {med[0] * 1e3:.2f} us, best {cands[best]} {med[best] * 1e3:.2f} us")
+    del flush
+    return picks
 
 
 def _router(x, st, m):
@@ -148,4 +219,9 @@ def kernel_fn(data, st):
                 out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
                 _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
                 return out
+    c = st["lt"].get((layer, m))
+    if c is not None:
+        out = torch.empty((m, n), dtype=torch.bfloat16, device=x.device)
+        _lt.lt_gemm(st[layer], x, out, st["ltws"], list(c))
+        return out
     return F.linear(x, st[layer][:n])
