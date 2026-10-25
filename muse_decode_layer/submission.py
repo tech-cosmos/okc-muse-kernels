@@ -4220,12 +4220,14 @@ __device__ __forceinline__ uint4 ld_stream(const uint4* p) {
 
 // 8 e2m1 codes (bit-permuted in prepare) -> 4 bf16x2 A registers (rows g, g+8, g, g+8),
 // each = code * 2^-126 (exact, subnormals for 0/0.5) times the block scale * 2^118.
+// Output 0 = q & M, outputs 1/2 = rotl(q, 10/13) & M, output 3 = the 8 leftover bits (mask 0x001B001B)
+// moved by one multiply (x 2^3 + 2^8 + 2^14: the shifted copies never overlap, so no carries) & M.
 __device__ __forceinline__ void dq(uint32_t q, uint32_t s0, uint32_t s1, uint32_t* a) {
   const uint32_t M = 0x81C081C0u;
-  uint32_t o0 = q & M;
-  uint32_t o1 = (q << 3) & M;
-  uint32_t o2 = (q << 6) & M;
-  uint32_t o3 = ((q >> 4) & 0x00C000C0u) | ((q >> 5) & 0x01000100u) | ((q << 1) & 0x80008000u);
+  const uint32_t o0 = q & M;
+  const uint32_t o1 = __funnelshift_l(q, q, 10) & M;
+  const uint32_t o2 = __funnelshift_l(q, q, 13) & M;
+  const uint32_t o3 = ((q & 0x001B001Bu) * 16648u) & M;
   a[0] = bmul(o0, s0);
   a[1] = bmul(o1, s1);
   a[2] = bmul(o2, s0);
@@ -4349,7 +4351,7 @@ __global__ void __launch_bounds__(256, MB) moe_gemm(
           const float v = red[idx] * gsc;
           if (GATED) {
             const float u = red[idx + R * G * 128] * gsc;
-            const float h = v / (1.0f + __expf(-v)) * u;
+            const float h = __fdividef(v, 1.0f + __expf(-v)) * u;
             Out[(size_t)(off + tok) * NOUT + col] = __float2bfloat16(h);
           } else {
             Out[(size_t)sroutes[off + tok] * NOUT + col] = __float2bfloat16(v);
@@ -4623,7 +4625,7 @@ __global__ void __launch_bounds__(NW * 32, MB) moe_big(
                 const float v = acc[gi][r] * gsc;
                 if (GATED) {
                   const float u = red[((warp * 8 + gi) * 4 + r) * 32 + lane] * gsc;
-                  Out[(size_t)(off + tok) * NOUT + col] = __float2bfloat16(v / (1.0f + __expf(-v)) * u);
+                  Out[(size_t)(off + tok) * NOUT + col] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
                 } else {
                   Out[(size_t)sroutes[off + tok] * NOUT + col] = __float2bfloat16(v);
                 }
@@ -4680,18 +4682,8 @@ static int launch_gemm(const void* wq, const void* ws, const void* gs, const voi
   switch (cfg) {                                                                            \
     case 10: return launch_gemm<1, 1, GATED, 3>(wq, ws, gs, lut, x, meta, sr, out, st);    \
     case CFG(1, 1): return launch_gemm<1, 1, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
-    case CFG(2, 1): return launch_gemm<2, 1, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
     case CFG(2, 2): return launch_gemm<2, 2, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
-    case CFG(4, 1): return launch_gemm<4, 1, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
-    case CFG(4, 2): return launch_gemm<4, 2, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
-    case CFG(1, 4): return launch_gemm<1, 4, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
-    case CFG(2, 4): return launch_gemm<2, 4, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
-    case CFG(1, 8): return launch_gemm<1, 8, GATED>(wq, ws, gs, lut, x, meta, sr, out, st); \
-    case 104: return launch_big<GATED, 4, 8, 2>(wq, ws, gs, lut, x, meta, sr, out, st);     \
-    case 108: return launch_big<GATED, 8, 16, 1>(wq, ws, gs, lut, x, meta, sr, out, st);    \
     case 118: return launch_big<GATED, 8, 8, 2>(wq, ws, gs, lut, x, meta, sr, out, st);     \
-    case 144: return launch_big<GATED, 4, 4, 4>(wq, ws, gs, lut, x, meta, sr, out, st);     \
-    case 148: return launch_big<GATED, 8, 4, 2>(wq, ws, gs, lut, x, meta, sr, out, st);     \
   }                                                                                         \
   return -1;
 
@@ -4764,9 +4756,9 @@ def _moe__unpack_codes(packed):
 # bit positions (lo element, hi element) of (sign, e1, e0, m) for the 4 outputs, see dq().
 _moe__POS = [
     ((15, 8, 7, 6), (31, 24, 23, 22)),
-    ((12, 5, 4, 3), (28, 21, 20, 19)),
-    ((9, 2, 1, 0), (25, 18, 17, 16)),
-    ((14, 13, 11, 10), (30, 29, 27, 26)),
+    ((5, 30, 29, 28), (21, 14, 13, 12)),  # rotl 10
+    ((2, 27, 26, 25), (18, 11, 10, 9)),   # rotl 13
+    ((1, 0, 4, 3), (17, 16, 20, 19)),     # (q & 0x001B001B) * (2^3 + 2^8 + 2^14)
 ]
 
 
@@ -4842,7 +4834,7 @@ def _moe__plan(M):
 
 
 _moe_PLAN_OVERRIDE = None
-_moe__CFGS = (10, 11, 21, 22, 41, 42, 14, 24, 18, 104, 108, 118, 144, 148)
+_moe__CFGS = (10, 11, 22, 118)
 
 
 def _moe_kernel_fn(data, st):
@@ -5190,7 +5182,7 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 # (H200, us, SGLang incl. its torch post-norm at small T / theirs): bs1 77.3/42.5, bs8 143/106, bs16 196/159,
 # bs32 204/211, bs128 466/340, bs256 617/471.
 BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
-MARLIN_TOKENS = (32,)  # moe bb49efd at T=32: 222.0 vs Marlin 219.7 us decode 32 sliding (c17d1581)
+MARLIN_TOKENS = ()  # check v8: moe 6a1cda0 at T=32 too. was (32,): moe bb49efd at T=32: 222.0 vs Marlin 219.7 us decode 32 sliding (c17d1581)
 
 
 def _use_moe(tokens):

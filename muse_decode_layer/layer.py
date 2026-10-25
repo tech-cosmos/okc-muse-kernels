@@ -363,7 +363,7 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 # (H200, us, SGLang incl. its torch post-norm at small T / theirs): bs1 77.3/42.5, bs8 143/106, bs16 196/159,
 # bs32 204/211, bs128 466/340, bs256 617/471.
 BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
-MARLIN_TOKENS = (32,)  # moe bb49efd at T=32: 222.0 vs Marlin 219.7 us decode 32 sliding (c17d1581)
+MARLIN_TOKENS = ()  # check v8: moe 6a1cda0 at T=32 too. was (32,): moe bb49efd at T=32: 222.0 vs Marlin 219.7 us decode 32 sliding (c17d1581)
 
 
 def _use_moe(tokens):
