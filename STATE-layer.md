@@ -1,45 +1,45 @@
-# STATE-layer (muse_decode_layer) — short current picture; NOTES-layer.md is the long log
+# STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-25 ~19:50Z (session 1).
+Updated 2026-10-25 20:25Z (end of session 1).
 
 ## Board
-- Best scored: **53d9d188 = 224f7fd (SGLang baseline modules as submission) 1.000x, 22,609 us/step** (rank: first correct run).
-- Board #1 colinlikescode 2.285x (9,900 us). Overall-board priority = get this lane to ~2x.
-
-## SGLang per-shape H200 times (us, run 53d9d188) and floors
-| shape | sglang | floor |
-|---|---|---|
-| decode 1 sliding / full | 172.72 / 183.10 | 40.0 / 44.2 |
-| decode 16 sliding / full | 265.55 / 437.74 | 76.7 / 137.5 |
-| decode 32 sliding / full | 261.33 / 612.56 | 84.5 / 208.1 |
-| verify 1 sliding / full | 266.83 / 272.30 | 62.3 / 66.4 |
-| verify 16 sliding / full | 506.48 / 692.02 | 126.6 / 188.7 |
-| verify 32 sliding / full | 723.60 / 1087.28 | 143.8 / 267.2 |
-Weights per load: sliding 46, full 16 (sliding dominates every load).
-
-## SGLang time split (judge profile 53d9d188, top-12 kernels only)
-- decode 1 sliding 175: Marlin x2 40.7, cuBLAS qkv+pooler (128x8 splitK) 32.0, FA3 9.9, o/unpool GEMMs ~12, router FP32 gemv 5.1,
-  splitK reduces 5.3, rms_norm 5.7, ~24 small kernels (casts, store_cache, align, maps, norms) = ~60 us of glue.
-- decode 16/32 full: FA3 191.6 / 368.7 (ours: 87.7 / 168.2 on the attention board), Marlin 148 / 124.
-- verify 32 full: Marlin 537, FA3 379. verify 1 sliding: Marlin 74.6, GEMMs 33, router FP32 (sm80 xmma) 13+9.
-- So: experts (Marlin) are the biggest slice at T>=16; attention on full layers; glue at small T.
+- **Best scored: 1a7c4997 = main 5a95d4a (v6), 1.4586x, 15,508 us/step.** (Session start: none; 1.000x baseline
+  53d9d188.) Board #1 2.285x (9,900 us). Budget 2026-10-25: 5 of 6 submits, 7 of 20 checks used.
+- v6 per shape, H200 (SGLang / ours, us): d1 171.9/104.0, d1f 180.0/110.4, d16 258.6/178.5, d16f 431.9/255.2,
+  d32 255.6/219.0, d32f 606.1/378.4, v1 262.8/157.1, v1f 281.3/174.1, v16 518.3/391.5, v16f 690.9/471.9,
+  v32 705.3/578.3, v32f 1044.5/737.8. Weakest loads: decode 32 (1.17 sliding), verify 32 (1.22), verify 16 (1.32).
+- Floors (us): d1 40/44, d16 77/137, d32 85/208, v1 62/66, v16 127/189, v32 144/267. Weights: sliding 46, full 16.
 
 ## Code (muse_decode_layer/)
-- layer.py = the layer source; attn_src.py = copy of ~/attn/submission.py @82866c6; `python build.py` -> submission.py
-  (inlines attention, renames its kernel_fn attn_kernel_fn, patches triton.next_power_of_2 in a jit body: SGLang's
-  import breaks it in the judge image, check 7e3e63a1 failed 2 tests on that).
-- bench.py: `test` (13 judge tests vs reference.py), `bench`, `prof`; tools/micro*.py: glue-kernel microbenches.
-  Locally no SGLang: experts use a dequant-everything fallback (correctness only; timings of whole layer meaningless).
-- main 2a21d76 = v2: cuBLAS GEMMs (F.linear), our attention, own Triton boundary x2, router (FP32 FMA split-K <= 8
-  tokens, BF16 hi/lo tl.dot above), routing (top-8, local ids), pre-expert norm; SGLang Marlin experts (judge only).
+- `layer.py` = the layer; `attn_src.py` = ~/attn submission.py @82866c6; `moe_src.py` = r-moe submission.py @bb49efd.
+  **`python build.py` writes submission.py**: inlines both (attention: kernel_fn -> attn_kernel_fn, plus a
+  constexpr_function replacing triton.next_power_of_2 inside a jit body, which SGLang's import breaks in the judge;
+  moe: every top-level name prefixed `_moe_` via tokenize). Never edit submission.py by hand.
+- Pipeline: qkv F.linear -> attn kernels -> o F.linear -> `_boundary` (Triton, 1 CTA/row, 16 warps) -> side stream:
+  router (`_router_fma` FP32 <= 8 tokens, `_router_split` hi/lo tl.dot above) + `_routing` (+ moe bucketing <= 16
+  tokens) || pooler F.linear -> `_rmsnorm_gain` -> experts (moe kernels; Marlin at T=32: MARLIN_TOKENS) ->
+  unpooler F.linear (1024-row slice <= 8 tokens) -> `_boundary`. `_post_expert_wsum` is for the Marlin path <= 16 tokens.
+- bench.py `test` (13 judge tests), `bench`, `prof`; tools/timeline.py (per-kernel start/end of one replay),
+  tools/micro*.py, tools/route_stress*.py. Locally everything runs (moe kernels) except Marlin (T=32 uses moe locally).
+- diag_experts.py: a prepare-time profiler of the Marlin path, for diag checks only (never submit).
 
-## Queued / next
-1. Read check of 2a21d76 (v2). If it beats 1.000x clearly, submit.
-2. Glue H100 T=1 (us): boundary 5.8 (single CTA per row: make multi-CTA), router 5.9 + routing 5.5 (fuse via ticket),
-   prenorm 3.7 (fold into experts prologue later). One tiny kernel in a graph = 2.4 us on H100.
-3. Watch COORD Handoffs: moe's experts (replace Marlin + align + silu + wsum), proj's GEMMs (qkv/o/pooler/unpooler).
-4. Bigger fusion: o-GEMM epilogue emits per-row partial sums (sum a^2, (beta a)^2, alpha s beta a, (alpha s)^2) so
-   boundary 1 folds into the pooler/router prologue; same for boundary 2 via unpooler epilogue.
+## Where the time goes (local H100 decode 1 sliding 132 us, tools/timeline.py)
+qkv GEMM 22.6 (38 MB at 1.8 TB/s), attention 4.8, o GEMM 10.6, boundary 4.3, pooler 29, prenorm 2, experts 46,
+unpooler 8, boundary 3.7. GEMMs ~70 us = proj's lane (Handoff awaited); experts = moe's lane.
+Judge-side at T>=128: experts dominate (moe kernel ~300-450 us of verify 16/32).
+
+## Next (ranked)
+1. Watch ~/COORD.md Handoffs: proj GEMV/GEMM for qkv/o/pooler/unpooler at m=1..256 (biggest small-T lever:
+   ~25-30 us of 104 at decode 1); newer moe commits (re-copy moe_src.py, re-check T=32 vs Marlin).
+2. Fusions in my lane once GEMMs are ours: boundary into the o/unpooler GEMM epilogues via per-row partial sums
+   (sum a^2, (beta a)^2, (alpha s)(beta a), (alpha s)^2) consumed in the pooler/router prologue; prenorm folded as
+   a per-token scale after gemm13 (needs moe kernel support: W13 (x g r) = r W13 (x g)).
+3. Drop splitK-reduce kernels (1.7-2 us each, 3 per step) when GEMMs are ours.
+4. Routing risk: diag check f5fdc570 failed one timed rep's routing (3.18e-2 > 0.03 margin). Local stress 0/120.
+   If a real run fails this way, study score error upstream of the router (attention FP8 queries).
 
 ## Dead ends
-- (none yet)
+- Multi-CTA boundary with atomics + spin row barrier: 6.6-8.3 us vs 5.0 single-CTA (H100).
+- PDL on glue kernels after a cuBLAS producer: no gain.
+- Side-stream moe bucketing at T=128/256: +29..+67 us on the judge (fine on H100).
+- moe bb49efd at T=32 vs Marlin: 222.0 vs 219.7 (tie/loss).
