@@ -88,10 +88,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   okc check /tmp/moe5tl/submission.py --json` (grep diagth: per-CTA ph1end/wait/end on the H200) to pick the weight.
   PF 4 port + layer port: DONE n6.
 
-## Night4 session 4 (19:49-20:25Z, no judge runs) -- paper only
-- Dead on paper (NOTES n4s4): lossless 5/6-bit block-scale packing (exp 11..15 = 5 octaves; 6-bit costs +4% consumer
-  instr for -2.5% bytes) and an e4m3-cvt dequant (>= today's 12 instr / 8 weights). E2M1 codes uniform: incompressible.
-- Plan unchanged: FIRST CHECK AT 00:00Z = the DIAG run in the n4s3 section below.
+## Night4 session 4: paper only (scale packing / e4m3-cvt dequant dead, NOTES n4s4).
 
 ## Night4 session 3 (19:31-20:05Z, no judge runs) -- r-moe 1f3b71b
 - TK2F_L2H_RT (python, None = #define 4): run-time tk2f L2 hint mode via cfg + 1000000 * (mode + 1) (PF | 64 copies of
