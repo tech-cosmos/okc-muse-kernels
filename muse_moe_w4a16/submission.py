@@ -2335,7 +2335,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
 // releases it); -1 = end of the phase (a stage with no data: plain arrive). Rows of a CTA stay increasing.
 template <int NRT, int NC, int NSTG, int KPS, bool HARD>
 __device__ __forceinline__ void tk2d_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int S,
-                                             int N, int* ctr, const int* s_rs, const int* s_e, int* s_rid,
+                                             int N, int* ctr, const int* s_rs, const int* s_e, int* s_rid, uint64_t* ridb,
                                              uint4* smem, uint64_t* full, uint64_t* empty, int& st, int& ph, int& i,
                                              int& k) {
   constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * 1152, KB = NC * KPS;
@@ -2353,20 +2353,11 @@ __device__ __forceinline__ void tk2d_produce(const uint4* __restrict__ Wq, const
       if (Rn >= N) Rn = -1;
       else nxt = atomicAdd(ctr, 1);
     }
-    if (Rn < 0 && !HARD) {  // end of phase 1: no stage; the consumers see -1 with the next phase's first stage
-      s_rid[k & 3] = -1;
-      ++k;
-      return;
-    }
-    if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
-    s_rid[k & 3] = Rn;
+    if (Rn >= 0 && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+    s_rid[k & 3] = Rn;  // row id (-1: end of the phase) on its own arrive-only barrier: no wait for data
+    mbar_arrive(&ridb[k & 3]);
     ++k;
-    if (Rn < 0) {  // end of the last phase: a stage with no data
-      mbar_arrive(&full[st]);
-      ++i;
-      if (++st == NSTG) { st = 0; ph ^= 1; }
-      return;
-    }
+    if (Rn < 0) return;
     while (s_rs[a + 1] <= Rn) ++a;
     const int e = s_e[a];
     const int lr = (Rn - s_rs[a]) & (RPE - 1);
@@ -2386,7 +2377,7 @@ __device__ __forceinline__ void tk2d_produce(const uint4* __restrict__ Wq, const
 
 template <int NRT, int NC, int NSTG, bool GATED, int KPS>
 __device__ __forceinline__ void tk2d_consume(const uint32_t* slut, const float* __restrict__ gs,
-                                             const __nv_bfloat16* X, void* Out, int* cnt, int need, int S, const int* s_rid,
+                                             const __nv_bfloat16* X, void* Out, int* cnt, int need, int S, const int* s_rid, uint64_t* ridb,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
                                              int& ph, int& rb, int& k) {
@@ -2400,16 +2391,9 @@ __device__ __forceinline__ void tk2d_consume(const uint32_t* slut, const float* 
   for (int j = 0;; ++j, ++k) {
     int R = R0 + j;
     if (j >= S) {  // tail row: its index comes from the producer
-      mbar_wait(&full[st], ph);
+      mbar_wait(&ridb[k & 3], (k >> 2) & 1);
       R = s_rid[k & 3];
-      if (R < 0) {  // end of phase (gemm13: the stage is the next phase's first: keep it)
-        ++k;
-        if (!GATED) {
-          mbar_arrive(&empty[st]);
-          if (++st == NSTG) { st = 0; ph ^= 1; }
-        }
-        break;
-      }
+      if (R < 0) { ++k; break; }
     }
     if (R >= seg_end) {
       while (s_rs[a + 1] <= R) ++a;
@@ -2532,10 +2516,12 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   __shared__ float s_red[2 * NC * 256];
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   __shared__ int s_rid[4];
+  __shared__ __align__(8) uint64_t ridb[4];
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   for (int i = tid; i < 256; i += (NC + 1) * 32) slut[i] = lut[i];
   if (tid == 0) {
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], NC * 32); }
+    for (int i = 0; i < 4; ++i) mbar_init(&ridb[i], 1);
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
@@ -2615,15 +2601,15 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     if (warp == NC) {
       if (lane == 0) {
         int i = 0;
-        tk2d_produce<512, NC, NSTG, KPS, false>(Wq13, S13, ns13, n13, cnt + 1, s_rs13, s_e, s_rid, smem, full, empty, st, ph, i, k);
-        tk2d_produce<256, NC, NSTG, KPS, true>(Wq2, S2, ns2, n2, cnt + 2, s_rs2, s_e, s_rid, smem, full, empty, st, ph, i, k);
+        tk2d_produce<512, NC, NSTG, KPS, false>(Wq13, S13, ns13, n13, cnt + 1, s_rs13, s_e, s_rid, ridb, smem, full, empty, st, ph, i, k);
+        tk2d_produce<256, NC, NSTG, KPS, true>(Wq2, S2, ns2, n2, cnt + 2, s_rs2, s_e, s_rid, ridb, smem, full, empty, st, ph, i, k);
       }
       return;
     }
     int rb = 0;
-    tk2d_consume<512, NC, NSTG, true, KPS>(slut, gs13, X, inter, cnt, n13, ns13, s_rid, s_rs13, s_e, s_off, s_srt, s_red, smem,
+    tk2d_consume<512, NC, NSTG, true, KPS>(slut, gs13, X, inter, cnt, n13, ns13, s_rid, ridb, s_rs13, s_e, s_off, s_srt, s_red, smem,
                                           full, empty, st, ph, rb, k);
-    tk2d_consume<256, NC, NSTG, false, KPS>(slut, gs2, inter, Y, cnt, n13, ns2, s_rid, s_rs2, s_e, s_off, s_srt, s_red, smem,
+    tk2d_consume<256, NC, NSTG, false, KPS>(slut, gs2, inter, Y, cnt, n13, ns2, s_rid, ridb, s_rs2, s_e, s_off, s_srt, s_red, smem,
                                            full, empty, st, ph, rb, k);
     return;
   }

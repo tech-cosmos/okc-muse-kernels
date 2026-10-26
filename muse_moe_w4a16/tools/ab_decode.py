@@ -19,5 +19,5 @@ for bs in [int(a) for a in sys.argv[1:]]:
     for sd in (7, 8, 9, 10, 11):
         data = reference.generate_input(bs=bs, sharding='ep8', seed=sd)
         for v in VS:
-            submission.TK2F = v; r[v].append(tg(lambda: submission.kernel_fn(data, st)))
+            submission.TK2F = v; submission.TK2F_DYN = v; r[v].append(tg(lambda: submission.kernel_fn(data, st)))
     print(f"bs {bs}: " + "  ".join(f"v{v} {sum(r[v])/len(r[v]):.1f}" for v in sorted(r)), flush=True)

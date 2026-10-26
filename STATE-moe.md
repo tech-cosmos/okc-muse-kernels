@@ -21,10 +21,20 @@
   (tensor maps!) in the state. bench.py test runs a cloned state now.
 
 ## What's on main (submission.py)
-M <= 32 (decode, bs8), TK2F = 1 (s7, 128b11a): 2 launches, `moe_tk2f<8, 8>` (gemm13 rows then gemm2 rows in ONE
-persistent launch: one routing prologue, the ring continues, so the producer streams w2 while gemm13 drains) + moe_norm2.
+M <= 32 (decode, bs8): 2 launches, moe_tk2f (gemm13 rows then gemm2 rows in ONE persistent launch: one routing
+prologue, the ring continues, so the producer streams w2 while gemm13 drains) + moe_norm2.
+- s8: template <NC, NSTG, KPS, DYN>; KPS = k chunks per consumer warp per ring stage (stage = NC*KPS*1152 B).
+  Launch cfg = (D+1)*1000 + KPS*100 + NSTG (tk2f_go dispatch in moe_tk2f_launch). M == 1: TK2F = 402 (static rows);
+  M > 1: TK2F_DYN = 5402 (DYN, D = 4). KPS 2/4 cut per-stage overhead: H200 -3..4% at bs8-32 (check 74a049c0);
+  locally the H100 is DRAM-bound (ncu dram 83%) and shows nothing: use smsp__inst_executed (tools/ncu_tk2f.sh) as proxy.
+- DYN: CTA b takes static rows [b*S, (b+1)*S) of each phase (S = rows/grid - D), then single rows from the tail
+  [grid*S, N) via cnt[1] (gemm13) / cnt[2] (gemm2) atomics, pulled by the producer one row ahead; row ids reach the
+  consumers via s_rid[4] (written before the row's first full-barrier arrive). Phase-1 end = soft marker (-1, no
+  stage), phase-2 end = an empty stage. Per-CTA phase ends spread ~10% of the phase (per-SM speed, not row counts):
+  DYN fixes that (H100 bs8-32 -3..4%); at bs1 it costs +1.4..3 us (tail rows switch segment; an L1 prefetch of the
+  next segment's x did not help), so M = 1 stays static.
 gemm13 consumers add their finished rows to cnt[0] (bar.sync 2 + thread-0 threadfence + atomicAdd); gemm2 consumers
-spin (ld.acquire) until cnt[0] == n13, then load inter with __ldg. cnt = st["cnt"] (int32[160], zeroed in prepare,
+spin (ld.acquire) until cnt[0] == n13, then load inter with __ldg. cnt = st["cnt"] (int32[128], zeroed in prepare,
 re-zeroed by moe_norm2 after each call: no memset node). DO NOT go back to per-segment counters or ld.global.cg
 inter loads without a many-routing sweep (tools/sweep_routings.py, also with +64 KB dyn smem): see NOTES s7 race.
 TK2F = 0 = the old 3-launch path below (moe_tk2 x2 + norm2), kept as reference (tools/race_ab.py compares bitwise).
