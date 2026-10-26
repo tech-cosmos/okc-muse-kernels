@@ -80,6 +80,8 @@ static int launch_k(void (*k)(KA...), int grid, int block, int smem, cudaStream_
 }
 int64_t moe_set_pdl(int64_t v, int64_t twpf) { g_pdl = (int)v; g_twpf = (int)twpf; return 0; }
 int64_t moe_set_blk(int64_t v) { g_blk = (int)v; return 0; }
+static int g_sa = 0;  // s9: moe_twf uses the arithmetic scale decode (set from kernel_fn: prepare() checked the scales)
+int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }
 
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
@@ -118,6 +120,13 @@ __device__ __forceinline__ void dq(uint32_t q, uint32_t s0, uint32_t s1, uint32_
   a[1] = bmul(o1, s1);
   a[2] = bmul(o2, s0);
   a[3] = bmul(o3, s1);
+}
+
+// s9 SA: e4m3 block scale byte k of w -> bf16x2 (both halves) of value * 2^118 without the LUT: exact for positive
+// normal scales (prepare() checks all of them, else SA = 0): bf16 bits = (e << 7 | m << 4) + (238 << 7).
+template <int K>
+__device__ __forceinline__ uint32_t sca(uint32_t w) {
+  return __byte_perm(w, 0u, 0x4040u | (K << 8) | K) * 16u + 0x77007700u;
 }
 
 __device__ __forceinline__ uint32_t u4get(const uint4& v, int i) {
@@ -1646,7 +1655,7 @@ __device__ __forceinline__ void tw_epi(float (&acc)[RT][N / 2], int lane, int wa
 }
 
 // DYN: one main loop for both GEMMs (moe_twf), epilogue picked by g2 at run time
-template <int RT, int KG, int N, int NSTG, bool GATED, int NW, bool DYN = false>
+template <int RT, int KG, int N, int NSTG, bool GATED, int NW, bool DYN = false, bool SA = false>
 __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
                                         const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
                                         const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out,
@@ -1680,8 +1689,13 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
 #pragma unroll
     for (int r = 0; r < RT; ++r) {
       const uint32_t sw = sc[r >> 1] >> ((r & 1) * 16);
-      s0[r] = slut[sw & 0xFF];
-      s1[r] = slut[(sw >> 8) & 0xFF];
+      if (SA) {
+        s0[r] = (r & 1) ? sca<2>(sc[r >> 1]) : sca<0>(sc[r >> 1]);
+        s1[r] = (r & 1) ? sca<3>(sc[r >> 1]) : sca<1>(sc[r >> 1]);
+      } else {
+        s0[r] = slut[sw & 0xFF];
+        s1[r] = slut[(sw >> 8) & 0xFF];
+      }
     }
     const uint64_t d0 = sw128_desc(sb);
 #pragma unroll
@@ -2018,7 +2032,7 @@ int64_t moe_tw_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tens
 #ifndef NEEDK
 #define NEEDK 1
 #endif
-template <int RT, int NSTG>
+template <int RT, int NSTG, bool SA = false>
 __global__ void __launch_bounds__(384, 1) moe_twf(
     const char* __restrict__ W13, const char* __restrict__ S13, const float* __restrict__ gs13,
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
@@ -2133,7 +2147,7 @@ __global__ void __launch_bounds__(384, 1) moe_twf(
     const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
     __nv_bfloat16* out = g2 ? Y : Inter;
-#define TWI(NN) tw_item<RT, 1, NN, NSTG, true, 8, true>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2)
+#define TWI(NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2)
     switch ((nv + 7) >> 3) {
       case 1: TWI(8); break;
       case 2: TWI(16); break;
@@ -2153,7 +2167,8 @@ __global__ void __launch_bounds__(384, 1) moe_twf(
   }
 }
 
-int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_,
+template <bool SA>
+static int64_t twf_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_,
                        torch::Tensor s2_, torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_,
                        torch::Tensor sr_, torch::Tensor inter_, torch::Tensor y_) {
   constexpr int RT = 4, NSTG = 8;
@@ -2163,16 +2178,21 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
     int dev, nsm;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
-    cudaFuncSetAttribute(moe_twf<RT, NSTG>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    cudaFuncSetAttribute(moe_twf<RT, NSTG, SA>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
   TMaps m13, m2;
   tw_maps(m13, xg_.data_ptr(), xg_.size(0));
   tw_maps(m2, inter_.data_ptr(), inter_.size(0));
-  return launch_k(moe_twf<RT, NSTG>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+  return launch_k(moe_twf<RT, NSTG, SA>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
       (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr());
+}
+int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_,
+                       torch::Tensor s2_, torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_,
+                       torch::Tensor sr_, torch::Tensor inter_, torch::Tensor y_) {
+  return g_sa ? twf_go<true>(w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_) : twf_go<false>(w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_);
 }
 // ---- moe_tk2f: the decode gemm13 and gemm2 in ONE launch (moe_tk2 rows, one routing, one ring). Phase 1 = gemm13
 // rows, phase 2 = gemm2 rows (each split over the CTAs as in moe_tk2); the producer streams phase-2 weights as soon
@@ -2202,13 +2222,6 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
       if (++st == NSTG) { st = 0; ph ^= 1; }
     }
   }
-}
-
-// s9 SA: e4m3 block scale byte k of w -> bf16x2 (both halves) of value * 2^118 without the LUT: exact for positive
-// normal scales (prepare() checks all of them, else SA = 0): bf16 bits = (e << 7 | m << 4) + (238 << 7).
-template <int K>
-__device__ __forceinline__ uint32_t sca(uint32_t w) {
-  return __byte_perm(w, 0u, 0x4040u | (K << 8) | K) * 16u + 0x77007700u;
 }
 
 template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA = false>
@@ -2931,7 +2944,8 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, torch::Tensor, torch::Tensor, "
         "torch::Tensor, double);"
         "int64_t moe_set_pdl(int64_t, int64_t);"
-        "int64_t moe_set_blk(int64_t);")
+        "int64_t moe_set_blk(int64_t);"
+        "int64_t moe_set_sa(int64_t);")
 
 
 def _lib():
@@ -2942,7 +2956,7 @@ def _lib():
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=CUDA_SRC,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                       "moe_gather_launch", "moe_tw_launch", "moe_twf_launch",
-                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_set_pdl", "moe_set_blk"],
+                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
     return _LIB
@@ -3095,6 +3109,7 @@ _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
 TK2_MAX = 32  # M above this: big-M path
 TK2F_DYN = 204  # M > 1 cfg; 5402 = DYN row tail (D = 4): H100 bs8-32 -3..4% but judge no gain (check b890d69b 2.125x)
+TWSA = 1  # s9: same for moe_twf (big-M)
 TK2SA = 1  # s9: arithmetic e4m3 scale decode in moe_tk2f (when prepare() found all scales positive normal)
 TK2FN = 0  # s9: 1 = post-expert norm fused into moe_tk2f (moe_tk2fn_launch): judge bs1 +2 us (check 168fa04c), dead
 TK2F = 204  # decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
@@ -3157,6 +3172,7 @@ def kernel_fn(data, st):
         xg = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
         lib.moe_gather_launch(x, meta, sroutes, xg)
         if TWF and rt == 4:
+            lib.moe_set_sa(1 if TWSA and st["sa"] else 0)
             lib.moe_twf_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["lut"], xg,
                                meta, sroutes, inter, y)
             lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out)

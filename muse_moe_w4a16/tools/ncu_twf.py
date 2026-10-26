@@ -1,0 +1,11 @@
+# ncu driver for big-M moe_twf: TWSA=<0|1> python tools/ncu_twf.py <bs> [seed]  (see ncu line in NOTES s9)
+import sys, os; sys.path.insert(0, '.')
+import torch, bench, submission, reference
+w, st = bench.state()
+submission.TWSA = int(os.environ.get("TWSA", "1"))
+bs = int(sys.argv[1])
+data = reference.generate_input(bs=bs, sharding="ep8", seed=int(sys.argv[2]) if len(sys.argv) > 2 else 7)
+submission.kernel_fn(data, st); torch.cuda.synchronize()
+torch.cuda.cudart().cudaProfilerStart()
+submission.kernel_fn(data, st); torch.cuda.synchronize()
+torch.cuda.cudart().cudaProfilerStop()
