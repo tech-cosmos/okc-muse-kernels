@@ -1,32 +1,20 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 11:10Z (session 23; real clock: earlier sessions' stamps ran ~30 min ahead, use `date -u`).
+Updated 2026-10-26 ~10:30Z real UTC (session 24).
 
-**s23: main = v55 (b36caa7) = v52 + more free H200 TUNE options: cuBLASLt (proj's H200-tuner winners from r-proj judge logs,
-`LT_DEFAULT_OFF`) for qkv/o at T=16/32, o at T=128/256, unpool at T=128 (now via `_linear`), pooler/unpool at T=16/32 instead
-of g19 (H100 +4..7 us: H200 A/B only); pr1 pooler PF 2 (`pr1_pf`, T=1). All forced variants: scored + replay 0/20-30 ok.
-Tune 5.2 s (prepare 13 s). NOT CHECKED; plan unchanged: last check ~14:30Z on main, copy every "layer tune" line of
-profiles/submission.<job>.log into NOTES (H200 A/B of ~40 options), submit by 17:30Z if >= 1.9558, else v45 (2dddb88).**
+**s24: main = v57 (7d14445) = v55 + proj s16 H200 lt picks as TUNE options (pooler/unpool m256 LT_DEFAULT_OFF; qkv m32
+alt cfg via new `LT_ALT` / option "ltalt:<key>") + tuner CONFIRM ROUND: a non-default pick must beat the defaults by
+TUNE_MARGIN 0.1% in a fresh 40-rep 2-way interleaved run (else defaults = v45 behaviour). Tests 13/13; forced new options:
+scored d32/v32 x2 ok, replay 0/20. NOT CHECKED. 1 CHECK + 1 SUBMIT LEFT. Plan unchanged: ~14:30Z real UTC run the last
+check on main (+ anything moe/proj post by ~14:15Z, as TUNE options), copy every "layer tune" line of
+profiles/submission.<job>.log into NOTES (H200 A/B of ~45 options); submit by 17:30Z that code if its check >= 1.9558
+(board best; ties ok), else v45 (`git show 2dddb88:muse_decode_layer/submission.py > /tmp/v45.py`, check ea9421fa 1.9634x).
+Push everything before 18:30Z.**
 
-**s22: main = v52 (9621c71) = v50 + generic GEMV config alternatives as TUNE options (`G10_ALT/G13_ALT/G14_ALT`, `_cfg`, option "<kind>alt:<key>" = 1-based index): T=1 g10alt:o (U 4, 132 blocks; H100 tie), T=8 g14alt:qkv_gate 1-3 = proj s16 kcu-8 no-split-K cfgs (own pack state["g14k"]; H100 tuner picks 2: v1 -0.9/-1.3 us). g22 OFF (G22_CFG {}; proj H200 check fb2fe4ee: loses every m128/256 shape; -30 s build). Tests 13/13, every forced alt: scored ok + replay 0/30. NOT CHECKED; plan unchanged: last check ~14:30Z on main (read the H200 "layer tune" lines into NOTES), submit by 17:30Z if >= 1.9558 (board best), else v45 (`git show 2dddb88:...`).**
-
-**s21: main = v50 = v49 + TUNE option g13alt:qkv_gate at T=1 (g13 PF 2 = 2 qkv rows in flight per virtual block; 62 regs, no spill; H100 +1.3/+2 us sliding/full, kept only as a free H200 A/B: H200 m=1 GEMVs run ~2.5 TB/s). Tests 13/13, forced scored decode 1 ok. Still NOT CHECKED; same plan as s20 below (last check ~14:30Z real UTC, submit by 17:30Z).**
-
-**s20: main = v49 (b564697) = v48 + proj gemv22 as TUNE options at T=128 (qkv/pooler/unpool; H100 keeps default).
-NOT CHECKED. 1 CHECK + 1 SUBMIT LEFT. Plan: ~14:30-15:00Z (real UTC) run the last check on main (v49 + anything moe/proj
-post by then, each as a TUNE option or H100-verified win), read the "layer tune" lines in profiles/submission.<job>.log
-(H200 A/B of every option: write them into NOTES). Submit by 17:30Z: that code if its check >= 1.9558 (board best)
-(ties ok), else v45 (`git show 2dddb88:muse_decode_layer/submission.py > /tmp/v45.py`, check ea9421fa 1.9634x).**
-
-**s19: main = v48 (d36e095) = v45 + a GENERIC prepare() tuner (`TUNE` in layer.py): per (T, sliding/full) it times
-whole-layer CUDA-graph replays of option sets on synthetic inputs (shapes only; full layers at ctx 80000) and keeps the
-fastest in state["tune"]. Options: T=1 pr1_npf 0/8, pr1_rb 20/32, kv_pf off; T=8 pr1 (pr8) off; T=16 qkv cuBLAS, o g19;
-T=32 qkv g19, o g19; T=128 lt pooler/qkv off; T=256 lt qkv off. Defaults = v45. H100: parity vs v45 (decode 8 rounds,
-verify 1). Every forced variant: scored ok, replay decode 0/30. NOT CHECKED (v45 is the checked code).
-STILL 1 CHECK + 1 SUBMIT LEFT. Plan: when proj commits gemv22 (T=128/256), add it as a TUNE option (default off) to v48
-and spend the LAST CHECK on that bundle (~15:00Z at the latest even without gemv22: check v48 alone). The judge log
-then prints H200 timings of every option (free A/B; write them into NOTES). Submit by 17:30Z: the checked bundle if
-its check >= v45's 1.9634x (ties ok: same defaults + H200-picked options), else v45 (`git show 2dddb88:...`).**
+s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
+option sets on synthetic inputs (shapes only) and keeps the fastest in state["tune"]; `_opt()` reads it at trace time.
+Options: g19:<key>, lt:<key>, ltalt:<key>, g10alt/g13alt/g14alt:<key> (1-based `_ALTS` index), pr1, pr1_npf, pr1_rb,
+pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Defaults = v45 (checked 1.9634x).
 
 **s17 TIMELINE for the last 2 checks + 1 submit (main = v44 = checked code, keep it that way until a bundle wins):**
 (a) when proj commits gemv22 (T=128/256 12-bit wgmma, v16/v32; r-proj dev/gemv22.cu was WIP at 09:30Z), wire it in,

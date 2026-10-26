@@ -592,3 +592,14 @@
 - v55 (b36caa7): lt pooler/unpool at T=16/32 instead of g19 (proj diag19 H200: m32 lt 20.3 vs g19 21.6, unpool 19.3 vs
   20.3 after a 3 us PDL predecessor). H100 in-layer: +4..7 us (g19's PDL W prefetch wins): free H200 A/B only.
   Forced: scored d16/d32 x2, replay decode 0/20. Tune 5.2 s, prepare 13.1 s total.
+
+## s24 (2026-10-26 from 10:24Z real UTC)
+- v56 (d36131b): proj s16 Handoffs (10:10Z) lt picks: ("pooler", 256) (66,18,...,0,2) and ("unpool", 256) (66,20,...,6,5) as
+  LT_DEFAULT_OFF TUNE options at T=256; ("qkv_gate", 32) (66,27,35,3,2,0,2,4) as a new LT_ALT entry (option ltalt:qkv_gate 1,
+  validated vs F.linear in _lt_prepare into state["lt_alt_ok"]). proj's o m16/m32 and unpool m128 picks equal ours already.
+  H100 tuner: pooler m256 lt +11..12 us (beside the side-stream router, same as s5's other m256 algo), unpool m256 -1.6
+  sliding / +3 full, qkv m32 alt tie. Forced (TUNE = only those): scored d32/v32 x2 ok, replay 0/20 x4.
+- v57 (7d14445): tuner confirm round: after the min-of-medians pick, re-time default vs pick 40 reps interleaved; keep the
+  pick only if it beats the default by TUNE_MARGIN 0.1%. H100: T=32 full and T=256 full fall back to default (pick gains
+  0.3/0.2 us vanished), the rest confirmed (T=8 full g14alt 1 -2.4, T=128 full lt o+unpool -2.8, T=1 full -1.0).
+- proj g22 is dead (H200); no new moe handoff. Last check still planned ~14:30Z.
