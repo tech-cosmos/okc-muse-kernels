@@ -199,3 +199,18 @@
 - check 1be6c8f5278b41eb (405439e): 1.2926x; H200 unpooler m1 4.67 -> 3.75 (tune: g17 7.20 vs g10 7.81 incl. events),
   m8 6.50 -> 5.99 (g17 9.28 vs lt 9.63). submit 6d0fc4d42b4544b1 (405439e): 1.2742x = NEW BEST.
 - Budget 10-26 at session end: checks 3/20, scored 3/10.
+
+## Session 8 (2026-10-26 01:21 - UTC): router3 (router m9-128 in one kernel)
+- dev/router3.cu (+ dev/r3.py sweep: `python dev/r3.py "MT,NT,WM,WN,KC,NS;..." m...`): split-K mma.sync GEMM, x = A
+  (MT tokens), W hi/lo rows = B (NT experts), hi and lo MMAs share the x fragments into one FP32 accumulator; cp.async
+  ring of 64-k stages, 128-B rows XOR-swizzled for ldmatrix. Grid = (K/KC, 256/NT, m/MT) ~ 128 blocks.
+- Split-K reduction, measured (H100, m128, MT128 NT64 KC256): body alone ~6.5-7 us; partial tile -> smem -> float4
+  atomics ~+1.5-2.4 us (red throughput ~1M floats / 2.4 us: m256 with 2M floats pays ~4 us); persistent ws + per-tile
+  counter + last-block copy: fence/counter +2.3 us, copy +2 us (serial ld->st loop; batching the loads saved ~1.3).
+  Winner: a tiny zero kernel for out (griddepcontrol.launch_dependents at its start) + the GEMM as its PDL dependent
+  (griddepcontrol.wait just before the atomics): no ws, no counter, no copy. m16 8.3 -> 6.9, m128 12.7 -> 10.1.
+- Dead: clusters of 4/8 along split K with a DSMEM pre-reduction (8-block clusters don't fit at 1 block/SM: 2 waves,
+  14 -> 21 us); clusters of 2 (+0.5-1 us); rotating the atomic start row per split (no change: not contention);
+  smaller tiles to cut red volume (L2->SM load traffic grows: (64,32,KC1024) 14 us at m128).
+- H100 (bench.py): m16 6.94 (was 8.9 g7), m32 7.04 (10.3), m128 9.78 (12.2 cuBLAS 3 kernels), m256 12.7 = cuBLAS (kept).
+  m256 limits: red volume (2M floats ~4 us) and mma.sync compute (~3.5 us for 2.15 GFLOP).
