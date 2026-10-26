@@ -940,3 +940,8 @@ pred's own graph time. H100, MODE=2, numbers = graph(pred + g19) - graph(pred) i
 ## Session 42 (2026-10-26 18:12Z): sanity only, sandbox expires ~19:10Z
 - No judge runs (proj checks 20/20 for 10-26). main (6f068c9) re-verified on the H100: `python bench.py test` 39/39 PASS,
   `python bench.py esc` PASS (12-bit round trip + adversarial escapes). The first check in the next sandbox = main as is (STATE Next 1).
+
+## s43 (2026-10-26 18:28-18:35Z): notes only
+No judge runs (proj checks 20/20 for 10-26; sandbox expires ~19:10Z). main unchanged (s42 re-verified: bench test 39/39, esc PASS).
+Next sandbox: first proj check = main as is; then pick up the layer's request list (COORD Requests) — the only open proj
+item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).

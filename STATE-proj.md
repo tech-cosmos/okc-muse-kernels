@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~18:15 UTC (session 42: main re-verified on H100: bench.py test 39/39 PASS, esc PASS; no judge runs).
+Updated 2026-10-26 ~18:30 UTC (session 43: notes only, sandbox expiring ~19:10Z; checks 20/20; main unchanged = s42-verified).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
