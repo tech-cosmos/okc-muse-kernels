@@ -571,3 +571,9 @@
   g14alt:qkv_gate = (2, 2, 8, 32, 1) / (2, 2, 4, 48, 1). H100 tuner (us, sliding/full): T=1 default 114.4/80.4, g10alt o
   114.7/82.2 (PF 2 on 264 blocks: 125.5/91.3, dropped); T=8 default 147.2/169.5, g14alt 1 147.0/169.9, 2 147.3/170.3.
   Forced each: scored decode 1 + verify 1 x3 ok, replay_test 30 inputs " 1 " 0/30 on all four. Free H200 A/B in the last check.
+- v52 (9621c71): proj s16 (r-proj 2480c53) T=8 qkv gemv14 without split-K: G14_ALT qkv = (8,8,4,96,1), (8,8,4,96,2),
+  (8,8,8,96,1) (kcu 8 needs its own pack: state["g14k"][(key, kcu)]); my v51 kcu-2 alts dropped (ties). H100 tuner T=8
+  sliding default 147.4 / alt1 147.0 / alt2 146.5 / alt3 147.8; full 171.8 / 170.6 / 170.5 / 170.8 -> picks alt 2.
+  Forced each: verify 1 x3 ok, replay 0/30. G22_CFG = {} (proj's H200 check fb2fe4ee: g22 loses at every m128/256:
+  qkv m128 22.1 vs lt 18.8, pooler 29.6 vs 24.4) and its TUNE options removed: -30 s build.
+- Not ported: proj G13_CPA (cp.async ring m1): proj's tuner says it ties gemv13 VT 512, which tied on H200 (6b50e844).
