@@ -1,7 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
 Updated 2026-10-26 (session 41: main = v84, NOT judge-checked; budget for 10-26 spent).
-
 **s41: main v84 re-validated (tuner on, H100): tests 13/13, replay 0/240, route_judge 0/240.** v1 sliding timeline in
 NOTES s41: tk2f 84 of 153 us; pr8 23.5 us (2.4 TB/s, m8 issue-bound). FIRST CHECK OF THE NEXT SANDBOX = main (v84).
 
