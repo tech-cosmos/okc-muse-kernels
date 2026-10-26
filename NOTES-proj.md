@@ -873,3 +873,16 @@
   bits differ from today's single accumulator: re-run layer route/scored tests). Needs a per-call flag reset that cannot
   race (epoch in the flag value, e.g. a call counter bumped by the finisher block) and an owner spin on the stolen half's
   done flag (safe: the stealer is resident).
+
+## Session 38 (2026-10-26 17:22-17:40Z): pr8 dynamic balancing: whole-row-group work queue ruled out on paper; no build
+- No judge runs (proj checks 20/20 for 10-26). Sandbox expires ~19:10Z, push by 18:30Z: no time for a K-split build+layer test.
+- Considered the cheap version of s37's design: no K split, the block's work as units of whole row groups (WG 16 = 2 rg per
+  1024-thread block, 256 units; or WG 32 = 1 rg, 512 units), first unit static, the rest from an atomic counter
+  (grab issued early in the unit so its ~1-3 us round trip hides; W register prefetch runs on into the next unit; header
+  double buffer fits the smem the launcher already reserves for 4 rg). Outputs would be deterministic (one block per rg).
+  Ruled out without a build: with <= 4 units per block a unit lasts ~6 us (~12 us at 2 units), which is LONGER than the ~3 us random
+  finish spread it should absorb, and grabs made early in a unit hand out the queue in start order (with 2 units/block
+  every block simply gets one more unit: no balancing at all). Balancing needs units well under the spread (>= 8-16 per
+  block) = K splitting, so partial combines (stealer partial + done flag/ticket, ~1-2 us at the tail).
+- Value estimate: <= ~1.5 us net at v1 (score weight ~.096%/us sliding) = ~0.1-0.15% layer. Moved below the line: not worth
+  a next-sandbox session unless everything bigger is gone.

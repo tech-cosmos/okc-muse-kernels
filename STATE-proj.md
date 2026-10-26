@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~17:30 UTC (session 37).
+Updated 2026-10-26 ~17:40 UTC (session 38).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -8,7 +8,6 @@ Updated 2026-10-26 ~17:30 UTC (session 37).
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
 - Budget 10-26 used: checks 20/20 (s25 5abb71f1 1.3040: diag, DeepGEMM bf16 dead), scored 5/10 (cap 10). s23 check 2722e8c4 1.3108 (diag: g13 for o m1 loses on H200). s22 check ccf41026 1.3162 (diag: qkv m32 bmm slabs). s17 check 29a2b16b 1.3173 (diag: m=1 = bare stream). s16 checks fb2fe4ee 1.3071 (g22 diag), a9b13469 1.3161; submit 3810db09. s15 checks ce84da07 1.3001, 4e5fad5b 1.2951 (diag only). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844 1.3064 (diag only).
-- H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
 ## m256 11.18 (cuBLAS splitK GEMM 6.4 + splitKreduce 2.0 + hi+lo add 1.6). SGLang: 10.5/26.4/15.0/15.5/16.8/17.7.
@@ -49,13 +48,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   ~1.8 us spread inside a block. H200 gemv12 at m16: qkv 0.99, o 0.91, pooler 1.08, unpooler 0.95; m32 0.72-0.93.
 - Dead ends this session: TMA bulk x staging (slower than cp.async), shared float atomics, 4-block clusters,
   R=2 row groups per warp (spills), gemv9 warp stream-K, CUDA-core math at m>=8, cuBLAS swap-AB.
-- unpooler m8 on gemv12 with 32 blocks: H200 5.71 once, 7.04/7.27 twice (same code): few-SM configs are fragile.
 
-## gemv16 (session 6, NOTES has the breakdown)
-- W = mma A operand, x via ldmatrix, x staged by TMA bulk multicast to mc=2 blocks sharing the k-chunk, S=1 path writes
-  outputs directly, S>1 pushes partials into the owner's smem (one cluster barrier). BF16_G16 in dev/sub_template.py.
-- H100: unpooler m16 23.0 vs cuBLAS 25.5, qkv m16 16.9 vs 18.1, pooler m16 25.2 vs 27.5. H200: ~par with lt (gains smaller).
-- Remaining cost over a bare reader (19.8 us at unpooler m16, H100): x staging ~1.5-2 us, math ~1.3 us, end ~0.5 us.
+## gemv16 (s6; W = mma A, x ldmatrix, TMA multicast x): H100 m16 wins 1-2.5 us, H200 ~par with lt (NOTES s6).
 
 ## Lossless 12-bit weights (session 5): the big lever
 - m=1 was already AT a bare reader's speed: only fewer bytes help. _compress in dev/sub_template.py: sign|mantissa byte
@@ -87,7 +81,6 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## Session 12: gemv20 (wgmma consumers) + 2 blocks/SM DEAD on H200; g19 m32 consumer-bound (~0.28 us/stage/warp). NOTES s12.
 
 ## Session 13: T<=8 ramps QG (csl beside qkv) + gemv21 (TMA-ring m=1) DEAD; g13 needs its whole register file. NOTES s13.
-## m=1 GEMV) both DEAD (NOTES s13). Patch for the layer kept: dev/qg_layer.patch; edge trick dev/lc_edge.py: no gain.
 - Key facts: g13 needs its whole register file (60 x 1024) for speed; co-residency also needs the smem carveout attr.
   One global ticket counter cannot feed 132 CTAs per row (~0.5 us per round). mbarrier release-arrive waits for the
   same thread's pending atomics/stores.
@@ -145,13 +138,14 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## H100 layer ABBA v1 -1.56/-1.67 us, outputs unchanged; handoff dev/s36/pr8_bpf_layer.patch. pr8 is NOT issue-bound (no-math
 ## +1.4 us only): its loss is the serialized prologue (router W + PF ahead of x32, ~3.5 us router math with HBM idle) and a
 ## ~9 us block-finish spread. Dead: prefetch before the wait, PF loads after it, router last/mid-loop, g14 bulk prefetch. NOTES s36.
-## Session 37: pr8 tail = random block-finish spread (~3 us max-mean), not the pred's late SMs (they end only ~1.5 us late);
-## interleaved row groups PR8_RGI +0.25 us DEAD. Only dynamic K-half stealing could help (design in NOTES s37). TRACE=2 tool.
+## s37/s38: pr8 tail = random block-finish spread (~3 us), not the pred's late SMs; PR8_RGI +0.25 dead (TRACE=2 tool); whole-rg
+## work queue ruled out (units >= 6 us > spread); only K split + combines left, <= ~0.1% layer: DEPRIORITIZED. NOTES s37/s38.
 ## Next (ranked)
 -25. (s36/s37) Layer should bundle pr8 npf 212 (and DEC3) into its next-sandbox first check (it is in layer v88). Remaining pr8 room
    (H100 ~24.4 us after pred vs ~18 us bytes): random block-finish tail ~3 us (s37: dynamic K-half stealing, design in NOTES s37)
-   and the router-math phase (fewer, fatter router items).
+   and the router-math phase (fewer, fatter router items). s38: the tail fix needs K split + combines, worth <= ~0.1% layer: low.
 -24. (s35) Layer's next-sandbox first check should carry DEC3 (layer is integrating it). proj's own first check tomorrow = main
    (DEC3 in g13/g14 m1/m8 picks, tg2 unpooler m8 candidate: read 'tune' lines in the judge log; submit if > 1.3110).
    DEC4 (v85) and g13o (v84) are already in the layer.
 -19. (s30) Still waiting for a lane (Requests proj s28/s30). Proj checks 20/20 today.
+
