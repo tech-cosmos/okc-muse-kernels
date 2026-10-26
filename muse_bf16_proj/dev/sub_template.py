@@ -114,12 +114,15 @@ DIAG20 = {}  # s12 diag done (DIAG20_S12: all lose on the H200); nothing built
 # _diag19 only (print, no picks): H200 behaviour of other configs in the layer case
 DIAG19 = {}  # s10 diag configs measured (checks 9b09c536/60ddb481/f1319777): see NOTES-proj
 # s15: after the escape-fixup rework (gemv19 fixups on the stored partials): the layer's unpool m16 config and AP4 m32
-DIAG19 = {"unpooler": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (32, 1024, 4, 4, 4, 1, 1, 8, 1)],
-          "pooler": [(32, 1024, 4, 4, 4, 1, 1, 8, 1)], "qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
+DIAG19_S15 = {"unpooler": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (32, 1024, 4, 4, 4, 1, 1, 8, 1)],
+              "pooler": [(32, 1024, 4, 4, 4, 1, 1, 8, 1)], "qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
+DIAG19 = {}  # s15 diag done (check ce84da07, NOTES-proj s15)
 # s15: _diag19q only (print): qkv with BF16 out written by gemv19 itself (mode 3: tile tickets, self-cleaning FP32
 # workspace, tile-major stages), standalone as the layer's first op (no predecessor), vs the picked kernel
-DIAG19Q = {"qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (16, 1024, 8, 3, 3, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1),
-                        (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
+# H200 (check 4e5fad5b): m16 19.6 vs lt 16.9, m32 23.3 vs 17.5 us: DEAD (no predecessor to hide g19's startup)
+DIAG19Q_S15 = {"qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (16, 1024, 8, 3, 3, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1),
+                            (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
+DIAG19Q = {}
 DIAG19_STREAM = []  # (stage bytes, stages): 50 MB bare streams
 _SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _LAYER_K = {"qkv_gate": 8192, "o": 1024, "pooler": 8192, "unpooler": 4096}

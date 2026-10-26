@@ -435,3 +435,22 @@
   (trace): one lane walks 32 tokens serially and the compiler can't overlap the RMWs (pointer aliasing). Dead.
 - (c) = kept: after the pbuf store, per warp, escapes walked one at a time (ballot per (rr, h, slot parity), ffs
   loop, shfl col/hy from the owner) with lane = token: one parallel RMW per escape. G19_RFIX = s14 register path.
+  H100 (MODE 2 PRED 3000, 3 interleaved rounds, median, vs G19_RFIX = s14): pool m16 (108 blk) 21.58 -> 21.44, pool
+  m32 24.26 -> 23.26, qkv m16 11.60 -> 11.42, qkv m32 16.93 -> 16.34, unp m16 20.85 -> 20.51, unp m32 22.56 -> 22.27.
+  ESCW ok in modes 0/2, TS2, RPW2. Ported to r-layer's (older) g19_src.cu: dev/g19_s15_layer.patch (vs fbc5684).
+  Copy of r-layer + patch: bench.py test 13/13; tools/ab_files.py 5 rounds: d16 sliding 215.6 -> 213.8, full 318.9 ->
+  314.3; + g19 at T=32 (pooler (32,1024,8,2,2,1) grid 108, unpool same): d32 sliding 210.3 -> 205.0, full 439.4 -> 433.1.
+- Check ce84da07 (b17feac, 1.3001x, diag only), H200 g19 after a 3 us PDL predecessor vs the tuned pick (us):
+  m16 pooler 15.81 vs 19.20, unpooler 15.62 vs 17.34 (layer cfg 4,4: 15.94), qkv (8,3) 11.14 / (4,4) 10.62 vs 13.25,
+  o 5.98 vs 6.40; m32 pooler 19.71 vs 19.84 (tie), unpooler 18.40 vs 19.01, qkv 15.39 / 14.75 vs 13.66 (loses).
+  s10 had all m32 losing by 1.5-5: the fixup rework moved m32 to tie/-0.6.
+- Layer request (s15): qkv at T=16/32 (graph's first op, no predecessor) with BF16 out. Built gemv19 mode 3: BF16 out
+  ob, FP32 workspace that stays zero (finisher reds, __threadfence, atomicAdd(atoms) on a never-reset per-tile counter,
+  the one reaching a multiple of KA bulk-copies the tile to smem (fence.proxy.async first), writes BF16, re-zeroes),
+  runtime tm = tile-major stage order (pack perm (1,0,3,2,4)). g19.py MODE=3 TM=1 tests (40 reps ESCW, ws clean).
+  * first version (tile read back by __ldcg loops): +5..15 us: each dependent L2 round trip ~1 us under load.
+    Bulk copy: m16 22.1 -> 19.2. Tile-major: 18.4 (H100 cuBLAS 18.1, mode 0 FP32 + zero kernel 17.0). npre 0/1: same.
+  * H200 (check 4e5fad5b, 1c90a55, 1.2951x, diag only, standalone graphs incl. launch): m16 (4,4) 19.62 vs lt 16.90,
+    m32 23.33 vs lt 17.54. DEAD: g19's win is the PDL overlap; with no predecessor it loses ~3-6 us (x arrival +
+    startup). Mode 3 kept in the kernel (cheap, tested) in case a predecessor appears; DIAG19Q = {} now.
+- Checks 10-26: 14/20 (ce84da07, 4e5fad5b diag). Scored 4/10. Board best unchanged (71145e34 1.307x).

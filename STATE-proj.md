@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~08:30 UTC (session 14).
+Updated 2026-10-26 ~09:10 UTC (session 15).
 
 ## Board
 - **Best: submit 71145e34fe424844 = a1f0af7, 1.307x (3,695.6 us), proj rank 196** (router3 at router m9-128; its check
@@ -8,7 +8,7 @@ Updated 2026-10-26 ~08:30 UTC (session 14).
 - Before: 6d0fc4d4 (405439e) 1.2742x; d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 13/20, scored 4/10 (cap 9). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
+- Budget 10-26 used: checks 14/20, scored 4/10 (cap 10). s15 checks ce84da07 1.3001, 4e5fad5b 1.2951 (diag only). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
   1.3064 (diag only).
 - H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
@@ -114,7 +114,15 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## version (bit-identical; H100 -0.5..0.8 us per g19 call). Handoff posted, patch dev/g19_ballot_layer.patch (NOTES s14).
 - g19 at m32 is NOT smem-bound (RPW2 no gain); per stage decode ~0.4 + mma/ldsm ~0.4 + base ~0.5 us (H100 consumer-only).
 
+## Session 15: g19 escape fixups on the stored partials (warp walks escapes, lane = token): H100 -0.15..1.0 us per call;
+## layer patch dev/g19_s15_layer.patch (d16 -1.8/-4.6 us H100; with g19 at T=32 d32 -5.3/-6.3). H200 m32 now tie/-0.6.
+- gemv19 mode 3 (BF16 out, tile tickets, self-cleaning ws, tm stage order) for the layer's qkv first op: H200 loses
+  3-6 us standalone (g19 needs a PDL predecessor): DEAD for qkv. Dead too: finisher-side escape list, per-lane RMW.
+
 ## Next (ranked)
+-3. (s15) If the layer's H200 check of the s15 patch (+ T=32 g19) holds: g19 m32 consumer cost (Next 0 below) is
+   the lever at d32 (pooler/unpool now ~tie on H200). qkv T=16/32 standalone: needs a non-g19 design (cuBLASLt wins
+   by 3-6 us; a cp.async/LDG kernel with x first, like gemv14/16, over 12-bit at m16 ties lt on H200).
 -2. (s14) g19: fixups in the finisher warp (consumer run end 0.7 -> 0.1 us; NOTES s14 Next (a)), then npre cap so x
    is not queued behind the W prologue, then x hot-spot (multicast). Each run end saved ~= 0.6 us per g19 call x ~2.
 -1. (s13) The ramps (lead item 5) left: qkv g13 at d1 (H200 ~10.8 us for 28 MB) and pr1. Ideas not tried: g13 with
