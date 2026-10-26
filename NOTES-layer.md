@@ -684,3 +684,17 @@
   route_judge 0/360, replay all shapes 0/240.
 - Session end ~12:15Z. Next session: the last check of the sandbox at ~14:30Z on main (+ any handoff posted by 14:15Z,
   as TUNE options), then submit by 17:30Z if it beats 1.9558 (else v45 2dddb88, check ea9421fa 1.9634x).
+
+## s28 (2026-10-26 12:07Z-) v67 QF32: attention reads g19's FP32 qkv at T=16 (proj s19 request)
+- At T=16 the qkv GEMM is g19 (FP32 out); v44-v66 cast it with qkv.to(bf16) (H200 ea9421fa: 1.2-1.3 us, and it sat
+  between g19 and attention). v67 (d51f68c): attn_src.py csl::decode templated on the qkv element type (float: float4 /
+  float2 loads packed by __floats2bfloat162_rn into the same BF16 words; host dispatches on qkv dtype, 4 instantiations);
+  every Gluon/Triton qkv load in the decode paths (_gd_full_body q/xp/k/kp/v, _gw_merge_rows, _norm_gate_store, _combine,
+  _combine_hb, _combine_bal incl. REDO, _red_fin) does .to(bf16).to(fp32) (no-op for BF16 inputs: same compiled kernels).
+  Verify paths (_gw_consumer_bal, _gw_verify, _attn_split/_new/_norm_rope, nds, nvs, vtk) untouched: layer.py passes FP32
+  only when q_len == 1 and batch <= CSL_MAX_BATCH (16) (csl sliding / gdec full), else casts as before.
+- tools/qf32_eq.py: FP32 qkv vs its BF16 cast through attn_kernel_fn, batch 1/2/8/16 (+ test configs), 3 seeds: sliding
+  out and every K/V cache write bit-identical; full-layer out differs only like the bf16-vs-bf16 control (FP32 atomics).
+- H100 ab_files 6 rounds (v66 vs v67): d16 sliding 210.59 -> 209.02, full 313.83 -> 311.26 us. Default ON, TUNE {qf32: False}.
+- Tests 13/13; scored all 12 shapes x2 seeds 24/24; replay all shapes 0/240 (20 inputs x 2 router seeds).
+- Not done: QF32 for nds (d32 sliding) — only matters if the H200 tuner picks g19:qkv at T=32 (it has not).
