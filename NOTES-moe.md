@@ -137,3 +137,32 @@
   likely why 6/12 lose on the judge. Overhead per stage ~22 (mbarrier ~6, LDS+arrive 4, scale LUT ~16 incl. the 4
   extract/add). Scales as bf16 would cut the LUT but add ~11% bytes (and bends "NVFP4 stays NVFP4"): not done.
 - moe_twf ncu (H100, seed 7): bs128 262 us DRAM 81%, active/elapsed 0.90; bs256 301 us DRAM 74%, 0.86.
+
+## Session 7 (2026-10-25 23:12Z - 10-26 00:30Z)
+- Calibration (H100 local): torch copy 3.0 TB/s read+write; our decode kernels reach ~2.7-2.9 TB/s on the big
+  phases, so locally decode is near HBM-bound; on the H200 decode runs at ~70% of 4.8 TB/s (issue-bound, see s6).
+- nsys (cold L2 by a READ flush; a zero_() flush leaves dirty lines and inflates the first kernel by ~8 us):
+  bs1 gemm13 23.5 + gemm2 13.7 + norm2 4.4 (incl. PDL wait) us; bs32 117 + 62.5 + 5.9.
+- moe_tk2f (76e8bb0): gemm13 + gemm2 of the decode path in ONE launch: same routing prologue, ring continues
+  (producer streams w2 while the consumers finish gemm13), phase-2 consumers wait on done counters. Counters live in
+  the state (st["cnt"], int32[160]) and moe_norm2 re-zeroes them: a cudaMemsetAsync node cost 0.8 us + 1.8 us gap
+  (ate the whole gain). H100: bs1 41.8 -> 39.2, bs8 97.6 -> 94.6, bs16 122.5 -> 118.6, bs32 173.9 -> 171.1.
+  check 7747817f 2.154x (bs1 29.0, bs16 96.7, bs32 134.2, bs8 72.0, bs128 200.3, bs256 247.9).
+- RACE in 76e8bb0 (found by a 144-routing sweep, /tmp/moe7/t16c.py; bench.py test did not catch it): with more
+  dynamic smem (+64 KB, same kernel code) 1-4 of 144 routings fail (rel err 1.7-4%); always rp 0 (the first row
+  after an x reload) of a gemm2 segment, wrong partial sums in some k chunks; inter itself final and correct, no
+  double writes. Not fixed by: every-writer __threadfence before the publish barrier, fence.acq_rel after the spin,
+  holding the producer until phase 1 ends, volatile ld.global.cg, 100 us sleep after the wait. Waiting for ALL
+  gemm13 rows (one counter) still failed with ld.global.cg (LDG.STRONG.GPU), even + 100 us sleep. Passing: wait for all
+  + __ldg (LDG.CONSTANT) inter loads after the acquire (CCTL.IVALL). Unexplained: smells like a load-use hazard on
+  the strong loads right after a segment switch. Fix = 60d4a66: one global gemm13-row counter (cnt[0] == n13) + __ldg.
+  576 routings at both smem sizes + bitwise equal to the 3-launch path over 30 repeated runs; same speed.
+  check 68739792 2.140x (bs1 29.1, bs16 102.0, bs32 136.6, bs8 69.4, bs128 202.2, bs256 248.7).
+  LESSON: run /tmp/moe7/t16c.py-style many-routing sweeps (and a +smem stress variant) before any check of a kernel
+  with inter-CTA flags; twf (big-M) uses the same publish pattern (thread-0 fence after bar.sync) but reads by TMA.
+- Dead: norm fused into tk2f behind a grid barrier (CTA b does tokens b, b+grid; bs1 +3 us, all decode worse);
+  L2 prefetch (cp.async.bulk.prefetch.L2) of the next 1-2 rows in tk2f (bs32 +14/+56 us locally: much worse).
+- Started (not working yet): 16-token segments in tk2f (2 groups share each dequantized A fragment; the 2nd group's
+  x fragments in smem, lane-private, 8 KB/warp; s_red doubled). Code in /tmp/moe7/cons2.cu; it needs the race fix
+  above re-applied (its first version ran into exactly that race). Expected: bs32 -5..8% (10% of bs32 rows are
+  extra token groups on average, up to 40%), bs16 -2..3%.
