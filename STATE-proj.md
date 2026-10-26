@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~11:00 UTC (end of session 16).
+Updated 2026-10-26 ~11:50 UTC (end of session 17).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -8,7 +8,7 @@ Updated 2026-10-26 ~11:00 UTC (end of session 16).
 - Before: 6d0fc4d4 (405439e) 1.2742x; d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 16/20, scored 5/10 (cap 10). s16 checks fb2fe4ee 1.3071 (g22 diag), a9b13469 1.3161; submit 3810db09. s15 checks ce84da07 1.3001, 4e5fad5b 1.2951 (diag only). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
+- Budget 10-26 used: checks 17/20, scored 5/10 (cap 10). s17 check 29a2b16b 1.3173 (diag: m=1 = bare stream). s16 checks fb2fe4ee 1.3071 (g22 diag), a9b13469 1.3161; submit 3810db09. s15 checks ce84da07 1.3001, 4e5fad5b 1.2951 (diag only). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
   1.3064 (diag only).
 - H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
@@ -129,7 +129,12 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 - **H200 proxy for g19** (NOTES s16): H100 `GRID=88 MODE=2 PRED=3000 python dev/g19.py ...`, times x 0.73 = judge g19
   after-pred numbers for pooler/unpool (qkv off by ~3 us); GRID 72 ~ the layer's 108 blocks. Use it before H200 diags.
 
+## Session 17: H200 says m=1 GEMVs are AT bare-stream speed (pooler g13 18.53 = bare 50 MB TMA stream + graph cost;
+## qkv g13 = bare 28 MB + 0.9 us); cp.async ring g13c loses. No m=1 kernel lever left (NOTES s17).
 ## Next (ranked)
+-6. (s17) Only remaining proj lever with size: a ~10.5-11-bit lossless format (exponent entropy 2.54 bits; NOTES s17)
+   for the m=1 path (g13, pr1): est. -1.5..2 us per d1 layer (~0.3-0.4%). Needs the layer to re-wire packers: agree
+   with lead/layer first (new sandbox tomorrow). Otherwise proj is done: ask the lead for a lane (asked s16, no answer).
 -5. (s16) FIRST: read COORD for the lead's answer to "proj -> lead (s16 10:36Z)" (move to moe tk2f fixed cost? or the
    fused pooler+router+routing). Budget 10-26: 4 checks + 5 submits left (sandbox ends ~19:10Z; new sandbox tomorrow).
    The layer has my qkv-m8 g14 config and lt picks as handoffs (check COORD whether it took them).

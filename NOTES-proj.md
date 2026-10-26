@@ -509,3 +509,22 @@
   (G72) 16.15 / 20.81 -> with routing then on the critical path: loses; G19_NOXW (consumers never wait for x: upper
   bound of faster x staging) -0.2..0.7 us only.
 - Session 16 end (11:00Z): checks 10-26 16/20, scored 5/10. Board best 3810db09 1.3110x.
+
+## Session 17 (2026-10-26 11:00 - UTC): m=1 GEMVs are at bare-stream speed on the H200 (diag check 29a2b16b)
+- Question (layer s17: "m=1 GEMVs run 2.5-3.2 TB/s on H200, ~11 us of d1 room"): is gemv13 short of bytes in flight on
+  the H200 (it holds 48 KB/SM in registers: U2 x 24 B x 1024 threads)? H100 g13.py XF=-DG13_CPA (cp.async smem ring,
+  PF 3/4/6, NV 2/4, VT 512): all tie or lose (qkv 13.0-16.0 vs 13.3, pooler 20.5-23.3 vs 20.2). (NV 4 x VT 512 = 2048
+  threads: invalid launch.)
+- **H200 check 29a2b16b (77e925e, 1.3173x, diag; not submitted: no new pick)**, graph us incl. the judge's ~4.6 us
+  1-kernel-graph cost: pooler m1 g13 18.53 vs g13c 18.69-22.02; qkv m1 g13 (VT 512) 13.98 vs g13c 14.30-15.74.
+  Bare TMA stream (g19_stream, (24576 B, 4 stages), 132 blocks, 1-kernel graph subtracted): 50 MB 13.89 us, 28 MB
+  8.51 us. So pooler g13 = 13.9 + 4.6 = exactly a bare stream; qkv g13 = bare + 0.9 us. The profile's "2.5-3.2 TB/s"
+  is kernel duration incl. ramp/drain (a bare 28 MB stream itself is 3.3 TB/s). DEAD: no m=1 kernel lever left;
+  only fewer bytes or overlap with latency-bound phases (layer tried o-W L2 prefetch, pr1 npf: ties).
+- Fewer bytes: exponent entropy of all 4 BF16 weights = 2.54-2.55 bits (uniform-like: each octave halves; qkv/pooler
+  exps 121..115 = 15/32/24/14/7/3.5/1.8%). Ideal lossless ~10.5 bits vs our 12 (-12%); a 3-bit window covers only
+  98.6% (1.4% escapes: too many for per-row headers) -> needs a 2-level code (3-bit code with an escape plane indexed by
+  popc of a per-group mask). Est. d1 ~-1.5..2 us/layer (qkv, pooler, unpool; o stays BF16 g10) = ~0.3-0.4% layer score,
+  m>=8 kernels are issue-bound and would not gain. Big change (format in g13 + pr1 + layer packers). Not started.
+- Answered layer's g22 m128 cfg question from fb2fe4ee (COORD Requests): both cfgs equal, both lose 3-8 us.
+- Checks 10-26: 17/20, scored 5/10. Board best unchanged 3810db09 1.3110x.
