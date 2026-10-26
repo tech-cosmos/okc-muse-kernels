@@ -1,14 +1,14 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~08:35 UTC (session 15).
+Updated 2026-10-26 ~10:50 UTC (session 16).
 
 ## Board
-- **Best: submit 71145e34fe424844 = a1f0af7, 1.307x (3,695.6 us), proj rank 196** (router3 at router m9-128; its check
-  a478daea gave 1.3137). (#1 1.62x, #10 ~1.54x.) main = a566ba9 (+ m256 router tuner: H200 picks cuBLAS, check 1a978122 tie).
+- **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
+  Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
 - Before: 6d0fc4d4 (405439e) 1.2742x; d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 14/20, scored 4/10 (cap 10). s15 checks ce84da07 1.3001, 4e5fad5b 1.2951 (diag only). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
+- Budget 10-26 used: checks 16/20, scored 5/10 (cap 10). s16 checks fb2fe4ee 1.3071 (g22 diag), a9b13469 1.3161; submit 3810db09. s15 checks ce84da07 1.3001, 4e5fad5b 1.2951 (diag only). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
   1.3064 (diag only).
 - H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
@@ -119,7 +119,17 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 - gemv19 mode 3 (BF16 out, tile tickets, self-cleaning ws, tm stage order) for the layer's qkv first op: H200 loses
   3-6 us standalone (g19 needs a PDL predecessor): DEAD for qkv. Dead too: finisher-side escape list, per-lane RMW.
 
+## Session 16: gemv22 (m128/256 12-bit wgmma GEMM) DEAD (per-SM smem ingest of W + x box); qkv m8 g14 no split-K WIN
+## (-1.2 us H200, handoff); lt picks handoff (pooler@256 etc.; the layer found pooler@256 loses beside the router).
+- Dead too (NOTES s16): g22 at m16/32 (H100 consumer-only no better than g19), g22 cluster x multicast, gemv13 cp.async
+  ring / L2 prefetch, gemv13 for o, fused [pooler; router hi/lo] g19 on 132 blocks (H100 26.2 vs 23.3 us pooler alone;
+  routing then on the critical path), g19 test_wait spin. g19 m32 H200 bound = consumers (H100 NOW: skeleton 9.8 +
+  decode 2.3 + mma.sync 4.4 us at pool m32) and no variant tried so far helps.
+
 ## Next (ranked)
+-4. (s16) Only if worth it: router + routing fused into the T=16/32 pooler g19 (per-tile scale for hi/lo tiles, routing
+   by the last router-flush finisher, like pr8) so the pooler gets 132 SMs and the side stream goes: est. -2 us d16/d32.
+   Otherwise the proj lane is near what these kernels can do; ask the lead for a lane (moe tk2f fixed cost is biggest).
 -3. (s15) If the layer's H200 check of the s15 patch (+ T=32 g19) holds: g19 m32 consumer cost (Next 0 below) is
    the lever at d32 (pooler/unpool now ~tie on H200). qkv T=16/32 standalone: needs a non-g19 design (cuBLASLt wins
    by 3-6 us; a cp.async/LDG kernel with x first, like gemv14/16, over 12-bit at m16 ties lt on H200).

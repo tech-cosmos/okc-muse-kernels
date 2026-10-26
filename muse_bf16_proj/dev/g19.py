@@ -28,7 +28,7 @@ def pack19r(w, kc, ap, rg):
     return torch.cat([S, N], 1).contiguous(), hdr, scale
 
 
-SH = [("qkv", "qkv_gate", 2304), ("o", "o", 8192), ("pool", "pooler", 4096), ("unp", "unpooler", 8192)]
+SH = [("qkv", "qkv_gate", 2304), ("o", "o", 8192), ("pool", "pooler", 4096), ("unp", "unpooler", 8192), ("poolr", "pooler", 4608)]
 only = os.environ.get("SH")
 GRID = int(os.environ.get("GRID", torch.cuda.get_device_properties(0).multi_processor_count))
 Wr = reference.generate_weights(reference.WEIGHTS_SEED)
@@ -56,7 +56,7 @@ ZG = int(os.environ.get("ZG", 1))
 NPRE = int(os.environ.get("NPRE", 99))  # stages before griddepcontrol.wait (capped at NS)       # mode 1: zero kernel inside the timed graph (else outside: assume fused elsewhere)
 for nm, layer, n in SH:
     if only and nm not in only.split(","): continue
-    W = Wr[layer][:n].contiguous()
+    W = Wr[layer][:n].contiguous() if n <= Wr[layer].shape[0] else torch.cat([Wr[layer], Wr[layer][:n - Wr[layer].shape[0]]]).contiguous()  # poolr: pooler + 512 rows (router hi/lo stand-in)
     k = W.shape[1]
     packs = {}
     for M in sorted({c[0] for c in cfgs}):

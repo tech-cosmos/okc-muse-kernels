@@ -14,7 +14,7 @@
 #else
 #define G22_NOPEERV 0
 #endif
-#ifdef G22_NOFIX
+#if defined(G22_NOFIX) || defined(G22_NOW)
 #define G22_NOFIXV 1
 #else
 #define G22_NOFIXV 0
@@ -108,6 +108,17 @@ __device__ __forceinline__ unsigned long long sw128_desc(unsigned a) {
     return (unsigned long long)((a & 0x3FFFF) >> 4) | (1ull << 16) | ((unsigned long long)(1024 >> 4) << 32) | (1ull << 62);
 }
 template <int M> __device__ __forceinline__ void wgmma(float* d, const unsigned* a, unsigned long long desc);
+template <> __device__ __forceinline__ void wgmma<16>(float* d, const unsigned* a, unsigned long long desc) {
+    asm volatile("wgmma.mma_async.sync.aligned.m64n16k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7}, {%8,%9,%10,%11}, %12, 1, 1, 1, 0;"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(desc));
+}
+template <> __device__ __forceinline__ void wgmma<32>(float* d, const unsigned* a, unsigned long long desc) {
+    asm volatile("wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, {%16,%17,%18,%19}, %20, 1, 1, 1, 0;"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]),
+                   "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15])
+                 : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(desc));
+}
 template <> __device__ __forceinline__ void wgmma<128>(float* d, const unsigned* a, unsigned long long desc) {
     asm volatile("wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63}, {%64,%65,%66,%67}, %68, 1, 1, 1, 0;"
                  : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]), "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]), "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]), "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
@@ -197,10 +208,14 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
                     if (j >= NS) bar_wait(bars + 8 * (NS + slot), ((j / NS) - 1) & 1);
 #ifdef G22_NOX
                     bar_expect(bars + 8 * slot, u == ra0 ? PB + XS : PB);
+#elif defined(G22_NOW)
+                    bar_expect(bars + 8 * slot, XS);  // diag: no W loads (consumers decode stale smem)
 #else
                     bar_expect(bars + 8 * slot, PB + XS);
 #endif
+#ifndef G22_NOW
                     bulk(ring + slot * SL, WP + (long)u * PB, PB, bars + 8 * slot);
+#endif
                 }
 #ifdef G22_NOX
                 if (u == ra0) {
@@ -297,19 +312,20 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
         __syncwarp();
         if (lane == 0) { bar_arrive(bars + 8 * (NS + pslot)); if (CL == 2) bar_arrive_peer(bars + 8 * (NS + pslot), cr ^ 1); }
         pslot = -1;
+        constexpr int G4 = NT < 4 ? NT : 4;
         // flush: 32-token groups through smem ([tok][16 rows], stride 20 floats), red.add.v4 along rows
         {
             float* sc = (float*)(smem + NS * SL + 16 * NS + 64) + w * 32 * 20;
             float* ob = out + (tr * NCW + w) * 16;
 #pragma unroll
-            for (int t0 = 0; t0 < NT; t0 += 4) {
+            for (int t0 = 0; t0 < NT; t0 += G4) {
 #pragma unroll
-                for (int jj = t0; jj < t0 + 4; ++jj)
+                for (int jj = t0; jj < t0 + G4; ++jj)
 #pragma unroll
                     for (int e = 0; e < 4; ++e) sc[((jj - t0) * 8 + 2 * c + (e & 1)) * 20 + g + 8 * (e >> 1)] = acc[jj * 4 + e] * scale;
                 __syncwarp();
 #pragma unroll
-                for (int i2 = 0; i2 < 4; ++i2) {
+                for (int i2 = 0; i2 < G4; ++i2) {
                     const int f = lane + 32 * i2, tl = f >> 2, q4 = f & 3;
                     const float4 v = *(const float4*)(sc + tl * 20 + 4 * q4);
 #ifdef G22_NORED

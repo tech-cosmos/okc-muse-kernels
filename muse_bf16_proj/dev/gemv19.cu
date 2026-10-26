@@ -53,8 +53,13 @@ __device__ __forceinline__ void bar_arrive(unsigned b) {
     asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" :: "r"(b) : "memory");
 }
 __device__ __forceinline__ void bar_wait(unsigned b, unsigned parity) {
+#ifdef G19_SPIN  // diag: non-suspending test_wait spin instead of try_wait
+    asm volatile("{\n.reg .pred p;\nW19_%=:\nmbarrier.test_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra W19_%=;\n}"
+                 :: "r"(b), "r"(parity) : "memory");
+#else
     asm volatile("{\n.reg .pred p;\nW19_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra W19_%=;\n}"
                  :: "r"(b), "r"(parity) : "memory");
+#endif
 }
 __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, unsigned b) {
     asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
