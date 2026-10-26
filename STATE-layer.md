@@ -119,7 +119,8 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
    proj g19 patches: `git apply -p1` on r-layer. Then bench.py test, tools/scored_test.py, tools/replay_test.py,
    tools/tk2f_stress.py if tk2f changed, tools/ab_files.py old/new, check.
 1. s55 DEAD: L2 prefetch of the routed experts' w13q beside the d32 g19 pooler (H100 tk2f -7 us/40 MB, but the prefetch
-   blocks take the router's free SMs: routing +12..16 us; real ids only exist at the pooler's end). NOTES s55.
+   blocks take the router's free SMs: routing +12..16 us; real ids only exist at the pooler's end; the real form XPF after the routing: tk2f only -1.1 us per 16 MB
+   prefetched, its own L2 traffic evicts the rest: <= ~1 us even on the H200). NOTES s55, dev/xpf_s55.patch.
    s54 DEAD: d1 qkv/gate split with the gate GEMV beside csl (oracle +0.5..1.3 us, NOTES s54).
    Dead this session (don't retry without a new idea): every L2 prefetch of a next weight (unpool during tk2f/norm,
    o during csl, more pooler chunks in pr1) on H100 AND H200; boundary variants (cluster, CUDA 1-CTA, 2-4 rows per
