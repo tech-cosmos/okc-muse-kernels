@@ -2329,19 +2329,209 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
   }
 }
 
-template <int NC, int NSTG, int KPS>
+// DYN variant (s8): CTA b first takes the static rows [b*S, (b+1)*S) of a phase (S = rows/grid - D), then single
+// rows from the tail [grid*S, N) via a global counter (ctr, pulled by the producer one row ahead). The producer
+// tells the consumers each row's index through s_rid (written before the row's first full-barrier arrive, which
+// releases it); -1 = end of the phase (a stage with no data: plain arrive). Rows of a CTA stay increasing.
+template <int NRT, int NC, int NSTG, int KPS, bool HARD>
+__device__ __forceinline__ void tk2d_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int S,
+                                             int N, int* ctr, const int* s_rs, const int* s_e, int* s_rid,
+                                             uint4* smem, uint64_t* full, uint64_t* empty, int& st, int& ph, int& i,
+                                             int& k) {
+  constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * 1152, KB = NC * KPS;
+  const int G0 = gridDim.x * S;
+  int a = 0, R = blockIdx.x * S;
+  const int sEnd = R + S;
+  int nxt = S == 0 ? atomicAdd(ctr, 1) : 0;  // next tail row, fetched one row early
+  while (true) {
+    int Rn;
+    if (R < sEnd) {
+      Rn = R++;
+      if (R == sEnd) nxt = atomicAdd(ctr, 1);
+    } else {
+      Rn = G0 + nxt;
+      if (Rn >= N) Rn = -1;
+      else nxt = atomicAdd(ctr, 1);
+    }
+    if (Rn < 0 && !HARD) {  // end of phase 1: no stage; the consumers see -1 with the next phase's first stage
+      s_rid[k & 3] = -1;
+      ++k;
+      return;
+    }
+    if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+    s_rid[k & 3] = Rn;
+    ++k;
+    if (Rn < 0) {  // end of the last phase: a stage with no data
+      mbar_arrive(&full[st]);
+      ++i;
+      if (++st == NSTG) { st = 0; ph ^= 1; }
+      return;
+    }
+    while (s_rs[a + 1] <= Rn) ++a;
+    const int e = s_e[a];
+    const int lr = (Rn - s_rs[a]) & (RPE - 1);
+    const uint4* src = Wq + ((size_t)e * NRT * 64 + lr * 64) * 32;
+    const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
+    for (int q = 0; q < NQ; ++q, ++i) {
+      if (q && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+      char* sbase = reinterpret_cast<char*>(smem) + st * SB;
+      mbar_expect_tx(&full[st], SB);
+      bulk_g2s(sbase, src + q * KB * 32, KB * 512, &full[st]);
+      bulk_g2s(sbase + KB * 512, src + NRT * 32 * 32 + q * KB * 32, KB * 512, &full[st]);
+      bulk_g2s(sbase + KB * 1024, ssrc + q * KB * 32, KB * 128, &full[st]);
+      if (++st == NSTG) { st = 0; ph ^= 1; }
+    }
+  }
+}
+
+template <int NRT, int NC, int NSTG, bool GATED, int KPS>
+__device__ __forceinline__ void tk2d_consume(const uint32_t* slut, const float* __restrict__ gs,
+                                             const __nv_bfloat16* X, void* Out, int* cnt, int need, int S, const int* s_rid,
+                                             const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
+                                             float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
+                                             int& ph, int& rb, int& k) {
+  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
+  uint4 xf[NQ][2];
+  int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0, nd = 0;
+  float gsc = 0.f;
+  const uint4* wsm = smem + warp * 32 + lane;
+  const int R0 = blockIdx.x * S;
+  for (int j = 0;; ++j, ++k) {
+    int R = R0 + j;
+    if (j >= S) {  // tail row: its index comes from the producer
+      mbar_wait(&full[st], ph);
+      R = s_rid[k & 3];
+      if (R < 0) {  // end of phase (gemm13: the stage is the next phase's first: keep it)
+        ++k;
+        if (!GATED) {
+          mbar_arrive(&empty[st]);
+          if (++st == NSTG) { st = 0; ph ^= 1; }
+        }
+        break;
+      }
+    }
+    if (R >= seg_end) {
+      while (s_rs[a + 1] <= R) ++a;
+      const int gi = (R - s_rs[a]) / RPE;
+      seg_start = s_rs[a] + gi * RPE;
+      seg_end = seg_start + RPE;
+      const int e = s_e[a];
+      gsc = gs[e] * 256.0f;
+      off = s_off[e] + gi * 8;
+      n = min(8, s_off[e + 1] - off);
+      if (!GATED && nd == 0) {  // all gemm13 rows written (by any CTA), once per CTA
+        int c;
+        do {
+          asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt) : "memory");
+        } while (c < need);
+      }
+      const bool v = g < n;
+      int row = 0;
+      if (v) row = GATED ? (s_srt[off + g] >> 3) : (off + g);
+      const uint4* xr = reinterpret_cast<const uint4*>(X + (size_t)row * KD + 16 * t);
+#pragma unroll
+      for (int qq = 0; qq < NQ; ++qq) {
+        const int kc = qq * NC + warp;
+        xf[qq][0] = v ? __ldg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
+        xf[qq][1] = v ? __ldg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
+      }
+    }
+    ++nd;
+    float acc[2][4];
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+      for (int r = 0; r < 4; ++r) acc[i][r] = 0.f;
+#pragma unroll
+    for (int q = 0; q < NS; ++q) {
+      mbar_wait(&full[st], ph);
+      const uint4* sw4 = wsm + st * (SB / 16);
+      uint4 wv0[KPS], wv1[KPS];
+      uint32_t sw[KPS];
+#pragma unroll
+      for (int h = 0; h < KPS; ++h) {
+        wv0[h] = sw4[h * SW];
+        wv1[h] = sw4[(KPS + h) * SW];
+        sw[h] = reinterpret_cast<const uint32_t*>(sw4 + 2 * KPS * SW - warp * 32 - lane)[(h * NC + warp) * 32 + lane];
+      }
+      mbar_arrive(&empty[st]);
+      if (++st == NSTG) { st = 0; ph ^= 1; }
+#pragma unroll
+      for (int h = 0; h < KPS; ++h) {
+        const uint32_t sc[4] = {slut[sw[h] & 0xFF], slut[(sw[h] >> 8) & 0xFF], slut[(sw[h] >> 16) & 0xFF], slut[sw[h] >> 24]};
+        const int qq = q * KPS + h;
+#pragma unroll
+        for (int ii = 0; ii < 2; ++ii) {
+          const uint4 wv = ii ? wv1[h] : wv0[h];
+#pragma unroll
+          for (int j = 0; j < 4; ++j) {
+            uint32_t af[4];
+            dq(u4get(wv, j), sc[2 * ii], sc[2 * ii + 1], af);
+            mma16816(acc[ii], af, u4get(xf[qq][j >> 1], (j & 1) * 2), u4get(xf[qq][j >> 1], (j & 1) * 2 + 1));
+          }
+        }
+      }
+    }
+    float* red = s_red + rb * (NC * 256);
+    rb ^= 1;
+#pragma unroll
+    for (int ii = 0; ii < 2; ++ii)
+#pragma unroll
+      for (int r = 0; r < 4; ++r) red[((warp * 2 + ii) * 4 + r) * 32 + lane] = acc[ii][r];
+    asm volatile("bar.sync 1, %0;" ::"n"(NC * 32) : "memory");
+    const int rp = R - seg_start;
+    const int ct = tid, l = ct & 31, gg = l >> 2, tt = l & 3;
+    if (GATED) {
+      if (ct < 128) {
+        const int r = ct >> 5;
+        float v = 0.f, u = 0.f;
+#pragma unroll
+        for (int w = 0; w < NC; ++w) { v += red[((w * 2) * 4 + r) * 32 + l]; u += red[((w * 2 + 1) * 4 + r) * 32 + l]; }
+        const int tok = 2 * tt + (r & 1);
+        if (tok < n) {
+          v *= gsc;
+          u *= gsc;
+          const int col = rp * 16 + gg + ((r & 2) ? 8 : 0);
+          reinterpret_cast<__nv_bfloat16*>(Out)[(size_t)(off + tok) * NOUT + col] =
+              __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+        }
+      }
+    } else {
+      const int ii = ct >> 7, r = (ct >> 5) & 3;
+      float v = 0.f;
+#pragma unroll
+      for (int w = 0; w < NC; ++w) v += red[((w * 2 + ii) * 4 + r) * 32 + l];
+      const int tok = 2 * tt + (r & 1);
+      if (tok < n) {
+        const int col = (rp + ii * RPE) * 16 + gg + ((r & 2) ? 8 : 0);
+        reinterpret_cast<float*>(Out)[(size_t)(off + tok) * NOUT + col] = v;
+      }
+    }
+  }
+  if (GATED) {  // publish this CTA's gemm13 rows
+    asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+    if (tid == 0 && nd) {
+      __threadfence();
+      atomicAdd(cnt, nd);
+    }
+  }
+}
+
+template <int NC, int NSTG, int KPS, bool DYN>
 __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     const uint4* __restrict__ Wq13, const uint32_t* __restrict__ S13, const uint4* __restrict__ Wq2,
     const uint32_t* __restrict__ S2, const uint32_t* __restrict__ lut, const float* __restrict__ gs13,
     const float* __restrict__ gs2, const __nv_bfloat16* __restrict__ X, const int* __restrict__ ids, int nroutes,
     int start, int count, int* __restrict__ meta, int* __restrict__ sroutes, int* __restrict__ inv,
-    __nv_bfloat16* inter, float* __restrict__ Y, int* cnt) {
+    __nv_bfloat16* inter, float* __restrict__ Y, int* cnt, int D) {
   static_assert(NC == 8, "routing uses 8 warps x 32 ids");
   extern __shared__ __align__(128) uint4 smem[];
   __shared__ uint32_t slut[256];
   __shared__ int s_e[32], s_off[33], s_rs13[33], s_rs2[33], s_srt[256], s_wc[8][32], s_nact;
   __shared__ float s_red[2 * NC * 256];
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
+  __shared__ int s_rid[4];
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   for (int i = tid; i < 256; i += (NC + 1) * 32) slut[i] = lut[i];
   if (tid == 0) {
@@ -2419,6 +2609,24 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   __syncthreads();
   const int n13 = s_rs13[nact], n2 = s_rs2[nact];
+  if constexpr (DYN) {
+    const int G = gridDim.x, ns13 = max(0, n13 / G - D), ns2 = max(0, n2 / G - D);
+    int st = 0, ph = 0, k = 0;
+    if (warp == NC) {
+      if (lane == 0) {
+        int i = 0;
+        tk2d_produce<512, NC, NSTG, KPS, false>(Wq13, S13, ns13, n13, cnt + 1, s_rs13, s_e, s_rid, smem, full, empty, st, ph, i, k);
+        tk2d_produce<256, NC, NSTG, KPS, true>(Wq2, S2, ns2, n2, cnt + 2, s_rs2, s_e, s_rid, smem, full, empty, st, ph, i, k);
+      }
+      return;
+    }
+    int rb = 0;
+    tk2d_consume<512, NC, NSTG, true, KPS>(slut, gs13, X, inter, cnt, n13, ns13, s_rid, s_rs13, s_e, s_off, s_srt, s_red, smem,
+                                          full, empty, st, ph, rb, k);
+    tk2d_consume<256, NC, NSTG, false, KPS>(slut, gs2, inter, Y, cnt, n13, ns2, s_rid, s_rs2, s_e, s_off, s_srt, s_red, smem,
+                                           full, empty, st, ph, rb, k);
+    return;
+  }
   const int a0 = (int)((long long)n13 * blockIdx.x / gridDim.x), a1 = (int)((long long)n13 * (blockIdx.x + 1) / gridDim.x);
   const int b0 = (int)((long long)n2 * blockIdx.x / gridDim.x), b1 = (int)((long long)n2 * (blockIdx.x + 1) / gridDim.x);
   int st = 0, ph = 0;
@@ -2437,8 +2645,8 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
                                      empty, st, ph, rb);
 }
 
-template <int NC, int NSTG, int KPS>
-static int64_t tk2f_go(int nr, const void* w13, const void* s13, const void* w2, const void* s2, const void* lut,
+template <int NC, int NSTG, int KPS, bool DYN = false>
+static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const void* w2, const void* s2, const void* lut,
                        const void* gs13, const void* gs2, const void* x, const void* ids, int start, int count,
                        void* meta, void* sr, void* inv, void* inter, void* y, void* cnt) {
   constexpr int SMEM = NSTG * NC * KPS * 1152;
@@ -2447,24 +2655,33 @@ static int64_t tk2f_go(int nr, const void* w13, const void* s13, const void* w2,
     int dev, nsm;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
-    cudaFuncSetAttribute(moe_tk2f<NC, NSTG, KPS>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    cudaFuncSetAttribute(moe_tk2f<NC, NSTG, KPS, DYN>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
   cudaStream_t st = at::cuda::getCurrentCUDAStream();
-  return launch_k(moe_tk2f<NC, NSTG, KPS>, grid, (NC + 1) * 32, SMEM, st, false,
+  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN>, grid, (NC + 1) * 32, SMEM, st, false,
       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
       (const float*)gs13, (const float*)gs2, (const __nv_bfloat16*)x, (const int*)ids, nr, start, count, (int*)meta,
-      (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt);
+      (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D);
 }
 
-// cfg = KPS * 100 + NSTG: 108 (s7 default), 204 (s8), 208, 402, 403, 206
+// cfg = KPS * 100 + NSTG: 108 (s7 default), 204 (s8), 208, 402, 403, 206; + 1000 * (D + 1): DYN tail (204/402 only)
 int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2_, torch::Tensor s2_,
                         torch::Tensor lut_, torch::Tensor gs13_, torch::Tensor gs2_, torch::Tensor x_,
                         torch::Tensor ids_, int64_t start, int64_t count, torch::Tensor meta_, torch::Tensor sr_,
                         torch::Tensor inv_, torch::Tensor inter_, torch::Tensor y_, torch::Tensor cnt_, int64_t cfg) {
   const int nr = (int)ids_.numel();
   if (nr > 256) return -2;
-#define TK2F_ARGS nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
+#define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
+    (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
+    cnt_.data_ptr()
+  const int D = (int)(cfg / 1000) - 1;  // cfg >= 1000: DYN with D = cfg / 1000 - 1
+  cfg %= 1000;
+  if (D >= 0) {
+    if (cfg == 204) return tk2f_go<8, 4, 2, true>(D, TK2F_ARGS0);
+    return tk2f_go<8, 2, 4, true>(D, TK2F_ARGS0);
+  }
+#define TK2F_ARGS 0, nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
     (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
     cnt_.data_ptr()
   if (cfg == 204) return tk2f_go<8, 4, 2>(TK2F_ARGS);
@@ -2474,6 +2691,7 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
   if (cfg == 206) return tk2f_go<8, 6, 2>(TK2F_ARGS);
   return tk2f_go<8, 8, 1>(TK2F_ARGS);
 #undef TK2F_ARGS
+#undef TK2F_ARGS0
 }
 
 int64_t moe_tk2_launch(int64_t gated, int64_t nstg, torch::Tensor wq_, torch::Tensor s2_, torch::Tensor lut_,
@@ -2731,6 +2949,7 @@ TB_PACK = ()  # RT values packed in prepare for moe_tb
 _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
 TK2_MAX = 32  # M above this: big-M path
+TK2F_DYN = 5402  # M > 1: tk2f with the dynamic row tail (D = 4: 4 rows/CTA from a shared counter; H100 bs8-32 -3..4%)
 TK2F = 402  # decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
@@ -2755,7 +2974,8 @@ def kernel_fn(data, st):
         y32 = torch.empty((M * TOP_K, H), dtype=torch.float32, device=dev)
         if TK2F:
             lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
-                                st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], TK2F)
+                                st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"],
+                                TK2F_DYN if M > 1 else TK2F)
             lib.moe_norm2_launch(y32, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], POST_NORM_EPS, out,
                                  st["cnt"])
             return out
