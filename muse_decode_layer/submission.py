@@ -167,9 +167,26 @@ __device__ __forceinline__ void sa2(unsigned addr, unsigned mbar, float a, float
                  ::"r"(addr), "f"(a), "f"(b), "r"(mbar) : "memory");
 }
 __device__ __forceinline__ float bf(unsigned short x) { return __uint_as_float((unsigned)x << 16); }
+// layer s28 (QF32): qkv may be the FP32 output of the qkv GEMM (layer g19 at T=16); each element is rounded to BF16
+// (RN, as the torch cast it replaces) at its load, so everything downstream is bit-identical to the BF16 input.
+__device__ __forceinline__ unsigned pkbf(float lo, float hi) {
+    __nv_bfloat162 t = __floats2bfloat162_rn(lo, hi);
+    return *(unsigned*)&t;
+}
+__device__ __forceinline__ unsigned ld2(const unsigned short* p) { return *(const unsigned*)p; }
+__device__ __forceinline__ unsigned ld2(const float* p) { const float2 f = *(const float2*)p; return pkbf(f.x, f.y); }
+__device__ __forceinline__ void ld16(const unsigned short* p, uint4& a, uint4& b) {
+    a = *(const uint4*)p; b = *(const uint4*)(p + 8);
+}
+__device__ __forceinline__ void ld16(const float* p, uint4& a, uint4& b) {
+    const float4 f0 = *(const float4*)p, f1 = *(const float4*)(p + 4), f2 = *(const float4*)(p + 8),
+                 f3 = *(const float4*)(p + 12);
+    a = make_uint4(pkbf(f0.x, f0.y), pkbf(f0.z, f0.w), pkbf(f1.x, f1.y), pkbf(f1.z, f1.w));
+    b = make_uint4(pkbf(f2.x, f2.y), pkbf(f2.z, f2.w), pkbf(f3.x, f3.y), pkbf(f3.z, f3.w));
+}
 
-template <int PAGE>
-__global__ void __launch_bounds__(128) decode(const unsigned short* __restrict__ qkv, const float* __restrict__ cs,
+template <int PAGE, typename QT>
+__global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               unsigned char* kc, unsigned char* vc, const int* __restrict__ pt,
                                               const int* __restrict__ seqs, const long* __restrict__ loc,
                                               const float* __restrict__ ks, const float* __restrict__ vs,
@@ -198,11 +215,12 @@ __global__ void __launch_bounds__(128) decode(const unsigned short* __restrict__
 
     // Every load that doesn't need the page table goes out first (warps issue in order, and the gathers' addresses
     // wait for the page-table trip): queries, the new token, the gate, scales; then cos/sin (needs seq).
-    const unsigned short* qp = qkv + (long)b * QKV_W + (h * 8 + g) * D + 16 * c;
-    const uint4 qa = *(const uint4*)qp, qb = *(const uint4*)(qp + 8);
-    const unsigned short* kp = qkv + (long)b * QKV_W + (HQ + h) * D + 2 * lane;
-    const unsigned kw = *(const unsigned*)kp, vw = *(const unsigned*)(kp + HKV * D);
-    const unsigned gw = *(const unsigned*)(qkv + (long)b * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
+    const QT* qp = qkv + (long)b * QKV_W + (h * 8 + g) * D + 16 * c;
+    uint4 qa, qb;
+    ld16(qp, qa, qb);
+    const QT* kp = qkv + (long)b * QKV_W + (HQ + h) * D + 2 * lane;
+    const unsigned kw = ld2(kp), vw = ld2(kp + HKV * D);
+    const unsigned gw = ld2(qkv + (long)b * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
     const long nloc = loc[b];
     const float kscale = *ks, vscale = *vs;
     // spec >= 0 (batch 1, page 1): SGLang slices the page table to the batch's longest length, so the window's
@@ -414,19 +432,21 @@ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
     at[0].id = cudaLaunchAttributeClusterDimension;
     at[0].val.clusterDim.x = 16; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
     cfg.attrs = at; cfg.numAttrs = 1;
-#define CSL_ARGS (const unsigned short*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
+#define CSL_ARGS(QT) (const QT*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
     (unsigned char*)vc.data_ptr(), pt.data_ptr<int>(), seq.data_ptr<int>(), loc.data_ptr<long>(), ks.data_ptr<float>(), \
     vs.data_ptr<float>(), (__nv_bfloat16*)out.data_ptr(), mp, (float)qk_scale, spec
+#define CSL_LAUNCH(P, QT) { \
+        static bool set = false; \
+        if (!set) { cudaFuncSetAttribute(csl::decode<P, QT>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; } \
+        cudaLaunchKernelEx(&cfg, csl::decode<P, QT>, CSL_ARGS(QT)); }
+    TORCH_CHECK(page == 1 || page == 64, "csl: page 1 or 64");
+    const bool f32 = qkv.scalar_type() == at::kFloat;
     if (page == 1) {
-        static bool set = false;
-        if (!set) { cudaFuncSetAttribute(csl::decode<1>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; }
-        cudaLaunchKernelEx(&cfg, csl::decode<1>, CSL_ARGS);
+        if (f32) CSL_LAUNCH(1, float) else CSL_LAUNCH(1, unsigned short)
     } else {
-        static bool set = false;
-        if (!set) { cudaFuncSetAttribute(csl::decode<64>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; }
-        TORCH_CHECK(page == 64, "csl: page 1 or 64");
-        cudaLaunchKernelEx(&cfg, csl::decode<64>, CSL_ARGS);
+        if (f32) CSL_LAUNCH(64, float) else CSL_LAUNCH(64, unsigned short)
     }
+#undef CSL_LAUNCH
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -2091,7 +2111,7 @@ if HAVE_GLUON:
         QKV_W: gl.constexpr = (2 * HQ + 2 * HKV) * D
         tok = b * L + r // G
         col = (hh * G + r % G)[:, None] * D + c[None, :]
-        gate = gl.load(qkv_ptr + tok[:, None] * QKV_W + (HQ + 2 * HKV) * D + col).to(gl.float32)
+        gate = gl.load(qkv_ptr + tok[:, None] * QKV_W + (HQ + 2 * HKV) * D + col).to(gl.bfloat16).to(gl.float32)
         return hh, r, c, ok, tok, col, gate
 
     @gluon.jit
@@ -2603,13 +2623,13 @@ if HAVE_GLUON:
         hp = r // G
         q_ok = (c_g // D)[None, :] == hp[:, None]
         x = gl.load(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], mask=q_ok,
-                    other=0.0).to(gl.float32)
+                    other=0.0).to(gl.bfloat16).to(gl.float32)
         x = gl.where(q_ok, x, 0.0)
         rs = gl.rsqrt(gl.sum(x * x, 1) / D + 1e-5)[:, None]
         if ROPE:
             # Interleaved RoPE at position seq (the norm commutes with the rotation).
             xp = gl.load(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + ((c_g % D) ^ 1)[None, :],
-                         mask=q_ok, other=0.0).to(gl.float32)
+                         mask=q_ok, other=0.0).to(gl.bfloat16).to(gl.float32)
             cs_off = seq * D + (c_g % D) // 2
             cos = gl.load(cs_ptr + cs_off)[None, :]
             sin = (gl.load(cs_ptr + cs_off + D // 2) * gl.where(c_g % 2 == 0, -1.0, 1.0))[None, :]
@@ -2742,14 +2762,14 @@ if HAVE_GLUON:
             # each head's block), and write its one-key partial (max = its score, sum = 1, acc = V) to slot S.
             loc = gl.load(loc_ptr + b)
             zero = gl.zeros([M, C], gl.float32, BL)
-            kx = gl.where(q_ok, gl.load(qkv_ptr + b * QKV_W + (HQ + h) * D + c_g)[None, :].to(gl.float32) + zero, 0.0)
+            kx = gl.where(q_ok, gl.load(qkv_ptr + b * QKV_W + (HQ + h) * D + c_g)[None, :].to(gl.bfloat16).to(gl.float32) + zero, 0.0)
             krs = gl.rsqrt(gl.sum(kx * kx, 1) / D + 1e-5)[:, None]
             if ROPE:
-                kxp = gl.where(q_ok, gl.load(qkv_ptr + b * QKV_W + (HQ + h) * D + (c_g ^ 1))[None, :].to(gl.float32)
+                kxp = gl.where(q_ok, gl.load(qkv_ptr + b * QKV_W + (HQ + h) * D + (c_g ^ 1))[None, :].to(gl.bfloat16).to(gl.float32)
                                + zero, 0.0)
                 kx = kx * cos + kxp * sin
             kq = (kx * krs / k_scale).to(gl.float8e4nv)
-            vx = gl.load(qkv_ptr + b * QKV_W + (HQ + HKV + h) * D + c_g)[None, :].to(gl.float32) + zero
+            vx = gl.load(qkv_ptr + b * QKV_W + (HQ + HKV + h) * D + c_g)[None, :].to(gl.bfloat16).to(gl.float32) + zero
             vq = (gl.where(q_ok, vx, 0.0) / gl.load(vs_ptr)).to(gl.float8e4nv)
             first = q_ok & ((r % G) == 0)[:, None]
             dst = (loc.to(gl.int64) * ROW_W + h * D + c_g)[None, :] + gl.zeros([M, C], gl.int64, BL)
@@ -3361,7 +3381,7 @@ def _norm_gate_store(o, qkv_ptr, out_ptr, tok, head, c, ok, HQ: tl.constexpr, HK
     QKV_W: tl.constexpr = (2 * HQ + 2 * HKV) * D
     o = o * tl.rsqrt(tl.sum(o * o, 1) / D + 1e-5)[:, None]
     col = head[:, None] * D + (c % D)[None, :]
-    gate = tl.load(qkv_ptr + tok[:, None] * QKV_W + (HQ + 2 * HKV) * D + col, mask=ok, other=0.0).to(tl.float32)
+    gate = tl.load(qkv_ptr + tok[:, None] * QKV_W + (HQ + 2 * HKV) * D + col, mask=ok, other=0.0).to(tl.bfloat16).to(tl.float32)
     tl.store(out_ptr + tok[:, None] * HQ * D + col, (o * tl.sigmoid(gate)).to(tl.bfloat16), mask=ok)
 
 
@@ -3377,7 +3397,7 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     h = head // G
     QKV_W: tl.constexpr = (2 * HQ + 2 * HKV) * D
     d = tl.arange(0, D)
-    gate = tl.load(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + head * D + d).to(tl.float32)
+    gate = tl.load(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + head * D + d).to(tl.bfloat16).to(tl.float32)
     if PDL:
         # Launched early (programmatic dependent launch): wait here for _attn_split's partials.
         gdc_wait()
@@ -3412,7 +3432,7 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
             # new tokens' slot (tsep) is exact and never flagged.
             ROW_W: tl.constexpr = HKV * D
             BK: tl.constexpr = 8
-            x = tl.load(qkv_ptr + tok * QKV_W + head * D + d).to(tl.float32)
+            x = tl.load(qkv_ptr + tok * QKV_W + head * D + d).to(tl.bfloat16).to(tl.float32)
             q8 = (x * tl.rsqrt(tl.sum(x * x, 0) / D + 1e-5)).to(tl.float8e4nv).to(tl.float32)
             scale = qk_scale * tl.load(ks_ptr)
             seq = tl.load(seq_ptr + b)
@@ -3470,7 +3490,7 @@ def _combine_hb(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     d = tl.arange(0, D)
     hb = tl.arange(0, HB)
     col = (head0 + hb)[:, None] * D + d[None, :]
-    gate = tl.load(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + col).to(tl.float32)
+    gate = tl.load(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + col).to(tl.bfloat16).to(tl.float32)
     if PDL:
         gdc_wait()
     row = (b * HKV + h) * S * M + (tok % L) * G + head0 % G + hb  # [HB] rows in split 0
@@ -3519,7 +3539,7 @@ def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     d = tl.arange(0, D)
     hb = tl.arange(0, HB)
     col = (head0 + hb)[:, None] * D + d[None, :]
-    gate = tl.load(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + col).to(tl.float32)
+    gate = tl.load(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + col).to(tl.bfloat16).to(tl.float32)
     idx = tl.arange(0, B_PAD)
     tiles = (tl.load(seq_ptr + idx, mask=idx < B, other=0).to(tl.int32) + (BN - 1)) // BN
     tt = tl.maximum(tl.sum(tiles, 0), 1)
@@ -3594,7 +3614,7 @@ def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
             # request's cached keys exactly (same FP8 queries and scale, FP32 P), then add the new tokens' partial.
             ROW_W: tl.constexpr = HKV * D
             BK: tl.constexpr = 8  # (small: wider tiles cost this kernel registers on the hot path)
-            x = tl.load(qkv_ptr + tok * QKV_W + col).to(tl.float32)
+            x = tl.load(qkv_ptr + tok * QKV_W + col).to(tl.bfloat16).to(tl.float32)
             q8 = (x * tl.rsqrt(tl.sum(x * x, 1) / D + 1e-5)[:, None]).to(tl.float8e4nv).to(tl.float32)
             scale = qk_scale * tl.load(ks_ptr)
             seq = tl.load(seq_ptr + b)
@@ -3772,7 +3792,7 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
     r = tl.arange(0, M)
     d = tl.arange(0, D)
     col = r[:, None] * D + d[None, :]
-    gate = tl.load(qkv_ptr + (HQ + 2 * HKV) * D + col).to(tl.float32)
+    gate = tl.load(qkv_ptr + (HQ + 2 * HKV) * D + col).to(tl.bfloat16).to(tl.float32)
     vs = tl.load(vs_ptr)
     gdc_wait()
     if TRIG:  # layer s27 RF_TRIG: the o GEMV (PDL secondary, W preload before its wait) launches only now
@@ -12941,14 +12961,14 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
             {"rf_trig": False}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
-             {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}),
+             {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
@@ -13214,6 +13234,9 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
 # the unpool slice split over k into NU8_KB-wide FP32 slabs, PDL secondary of moe_tk2f) -> the boundary adds the slabs.
 # Replaces moe_norm3 + gemv17 (H100 v1 tail tk2f end -> norm3 3.7 -> g17 4.6 -> boundary 3.3 us). TUNE option "nu8".
 NU8_DEFAULT = False
+# s28 QF32 (proj s19 request): at T=16 decode the g19 qkv stays FP32 into attention (csl sliding, _gd_full + merges full),
+# rounded to BF16 (RN) at each load: bit-identical to the torch cast it drops (H200 ea9421fa: 1.2-1.3 us per layer).
+QF32 = True
 RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 -> 109.9 (8 rounds), 112.3 -> 110.7 (4)
 TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
 TK2FJ_TOKENS = (16, 32)  # s27: the same at T = 16/32 after joining the router's side stream before the rmsnorm
@@ -13291,7 +13314,11 @@ def kernel_fn(data, state):
     global RF_TRIG
     RF_TRIG = _opt(state, tokens, "rf_trig", RF_TRIG_DEFAULT)  # s27: attention's _red_fin (decode 1 full) triggers o after its wait
     qkv = _g19(data["attn_input"], "qkv_gate", state)  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
-    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf) if qkv is None else qkv.to(torch.bfloat16)
+    if qkv is None:
+        qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf)
+    elif not (length == 1 and batch <= CSL_MAX_BATCH and _CSL is not None and HAVE_GLUON and USE_GDEC
+              and _opt(state, tokens, "qf32", QF32)):
+        qkv = qkv.to(torch.bfloat16)
     o = attn_kernel_fn({
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
