@@ -461,6 +461,9 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
                 upf = None
             else:
                 lib.moe_set_upf(e[0].data_ptr(), min(upf[1], e[0].numel()) >> 16, 1 << 16, 1 << 16)
+        _moe_TWM_ORDER_M.clear()  # s25: moe_twm item order as a TUNE option (H200 judge v43 vs moe's proxy disagree at T=256)
+        if _opt(state, m, "twm_order", 0):
+            _moe_TWM_ORDER_M[m] = _opt(state, m, "twm_order", 0)
         out = _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                               "config": {"local_start": 0, "local_count": LOCAL_EXPERTS}}, st)
         if upf:
@@ -1588,7 +1591,7 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T; lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T; twm_order (int) moe_twm item order (s25); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}),
@@ -1600,10 +1603,12 @@ TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3}),
-        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True}),
+        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
+              {"twm_order": 76}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
-              {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
+              {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True})}
 TUNE_REPS = 40
+TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
 TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}  # T -> (batch, q_len)
 
@@ -1615,7 +1620,30 @@ def _opt(state, tokens, name, default):
     return state.get("tune", {}).get((tokens, _SLIDING[0]), {}).get(name, default)
 
 
-def _synth_input(batch, dev, ctx=3000, q_len=1, sliding=True):
+# s25: skewed synthetic routing for the tuner (expert kernels' timing depends on the per-expert load, e.g. moe_twm's
+# item order). Local expert j (0..19) is one of a token's 8 experts with probability SYNTH_P[j] (the scored loads'
+# measured mean shares: T=128/256 top local expert ~37% of tokens, ~1.3 local routes per token); the rest of the 8 are
+# off-GPU experts. The stream is the sum of the 8 picked experts' unit router rows plus a little noise, so the router
+# picks them. Built from the weights only (prepare-time); the outputs are discarded.
+SYNTH_P = (.37, .29, .16, .11, .08, .065, .05, .047, .035, .027, .02, .016, .012, .012, .01, .008, .008, .004, .004, .004)
+
+
+def _synth_stream(router, tokens, g):
+    dev = router.device
+    p = torch.zeros(N_EXPERTS, device=dev)
+    p[:len(SYNTH_P)] = torch.tensor(SYNTH_P, device=dev)
+    pick = torch.rand((tokens, N_EXPERTS), generator=g, device=dev) < p  # local picks
+    pick &= (torch.cumsum(pick.int(), 1) <= TOP_K)
+    off = torch.rand((tokens, N_EXPERTS - LOCAL_EXPERTS), generator=g, device=dev).argsort(1)  # off-GPU fill, random order
+    need = TOP_K - pick.sum(1, keepdim=True)
+    fill = torch.zeros_like(pick)
+    fill[:, LOCAL_EXPERTS:] = off < need
+    u = router / router.norm(dim=1, keepdim=True)
+    st = (pick | fill).float() @ u * (HIDDEN / TOP_K) ** 0.5
+    return st + 0.3 * torch.randn((tokens, HIDDEN), generator=g, device=dev)
+
+
+def _synth_input(batch, dev, ctx=3000, q_len=1, sliding=True, router=None):
     """A decode step / verify block (page 1) of random data with the scored inputs' shapes and dtypes."""
     g = torch.Generator(device=dev).manual_seed(1234)
     tokens = batch * q_len
@@ -1623,7 +1651,7 @@ def _synth_input(batch, dev, ctx=3000, q_len=1, sliding=True):
     maxp = ctx + q_len
     pt = torch.randperm(batch * maxp, generator=g, device=dev).to(torch.int32).view(batch, maxp)
     pos = (seq.long()[:, None] + torch.arange(q_len, device=dev)).reshape(-1)
-    stream = torch.randn((tokens, HIDDEN), generator=g, device=dev)
+    stream = torch.randn((tokens, HIDDEN), generator=g, device=dev) if router is None else _synth_stream(router, tokens, g)
     kc = (torch.randn((batch * maxp, 1, 2, 64), generator=g, device=dev) * 0.5).to(torch.float8_e4m3fn)
     vc = (torch.randn((batch * maxp, 1, 2, 64), generator=g, device=dev) * 0.5).to(torch.float8_e4m3fn)
     one = torch.tensor(1.0, dtype=torch.float32, device=dev)
@@ -1649,7 +1677,8 @@ def _tune(state):
         flush = torch.empty(256 << 20, dtype=torch.uint8, device=dev)
         for (tokens, cands), sliding in ((tc, sl) for tc in TUNE.items() for sl in (True, False)):
             key = (tokens, sliding)
-            data = _synth_input(TUNE_SHAPE[tokens][0], dev, 3000 if sliding else 80000, TUNE_SHAPE[tokens][1], sliding)
+            data = _synth_input(TUNE_SHAPE[tokens][0], dev, 3000 if sliding else 80000, TUNE_SHAPE[tokens][1], sliding,
+                                state["router"] if TUNE_SKEW else None)
             graphs, ok = [], []
             for opts in cands:
                 state["tune"][key] = opts
