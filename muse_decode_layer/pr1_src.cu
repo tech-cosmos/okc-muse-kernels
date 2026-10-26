@@ -178,7 +178,7 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
         xr[0] = make_float4(hh[0], hh[1], hh[2], hh[3]); xr[1] = make_float4(hh[4], hh[5], hh[6], hh[7]);
     } else {
 #pragma unroll
-    for (int j = 0; j < J; ++j) xr[j] = __ldg(a.x32 + t + T * j);
+    for (int j = 0; j < J; ++j) xr[j] = __ldcg(a.x32 + t + T * j);
     }
     int par = 0;
     for (; g < NG; g += RB) {
@@ -313,7 +313,7 @@ __device__ __forceinline__ void pooler(const Args& a, int pb, int PB) {
 #pragma unroll
     for (int q = 0; q < XV; ++q) {
         const int i = threadIdx.x + q * 256 * NV;
-        if (i < KK / 8) xv[q] = __ldg(reinterpret_cast<const uint4*>(a.x) + i);
+        if (i < KK / 8) xv[q] = __ldcg(reinterpret_cast<const uint4*>(a.x) + i);
     }
     }
 #pragma unroll
