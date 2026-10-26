@@ -1,10 +1,16 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~09:50Z (session 18).
+Updated 2026-10-26 ~10:00Z (session 19).
 
-**s18: main = v45 (2dddb88) = v44 + prepare() g19 pooler-grid tuner (H200 picks 108 = v44 compute). Check ea9421fa
-1.9634x. NOW 1 CHECK + 1 SUBMIT LEFT. G19_GRID 120 is DEAD (H200 tuner: +8/+11 us). Submit v45 (main, checked
-1.9634x) by 17:30Z unless a gemv22 bundle check beats it.**
+**s19: main = v48 (d36e095) = v45 + a GENERIC prepare() tuner (`TUNE` in layer.py): per (T, sliding/full) it times
+whole-layer CUDA-graph replays of option sets on synthetic inputs (shapes only; full layers at ctx 80000) and keeps the
+fastest in state["tune"]. Options: T=1 pr1_npf 0/8, pr1_rb 20/32, kv_pf off; T=8 pr1 (pr8) off; T=16 qkv cuBLAS, o g19;
+T=32 qkv g19, o g19; T=128 lt pooler/qkv off; T=256 lt qkv off. Defaults = v45. H100: parity vs v45 (decode 8 rounds,
+verify 1). Every forced variant: scored ok, replay decode 0/30. NOT CHECKED (v45 is the checked code).
+STILL 1 CHECK + 1 SUBMIT LEFT. Plan: when proj commits gemv22 (T=128/256), add it as a TUNE option (default off) to v48
+and spend the LAST CHECK on that bundle (~15:00Z at the latest even without gemv22: check v48 alone). The judge log
+then prints H200 timings of every option (free A/B; write them into NOTES). Submit by 17:30Z: the checked bundle if
+its check >= v45's 1.9634x (ties ok: same defaults + H200-picked options), else v45 (`git show 2dddb88:...`).**
 
 **ACTION (s17, partly superseded): 1 scored run left for the sandbox (ends ~19:10Z): submit the best CHECKED code before ~17:30Z. Now: v44
 (de763eb) check c6a00da7 1.9608x > board 1.9558 = eligible (`okc submit muse_decode_layer/submission.py --json` on main

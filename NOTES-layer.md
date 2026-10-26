@@ -524,3 +524,19 @@
   284.3/370.1, v32 367.0/527.4 (= v44 compute; d32 sliding 180.5 vs v44's 167.4 is judge noise).
 - Lesson/tool: the in-prepare tuner is a FREE H200 measurement channel: any check can carry whole-layer A/B timings of
   variants (printed in the log) at ~0.1 s each. Use it to measure H200-only questions inside the last checks.
+
+## Session 19 (2026-10-26 09:30Z-)
+- Budget at start: 1 submit, 1 check. Board #53 at 1.956x (#50 1.961x, #1 ~2.38x). proj gemv22 still uncommitted WIP.
+- v46-v48 (189f79d, c8056e5, d36e095): generalized s18's grid tuner into `TUNE` / `_tune` / `_opt(state, T, name,
+  default)`: option sets per T, timed per (T, sliding) on `_synth_input(batch, dev, ctx, q_len, sliding)` (now also
+  verify blocks and full layers; full at ctx 80000; our attention ignores scheduler_metadata), 40 interleaved reps,
+  median; a candidate that raises host-side is skipped. Pooler g19 grid fixed at 108 (s18 H200 result). New G19_CFG
+  picks (qkv T=32, o T=16/32; configs already built) with G19_DEFAULT_OFF; G19_ON now includes "o".
+  H100 tuner picks (noisy, +-1 us): T=1 default (sometimes rb 32); T=16 sliding o g19 (-1.3), full default; T=32
+  default; T=8 default; T=128 sliding lt qkv off (-1.4), full default; T=256 full lt qkv off (-0.3).
+  ab_files decode 8 rounds v45 vs v46: d1 91.54/112.92 vs 91.37/112.82, d16 213.4/314.1 vs 212.4/316.4, d32
+  205.7/435.4 vs 205.7/434.9; verify 1 154.2/168.6 vs 155.0/168.7 (= parity). Tune 0.9 s.
+- Caveat: synthetic routing is random-uniform (not "dist soft"): options that change the experts would be
+  mis-measured; all current options are GEMM/glue choices. Synthetic T=1 sliding 114 us vs real d1 91: local
+  expert count differs; only the relative timings matter.
+- No check/submit this session (holding the last check for the gemv22 bundle; see STATE).
