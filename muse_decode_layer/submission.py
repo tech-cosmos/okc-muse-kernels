@@ -4354,6 +4354,9 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
 #define TK2F_L2H 1       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
 #define NORM_EARLY 1     // n4s1 (layer s53: set here, layer has its own _lib): twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them
+#ifndef TK2G_PAR
+#define TK2G_PAR 1       // n4s5: GS16 weighted split bounds by warp 0 (tk2g_bound) instead of every thread (tk2g_split)
+#endif
 #define TK2_EXP 0        // s12: tk2h (TK2H/PSC) and weighted-split (TK2W) instantiations: H200 diags, no gain (off: compile time)
 
 __device__ __forceinline__ uint32_t bmul(uint32_t a, uint32_t b) {
@@ -7630,10 +7633,12 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
 // it against both 8-token groups (TWO): group 0's x fragments in registers (xf), group 1's in smem (xs, lane-private,
 // written by the same lane at the segment change). Dequant is ~70% of a row's instructions, so a 2-group row costs
 // ~1.15x a 1-group row instead of 2x. s_red holds 2 groups x 2 tiles (double-buffered).
-template <int NRT, int NC, int NSTG, bool GATED_, int KPS, bool SA, bool TWO, bool RTG = false>
+template <int NRT, int NC, int NSTG, bool GATED_, int KPS, bool SA, bool TWO, bool RTG = false, bool SLOT = false>
 __device__ __forceinline__ void tk2g_row(const uint32_t* slut, const uint4 (&xf)[64 / NC][2], const uint4* xs, void* Out,
                                          int rp, int off, int n, float gsc, float* s_red, uint4* smem, uint64_t* full,
-                                         uint64_t* empty, int& st, int& ph, int& rb, bool gated_rt = false) {
+                                         uint64_t* empty, int& st, int& ph, int& rb, bool gated_rt = false,
+                                         const int* s_srt = nullptr) {
+  // SLOT (n6, = tk2f PF & 4): gemm2 Y row = route slot s_srt[off + tok], pre-scaled by gsc (= gs2 * 256): moe_norm3
   // RTG (s12): gated is a run-time flag (gemm13 and gemm2 share ONE main-loop body: i-cache), RPE from it
   const bool GATED = RTG ? gated_rt : GATED_;
   const int RPE = RTG ? (gated_rt ? 256 : 128) : NRT / 2;
@@ -7729,7 +7734,8 @@ __device__ __forceinline__ void tk2g_row(const uint32_t* slut, const uint4 (&xf)
       const int tok = h * 8 + 2 * tt + (r & 1);
       if (tok < n) {
         const int col = (rp + ii * RPE) * 16 + gg + ((r & 2) ? 8 : 0);
-        reinterpret_cast<float*>(Out)[(size_t)(off + tok) * NOUT + col] = v;
+        if (SLOT) reinterpret_cast<float*>(Out)[(size_t)s_srt[off + tok] * NOUT + col] = v * gsc;
+        else reinterpret_cast<float*>(Out)[(size_t)(off + tok) * NOUT + col] = v;
       }
     }
   }
@@ -7799,7 +7805,7 @@ __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* 
 // s12 MERGED consumer (tk2h): both phases in ONE run-time loop, so the kernel holds one main-loop body per row kind
 // (GS 8: 1 body; GS 16: 2) instead of 2 / 4. GS16's loss was instruction-cache misses: ncu stall_no_instruction at
 // layer d1 923 -> 9418 (118 KB kernel vs 65 KB) with no 2-group row at all.
-template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false>
+template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false, bool SLOT = false>
 __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* __restrict__ gs13,
                                              const float* __restrict__ gs2, const __nv_bfloat16* X,
                                              __nv_bfloat16* inter, float* Y, int* cnt, int need, int a0, int a1, int b0,
@@ -7813,6 +7819,7 @@ __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* 
 #pragma unroll 1
   for (int p = 0; p < 2; ++p) {
     const bool gated = p == 0;
+    if (!gated) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // layer s58: as TK2F_LATE_TRIG 3
     const int RPE = gated ? 256 : 128;
     const int* s_rs = gated ? s_rs13 : s_rs2;
     const float* gs = gated ? gs13 : gs2;
@@ -7852,16 +7859,16 @@ __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* 
           for (int qq = 0; qq < NQ; ++qq) {
             const int kc = qq * NC + warp;
             uint4 x0 = make_uint4(0, 0, 0, 0), x1 = x0;
-            if (v) { x0 = __ldg(xr + kc * 8); x1 = __ldg(xr + kc * 8 + 1); }
+            if (v) { x0 = __ldcg(xr + kc * 8); x1 = __ldcg(xr + kc * 8 + 1); }  // layer s58: __ldcg (PDL / in-kernel producer)
             if (h) { xs[(qq * 2) * 32] = x0; xs[(qq * 2 + 1) * 32] = x1; }
             else { xf[qq][0] = x0; xf[qq][1] = x1; }
           }
         }
       }
       if (GS == 16 && n > 8)
-        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated);
+        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
       else
-        tk2g_row<0, NC, NSTG, false, KPS, SA, false, true>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated);
+        tk2g_row<0, NC, NSTG, false, KPS, SA, false, true, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
       if (gated && (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
         if (tid == 0) {
@@ -8163,6 +8170,36 @@ __device__ __forceinline__ int tk2g_split(int b, int nact, int wt, int rps, cons
   return row;
 }
 
+// n4s5: tk2g_split by warp 0 in 32-bit lane-parallel math (one lane per active expert; same bounds as tk2g_split).
+// tk2g_split ran 64-bit loops in every thread: consumers started 1.8 (median) / 4.1 (max) us late at d16 (G88).
+__device__ __forceinline__ int tk2g_bound(int b, int nact, int wt, int rps, const int* s_e, const int* s_off) {
+  const int lane = threadIdx.x & 31;
+  const int c = lane < nact ? s_off[s_e[lane] + 1] - s_off[s_e[lane]] : 0;
+  int w = 0;  // this expert's weight / rps
+  for (int o = 0; o < c; o += 16) w += c - o > 8 ? wt : 8;
+  const int ng = (c + 15) >> 4;
+  int incl = w * rps, rows = ng * rps;
+#pragma unroll
+  for (int o = 1; o < 32; o <<= 1) {
+    const int v = __shfl_up_sync(0xffffffffu, incl, o), r = __shfl_up_sync(0xffffffffu, rows, o);
+    if (lane >= o) { incl += v; rows += r; }
+  }
+  const int W = __shfl_sync(0xffffffffu, incl, 31);
+  const int p = (int)((long long)W * b / gridDim.x);
+  int cum = incl - w * rps, row = rows - ng * rps;
+  int res = 0x7fffffff;
+  if (ng && p >= cum && p < incl) {
+    for (int o = 0; o < c; o += 16) {
+      const int sw = c - o > 8 ? wt : 8;
+      if (p < cum + rps * sw) { res = row + (p - cum + sw - 1) / sw; break; }
+      cum += rps * sw;
+      row += rps;
+    }
+  }
+  if (p >= W) res = __shfl_sync(0xffffffffu, rows, 31);
+  return __reduce_min_sync(0xffffffffu, res);
+}
+
 // s12 WEIGHTED static split (GS 8): a row of an expert's first 8-token group streams its weights from HBM, rows of the
 // extra groups (hot experts) mostly hit L2 and cost ~wE/8 of it (H200 fit on layer routings: 4.4 / 6.97 us = 0.63).
 // Warp 0 computes CTA b's row bounds [r(b), r(b+1)) of a phase with RPS rows per group; lane = active expert index.
@@ -8322,10 +8359,21 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     a0 = s_ab[0]; a1 = s_ab[1]; b0 = s_ab[2]; b1 = s_ab[3];
   }
   if (GS == 16 && D > 8) {  // GS16: 2-group rows cost D/8 of a 1-group row: split the rows by weight, not count
-    a0 = tk2g_split(blockIdx.x, nact, D, 256, s_e, s_off);
-    a1 = tk2g_split(blockIdx.x + 1, nact, D, 256, s_e, s_off);
-    b0 = tk2g_split(blockIdx.x, nact, D, 128, s_e, s_off);
-    b1 = tk2g_split(blockIdx.x + 1, nact, D, 128, s_e, s_off);
+    __shared__ int s_gb[4];
+    if (TK2G_PAR) {  // n4s5: warp 0, lane-parallel (tk2g_bound)
+      if (warp == 0) {
+        const int v0 = tk2g_bound(blockIdx.x, nact, D, 256, s_e, s_off), v1 = tk2g_bound(blockIdx.x + 1, nact, D, 256, s_e, s_off);
+        const int v2 = tk2g_bound(blockIdx.x, nact, D, 128, s_e, s_off), v3 = tk2g_bound(blockIdx.x + 1, nact, D, 128, s_e, s_off);
+        if (lane == 0) { s_gb[0] = v0; s_gb[1] = v1; s_gb[2] = v2; s_gb[3] = v3; }
+      }
+      __syncthreads();
+      a0 = s_gb[0]; a1 = s_gb[1]; b0 = s_gb[2]; b1 = s_gb[3];
+    } else {
+      a0 = tk2g_split(blockIdx.x, nact, D, 256, s_e, s_off);
+      a1 = tk2g_split(blockIdx.x + 1, nact, D, 256, s_e, s_off);
+      b0 = tk2g_split(blockIdx.x, nact, D, 128, s_e, s_off);
+      b1 = tk2g_split(blockIdx.x + 1, nact, D, 128, s_e, s_off);
+    }
   }
   int st = 0, ph = 0;
   if (warp == NC) {
@@ -8346,7 +8394,8 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   int rb = 0;
   if constexpr (MRG) {
-    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
+    asm volatile("griddepcontrol.wait;" ::: "memory");  // layer s58: x is the PDL predecessor's output (TK2FX/TK2FJ)
+    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
                                         s_srt, s_red, smem, smem + NSTG * NC * KPS * 72, full, empty, st, ph, rb);
     return;
   }
@@ -8431,11 +8480,17 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     if (pf == 2) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 2>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 2>(0, TK2F_ARGS0);
     return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 3>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 3>(0, TK2F_ARGS0);
   }
+  if (sa && cfg >= 40000 && cfg < 50000 && cfg % 1000 == 4)  // layer s58: moe n6 tk2h GS16 + PF4 (h16w*p4), the only tk2h built
+    return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
 #if TK2_EXP
   if (cfg >= 30000) {  // s12 merged-phase consumer (tk2h): + 30000 GS 8, + 40000 GS 16 (cfg / 1000 % 10 = 2-group weight),
     // + 50000 / + 60000: the same with per-segment gemm13 -> gemm2 counters (PSC)
     const int kind = (int)(cfg / 10000);
     const int wt = 8 + (int)(cfg / 1000) % 10;
+    if (cfg % 1000 == 4) {  // n6: + 4 = slot-ordered pre-scaled y32 (tk2f PF 4) -> moe_norm3
+      if (kind == 3) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 1, 4>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 1, 4>(0, TK2F_ARGS0);
+      return sa ? tk2f_go<8, 4, 2, false, false, true, 16, 1, 4>(wt, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 16, 1, 4>(wt, TK2F_ARGS0);
+    }
     if (kind == 3) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 1>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 1>(0, TK2F_ARGS0);
     if (kind == 4) return sa ? tk2f_go<8, 4, 2, false, false, true, 16, 1>(wt, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 16, 1>(wt, TK2F_ARGS0);
     if (kind == 7) {  // + 70000: main consumer (tk2f_consume), weighted static split, wE = cfg / 1000 % 10
@@ -8963,17 +9018,22 @@ def _moe__diag_tl(st, data, name, order):
 
 _moe_TK2H = 0  # s12: merged-phase tk2f consumer (one main-loop body, i-cache): 8 = GS 8, 16 = GS 16 (from M >= TK2H_MIN16)
 _moe_TK2H_MIN16 = 1
+_moe_TK2H_MIN = 1  # n4s5: TK2H applies from this M (below: the main tk2f cfg); 9 = only calls that can have 2-group rows
 _moe_TK2W = 0  # s12: weighted static row split for M > 1 (extra-group rows weigh TK2W / 8; 0 = by count), cfg + 70000
 _moe_TK2H_PSC = 0  # s12: 1 = per-segment gemm13 -> gemm2 counters (cnt[64 + seg]) instead of the global one
+_moe_TK2H_PF4 = 0  # n6: 1 = tk2h writes y32 like tk2f PF 4 (slot order, pre-scaled) -> moe_norm3 (cfg + 4; kinds 3/4 only)
 _moe_TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
+_moe_TK2H_M = {}  # layer s58: {M: W + 1}: tk2h GS16 + PF4 (SA only) at that M, 2-group weight (8 + W) / 8
 
 
 def _moe__tk2f_cfg(M, st):
     sa = 100000 if _moe_TK2SA and st["sa"] else 0
+    if _moe_TK2H_M.get(M) and sa:
+        return sa + 40000 + (_moe_TK2H_M[M] - 1) * 1000 + 4
     if _moe_TK2W and M > 1:
         return sa + 70000 + _moe_TK2W * 1000
-    if _moe_TK2H:
-        return sa + (40000 + _moe_TK2H_W * 1000 if _moe_TK2H == 16 and M >= _moe_TK2H_MIN16 else 30000) + 20000 * _moe_TK2H_PSC
+    if _moe_TK2H and M >= _moe_TK2H_MIN:
+        return sa + (40000 + _moe_TK2H_W * 1000 if _moe_TK2H == 16 and M >= _moe_TK2H_MIN16 else 30000) + 20000 * _moe_TK2H_PSC + 4 * (_moe_TK2H_PF4 and not _moe_TK2H_PSC)
     return (_moe_TK2F_DYN if M > 1 else _moe_TK2F) + sa + (10000 + _moe_TK2G_W * 1000 if _moe_TK2G and M >= _moe_TK2G_MIN else 0)
 
 
@@ -9003,7 +9063,8 @@ def _moe_kernel_fn(data, st):
             c = _moe__tk2f_cfg(M, st)
             lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
-            if 80000 < c % 100000 < 100000 and (c % 100000 - 80000) // 1000 & 4:  # s13 slot-ordered y32
+            c5 = c % 100000
+            if (80000 < c5 < 100000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
                 lib.moe_norm3_launch(y32, ids, tw, st["w1"], st["start"], st["count"], _moe_POST_NORM_EPS, out, st["cnt"])
                 return out
             lib.moe_norm2_launch(y32, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], _moe_POST_NORM_EPS, out,
@@ -9597,6 +9658,9 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
         _moe_HOT_M.clear()
         if _opt(state, m, "hot", 0):  # moe s29: moe_hot (65..128-token experts in one N128 pass) on that many CTAs before moe_twm
             _moe_HOT_M[m] = _opt(state, m, "hot", 0)
+        _moe_TK2H_M.clear()
+        if _opt(state, m, "tk2h", 0):  # s58: moe n6 tk2h (GS16 merged consumer + PF4) at T=16/32, value = 2-group weight W + 1
+            _moe_TK2H_M[m] = _opt(state, m, "tk2h", 0)
         _moe_TWF_SPLIT_M.clear()
         if _opt(state, m, "twf_split", 0):  # moe s19: K-split tail of moe_twm (light experts only; combinable with order)
             _moe_TWF_SPLIT_M[m] = _opt(state, m, "twf_split", 0)
@@ -13762,20 +13826,21 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); rg (bool) RG (s52); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); rg (bool) RG (s52); tk2h (int) moe n6 tk2h GS16+PF4 at T=16/32, 2-group weight W + 1 (s58); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
             {"rf_trig": False}, {"g13o": True}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
-             {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False}),
+             {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
+             {"tk2h": 3}, {"tk2h": 4}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
              {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
-             {"o_pf": 0}, {"g19trig": False}),
+             {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},

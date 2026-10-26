@@ -7,8 +7,13 @@ import bench
 sub = bench.load_sub(sys.argv[1]); flt = sys.argv[2]; rounds = int(sys.argv[3]); stmts = sys.argv[4:]
 w, st = bench.weights_state(sub)
 names = [(f"{l} {c['layer']}", c) for l, c in bench.SCORED if flt in f"{l} {c['layer']}"]
+import os
+SEEDS = [int(x) for x in os.environ.get("SEEDS", "99").split(",")]  # s58: several input seeds (routing) per shape
+names = [(f"{n} s{sd}" if len(SEEDS) > 1 else n, c, sd) for n, c in names for sd in SEEDS]
+data = {n: bench.make_input(c, w, sd) for n, c, sd in names}
+names = [(n, c) for n, c, sd in names]
 res = {(n, i): [] for n, _ in names for i in range(len(stmts))}
-data = {n: bench.make_input(c, w, 99) for n, c in names}
+
 e0 = bench.empty_cost()
 for r in range(rounds):
     for i, s in enumerate(stmts):
