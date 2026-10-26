@@ -2570,8 +2570,13 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
         if (kc == k0) s_item[st] = item;
         mbar_expect_tx(&full[st], bytes);
         tma2d(sb, map, kc * 64, off, &full[st]);
-        bulk_g2s(sb + xo, wsrc + (size_t)kc * WB, wbytes, &full[st]);
-        bulk_g2s(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, &full[st]);
+        {  // moe s21 (12d95a9): evict_last if a later pass of this expert re-reads these weights, else evict_first
+          uint64_t pol;
+          if (off + PS < s_off[e + 1]) asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol));
+          else asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol));
+          bulk_g2s_h(sb + xo, wsrc + (size_t)kc * WB, wbytes, &full[st], pol);
+          bulk_g2s_h(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, &full[st], pol);
+        }
         if (++st == NSTG) { st = 0; ph ^= 1; }
       }
     }
