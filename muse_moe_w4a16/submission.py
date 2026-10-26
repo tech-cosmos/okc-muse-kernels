@@ -971,6 +971,44 @@ __device__ __forceinline__ void bulk_g2s_h(void* dst, const void* src, int bytes
                ::"r"(smem_u32(dst)), "l"(src), "r"(bytes), "r"(smem_u32(bar)), "l"(pol) : "memory");
 }
 
+// n9: HBM-ceiling probe (DIAG only, outputs nothing): CTA b streams stages [beg[b], beg[b + 1]) of a host-built list
+// (per stage up to 3 bulk copies: desc = {addr, bytes} x 3, bytes 0 = unused) into an NSTG ring of sb-byte slots; one
+// consumer warp waits 'full' and arrives 'empty' without reading (the copy engine's rate for that access pattern).
+template <int NSTG>
+__global__ void __launch_bounds__(64, 1) moe_stream(const long long* __restrict__ desc, const int* __restrict__ beg, int sb) {
+  extern __shared__ __align__(128) uint4 smem[];
+  __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  if (tid == 0) {
+    for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 32); }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  __syncthreads();
+  const int s0 = beg[blockIdx.x], s1 = beg[blockIdx.x + 1];
+  int st = 0, ph = 0;
+  if (warp == 1) {
+    if (lane == 0) {
+      for (int i = s0, k = 0; i < s1; ++i, ++k) {
+        if (k >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+        const long long* d = desc + (size_t)i * 6;
+        const int b0 = (int)d[1], b1 = (int)d[3], b2 = (int)d[5];
+        char* sbase = reinterpret_cast<char*>(smem) + (size_t)st * sb;
+        mbar_expect_tx(&full[st], b0 + b1 + b2);
+        bulk_g2s(sbase, (const void*)d[0], b0, &full[st]);
+        if (b1) bulk_g2s(sbase + b0, (const void*)d[2], b1, &full[st]);
+        if (b2) bulk_g2s(sbase + b0 + b1, (const void*)d[4], b2, &full[st]);
+        if (++st == NSTG) { st = 0; ph ^= 1; }
+      }
+    }
+    return;
+  }
+  for (int i = s0; i < s1; ++i) {
+    mbar_wait(&full[st], ph);
+    mbar_arrive(&empty[st]);
+    if (++st == NSTG) { st = 0; ph ^= 1; }
+  }
+}
+
 template <int NRT, int NC, int NSTG, bool XROUTE>
 __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2,
                                                           const uint32_t* __restrict__ lut,
@@ -2931,6 +2969,15 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   if (tid == 0) atomicAdd(meta + 67, 1 << 20);
 #endif
 }
+int64_t moe_stream_launch(torch::Tensor desc_, torch::Tensor beg_, int64_t sb, int64_t nstg) {
+  const int grid = (int)beg_.numel() - 1, smem = (int)(sb * nstg);
+  cudaStream_t st = at::cuda::getCurrentCUDAStream();
+#define STRM(N) { cudaFuncSetAttribute(moe_stream<N>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); \
+    moe_stream<N><<<grid, 64, smem, st>>>((const long long*)desc_.data_ptr(), (const int*)beg_.data_ptr(), (int)sb); }
+  if (nstg == 8) STRM(8) else if (nstg == 3) STRM(3) else STRM(4)
+#undef STRM
+  return (int)cudaGetLastError();
+}
 template <bool SA>
 static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
@@ -4625,6 +4672,7 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "torch::Tensor, double);"
         "int64_t moe_twq_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
+        "int64_t moe_stream_launch(torch::Tensor, torch::Tensor, int64_t, int64_t);"
         "int64_t moe_set_pdl(int64_t, int64_t);"
         "int64_t moe_set_blk(int64_t);"
         "int64_t moe_set_sa(int64_t);"
@@ -4646,7 +4694,7 @@ def _lib():
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=src,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                       "moe_gather_launch", "moe_routegather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
-                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_hot", "moe_hot_launch"],
+                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
     return _LIB
@@ -4918,6 +4966,8 @@ def _diag(st):
         del graphs
     for (load, n), v in res.items():
         print(f"diag12 MEAN {load} {n}: {sum(v) / len(v):.1f} us", flush=True)
+    if DIAG_STREAM:
+        _diag_stream(st, routes, flush, sink)
     if DIAG_TL:
         for load, seed, T, data in routes:
             if T > TK2_MAX:
@@ -4925,6 +4975,103 @@ def _diag(st):
                     _diag_tl(st, data, f"{load} s{seed}", o)
     del flush
     torch.cuda.synchronize()
+
+
+DIAG_STREAM = True  # n9: H200 HBM-ceiling probe (moe_stream) on the same routings, after the variants
+
+
+def _diag_stream(st, routes, flush, sink):
+    """n9: time moe_stream (bulk-copy ring, consumers only wait/arrive) on the routed experts' bytes, cold L2.
+    tkp = tk2f's exact copy pattern (rows R of 4 stages x {W 8K, W 8K, S 2K}, one pass per 8-token group, gemm13 rows
+    then gemm2 rows, count split over the grid, NSTG 4); uq / uq8 = the same with each expert once (NSTG 4 / 8);
+    sq16 / sq32 = each expert's 4 regions cut into contiguous 16 KB (NSTG 8) / 32 KB (NSTG 4) single-copy stages.
+    TB/s is over the UNIQUE bytes (distinct experts x expert bytes)."""
+    import numpy as np
+    lib = _lib()
+    G = torch.cuda.get_device_properties(0).multi_processor_count
+    tens = [st["w13q"], st["w13s2"], st["w2q"], st["w2s2"]]
+    base = [t.data_ptr() for t in tens]
+    cnt = st["count"]
+    per = [t.numel() * t.element_size() // cnt for t in tens]
+    assert per[0] == 512 * 64 * 32 * 16 and per[2] == 256 * 64 * 32 * 16, per
+    ebytes = sum(per)
+
+    def rows(nrt, ws, ss, es, k=1):  # stage descs of tk2f rows for (expert, ng) list; k = KPS / 2
+        rpe = nrt // 2
+        out = []
+        for e, ng in es:
+            lr = np.tile(np.arange(rpe), ng)
+            q = np.arange(4 // k)
+            w = (ws + ((e * nrt * 64 + lr[:, None] * 64) * 32 + q[None, :] * 512 * k) * 16).reshape(-1)
+            sc = (ss + ((e * rpe * 64 + lr[:, None] * 64) * 32 + q[None, :] * 512 * k) * 4).reshape(-1)
+            d = np.stack([w, np.full_like(w, 8192 * k), w + nrt * 32 * 32 * 16, np.full_like(w, 8192 * k), sc,
+                          np.full_like(w, 2048 * k)], 1)
+            out.append(d.reshape(-1, 4 // k, 6))  # [rows, stages per row, 6]
+        return np.concatenate(out, 0)
+
+    def split_rows(d13, d2):  # count split of rows, per CTA: its gemm13 rows then its gemm2 rows
+        parts, beg = [], [0]
+        for b in range(G):
+            a0, a1 = len(d13) * b // G, len(d13) * (b + 1) // G
+            b0, b1 = len(d2) * b // G, len(d2) * (b + 1) // G
+            parts += [d13[a0:a1].reshape(-1, 6), d2[b0:b1].reshape(-1, 6)]
+            beg.append(beg[-1] + d13.shape[1] * (a1 - a0 + b1 - b0))
+        return np.concatenate(parts, 0), beg
+
+    def chunks(es, cb):  # contiguous cb-byte single-copy stages over each expert's 4 regions, contiguous split
+        d = []
+        for e, _ in es:
+            for bb, pp in zip(base, per):
+                o = np.arange(0, pp, cb)
+                d.append(np.stack([bb + e * pp + o, np.minimum(cb, pp - o), 0 * o, 0 * o, 0 * o, 0 * o], 1))
+        d = np.concatenate(d, 0)
+        beg = [len(d) * b // G for b in range(G + 1)]
+        return d, beg
+
+    res = {}
+    for load, seed, T, data in routes:
+        loc = (data["topk_ids"] - st["start"]).flatten().tolist()
+        c = {}
+        for e in loc:
+            if 0 <= e < cnt:
+                c[e] = c.get(e, 0) + 1
+        es = [(e, (n + 7) // 8) for e, n in sorted(c.items())]
+        e1 = [(e, 1) for e, _ in es]
+        vs = []
+        for name, ee, nstg in (("tkp", es, 4), ("uq", e1, 4), ("uq8", e1, 8)):
+            d, beg = split_rows(rows(512, base[0], base[1], ee), rows(256, base[2], base[3], ee))
+            vs.append((name, d, beg, 18432, nstg))
+        d, beg = split_rows(rows(512, base[0], base[1], e1, 2), rows(256, base[2], base[3], e1, 2))
+        vs.append(("uqk4", d, beg, 36864, 4))
+        for name, cb, nstg in (("sq16", 16384, 8), ("sq18", 18432, 4), ("sq18x8", 18432, 8), ("sq32", 32768, 4),
+                               ("sq36", 36864, 4), ("sq64", 65536, 3)):
+            d, beg = chunks(e1, cb)
+            vs.append((name, d, beg, cb, nstg))
+        ts = {}
+        for name, d, beg, sb, nstg in vs:
+            dt = torch.from_numpy(np.ascontiguousarray(d, dtype=np.int64)).cuda()
+            bt = torch.tensor(beg, dtype=torch.int32, device="cuda")
+            lib.moe_stream_launch(dt, bt, sb, nstg)
+            torch.cuda.synchronize()
+            gr = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(gr):
+                lib.moe_stream_launch(dt, bt, sb, nstg)
+            tt = []
+            for _ in range(20):
+                torch.sum(flush, 0, out=sink)
+                a, b = torch.cuda.Event(True), torch.cuda.Event(True)
+                a.record(); gr.replay(); b.record()
+                torch.cuda.synchronize()
+                tt.append(a.elapsed_time(b) * 1e3)
+            t = sorted(tt)[len(tt) // 2]
+            ub = len(es) * ebytes
+            res.setdefault((load, name), []).append((t, ub / t / 1e6))
+            print(f"diag9s {load} s{seed} {name}: {t:.1f} us, {len(es)} experts {ub / 1e6:.0f} MB uniq, "
+                  f"{float(d[:, 1::2].sum()) / 1e6:.0f} MB issued, {ub / t / 1e6:.2f} TB/s", flush=True)
+            del gr, dt, bt
+    for (load, n), v in res.items():
+        print(f"diag9s MEAN {load} {n}: {sum(x[0] for x in v) / len(v):.1f} us {sum(x[1] for x in v) / len(v):.2f} TB/s",
+              flush=True)
 
 
 DIAG_TL = ()  # s14: twm item orders to timeline in the diag (needs TWM_TL 1 in the CUDA source: diag copies only)
