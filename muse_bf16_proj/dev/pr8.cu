@@ -189,7 +189,9 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
     uint2 ws_[PF];
     unsigned wn_[PF];
 #pragma unroll
+#ifndef PR8_PFLATE
     for (int p = 0; p < PF; ++p) { ws_[p] = ld2(wbs + p * WG * 32); wn_[p] = ld1(wbn + p * WG * 32); }
+#endif
     auto bulk_pf = [&](int nb) {  // s36: bulk L2 prefetch of atoms [PF, PF + nb) of each row group (WS, WN)
         if (t >= 2 * NG) return;
         const int gi2 = t >> 1;
@@ -236,6 +238,15 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
 #pragma unroll
     for (int p = 0; p < XR; ++p) { stage(p); asm volatile("cp.async.commit_group;"); }
     if (a.npf >= 200 && a.npf < 1000) bulk_pf(a.npf - 200);  // after the wait and the x / x32 / header copies are issued
+#ifdef PR8_PFLATE  // s36 probe: pooler register preloads after the wait (atoms [0, PF) also bulk-prefetched first)
+    if (t < 2 * NG) {
+        const long o0 = ((long)(rg0 + (t >> 1)) * (KC / 32)) * 32;
+        const char* src = (t & 1) ? (const char*)(a.WN + o0) : (const char*)(a.WS + o0);
+        asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"((unsigned)PF * WG * 32 * ((t & 1) ? 4 : 8)) : "memory");
+    }
+#pragma unroll
+    for (int p = 0; p < PF; ++p) { ws_[p] = ld2(wbs + p * WG * 32); wn_[p] = ld1(wbn + p * WG * 32); }
+#endif
     if (a.npf >= 1000 && (a.npf - 1000) % 32) {  // post part: atoms after the pre part
         if (t < 2 * NG) {
             const int pre = (a.npf - 1000) / 32, nb = min((a.npf - 1000) % 32, NA - PF - pre);

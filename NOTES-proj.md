@@ -854,3 +854,6 @@
   appear B vs B and A vs A (decode 1 full seed 1: 2 elements) = pre-existing nondeterminism, not pr8 (B with npf 0 == A).
 - Handoff: dev/s36/pr8_bpf_layer.patch (pr8_src.cu + PR8_CFG), `git apply -p1` on r-layer 0dcefe6. COORD Handoffs proj s36.
 - g14.py now packs with sub_template's _pack14 (DEC3 layout; its own pack14 was the old layout) and takes DEFS.
+- Dead too (17:12Z): DEFS=PR8_PFLATE (pooler PF register preloads moved after the wait, atoms [0, PF) bulk-prefetched
+  first, so x32 doesn't queue behind them): +2.0 us after a 3-4 us pred (212: 24.4 -> 26.4). Pre-wait W loads are worth
+  more than an earlier x32.

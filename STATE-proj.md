@@ -144,7 +144,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## Session 36: pr8 (layer T=8 pooler+router) bulk L2 prefetch of W atoms [PF, PF+12) per row group AFTER the wait (npf 212):
 ## H100 layer ABBA v1 -1.56/-1.67 us, outputs unchanged; handoff dev/s36/pr8_bpf_layer.patch. pr8 is NOT issue-bound (no-math
 ## +1.4 us only): its loss is the serialized prologue (router W + PF ahead of x32, ~3.5 us router math with HBM idle) and a
-## ~9 us block-finish spread. Dead: prefetch before the wait, router last/mid-loop, same prefetch in g14 qkv m8. NOTES s36.
+## ~9 us block-finish spread. Dead: prefetch before the wait, PF loads after it, router last/mid-loop, g14 bulk prefetch. NOTES s36.
 ## Next (ranked)
 -25. (s36) Layer should bundle pr8 npf 212 (and DEC3) into its next-sandbox first check. Remaining pr8 room (H100 ~25 us
    after pred vs ~18 us bytes): the block-finish spread (blocks on the predecessor's SMs start late: try 2 row groups of
