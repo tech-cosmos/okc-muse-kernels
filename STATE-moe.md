@@ -70,14 +70,16 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
-## Session 19 summary (big-M loss = last-wave load balance; WS dequant dead; NOTES s19)
-- Per-CTA timeline (layer routings): twm items run in lockstep waves (~35-45 us each); loss = makespan - perfect
-  balance = 16-25 H100-us (~12-18 H200 us) per v16/v32 call, the largest item left in the experts. Fix = tail pieces
-  sized from (items mod grid) in-kernel (NOTES s19 NEXT). K halves (TWF_SPLIT) only help if the last wave <= half full.
-- New option (off; main bitwise unchanged): TWF_SPLIT_M combinable with TWM_ORDER_M / TWM_HOT_M (launch-code bit 22);
-  split region limited to light experts (fixes NaN when it reached hot/big experts). Proxy 0-4 us either sign: given
-  to layer as H200 TUNE options (tools/s19/twm_split_moe_src.diff = moe_src.py-only patch).
-- DEAD: warp-specialized dequant (dq WGs -> smem A -> SS wgmma WGs): no overlap, smem-bandwidth bound (tools/s19/mb_ws.py).
+## Session 20 summary (grid-aware tail split: halves tie, quarters dead; NOTES s20)
+- main = 6f6c487: TWF_SPLIT(_M) 1022/1023 = AUTO halves (split count = item cost mod gridDim, in-kernel; off by
+  default). Proxy/layer copy: tie (-0..4 us, noise). Posted to layer as optional TUNE option (tools/s20 diff).
+- Dead: Q = 4/8 K parts (tie..+6 us; tools/s20/twm_qparts_dead.diff). Halves cut the timeline tail ~9 us when they run
+  but cost ~half of that in overhead; at G=132 the layer's v16/v32 last waves are mostly > half full (no split).
+- Tool: tools/s20/spills.sh (moe_twm spill count per build; main 48, all in the producer warp).
+
+## Session 19 summary (NOTES s19)
+- twm items run in lockstep waves; tail loss 16-25 H100-us per v16/v32 (s20: K-split fixes it only partly, tie).
+  TWF_SPLIT_M combinable with order/hot (bit 22; light experts only). DEAD: warp-specialized dequant (smem-bound).
 
 ## Session 18 summary (no speedup; why twm is slow; NOTES s18)
 - twm consumers never wait on the ring (stage timeline): compute-bound. Microbenchmark (tools/s18/mb_wgmma.py): dq ALU
@@ -103,7 +105,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   N48/N64/N96 passes in twq/twm (C7512: whole-kernel wgmma serialization); inline producer in warp 0 (2x slower).
 
 ## Ranked ideas
--9. (s19) TOP: grid-aware twm tail (NOTES s19 NEXT): est. -12..18 H200 us per v16/v32 call.
+-9. (s19) grid-aware twm tail by K-split: DONE s20, tie (halves) / dead (quarters). Tail needs cheaper items, not finer.
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
    all their tokens needs N 96-128 accumulators = a SEPARATE kernel (ptxas sizes registers for the whole function).
    E.g. hot experts on their own launch on a subset of SMs concurrently with twm/twq for the rest (2 streams or one
@@ -131,10 +133,8 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
    only (phase 1 tied) with GS8 segments in gemm2 (needs inter rows of 16-token segments readable as 2 x 8: they are).
 -0. (s10) Cheaper dq is the only other lever (69%): ideas: fold the e4m3 scale into the x side per k16 block is impossible
    (per-row scale); 2-group sharing = GS16 above.
-3. Big-M: gemm2 tail (only 8 items per expert at RT=4; 200 items / 132 CTAs at bs128): give the last items 2-tile
-   halves or let idle CTAs start moe_norm rows whose experts are done (per-token flags); fuse moe_gather into
+3. Big-M: let idle tail CTAs start moe_norm rows whose experts are done (per-token flags); fuse moe_gather into
    moe_route (multi-CTA route) -1 launch (~3 us).
-4. Clean-up: remove moe_sk / moe_tk / moe_gemm / route2 / act / moe_tb / moe_big / RT 2 moe_tw (~55 s compile).
 
 ## Dead ends (older ones: NOTES-moe.md)
 - (s14) tw_item next-stage weight/scale LDS prefetch: twm v32 +8, twf +9.5 us (H100). TWM_TAIL13; TWM_TAIL + merge order.

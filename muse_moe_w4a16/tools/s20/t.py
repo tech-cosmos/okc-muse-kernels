@@ -1,9 +1,9 @@
 import sys, os; sys.path.insert(0, os.path.expanduser('~/r-moe/muse_moe_w4a16'))
 import torch, bench, submission as S, reference, importlib
 w, st = bench.state()
-V = {"main": {}, "a22": {"TWF_SPLIT_M": {128: 1022, 256: 1022, 64: 1022, 257: 1022}}, "a23": {"TWF_SPLIT_M": {128: 1023, 256: 1023, 64: 1023, 257: 1023}},
-     "o76a23": {"TWM_ORDER_M": {128: 76, 256: 76, 64: 76, 257: 76}, "TWF_SPLIT_M": {128: 1023, 256: 1023, 64: 1023, 257: 1023}},
-     "hota22": {"TWM_HOT_M": {128: 1, 256: 1, 64: 1, 257: 1}, "TWF_SPLIT_M": {128: 1022, 256: 1022, 64: 1022, 257: 1022}}}
+V = {"main": {}, "a22": {"TWF_SPLIT_M": {128: 1022, 256: 1022, 64: 1022, 257: 1022}}, "q8": {"TWF_SPLIT_M": {128: 1018, 256: 1018, 64: 1018, 257: 1018}}, "q42": {"TWF_SPLIT_M": {128: 1019, 256: 1019, 64: 1019, 257: 1019}}, "q4": {"TWF_SPLIT_M": {128: 1020, 256: 1020, 64: 1020, 257: 1020}},
+     "o76q42": {"TWM_ORDER_M": {128: 76, 256: 76, 64: 76, 257: 76}, "TWF_SPLIT_M": {128: 1019, 256: 1019, 64: 1019, 257: 1019}},
+     "hotq8": {"TWM_HOT_M": {128: 1, 256: 1, 64: 1, 257: 1}, "TWF_SPLIT_M": {128: 1018, 256: 1022, 64: 1022, 257: 1022}}}
 old = {k: getattr(S, k) for d in V.values() for k in d}
 nbad = 0; ref_main = {}
 for name, d in V.items():

@@ -609,3 +609,18 @@
     run 2: [66]/[1022]/[1023]: v16 sl 310.3/310.2/310.4, full 455.1/455.3/454.4, v32 sl 404.5/405.1/398.2, full 651.1/648.5/648.5
   => within the +-4 us run-to-run noise. Posted as H200 TUNE options (twf_split 1022 at T=128/256; diff
   tools/s20/twm_auto_moe_src.diff, moe_src.py only, applies to r-layer HEAD).
+- Timeline of a22 (H100 G88, tools/s20/tl20.py + sub_tl20 = TWM_TL build with stamps moved past the split slots):
+    v16 s7: last exit 226.0 -> 217.3, loss 22.5 -> 12.3 (split ran); s11 226.7 -> 223.2; s13 225.1 -> 228.5 (split
+    ran, work/G +4 us); s17 / s99: no split (r > G/2). So halves can cut ~9 us when they run, but the split's overhead
+    (work/G +1.4..4 us per call: half items cost more than half) eats about half of it, and on the H200's 132 CTAs
+    the layer's v16/v32 item counts (480 / 600-624 = 3.64 / 4.55-4.73 waves) mostly have r > G/2: a22 rarely splits.
+- DEAD: Q = 4 / 8 K parts (1018-1020: fill a > half-full last wave with quarters/eighths; deterministic slot-order
+  sum, every part stores, last sums). Proxy (H100 us, 2 rounds): G88 v16 o0 235.1/235.7 a22 233.5/236.5 q42 241.0/241.4
+  q4 241.4/240.9; G88 v32 307.0/307.0 305.7/304.2 306.6/307.0 306.8/306.8; G132 v16 207.9/208.1 206.0/206.8 207.6/207.7
+  207.5/207.5; G132 v32 243.4/244.4 244.9/245.3 250.2/250.1 250.3/250.0. Quarter items cost far more than 1/4 (ring
+  ramp + ticket wait + partial traffic per part). Diff tools/s20/twm_qparts_dead.diff (not on main).
+  Gotcha found on the way: a runtime-Q loop with `q == hh ? acc : ldcg` in tw_item's epilogue made ptxas spill
+  1636 LDL/STL in moe_twm (proxy +40 us); tools/s20/spills.sh <file.py> prints moe_twm REG/STACK/LDL+STL count of a
+  build (use the .so of THAT file: S._lib().__file__; committed main = 48 LDL/STL, all in the 40-reg producer).
+- Conclusion s20: the big-M tail is NOT cheaply fixable by K-splitting (halves tie, quarters lose). Remaining big-M
+  levers: hot experts on their own kernel / SM subset (STATE idea -8), or making items cheaper (dq), not finer.

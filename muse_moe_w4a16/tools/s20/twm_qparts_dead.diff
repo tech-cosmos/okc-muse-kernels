@@ -1,0 +1,169 @@
+diff --git a/muse_moe_w4a16/submission.py b/muse_moe_w4a16/submission.py
+index a95ae59..66a818e 100644
+--- a/muse_moe_w4a16/submission.py
++++ b/muse_moe_w4a16/submission.py
+@@ -1780,37 +1780,47 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
+     return;
+   }
+   if constexpr (DYN) {
+-    if (part) {  // s11 K-split tail item: the first half to finish stores its FP32 partial, the second adds it
+-      const int ct = warp * 32 + lane;
++    if (part) {  // s11 K-split tail item: the first Q-1 parts to finish store their FP32 partials, the last sums all
++      // s20: pofs = (Q << 4) | own part index; part = own slot (slots 16384 floats apart); the sum runs in part order
++      // 0..Q-1 (deterministic; Q = 2 is bitwise the old 2-half path: p0 + p1)
++      const int ct = warp * 32 + lane, Q = pofs >> 4, hh = pofs & 15;
+       asm volatile("bar.sync 1, 256;" ::: "memory");  // s_flag is free (previous split item done with it)
+       if (ct == 0) *s_flag = atomicAdd(tick, 1);
+       asm volatile("bar.sync 1, 256;" ::: "memory");
+       const int o = *s_flag;
+-      if (!o) {
+ #pragma unroll
+-        for (int r = 0; r < RT; ++r)
++      for (int r = 0; r < RT; ++r)
+ #pragma unroll
+-          for (int i = 0; i < NA; ++i) __stcg(part + (r * NA + i) * 256 + ct, acc[r][i]);
++        for (int i = 0; i < NA; ++i) __stcg(part + (r * NA + i) * 256 + ct, acc[r][i]);
++      if (o < Q - 1) {
+         __threadfence();
+         asm volatile("bar.sync 1, 256;" ::: "memory");
+-        if (ct == 0) asm volatile("st.release.gpu.global.b32 [%0], %1;" ::"l"(tick + 512), "r"(1) : "memory");
++        if (ct == 0) asm volatile("red.release.gpu.global.add.s32 [%0], %1;" ::"l"(tick + 512), "r"(1) : "memory");
+         return;
+       }
+-      if (ct == 0) {  // the other half took its ticket first: wait for its partial
++      if (ct == 0) {  // the other parts took their tickets first: wait for their partials
+         int v;
+         do {
+           asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(v) : "l"(tick + 512) : "memory");
+-        } while (!v);
++        } while (v < Q - 1);
+         tick[0] = 0;  // last user of both words: zero for the next call
+         tick[512] = 0;
+         __threadfence();
+       }
+       asm volatile("bar.sync 1, 256;" ::: "memory");
+-      const float* ot = part + pofs;
++      const float* ot = part - hh * 16384;  // every part (own included) is in its slot: sum in slot order
+ #pragma unroll
+       for (int r = 0; r < RT; ++r)
+ #pragma unroll
+-        for (int i = 0; i < NA; ++i) acc[r][i] += __ldcg(ot + (r * NA + i) * 256 + ct);
++        for (int i = 0; i < NA; ++i) acc[r][i] = __ldcg(ot + (r * NA + i) * 256 + ct);
++#pragma unroll 1
++      for (int q = 1; q < Q; ++q) {
++        const float* oq = ot + q * 16384 + ct;
++#pragma unroll
++        for (int r = 0; r < RT; ++r)
++#pragma unroll
++          for (int i = 0; i < NA; ++i) acc[r][i] += __ldcg(oq + (r * NA + i) * 256);
++      }
+     }
+     if (g2) tw_epi<RT, N, false, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
+     else tw_epi<RT, N, true, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
+@@ -2207,7 +2217,7 @@ __global__ void __launch_bounds__(384, 1) moe_twf(
+     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
+     __nv_bfloat16* out = g2 ? Y : Inter;
+ #define TWI(NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
+-                                                        h < 0 ? 64 : 32, pt, tick + j, &s_flag, h ? -16384 : 16384)
++                                                        h < 0 ? 64 : 32, pt, tick + j, &s_flag, 32 | (h & 1))
+     if constexpr (RT == 4) {
+       switch ((nv + 7) >> 3) {
+         case 1: TWI(8); break;
+@@ -2390,7 +2400,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+   extern __shared__ __align__(1024) uint4 smem_tw[];
+   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
+   __shared__ uint32_t slut[256];
+-  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[2][32], s_ord[4], s_cost;
++  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[2][32], s_ord[4], s_cost, s_q;
+   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
+   int* done = meta + 68;
+   // s14: nsplit < 0 = no K split; instead the lightest (last) non-big experts whose RT 4 gemm2 items add up to
+@@ -2408,7 +2418,9 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+   // s20: split count 1022 / 1023 = AUTO: K-split the last r light gemm2 items, r = (total item cost mod gridDim) when
+   // that last wave is at most half full (halves then fill it; else no split). 1022: every item costs 1; 1023: light
+   // RT 4 items weighted by their pass size (N8 1, N16 1.25, N32 1.5). Shape/routing-derived on device, no host sync.
+-  const int autos = nsplit >= 1022 ? nsplit - 1021 : 0;
++  // s20: 1018 / 1019 / 1020 (count model): K parts Q = 8 / (4 if the last wave is > half full else 2) / 4, splitting
++  // the last ceil(r) light gemm2 items whenever r > 0
++  const int autos = nsplit >= 1018 ? nsplit - 1017 : 0;  // 1 Q8, 2 Q4|2, 3 Q4, 4 / 5 = 1022 / 1023 (halves)
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
+   asm volatile("griddepcontrol.wait;" ::: "memory");
+@@ -2441,7 +2453,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+     s_big[0][tid] = c13;
+     s_big[1][tid] = c2;
+     if (autos) {
+-      const int w = (autos == 2 && !c2 && nt > 8) ? (nt > 16 ? 6 : 5) : 4;
++      const int w = (autos == 6 && !c2 && nt > 8) ? (nt > 16 ? 6 : 5) : 4;
+       const int n13i = npass * (c13 ? HG::NRB * (c13 == 3 ? 2 : 1) : CG::NRB), n2i = npass * (c2 ? HN::NRB * (c2 == 3 ? 2 : 1) : CN::NRB);
+       int cst = tid < nact ? w * (n13i + n2i) : 0;
+ #pragma unroll
+@@ -2467,17 +2479,23 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+   // result must not depend on whether its pass is split), so ns may come out a bit below nsplit.
+   const int n13 = s_cum[0][32], n2 = s_cum[1][32];
+   int n2f = n2;
++  int Q = 2;
+   if (autos) {
+     const int GU = 4 * gridDim.x, r = s_cost % GU;
+-    nsplit = (r > 0 && 2 * r <= GU) ? min((r + 3) / 4, 66) : 0;
++    if (autos >= 5) nsplit = (r > 0 && 2 * r <= GU) ? min((r + 3) / 4, 66) : 0;
++    else {
++      Q = autos == 1 ? 8 : autos == 3 || 2 * r > GU ? 4 : 2;
++      nsplit = r > 0 ? min((r + 3) / 4, 528 / Q) : 0;
++    }
+   }
+   if (nsplit > 0)
+     for (int a = 32; a >= 0; --a) {
+       if (a < 32 && s_big[1][a] != 0) break;  // s19: only light (RT 4) experts split (hot/big items take no K half)
+       if (s_cum[1][a] >= n2 - nsplit) n2f = s_cum[1][a];
+     }
+-  const int ns = n2 - n2f, nitems = n13 + n2f + 2 * ns;
++  const int ns = n2 - n2f, nitems = n13 + n2f + Q * ns;
+   if (tid == 0) {
++    s_q = Q == 8 ? 3 : Q == 4 ? 2 : 1;  // log2 of the K parts
+     int nbig = 0;
+     while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
+     const int mrg = (order >> 3) & 3;
+@@ -2493,8 +2511,8 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+     j = 0;
+     int it = g2 ? item - n13 : item;
+     if (g2 && it >= n2f) {
+-      j = (it - n2f) >> 1;
+-      h = (it - n2f) & 1;
++      j = (it - n2f) >> s_q;
++      h = (it - n2f) & ((1 << s_q) - 1);
+       it = n2f + j;
+     }
+     const int* cum = s_cum[g2];
+@@ -2536,7 +2554,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+       decode(item, g2, a, p, rb, h, j);
+       const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? 64 : 32;
+       const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
+-      const int k0 = h < 0 ? 0 : h * 32, k1 = h < 0 ? 64 : k0 + 32;
++      const int k0 = h < 0 ? 0 : h << (6 - s_q), k1 = h < 0 ? 64 : k0 + (64 >> s_q);
+       const int mi = cl == 3 ? 4 : nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
+       const int nrb = big ? (g2 ? HN::NRB : HG::NRB) : (g2 ? CN::NRB : CG::NRB);
+       const int WB = big ? HG::WB : CG::WB, SB = big ? HG::SB : CG::SB;
+@@ -2595,11 +2613,11 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+     decode(item, g2, a, p, rb, h, j);
+     const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? 64 : 32;
+     const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
+-    float* pt = h < 0 ? nullptr : part + (size_t)(2 * j + h) * 16384;
++    float* pt = h < 0 ? nullptr : part + (size_t)((j << s_q) + h) * 16384;
+     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
+     __nv_bfloat16* out = g2 ? Y : Inter;
+ #define TWI(RT, NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
+-                                                        h < 0 ? 64 : 32, pt, tick + j, &s_flag, h ? -16384 : 16384)
++                                                        h < 0 ? 64 : 64 >> s_q, pt, tick + j, &s_flag, (16 << s_q) | (h & 15))
+     if (cl == 3) {
+       if (nv <= 80) tw_hot<80, NSTG, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
+       else tw_hot<96, NSTG, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
+@@ -4619,7 +4637,7 @@ def kernel_fn(data, st):
+             trt = trt if f"w2b{trt}" in st else 4
+             lib.moe_set_sa((1 if TWSA and st["sa"] else 0) | (2 if trt == 2 else 0))
+             ns = TWF_SPLIT_M.get(M, TWF_SPLIT)
+-            part = (torch.full if TWF_DBG else torch.empty)((max(66 if ns >= 1022 else ns, 1) * 32768,), *((float("nan"),) if TWF_DBG else ()), dtype=torch.float32, device=dev)
++            part = (torch.full if TWF_DBG else torch.empty)((528 * 16384 if 1018 <= ns <= 1021 else max(66 if ns >= 1022 else ns, 1) * 32768,), *((float("nan"),) if TWF_DBG else ()), dtype=torch.float32, device=dev)
+             if TWQ_M.get(M, TWQ):
+                 q = TWQ_M.get(M, TWQ)
+                 if DIAG_TL and TWM_ORDER_M.get(M, TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
