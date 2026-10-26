@@ -246,3 +246,31 @@
   Cost: H100 +0.3 us, judge bs16 92.6 (was 93.9-94.5): free. Still early-arrive (not default paths): moe_tk, moe_tk2, tk2d (DYN).
   Lesson: never release a smem stage before its loaded registers have been USED (mbarrier.arrive does not wait for LDS).
 - check b25182e8 @ea74c2b (fix + GS16 at bs32): 2.1906x (bs1 28.5, bs16 92.6, bs32 135.7, bs8 70.3, bs128 196.3, bs256 243.0).
+
+## Session 11 (2026-10-26 03:39Z - )
+- H200 judge PROFILES exist for the layer: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt (per-kernel GPU time per
+  scored shape). Layer e5512e00: tk2f d1 20-27.5 us (2-3 experts; floor 13-20), d16 62-76, d32 75-104, v1 40-63; twf v16
+  125-170 + moe_norm 21-45, v32 207-235 + moe_norm 34-45. moe_norm's "time" is mostly twf's TAIL: it is a PDL secondary and
+  starts when the first twf CTA exits (torch profiler H100 v16: norm starts 37 us before twf ends; its own work ~4.7 us).
+- Judge per-group model (standalone decode): time ~ 8 us + 6.6 us per 8-token group (= 28.3 MB at 4.3 TB/s): bs8-32 are near
+  the HBM roofline per distinct expert; the layer's d16/d32 have 15-25% extra groups (hot experts).
+- tk2f timeline H100 (layer d1, /tmp/moe11/mktl.py + tl.py, static path stamps): routed 1.5-1.8, first data 3.8, ph1 end
+  14.6-18.2 (3 vs 4 rows/CTA), cnt ok 18.9, end 21-24.3 (2 experts). Fixed overhead ~4-5 us = routing + first-data latency +
+  barrier. PDL "weights first" was already tried by layer (TK2_PDL13, tie): not redone.
+- NC16 tk2f (16 consumer warps, cfg +20000; x regs halve): L2-warm proxy (tools/l2warm.py: 1 expert, warm L2 = consumer
+  bound) 5-10% SLOWER than NC8 at every T (per-row reduce of 16 partials). GS16 in the same proxy: T=32 34.7 -> 27.5 us
+  (pure consumer bound), so GS16's loss is specific to cold/HBM runs. Bit-tiling search: no shift+mask tiling of the
+  e2m1->bf16 fields exists for 32/64/128/256-bit words, so dq's 12 instr/8 weights is minimal for this approach.
+- moe_twf K-split tail (TWF_SPLIT / TWF_SPLIT_M; last gemm2 items as 2 K halves; the first finisher stores an FP32 partial
+  (ticket tk[j], release flag tk[512+j]), the second adds it; self-resetting; the split starts at an expert boundary
+  because moe_route orders an expert's tokens NONDETERMINISTICALLY (atomics): a token could otherwise move between a
+  split and a whole pass -> 1-ulp run-to-run differences; that was the "race" I chased). Judge c1659443 (bs128 S132,
+  bs256 S66): 2.179x, bs128 205.2, bs256 250.8 = tie: moe_norm (tail) 38-45 -> 27-29 us but twf +10..20 us. H100 the same
+  (min CTA exit +19 us): the GPU stays throughput-bound during the tail. Kept, off.
+- moe_twf RT 2 / 64-token passes for all (TWF_RT 2): H100 better everywhere (layer v16 -5, v32 -7, standalone -3/-9) but
+  JUDGE 7dda218c 2.130x: bs128 224.5, bs256 267.0 (worse by ~8%). Again the H100 is not a big-M proxy.
+- moe_twm (TWF_MIX = 1, ON): item shape per expert: RT 2 / 64-token passes for experts with > 32 tokens (one dequant per
+  64 tokens), RT 4 / 32-token passes otherwise; prepare also packs w13b2/w2b2 (+0.85 GB, +~8 s). SASS: no spill, wgmma
+  waits 0x1 in loops. Correct + deterministic (60 routings incl. split). Judge d4909e24 2.170x: bs128 206.8 (control: no
+  expert > 32 tokens), bs256 247.8 (= baseline range): neutral standalone. Aimed at the LAYER's v32 (hot experts 73-98
+  tokens: 34 passes of 32 -> ~24 of 64) and v16 (36-49): only a layer check can tell.
