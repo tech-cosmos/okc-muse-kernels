@@ -308,3 +308,21 @@
 - TK2W weighted static split (extra-group rows weigh wE/8, warp-parallel tk2w_bound, cfg +70000): bitwise ok, H100
   worse (w 3: d32 207 us: on the H100 extra-group rows are NOT cheap; even w 8 = count +2 us, unexplained). Not sent to
   the judge: the H200 timeline shows no imbalance to fix. Experimental instantiations now behind #if TK2_EXP (0).
+
+## Session 13 (2026-10-26 04:57Z - )
+- tk2f PF variants (cfg 80204 + 1000 * PF; bitwise = main, tools/pf_ab.py): PF 1 = L1 prefetch (prefetch.global.L1) of the
+  next segment's x one row ahead; PF 2 = gemm2's cnt acquire-spin only at the CTA's first gemm2 row (was: every segment
+  start, serialized before the x loads); PF 4 = gemm2 writes y32 in ROUTE-SLOT order (row = s_srt[pos]) pre-multiplied by
+  gs2 * 256, then moe_norm3 (= moe_norm2<SLOT>: no inv / gs loads, one dependent-load level less). Built: 1, 2, 3, 7.
+  H100 layer routings: all within 0.5 us (DRAM-bound). H200 DIAG 1fdf6eb2 (MEAN of 5 seeds, us):
+    d1  gs8 30.6/30.6(rerun)  pf1 30.9  pf2 30.8  pf3 30.9  pf7 30.4
+    d16 68.4/68.3            68.7      68.5      68.9      68.1
+    d32 88.3/88.4            89.4      88.6      89.8      88.9
+    v1  66.3/66.6            66.7      66.7      66.6      66.4
+  => prefetch LOSES (+0.3..1.1), spin-once nothing; norm3 (pf7 - pf3) -0.5..0.9 us at every decode shape. The segment
+  change (x reload) is NOT what makes phase 2 slow on the H200.
+- ncu L2-warm proxy (T=32, 1 expert; /tmp/moe13/warm1.py): issue active 50.6%, warp cycles per issued instr 4.40 (selected 1,
+  wait 0.94, long_scoreboard 0.65, not_selected 0.47, math_pipe_throttle 0.43, barrier 0.33, dispatch 0.21, short_sb 0.16).
+  ALU pipe (LOP3/SHF/PRMT/LEA, half rate) 7.0M of 13.9M instr, pipe active 51% (= issue): per mma ~8.7 ALU instr.
+  SASS census (bs32 cold, per HMMA): LOP3 5.15, HMUL2 4, SHF 2.04, IMAD 1.36, BRA .89, SYNCS .76, YIELD .71 (ring spin, H100
+  DRAM-bound), LEA .61, PRMT .5, LDS .49.
