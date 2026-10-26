@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~17:25 UTC (session 36).
+Updated 2026-10-26 ~17:30 UTC (session 37).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -145,10 +145,12 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## H100 layer ABBA v1 -1.56/-1.67 us, outputs unchanged; handoff dev/s36/pr8_bpf_layer.patch. pr8 is NOT issue-bound (no-math
 ## +1.4 us only): its loss is the serialized prologue (router W + PF ahead of x32, ~3.5 us router math with HBM idle) and a
 ## ~9 us block-finish spread. Dead: prefetch before the wait, PF loads after it, router last/mid-loop, g14 bulk prefetch. NOTES s36.
+## Session 37: pr8 tail = random block-finish spread (~3 us max-mean), not the pred's late SMs (they end only ~1.5 us late);
+## interleaved row groups PR8_RGI +0.25 us DEAD. Only dynamic K-half stealing could help (design in NOTES s37). TRACE=2 tool.
 ## Next (ranked)
--25. (s36) Layer should bundle pr8 npf 212 (and DEC3) into its next-sandbox first check. Remaining pr8 room (H100 ~25 us
-   after pred vs ~18 us bytes): the block-finish spread (blocks on the predecessor's SMs start late: try 2 row groups of
-   uneven size, or the late blocks skip the router item) and the router-math phase (fewer, fatter router items).
+-25. (s36/s37) Layer should bundle pr8 npf 212 (and DEC3) into its next-sandbox first check (it is in layer v88). Remaining pr8 room
+   (H100 ~24.4 us after pred vs ~18 us bytes): random block-finish tail ~3 us (s37: dynamic K-half stealing, design in NOTES s37)
+   and the router-math phase (fewer, fatter router items).
 -24. (s35) Layer's next-sandbox first check should carry DEC3 (layer is integrating it). proj's own first check tomorrow = main
    (DEC3 in g13/g14 m1/m8 picks, tg2 unpooler m8 candidate: read 'tune' lines in the judge log; submit if > 1.3110).
    DEC4 (v85) and g13o (v84) are already in the layer.

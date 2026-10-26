@@ -112,4 +112,10 @@ if __name__ == "__main__":
             tr = (tr - tr[:, 0].min()) / 1000
             q = lambda v: f"{v.min().item():6.1f} {v.median().item():6.1f} {v.max().item():6.1f}"
             print("npf", npf, " | ".join(f"t{i} {q(tr[:, i])}" for i in range(6)))
+            if os.environ.get("TRACE") == "2":  # s37: start vs loop-end per block
+                st = (tr[:, 0] - tr[:, 0].min()); late = st > 1.0
+                print(f"  late starters {int(late.sum())}: t0 {q(st[late]) if late.any() else '-'} t4 {q(tr[late, 4]) if late.any() else '-'}"
+                      f" | early t4 {q(tr[~late, 4])} | t4-t3 {q(tr[:, 4] - tr[:, 3])} | corr(t0,t4) {torch.corrcoef(torch.stack([st, tr[:, 4]]))[0, 1].item():.2f}")
+                for b0 in range(0, 128, 16): print(f"    blocks {b0:3d}-{b0+15:3d}: t0 {st[b0:b0+16].mean():.1f} t1 {tr[b0:b0+16,1].mean():.1f} t3 {tr[b0:b0+16,3].mean():.1f} t4 {tr[b0:b0+16,4].mean():.1f} late {int(late[b0:b0+16].sum())}")
+                o = tr[:, 4].argsort(); print("  t4 order (first/last 8 blocks):", o[:8].tolist(), o[-8:].tolist())
             print("  slowest blocks (t3-t2):", (tr[:, 3] - tr[:, 2]).topk(5).values.tolist(), (tr[:, 3] - tr[:, 2]).topk(5).indices.tolist())

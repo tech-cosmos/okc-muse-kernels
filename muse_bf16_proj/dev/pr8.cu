@@ -171,7 +171,13 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
     TR(0)
     const int t = threadIdx.x, lane = t & 31, wp = t >> 5, g = lane >> 2, c = lane & 3;
     const int gi = wp / WG, wi = wp % WG, NG = blockDim.x / (32 * WG);
-    const int rg0 = blockIdx.x * NG, rg = rg0 + gi;
+    const int rg0 = blockIdx.x * NG;
+#ifdef PR8_RGI  // s37 probe: block b owns row groups b, b + bk, b + 2 bk, ... (interleaved, not contiguous)
+#define RGOF(i) ((i) * a.bk + (int)blockIdx.x)
+#else
+#define RGOF(i) (rg0 + (i))
+#endif
+    const int rg = RGOF(gi);
     const int n = a.n;
     float* xr = (float*)(smem + M * XS + blockDim.x / 32 * TT * 512 + NG * 8 * ESC * 8);  // [8][RK] FP32 x slice
     // router item: rows ri * 16 + (t >> 6), k = sl * RK + (t & 63) * 4 + 256 j
@@ -196,7 +202,7 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
         if (t >= 2 * NG) return;
         const int gi2 = t >> 1;
         nb = min(nb, NA - PF);
-        const long o0 = ((long)(rg0 + gi2) * (KC / 32) + PF * WG) * 32;
+        const long o0 = ((long)RGOF(gi2) * (KC / 32) + PF * WG) * 32;
         const char* src = (t & 1) ? (const char*)(a.WN + o0) : (const char*)(a.WS + o0);
         const unsigned bytes = (unsigned)nb * WG * 32 * ((t & 1) ? 4 : 8);
         if (nb > 0) asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"(bytes) : "memory");
@@ -205,7 +211,7 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
     if (a.npf >= 1000) bulk_pf((a.npf - 1000) / 32);  // 1000 + pre * 32 + post: both
     if (a.npf > 1 && a.npf < 100 && t < NG * WG) {  // L2 prefetch of this warp-slot's next atoms (gemv14 order: atom stride WG * 32 lanes)
         const int gi2 = t / WG, wi2 = t % WG;
-        const long wo2 = (((long)(rg0 + gi2)) * (KC / 32) + wi2) * 32;
+        const long wo2 = (((long)RGOF(gi2)) * (KC / 32) + wi2) * 32;
         for (int p = PF; p < PF + a.npf && p < NA; ++p) {
             asm volatile("prefetch.global.L2 [%0];" :: "l"(a.WS + wo2 + (long)p * WG * 32));
             if (p % 2 == 0) asm volatile("prefetch.global.L2 [%0];" :: "l"(a.WN + wo2 + (long)p * WG * 32));
@@ -233,14 +239,14 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
     };
     for (int i = t; i < NG * 8 * ESC / 2; i += blockDim.x) {
         const unsigned sa = (unsigned)__cvta_generic_to_shared(hs + 2 * i);
-        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa), "l"(a.H + (long)rg0 * 8 * ESC + 2 * i));
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa), "l"(a.H + (long)RGOF(i / (4 * ESC)) * 8 * ESC + 2 * (i % (4 * ESC))));
     }
 #pragma unroll
     for (int p = 0; p < XR; ++p) { stage(p); asm volatile("cp.async.commit_group;"); }
     if (a.npf >= 200 && a.npf < 1000) bulk_pf(a.npf - 200);  // after the wait and the x / x32 / header copies are issued
 #ifdef PR8_PFLATE  // s36 probe: pooler register preloads after the wait (atoms [0, PF) also bulk-prefetched first)
     if (t < 2 * NG) {
-        const long o0 = ((long)(rg0 + (t >> 1)) * (KC / 32)) * 32;
+        const long o0 = ((long)RGOF(t >> 1) * (KC / 32)) * 32;
         const char* src = (t & 1) ? (const char*)(a.WN + o0) : (const char*)(a.WS + o0);
         asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"((unsigned)PF * WG * 32 * ((t & 1) ? 4 : 8)) : "memory");
     }
@@ -250,7 +256,7 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
     if (a.npf >= 1000 && (a.npf - 1000) % 32) {  // post part: atoms after the pre part
         if (t < 2 * NG) {
             const int pre = (a.npf - 1000) / 32, nb = min((a.npf - 1000) % 32, NA - PF - pre);
-            const long o0 = ((long)(rg0 + (t >> 1)) * (KC / 32) + (PF + pre) * WG) * 32;
+            const long o0 = ((long)RGOF(t >> 1) * (KC / 32) + (PF + pre) * WG) * 32;
             const char* src = (t & 1) ? (const char*)(a.WN + o0) : (const char*)(a.WS + o0);
             if (nb > 0) asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"((unsigned)nb * WG * 32 * ((t & 1) ? 4 : 8)) : "memory");
         }
@@ -359,7 +365,7 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
                 s = fmaf(xv, he[e2].y, fmaf(xv, -0x1p-15f, s));
             }
         }
-        a.out[(long)tok * n + (rg0 + rgl) * 8 + row8] = __float2bfloat16(s * a.scale);
+        a.out[(long)tok * n + RGOF(rgl) * 8 + row8] = __float2bfloat16(s * a.scale);
     }
     TR(5)
 }

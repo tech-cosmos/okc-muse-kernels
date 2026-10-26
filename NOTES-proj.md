@@ -857,3 +857,19 @@
 - Dead too (17:12Z): DEFS=PR8_PFLATE (pooler PF register preloads moved after the wait, atoms [0, PF) bulk-prefetched
   first, so x32 doesn't queue behind them): +2.0 us after a 3-4 us pred (212: 24.4 -> 26.4). Pre-wait W loads are worth
   more than an earlier x32.
+
+## Session 37 (2026-10-26 17:09-17:30Z): pr8 block-finish spread measured; interleaved row groups DEAD
+- No judge runs (proj checks 20/20 for 10-26). Item: STATE Next -25 (pr8 block-finish spread).
+- dev/pr8.py TRACE=2 (new): per-block start vs loop end, by block-id range. After a 3 us PDL pred (npf 212): the 28 blocks
+  on the pred's SMs (ids ~100-127) start 2.8 us late but end only ~1.5 us later on average (t4 27.2 vs 24.1-26.3 for the
+  others): they catch up (HBM is shared). The spread is mostly RANDOM: early starters alone end anywhere in 18.7-28.4 us,
+  and which blocks are last changes every run. t4 mean ~25.7 vs max ~29.2: ~3 us tail (standalone, traced).
+- DEFS=PR8_RGI (new probe, off by default): block b owns row groups b, b+128, b+256, b+384 instead of 4 contiguous ones.
+  Bit-identical outputs, test 0 bad; interleaved A/B, 4 rounds, PRED 3000: base 24.35-24.42 vs RGI 24.56-24.70 us: +0.25, DEAD.
+- So the tail cannot be fixed statically (late-start blocks matter little; the rest is random): only dynamic balancing.
+  Design for a future session (est. <= -2 us at v1, ~+0.2% layer): split each row group's K into 2 halves; a block finishing
+  its own work early claims (atomicCAS on a per-(rg, half) flag) a second half not yet started by its owner and writes its
+  FP32 [8 tok x 8 rows] partial; out = (h0 + h1 + fixups) * scale in fixed order whoever computed each half (deterministic,
+  bits differ from today's single accumulator: re-run layer route/scored tests). Needs a per-call flag reset that cannot
+  race (epoch in the flag value, e.g. a call counter bumped by the finisher block) and an owner spin on the stolen half's
+  done flag (safe: the stealer is resident).
