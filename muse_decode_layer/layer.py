@@ -1453,8 +1453,9 @@ def _g19_prepare(state):
 
 
 # (s18/s19) Choices where the H100 and the judge's H200 may disagree, tuned in prepare(): the whole layer is timed
-# (CUDA graph replays, cold L2, interleaved, median) on synthetic sliding decode inputs (shapes only, random data) with
-# each candidate option set; the fastest set per T is kept in state["tune"][T]. Options (defaults = no entry):
+# (CUDA graph replays, cold L2, interleaved, median) on synthetic decode/verify inputs (shapes only, random data) with
+# each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
+# ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
 # kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T; lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
@@ -1467,12 +1468,15 @@ TUNE_REPS = 40
 TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}  # T -> (batch, q_len)
 
 
+_SLIDING = [True]  # the current kernel_fn call's layer type (set at its start; read by _opt at trace time)
+
+
 def _opt(state, tokens, name, default):
-    return state.get("tune", {}).get(tokens, {}).get(name, default)
+    return state.get("tune", {}).get((tokens, _SLIDING[0]), {}).get(name, default)
 
 
-def _synth_input(batch, dev, ctx=3000, q_len=1):
-    """A sliding-window decode step / verify block (page 1) of random data with the scored inputs' shapes and dtypes."""
+def _synth_input(batch, dev, ctx=3000, q_len=1, sliding=True):
+    """A decode step / verify block (page 1) of random data with the scored inputs' shapes and dtypes."""
     g = torch.Generator(device=dev).manual_seed(1234)
     tokens = batch * q_len
     seq = torch.full((batch,), ctx, dtype=torch.int32, device=dev)
@@ -1490,7 +1494,8 @@ def _synth_input(batch, dev, ctx=3000, q_len=1):
             "scheduler_metadata": None, "k_scale": one, "v_scale": one.clone(), "page_table": pt, "seq_lens": seq,
             "local_start": torch.zeros(1, dtype=torch.int32, device=dev),
             "config": {"batch": batch, "q_len": q_len, "tokens": tokens, "hidden": HIDDEN, "num_q_heads": 16,
-                       "num_kv_heads": 2, "head_dim": 64, "page_size": 1, "window": 2048, "rope_theta": 500000.0,
+                       "num_kv_heads": 2, "head_dim": 64, "page_size": 1, "window": 2048 if sliding else 0,
+                       "rope_theta": 500000.0 if sliding else 0.0,
                        "qk_scale_factor": 5.4730064863875, "sm_scale": 0.125, "kv_scale": 1.0,
                        "n_experts": N_EXPERTS, "top_k": TOP_K, "local_experts": LOCAL_EXPERTS}}
 
@@ -1502,16 +1507,17 @@ def _tune(state):
     dev = state["unpool_slice"].device
     try:
         flush = torch.empty(256 << 20, dtype=torch.uint8, device=dev)
-        for tokens, cands in TUNE.items():
-            data = _synth_input(TUNE_SHAPE[tokens][0], dev, q_len=TUNE_SHAPE[tokens][1])
+        for (tokens, cands), sliding in ((tc, sl) for tc in TUNE.items() for sl in (True, False)):
+            key = (tokens, sliding)
+            data = _synth_input(TUNE_SHAPE[tokens][0], dev, 3000 if sliding else 80000, TUNE_SHAPE[tokens][1], sliding)
             graphs, ok = [], []
             for opts in cands:
-                state["tune"][tokens] = opts
+                state["tune"][key] = opts
                 fn = lambda: kernel_fn(data, state)  # noqa: E731
                 try:
                     fn()
                 except Exception as ex:  # noqa: BLE001  (host-side checks only: a CUDA fault would raise below)
-                    print(f"layer tune T={tokens} {opts} skipped ({type(ex).__name__}: {ex})", flush=True)
+                    print(f"layer tune {key} {opts} skipped ({type(ex).__name__}: {ex})", flush=True)
                     continue
                 torch.cuda.synchronize()
                 ok.append(opts)
@@ -1540,8 +1546,8 @@ def _tune(state):
                         ts[i].append(a.elapsed_time(b))
             med = [sorted(v)[len(v) // 2] for v in ts]
             best = min(idx, key=lambda i: med[i])
-            state["tune"][tokens] = cands[best]
-            print(f"layer tune T={tokens}: " + " | ".join(f"{cands[i] or 'default'} {med[i] * 1e3:.1f}us" for i in idx)
+            state["tune"][key] = cands[best]
+            print(f"layer tune T={tokens} {'sliding' if sliding else 'full'}: " + " | ".join(f"{cands[i] or 'default'} {med[i] * 1e3:.1f}us" for i in idx)
                   + f" -> {cands[best] or 'default'}", flush=True)
             del graphs, data
         del flush
@@ -1666,6 +1672,7 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None):
 
 def kernel_fn(data, state):
     cfg = data["config"]
+    _SLIDING[0] = cfg["window"] > 0
     batch, length, tokens = cfg["batch"], cfg["q_len"], cfg["tokens"]
     hq, d = cfg["num_q_heads"], cfg["head_dim"]
     dense = state["dense"]
