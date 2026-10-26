@@ -18,11 +18,6 @@ bit-identical). H100 ab_flag: d1 -0.5/-1.0, v1 -1.1/-0.1, d16 -1.5/-1.9, d32 -1.
 best** (d1 69.6/77.8, d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5). H200 tuner
 lines in NOTES s32. Sandbox ends ~19:10Z: no judge runs left today; next sandbox (after 00:00Z) starts from main.
 
-**s31: main = v69** = v68 + moe s19 (r-moe 20b864e) twm K-split diff in moe_src.py + TUNE option `twf_split` (T=128:
-{twf_split 66}; T=256: {twf_split 66}, {twf_split 66, twm_order 76}). Defaults unchanged (bit-identical path). Forced
-each: scored verify x2 0 bad, replay verify 0/20 per shape. THE ~14:30Z LAST CHECK RUNS MAIN = v69: copy its "layer tune
-T=128/256" lines into NOTES (moe asked for them).
-
 (s25-s29 details: NOTES s25-s29. Live TUNE options incl. skewed synthetic routing SYNTH_P, nu8, QF32/QF32_NDS, TK2FX/TK2FJ, RF_TRIG, BKT, GNORM, twq/twm_*.)
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
@@ -41,14 +36,7 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
   __ldcg x (the s8 "race" was ptxas hoisting __ldg above griddepcontrol.wait; see NOTES s14 SASS audit).
 - v41 (4afa8ea): TK2F_LATE_TRIG 3 (tk2f triggers PDL at each CTA's gemm2 rows; n2u / moe_norm2/3 as PDL secondaries).
   Check 36073e6e 1.9526x.
-- v38 (d664b23) = v37 + proj pr8 at T=8 (same fusion with gemv14 pooler; H100 v1 -1.7/-1.8 us): check 0602febf
-  1.936x (noisy run; v1 full +6.8 vs v37 unexplained: re-check before trusting; T=8 off = PR1_TOKENS (1,)).
-- v37 (d411cf4) = v36 + proj pr1 at T=1 (pooler+router+top-8 one launch; H100 d1 -2.4/-1.9 us) + moe 2466fac
-  (twm): check 7b02fb2c 1.947x = tie on H200 (d1 72.5/82.2), not submitted. PR1_BND (boundary fused into pr1): off, loses.
-- v36 (4017c16) = v33 + moe c33acae (race fix) + proj gemv19 at T=16 (pooler AP8 on 108 blocks as PDL
-  dependent of the first boundary, which triggers at start; full unpool). **Best check ee80a8f8 1.9566x**; its submit
-  543b6ca9 scored 1.9395x (noise). Per shape (H200 us ours, ratio): d1 72.1/83.7 (2.369/2.174), d16 150.1/225.4
-  (1.747/1.912), d32 181.1/311.0 (1.443/1.974), v1 121.6/132.8 (2.133/2.043), v16 273.0/359.4, v32 351.8/527.1.
+- Older mains v36-v41: NOTES s8-s14.
 - Budget 2026-10-26 (resets 00:00Z, after the sandbox ends): submits 9 of 10 used (1 left); checks 18 of 20 used (2 left) at 09:00Z (s15).
 - Judge noise: SGLang's own per-shape times move 2-6% between runs; identical code's per-shape ratios spread ~+-1.5%,
   total ~+-1%: one check cannot resolve <2% changes. Decide on H100 interleaved A/Bs (tools/ab_flag.py), check to confirm.
