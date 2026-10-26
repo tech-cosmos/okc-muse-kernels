@@ -1,36 +1,24 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 20:58Z (s58): **main = v95 = v94 + moe n6 tk2h (GS16 merged consumer + PF4) as TUNE option {tk2h: W+1}
-at T=16/32** (candidates 3, 4; T=32 also {tk2h 4, lt:o}). NOT judge-checked. G88 proxy (tk2f grid capped at 88 = H200-like,
-4 seeds) d32 sl -9 / full -4.5 proxy-us (x0.73 = H200), d16 sl -2 / full +3.8; H100 tuner picks tk2h 4 at T=32, rejects T=16.
-FIRST CHECK AFTER 00:00Z = main v95: read the 'layer tune T=32' (and T=16) tk2h lines; NOTES s58. Plan below otherwise unchanged.
+Updated 2026-10-26 22:10Z (s59): **main = v96 = v95 + NU8D at T=8** (nu8 red.adds per-slot partials, no exchange; the
+T=8 boundary applies the per-slot post-expert norm scales; H100 v1 -0.6..0.9 sl / -0.4..0.6 full; TUNE[8] {nu8d: False}).
+NOT judge-checked. FIRST CHECK AFTER 00:00Z = main v96: read 'layer tune T=8' nu8d lines and 'T=16/32' tk2h lines. NOTES s59.
+Board 21:00Z: #52 at 1.995x (#1 2.380x). Per-load ratios: d1 2.43, d16 1.88, d32 1.68, v1 2.19, v16 1.93, v32 2.00.
 
-Updated 2026-10-26 20:40Z (s57): **main = v94 = v92 + BND_SEP at T=8 (v93: second boundary loads nu8's 8 slabs as an [8,1024] tile;
-H100 v1 -1.0/-1.1 us) + G19_TRIG (v94: g19 unpool/o trigger PDL at start, both boundaries their PDL secondaries at T=16/32;
-H100 d16 -1.1..2.8 sl / -1.0 full, d32 -1.6 / -1.4 us; TUNE {g19trig: False} at T=16/32)**. NOT judge-checked.
-First check after 00:00Z = main v94 (look at 'layer tune T=16/32' g19trig lines). Persistent experts->norm2->unpool->boundary
-tail bounded on paper (<= 1-2 us d1; oracle numbers in NOTES s57): not built. n2u's y32 L2 reads are not its bottleneck (oracle tie).
-(s56: v92 = v91 + pr1 non-bnd x/x32 __ldcg, proj s47 audit request, cache-op only; tests 13/13, replay d1/d16 0/40). Below 'main = v91' read 'main = v92'.
-(s55) **main = v91 = v90 (v89 + moe n4s1 NORM_EARLY: post-expert norm runs in twm's
-drain) + __ldcg ids/tw/inv in moe_norm/moe_norm2 (s54, moe's SASS audit), NOT judge-checked** (layer budget for 10-26 spent: 20/20 checks, 10/10 submits). v90 H100 vs v89: v32 sl -1..2,
-full -3..4 us, v16 tie..-2 (NOTES s53). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x, #10 2.180x.
-NOTE: the first check below is now on v92 (= v91 + pr1 __ldcg) (= v90 + a cache-op-only correctness fix) (same plan; v90 differs from v89 only at T=128/256).
+Mains since v89 (all NOT judge-checked, H100-validated; NOTES s52-s59): v90 NORM_EARLY (T>=128) | v91 __ldcg moe_norm/norm2 |
+v92 pr1 __ldcg | v93 BND_SEP (T=8, v1 -1.0) | v94 G19_TRIG (T=16/32 boundaries PDL after g19, d16/d32 -1..2.8; TUNE g19trig) |
+v95 moe tk2h GS16+PF4 at T=16/32 (TUNE tk2h 3/4; G88 proxy d32 sl -9 proxy-us; H100 tuner picks tk2h 4 at T=32) | v96 NU8D.
+The 00:00Z check reads the H200 tuner lines for all of these ('layer tune T=8/16/32/256'). Persistent T<=8 tail: bounded
+<= 1-2 us on paper (s57), not built.
 
 ## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
-1. `okc check muse_decode_layer/submission.py --json` on main (v89). Compare per shape vs 703d3a7e (d1 69.6/77.8,
+1. `okc check muse_decode_layer/submission.py --json` on main (v96). Compare per shape vs 703d3a7e (d1 69.6/77.8,
    d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5; tools/ckparse.py). Expected:
-   v32 -8..14 us (moe_hot), v1 -1.6..1.9 (pr8 npf 212), g19 shapes -0.5..1.5 us (DEC3/DEC4), d1 -1..2 (evict_last, g13o). Submit if > 1.9954x.
-2. Copy the profile's 'layer tune' lines into NOTES (T=1 g13o for proj; T=256 hot 0/24/32/40 for moe; T=8 g19 picks).
-3. If v87's check loses on some shape vs 703d3a7e, bisect with ONE check of a DIAG build that forces the suspect
+   v32 -8..14 us (moe_hot, RG), v1 -2..4 (pr8 npf 212, BND_SEP, NU8D), d16/d32 -1..5 (G19_TRIG, tk2h), d1 -1..2. Submit if > 1.9954x.
+2. Copy the profile's 'layer tune' lines into NOTES (every T: which TUNE option the H200 picked, and by how much).
+3. If the check loses on some shape vs 703d3a7e, bisect with ONE check of a DIAG build that forces the suspect
    options per shape (the tuner lines in the log already A/B every TUNE option on the H200: read them first).
 4. Then: integrate new moe/proj Handoffs (stack several into one check), check, submit only on a beat.
-   Queued handoff: moe s33 RG = moe_routegather (r-moe 7ac1069; route+gather in one launch; moe H100 layer_ab v16 -1.1 us,
-   v32 tie). NOT a plain re-copy: layer's moe_src is patched (s21 L2H, s29 hot diff, v81 route PDL, v77 strided
-   moe_gathern for the fused pooler+router at T=256): port RG's kernel + RG flag onto moe_src, keep the strided-row read,
-   make it a TUNE option at T=128/256, A/B with tools/ab_flag.py, then stack into a check.
-   **DONE s52 = v89** (main): moe_routegathern, T=256 TUNE options {rg}, {rg, twf_split 1022/66}; H100 v32 -4.6..5.5 sl,
-   -7..8 full with twf_split (NOTES s52). So the first check next budget is on v89 (not v88): look for the H200 tuner's
-   T=256 pick ('layer tune T=256' lines) and v32 per-shape vs 703d3a7e.
 
 Mains since the board best (v70), all H100-validated (bench test 13/13, replay_test + route_judge 0 fails), details in
 NOTES s32-s44: v71 BND_SPLIT | v72 O_PF (d32/v16 sl) | v73 moe TK2F_L2H | v74 pr1_npf 0 at T=1 | v75 TUNE_BASE (H200-agreed
@@ -39,14 +27,6 @@ proj evict_last on all L2 prefetches | v81-v83 PDL edges in the routing glue | v
 DEC4 | v86 proj DEC3 (12-bit decode 3 instr/pair) | v87 moe_hot at T=256 (TUNE_BASE hot 32; H100 v32 -14 sl / -11 full) |
 v88 proj s36 pr8 bulk L2 prefetch after the wait (PR8_CFG npf 212; H100 ABBA 6 rounds v1 -1.9 sl / -1.6 full).
 
-## s45 (16:48Z): no build. H200 703d3a7e profile per shape re-read: every phase streams near its bare rate; what is left
-is latency chains between phases (d1: g13 qkv 11.4 | csl 4.2 | o 6.7 | bnd ~4.3 | pr1 20.8 | tk2f 28.7 | n2u 5.6 | bnd) and
-the experts (tk2f d32 82.6 = 42%) / g19 m32 (d32 2 calls 50.2): moe's and proj's lanes. All layer-side ideas on the list
-below were measured dead; a new layer gain needs a structural change, > 1 session: e.g. at T=1 launch pr1 earlier (PDL
-secondary of csl) and land part of the 48 MB pooler W in SMEM (up to ~200 KB x 132 SMs) during the latency-bound csl/o/bnd
-windows (~15 us at < 50% HBM); L2 prefetch for the same purpose was zero-sum (s2, s15, s34), SMEM residency is untested
-(risk: o GEMV and bnd then lack SMs). Only worth it with pr1 launched BEFORE o/bnd (megakernel o + grid barrier + bnd +
-pooler/router at T=1): in today's bnd-only window pr1 already loads its first chunk to registers and deeper npf lost on H200.
 **s32: v70 (909010f)** = proj QSS + moe twm AUTO K-split: check 0f065691 1.9754x; **submit 703d3a7e 1.9954x = board best**.
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
@@ -58,15 +38,6 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
 - **Best scored: 703d3a7e = v70 (909010f), 1.9954x (s32 14:00Z).** Previous: 371a17ee = v42 (cfd3bc5), 1.9558x, 11,566 us/step, overall #49** at 07:10Z 10-26 (#1 2.368x, #10 2.176x,
   #50 ~1.953x). Per shape (H200 us): d1 71.4/82.3, d16 145.1/223.9, d32 185.9/334.2, v1 120.5/132.4, v16 264.9/368.3,
   v32 368.0/544.3. Its check 9db0d4eb 1.9545x. (Old best e5512e00 1.9459 had moe's tk2f race; now superseded.)
-- **main = v44 (de763eb)** = v42 + moe 499bde6 (twm order overridden back to {}) + proj g19 s15 fixups + g19 T=32 pooler/unpool +
-  g19 qkv T=16 (+ cast): check c6a00da7 1.9608x: d1 72.1/80.3, d16 146.9/220.6, d32 167.4/317.6, v1 122.4/129.2, v16 273.8/360.5,
-  v32 345.9/519.3. NOT yet submitted (see ACTION).
-- v42 (cfd3bc5) = v41 + N2U_SLOT/N2U_PFW (n2u: slot-ordered y32, W L2 bulk prefetch) + g17 PDL at T=8 with
-  __ldcg x (the s8 "race" was ptxas hoisting __ldg above griddepcontrol.wait; see NOTES s14 SASS audit).
-- v41 (4afa8ea): TK2F_LATE_TRIG 3 (tk2f triggers PDL at each CTA's gemm2 rows; n2u / moe_norm2/3 as PDL secondaries).
-  Check 36073e6e 1.9526x.
-- Older mains v36-v41: NOTES s8-s14.
-- Budget 2026-10-26 (resets 00:00Z, after the sandbox ends): submits 9 of 10 used (1 left); checks 18 of 20 used (2 left) at 09:00Z (s15).
 - Judge noise: SGLang's own per-shape times move 2-6% between runs; identical code's per-shape ratios spread ~+-1.5%,
   total ~+-1%: one check cannot resolve <2% changes. Decide on H100 interleaved A/Bs (tools/ab_flag.py), check to confirm.
 - SGLang per shape (H200 us sliding/full): d1 171/183, d16 262-271/431-444, d32 261-268/614-634, v1 259-261/271-280,
@@ -172,8 +143,3 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
   attention is delayed/slowed by the same amount; a side-stream fork at graph START costs ~9 us.
 - GEMV with PDL preloading W before griddepcontrol.wait AFTER A BIG PRODUCER (s2: Triton o GEMV after attention): zero-sum. After small producers (norm2, csl at d1) it wins (v12-v14).
 - torch.mm(out_dtype=float32) instead of F.linear: same speed.
-
-## s48 (2026-10-26 17:40Z-17:50Z): housekeeping, no build, no judge runs (layer 20/20 checks, 10/10 submits for 10-26)
-- Board: #46 at 1.9954x; #1 2.380x, #10 2.208x. submission.py == build.py output (rebuilt, no diff); no tool reads
-  inputs from /tmp (only scratch trace files), so a fresh sandbox rebuilds from git alone. variants/ now gitignored
-  (the 5 tracked files stay). Next sandbox: unchanged plan (FIRST THING above: check main v88).

@@ -1167,3 +1167,27 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   W0 (tk2h 1) lost at d32 sl on seed 99 (+7): dropped from TUNE.
 - H100 tuner (synthetic skewed routing): T=32 sl default 225.5 vs {tk2h 4, lt:o} 220.2 -> picked; T=32 full -> {tk2h 4}
   (430.4 vs 432.4); T=16 sl/full tk2h +5 us -> not picked (synthetic T=16 has no >8-token expert).
+
+## s59 (2026-10-26 20:56Z-22:10Z, sandbox okc-night4, session 8): v96 = v95 + NU8D at T=8 (no judge runs: budget resets 00:00Z)
+- Board 21:00Z: we fell to #52 (1.995x, 11.34 ms); #1 2.380x, #10 2.208x. Per-load ratios vs SGLang (703d3a7e):
+  d1 2.43, d16 1.88, d32 1.68, v1 2.19, v16 1.93, v32 2.00 (geomean of loads): d32/d16 are the weak loads.
+- Both lead items were already done: T=8 norm3+unpool = nu8 (s26, H200 default), persistent tail bounded s57.
+  Built instead NU8D = nu8 without its sum-of-squares exchange (s26: ideal-vs-X ~2 us H100). The post-expert norm is
+  per SLOT (h = sum_i f_i rsqrt(ss_i/K+eps) y_i w1), so pull the per-slot scale out of the GEMV: nu8 D computes
+  P_i = W . BF16(y_i w1) per local slot (slots as mma N, up to 8 n-tiles), red.adds P_i over the 8 k chunks into
+  y32 rows 65..80 ([64 slots][1024]) and row-group-0 blocks red.add ss_i into y32[64][slot]; the pre-expert
+  _rmsnorm_gain zeroes the local slots' rows + ss after its wait (ZL; ~4 KB/program); the T=8 boundary (SC, SEP path)
+  forms sum_i f_i rsqrt(ss_i/K + eps) P_i over the token's local slots (masked [8, 1024] tile), then RB/BF16 as before.
+  Numerics: per-slot BF16 rounding of y w1 instead of one rounding of the weighted sum (same precision class);
+  scored v1 errors equal to 4 digits (5.841e-2 vs 5.839e-2 etc.).
+- Boundary versions (micro /tmp/bnd_micro.py, no PDL, X slabs = 3.9 us): per-slot loop with tl.sum inside 6+ us
+  (in-layer +3.3 us); [64, 1024] tile 128 regs / 78 spills; per-k-chunk P slabs = 3x X's bytes for the busiest
+  token (boundary at T=8 is per-program L2-bytes bound); [8]-vector slot scales cost ~1 us of layout conversion:
+  fixed by loading ids/tw (pre-wait) and ss as [8, NB] broadcast tiles. Final micro 4.9 us (its ids->load chain is
+  pre-wait in the layer).
+- H100 timeline v1 sl: tk2f end -> nu8 end 5.3 (X 5.6-6.3), nu8 end -> bnd end 3.5 (X 2.8-2.9).
+  ab_flag 6 rounds ABBA, SEEDS 99,7,13, tuner off: v1 sl 142.67/116.46/135.03 (X) -> 142.05/115.78/134.62 (D),
+  full 154.94/128.62/155.28 -> 154.64/128.15/154.87: -0.6..0.9 sl, -0.4..0.6 full (~+0.08% score).
+- Tests: bench test 13/13 (tuner on), scored_test v1 x2 0 bad, replay_test v1 x seeds 11,23 0/80, nu8 D unit vs torch
+  (/tmp/nu8d_unit.py: nl 0/5-7/30/64 local slots) ss and P rel err <= 5e-7. Default NU8_D True; TUNE[8] += {nu8d: False},
+  {nu8d: False, nu8x: False} (the H200 decides).
