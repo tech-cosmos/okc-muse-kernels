@@ -2204,7 +2204,14 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
   }
 }
 
-template <int NRT, int NC, int NSTG, bool GATED, int KPS>
+// s9 SA: e4m3 block scale byte k of w -> bf16x2 (both halves) of value * 2^118 without the LUT: exact for positive
+// normal scales (prepare() checks all of them, else SA = 0): bf16 bits = (e << 7 | m << 4) + (238 << 7).
+template <int K>
+__device__ __forceinline__ uint32_t sca(uint32_t w) {
+  return __byte_perm(w, 0u, 0x4040u | (K << 8) | K) * 16u + 0x77007700u;
+}
+
+template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA = false>
 __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* __restrict__ gs,
                                              const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
@@ -2270,7 +2277,13 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       if (++st == NSTG) { st = 0; ph ^= 1; }
 #pragma unroll
       for (int h = 0; h < KPS; ++h) {
-        const uint32_t sc[4] = {slut[sw[h] & 0xFF], slut[(sw[h] >> 8) & 0xFF], slut[(sw[h] >> 16) & 0xFF], slut[sw[h] >> 24]};
+        uint32_t sc[4];
+        if (SA) {
+          sc[0] = sca<0>(sw[h]); sc[1] = sca<1>(sw[h]); sc[2] = sca<2>(sw[h]); sc[3] = sca<3>(sw[h]);
+        } else {
+          sc[0] = slut[sw[h] & 0xFF]; sc[1] = slut[(sw[h] >> 8) & 0xFF]; sc[2] = slut[(sw[h] >> 16) & 0xFF];
+          sc[3] = slut[sw[h] >> 24];
+        }
         const int qq = q * KPS + h;
 #pragma unroll
         for (int ii = 0; ii < 2; ++ii) {
@@ -2596,7 +2609,7 @@ __device__ __forceinline__ void tk2f_norm(int* cnt, int M, const int* s_inv, con
   }
 }
 
-template <int NC, int NSTG, int KPS, bool DYN, bool FN = false>
+template <int NC, int NSTG, int KPS, bool DYN, bool FN = false, bool SA = false>
 __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     const uint4* __restrict__ Wq13, const uint32_t* __restrict__ S13, const uint4* __restrict__ Wq2,
     const uint32_t* __restrict__ S2, const uint32_t* __restrict__ lut, const float* __restrict__ gs13,
@@ -2733,9 +2746,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     }
   }
   int rb = 0;
-  tk2f_consume<512, NC, NSTG, true, KPS>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
+  tk2f_consume<512, NC, NSTG, true, KPS, SA>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
                                     empty, st, ph, rb);
-  tk2f_consume<256, NC, NSTG, false, KPS>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
+  tk2f_consume<256, NC, NSTG, false, KPS, SA>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
                                      empty, st, ph, rb);
   if constexpr (FN) {
     s_rt[tid] = rt;
@@ -2744,7 +2757,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
 }
 
-template <int NC, int NSTG, int KPS, bool DYN = false, bool FN = false>
+template <int NC, int NSTG, int KPS, bool DYN = false, bool FN = false, bool SA = false>
 static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const void* w2, const void* s2, const void* lut,
                        const void* gs13, const void* gs2, const void* x, const void* ids, int start, int count,
                        void* meta, void* sr, void* inv, void* inter, void* y, void* cnt, const void* tw = nullptr,
@@ -2755,11 +2768,11 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
     int dev, nsm;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
-    cudaFuncSetAttribute(moe_tk2f<NC, NSTG, KPS, DYN, FN>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    cudaFuncSetAttribute(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
   cudaStream_t st = at::cuda::getCurrentCUDAStream();
-  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN>, grid, (NC + 1) * 32, SMEM, st, false,
+  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA>, grid, (NC + 1) * 32, SMEM, st, false,
       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
       (const float*)gs13, (const float*)gs2, (const __nv_bfloat16*)x, (const int*)ids, nr, start, count, (int*)meta,
       (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D, (const float*)tw, (const float*)w1,
@@ -2793,6 +2806,8 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
     (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
     cnt_.data_ptr()
+  const bool sa = cfg >= 100000;  // + 100000: SA (arithmetic scale decode; prepare() checked the scales)
+  cfg %= 100000;
   const int D = (int)(cfg / 1000) - 1;  // cfg >= 1000: DYN with D = cfg / 1000 - 1
   cfg %= 1000;
   if (D >= 0) {
@@ -2802,6 +2817,10 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #define TK2F_ARGS 0, nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
     (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
     cnt_.data_ptr()
+  if (sa && D < 0) {
+    if (cfg == 402) return tk2f_go<8, 2, 4, false, false, true>(TK2F_ARGS);
+    return tk2f_go<8, 4, 2, false, false, true>(TK2F_ARGS);
+  }
   if (cfg == 204) return tk2f_go<8, 4, 2>(TK2F_ARGS);
   if (cfg == 208) return tk2f_go<8, 8, 2>(TK2F_ARGS);
   if (cfg == 402) return tk2f_go<8, 2, 4>(TK2F_ARGS);
@@ -3045,6 +3064,10 @@ def prepare(weights):
     st["gs13"] = weights["w13_gs"][:LOCAL].float().contiguous()
     st["gs2"] = weights["w2_gs"][:LOCAL].float().contiguous()
     st["lut"] = _scale_lut(dev)
+    # SA decode (s9) needs every block scale positive and normal (e4m3 exponent field 1..15, not NaN)
+    sfb = [weights[k][:LOCAL].contiguous().view(torch.uint8) for k in ("w13_sf", "w2_sf")]
+    st["sa"] = all(bool((((b & 0x80) == 0) & ((b & 0x78) != 0) & (b != 0x7F)).all()) for b in sfb)
+    del sfb
     st["cnt"] = torch.zeros(128, dtype=torch.int32, device=dev)  # moe_tk2f counters (zero between calls)
     st["w1"] = (1.0 + weights["post_norm_w"].float()).contiguous()
     torch.cuda.synchronize()
@@ -3072,7 +3095,8 @@ _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
 TK2_MAX = 32  # M above this: big-M path
 TK2F_DYN = 204  # M > 1 cfg; 5402 = DYN row tail (D = 4): H100 bs8-32 -3..4% but judge no gain (check b890d69b 2.125x)
-TK2FN = 1  # s9: post-expert norm fused into moe_tk2f (moe_tk2fn_launch; static cfg 204/402 only)
+TK2SA = 1  # s9: arithmetic e4m3 scale decode in moe_tk2f (when prepare() found all scales positive normal)
+TK2FN = 0  # s9: 1 = post-expert norm fused into moe_tk2f (moe_tk2fn_launch): judge bs1 +2 us (check 168fa04c), dead
 TK2F = 204  # decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
@@ -3103,7 +3127,7 @@ def kernel_fn(data, st):
         if TK2F:
             lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"],
-                                TK2F_DYN if M > 1 else TK2F)
+                                (TK2F_DYN if M > 1 else TK2F) + (100000 if TK2SA and st["sa"] else 0))
             lib.moe_norm2_launch(y32, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], POST_NORM_EPS, out,
                                  st["cnt"])
             return out

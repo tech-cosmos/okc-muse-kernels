@@ -3,6 +3,7 @@ import sys, os; sys.path.insert(0, '.')
 import torch, bench, submission, reference
 w, st = bench.state()
 submission.TK2F = int(os.environ.get("TK2F", "204"))
+submission.TK2SA = int(os.environ.get("TK2SA", "1"))
 bs = int(sys.argv[1])
 data = reference.generate_input(bs=bs, sharding="ep8", seed=int(sys.argv[2]) if len(sys.argv) > 2 else 7)
 submission.kernel_fn(data, st); torch.cuda.synchronize()
