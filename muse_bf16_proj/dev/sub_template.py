@@ -47,6 +47,7 @@ _G14_SRC = r'''@@GEMV14@@'''
 _G15_SRC = r'''@@GEMV15@@'''
 _G16_SRC = r'''@@GEMV16@@'''
 _G19_SRC = r'''@@GEMV19@@'''
+_G20_SRC = r'''@@GEMV20@@'''
 _G17_SRC = r'''@@GEMV17@@'''
 _R3_SRC = r'''@@ROUTER3@@'''
 _LT_SRC = r'''@@LT@@'''
@@ -95,11 +96,14 @@ BF16_G17 = {"unpooler": [(1, 4, 512), (1, 4, 256), (8, 4, 256), (8, 4, 128)]}
 BF16_G19 = {"qkv_gate": [(16, 1024, 8, 3, 2, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1)],
             "pooler": [(16, 1024, 8, 3, 2, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1)],
             "unpooler": [(16, 1024, 8, 3, 2, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1)], "o": [(16, 512, 8, 3, 2, 1, 1, 8, 1)]}
+# gemv20 (dev/gemv20.cu) = gemv19 with wgmma consumers (x by an SW128 tensor map). _diag20 only (print, no picks):
+# variant a = 1 block/SM (grid #SMs), b = 2 blocks/SM (grid 2 x #SMs, single-buffered A fragments, 1 partial buffer).
+# (m, kc, ap, ns) per layer; npre = ns, xb 1.
+DIAG20 = {"a": [(16, 1024, 4, 4), (16, 1024, 8, 3), (32, 1024, 4, 4), (32, 1024, 8, 2)],
+          "b": [(16, 1024, 4, 2), (16, 512, 4, 2), (32, 512, 4, 2), (32, 512, 2, 3)]}
 # _diag19 only (print, no picks): H200 behaviour of other configs in the layer case
-DIAG19 = {"pooler": [(16, 2048, 8, 2, 2, 1, 1, 8, 1), (16, 1024, 4, 3, 3, 1, 1, 16, 2), (32, 1024, 2, 3, 3, 1, 1, 16, 2),
-                     (32, 512, 2, 4, 4, 1, 1, 16, 2), (32, 1024, 4, 4, 4, 1, 1, 8, 1)],
-          "unpooler": [(32, 1024, 2, 3, 3, 1, 1, 16, 2)], "qkv_gate": [(32, 1024, 2, 3, 3, 1, 1, 16, 2)]}
-DIAG19_STREAM = [(24576, 3), (24576, 4), (24576, 8), (49152, 4), (12288, 8)]  # (stage bytes, stages): 50 MB bare streams
+DIAG19 = {}  # s10 diag configs measured (checks 9b09c536/60ddb481/f1319777): see NOTES-proj
+DIAG19_STREAM = []  # (stage bytes, stages): 50 MB bare streams
 _SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _LAYER_K = {"qkv_gate": 8192, "o": 1024, "pooler": 8192, "unpooler": 4096}
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
@@ -161,6 +165,19 @@ try:
 except Exception as _e:  # noqa: BLE001
     print("muse_proj gemv19 build failed:", _e)
     _g19 = None
+
+_g20 = {}
+for _v, _defs in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_SB\n#define G20_NPB 1\n")):
+    try:
+        _g20[_v] = load_inline(
+            name="muse_proj_g20" + _v,
+            cpp_sources="void g20_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
+                        "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+            cuda_sources="#define G20_ONLY2\n" + _defs + _G20_SRC.replace("G20_CONFIGS", " ".join(
+                "G20_CASE(%d,%d,%d,%d,1,1,1,8,1)" % c for c in sorted(set(DIAG20[_v])))),
+            functions=["g20_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+    except Exception as _e:  # noqa: BLE001
+        print("muse_proj gemv20", _v, "build failed:", _e)
 
 try:
     _lt = load_inline(
@@ -294,6 +311,9 @@ def prepare(weights):
             for cf in cfgs:
                 if ("g19", name, cf[1], cf[2], cf[7]) not in st:
                     st[("g19", name, cf[1], cf[2], cf[7])] = _pack19(c, cf[1], cf[2], cf[7])
+            for cf in [c_ for v_ in DIAG20.values() for c_ in v_] if _g20 else []:
+                if ("g19", name, cf[1], cf[2], 8) not in st and weights[name].shape[1] % cf[1] == 0:
+                    st[("g19", name, cf[1], cf[2], 8)] = _pack19(c, cf[1], cf[2], 8)
         st["ws19"] = torch.zeros(32 * 8192, dtype=torch.float32, device=weights["o"].device)
         st["ctr19"] = torch.zeros(2, dtype=torch.int32, device=weights["o"].device)  # [1] = gemv19's epoch counter
     for name, cfgs in BF16_G12.items():
@@ -336,6 +356,7 @@ def prepare(weights):
     st["ltws"] = torch.empty(LT_WS_BYTES, dtype=torch.uint8, device=r.device)
     st["pick"] = _tune(st)
     _diag19(st)
+    _diag20(st)
     _diag19_stream()
     st["rpick"] = _tune_router(st)
     return st
@@ -493,6 +514,50 @@ def _diag19(st):
                 med[1] = float("nan")
             print(f"diag19 {layer} m{m} {c}: after a 3 us PDL predecessor ({med[0] * 1e3:.2f}): pick {pick} +{(med[1] - med[0]) * 1e3:.2f} us, "
                   f"g19 FP32 out +{(med[2] - med[0]) * 1e3:.2f} us")
+
+
+def _diag20(st):
+    """Print only: gemv20 variants vs gemv19 (BF16_G19 configs) in the layer's case (3 us PDL predecessor), H200 us."""
+    if _g19 is None or not _g20:
+        return
+    g = torch.Generator(device="cuda")
+    g.manual_seed(5)
+    for layer, cfgs19 in BF16_G19.items():
+        for m in (16, 32):
+            w = st[layer]
+            xs = torch.randn(m, w.shape[1], generator=g, device="cuda").to(torch.bfloat16)
+            x = xs.clone()
+            o32 = st["ws19"][:m * w.shape[0]].view(m, w.shape[0])
+            ref = F.linear(xs.float(), w.float())
+            fns, names = [lambda: _g19.g19_pred(xs, x, 3000)], []
+            for c in cfgs19:
+                if c[0] == m and ("g19", layer, c[1], c[2], c[7]) in st:
+                    P, hdr, scale = st[("g19", layer, c[1], c[2], c[7])]
+                    fns.append(lambda P=P, hdr=hdr, scale=scale, c=c: (_g19.g19_pred(xs, x, 3000), _g19.g19_gemm(P, hdr, scale, x, o32, st["ctr19"], c[1], c[2], c[3], 1, _SMS, 0, 2, c[3], *c[5:])))
+                    names.append("g19%s" % (c[1:4],))
+            for v, cfgs in DIAG20.items():
+                if v not in _g20:
+                    continue
+                grid = _SMS * (2 if v == "b" else 1)
+                ctr = st.setdefault(("ctr20", v), torch.zeros(2, dtype=torch.int32, device="cuda"))
+                for c in cfgs:
+                    if c[0] != m or ("g19", layer, c[1], c[2], 8) not in st:
+                        continue
+                    P, hdr, scale = st[("g19", layer, c[1], c[2], 8)]
+                    run = lambda P=P, hdr=hdr, scale=scale, c=c, v=v, grid=grid, ctr=ctr: _g20[v].g20_gemm(P, hdr, scale, x, o32, ctr, c[1], c[2], c[3], 1, grid, 0, 2, c[3], 1, 1, 8, 1)
+                    try:
+                        o32.fill_(7.0)
+                        torch.cuda.synchronize()
+                        run()
+                        torch.cuda.synchronize()
+                        err = ((o32 - ref).norm() / ref.norm()).item()
+                    except Exception as e:  # noqa: BLE001
+                        print("diag20", layer, m, v, c, "failed:", e)
+                        continue
+                    fns.append(lambda run=run: (_g19.g19_pred(xs, x, 3000), run()))
+                    names.append("g20%s%s err %.1e" % (v, c[1:], err))
+            med = _graph_medians(fns)
+            print(f"diag20 {layer} m{m} (pred {med[0] * 1e3:.2f}):", " | ".join(f"{nm_} +{(t - med[0]) * 1e3:.2f}" for nm_, t in zip(names, med[1:])))
 
 
 def _diag19_stream():

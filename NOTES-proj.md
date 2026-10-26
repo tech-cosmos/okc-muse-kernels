@@ -320,3 +320,25 @@
   half-size rounds (9 of 8.73). H100 13.7 -> 13.1 us, but H200 (check 6b50e844, 1.3064x, diag) 14.21 vs 14.14: no gain.
   Kept as a tuner candidate (g13 call takes vt now).
 - Checks 10-26: 10/20 used (6b50e844). Scored 4/10.
+
+## Session 12 (2026-10-26 05:03 - UTC): gemv20 = g19 with wgmma consumers; why g19/g20 are consumer-bound
+- dev/gemv20.cu (namespace g20, same args as g19 + an SW128 x tensor map encoded per launch), sweep dev/g20.py (same
+  env as g19.py; PROF=1 = plain launches for ncu; DEFS=A=B values ok). Consumers: 8 warps = 2 warpgroups; warp w =
+  16-row group w (dec8 output = wgmma A fragment, unchanged packing); per k16 one wgmma m64nMk16 per WG, B = x chunk
+  as [KC/64][M][128 B] SW128 (TMA box {64, M}); A fragments double-buffered (wg_wait<1>); escape fixups read the
+  swizzled x. Correct first try (g20.py asserts incl. probe rows).
+- H100 full (MODE 2, PRED 3000): ties g19 (pool m16 20.45 vs 20.3-21.5, m32 KC512 24.8 vs 24.1). But KC 1024 at m32
+  (x 64 KB, xb 1, fits) is a real gain over KC 512: pool 22.1 vs 24.6, unp 21.5 vs 24.3, qkv 15.4 vs 16.7 (g19 likely
+  the same: the layer/handoff used KC 512 at m32).
+- Consumer-only (G19_NOW/G20_NOW, no W loads): g20 is NOT faster than g19 (pool m32 KC512 24.3 vs 23.3, m16 19.8 vs
+  17.7). Ablations on g20 NOW pool m16 KC1024 AP4: full 20.1, no wgmma 16.7, no decode 15.5, neither 13.1, neither +
+  no wgmma fence/commit/wait 12.1, no red/no fixups ~-0.5. Skeleton vs AP (stages per block): AP2 16.1-16.8, AP4
+  12.0-12.4, AP8 11.6-11.8 => ~0.28 us FIXED per stage per warp (mbarrier wait, tag, index math, lds, arrive) and
+  decode + mma add serially on top: 0.86 us/stage at AP4 m32 vs H200 HBM ~0.58 us/stage (18.4 KB per SM at
+  ~32 GB/s/SM) => consumer-bound on H200, as the s10 judge diag said. ncu: issue slots 27% busy, 2.44 warps/scheduler.
+  wgmma does not fix it; the fix is more independent consumer streams per SM (latency hiding).
+- 2 blocks per SM (G20_MINB=2, G20_SB single-buffered A, G20_NPB=1 partial buffer; grid 264; 89-93 regs; needs
+  cudaFuncAttributePreferredSharedMemoryCarveout 100, else 1 block/SM fits and the grid barrier HANGS: g20 now
+  TORCH_CHECKs co-residency via cudaOccupancyMaxActiveBlocksPerMultiprocessor): NOW pool m16 19.94 -> 16.67 us
+  (consumer throughput +20%); H100 full: ties at m16 (pool 21.1, qkv 13.1-13.8), loses at m32 (needs KC 512 to fit:
+  pool 22.8, unp 23.5, qkv 17.0 vs 1-block KC1024 22.1/21.5/15.4). H200 decides: _diag20 in prepare().
