@@ -49,6 +49,7 @@ _G16_SRC = r'''@@GEMV16@@'''
 _G19_SRC = r'''@@GEMV19@@'''
 _G20_SRC = r'''@@GEMV20@@'''
 _G17_SRC = r'''@@GEMV17@@'''
+_G21_SRC = r'''@@GEMV21@@'''
 _R3_SRC = r'''@@ROUTER3@@'''
 _LT_SRC = r'''@@LT@@'''
 
@@ -87,6 +88,12 @@ BF16_G16 = {"unpooler": [(16, 4, 4, 4, 128, 1, 2), (16, 4, 8, 2, 128, 1, 2)],
             "qkv_gate": [(16, 4, 4, 4, 48, 1, 2), (16, 4, 4, 4, 36, 1, 2)], "pooler": [(16, 4, 4, 4, 64, 1, 1)]}
 # BF16 small-m GEMV with router2's structure (dev/gemv17.cu: R whole rows per block, x in registers, no split K),
 # (m, R, T), H100 (dev/g17.py): unpooler-1k m1 5.66 vs 6.24 (gemv10), m8 7.65 vs 8.67; o loses (n = 8192).
+# gemv21 (dev/gemv21.cu): m=1 over gemv13's 12-bit packing with the weight stream in a TMA ring (one row per stage),
+# NG consumer groups of WG warps + a producer warp, rows by global ticket. (m, k, wg, ng, ns). H100 (dev/g21.py): slower
+# than gemv13 (qkv 15.1 vs 13.7: HBM-bound there, per-row consumer latency ~0.8 us); built for the layer's QG overlap
+# (few registers: csl fits beside it) and the H200, where gemv13 runs at ~2.6 TB/s.
+BF16_G21 = {"qkv_gate": [(1, 8192, 8, 2, 8), (1, 8192, 8, 3, 9), (1, 8192, 8, 3, 12), (1, 8192, 4, 4, 8)],
+            "pooler": [(1, 8192, 8, 2, 8), (1, 8192, 8, 3, 12)], "unpooler": [(1, 4096, 8, 2, 8), (1, 4096, 8, 3, 9)]}
 BF16_G17 = {"unpooler": [(1, 4, 512), (1, 4, 256), (8, 4, 256), (8, 4, 128)]}
 # gemv19 (dev/gemv19.cu, dev/g19_lib.py): TMA-ring streamer over the 12-bit weights, FP32 out zeroed in-kernel + red.add
 # split-K partials, then a BF16 copy (g19_cvt). (m, kc, ap, ns, npre). Built for the layer (PDL W prefetch during the
@@ -99,9 +106,10 @@ BF16_G19 = {"qkv_gate": [(16, 1024, 8, 3, 2, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1,
 # gemv20 (dev/gemv20.cu) = gemv19 with wgmma consumers (x by an SW128 tensor map). _diag20 only (print, no picks):
 # variant a = 1 block/SM (grid #SMs), b = 2 blocks/SM (grid 2 x #SMs, single-buffered A fragments, 1 partial buffer).
 # (m, kc, ap, ns) per layer; npre = ns, xb 1.
-DIAG20 = {"a": [(16, 1024, 4, 4), (16, 1024, 8, 3), (32, 1024, 4, 4), (32, 1024, 8, 2)],
+DIAG20_S12 = {"a": [(16, 1024, 4, 4), (16, 1024, 8, 3), (32, 1024, 4, 4), (32, 1024, 8, 2)],
           "b": [(16, 1024, 4, 2), (16, 512, 4, 2), (32, 512, 4, 2), (32, 512, 2, 3)],
           "c": [(16, 1024, 4, 2), (16, 512, 4, 2), (32, 512, 4, 2), (32, 512, 2, 3)]}  # c = gemv19 (mma.sync), 2 blocks/SM
+DIAG20 = {}  # s12 diag done (DIAG20_S12: all lose on the H200); nothing built
 # _diag19 only (print, no picks): H200 behaviour of other configs in the layer case
 DIAG19 = {}  # s10 diag configs measured (checks 9b09c536/60ddb481/f1319777): see NOTES-proj
 DIAG19_STREAM = []  # (stage bytes, stages): 50 MB bare streams
@@ -125,6 +133,7 @@ _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for
         _G15_SRC.replace("G15_CONFIGS", " ".join("G15_CASE(%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G15.values() for c in v}))) + "\n" +
         _G16_SRC.replace("G16_CONFIGS", " ".join("G16_CASE(%d,%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G16.values() for c in v}))) + "\n" +
         _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d,%d)" % c for c in sorted({c + (_LAYER_K[l],) for l, v in BF16_G17.items() for c in v}))) + "\n" +
+        _G21_SRC.replace("G21_CONFIGS", " ".join("G21_CASE(%d,%d,%d,%d)" % c[1:] for c in sorted({c for v in BF16_G21.values() for c in v}))) + "\n" +
         _R3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in [c for _, c in ROUTER_R3] + [c for v in ROUTER_R3_TUNE.values() for c in v])))
 try:
     from torch.utils.cpp_extension import load_inline
@@ -145,10 +154,12 @@ try:
                     "void g16_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
                     "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                     "void g17_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
+                    "void g21_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
+                    "int64_t, int64_t, int64_t, torch::Tensor, int64_t, torch::Tensor);\n"
                     "void pj_router3(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, "
                     "int64_t, int64_t);",
         cuda_sources=_SRC, functions=["pj_router2", "g7_gemv", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "g15_gemm",
-                                      "g16_gemm", "g17_gemv", "pj_router3"],
+                                      "g16_gemm", "g17_gemv", "g21_gemv", "pj_router3"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -168,7 +179,7 @@ except Exception as _e:  # noqa: BLE001
     _g19 = None
 
 _g20 = {}
-for _v, _defs in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_SB\n#define G20_NPB 1\n"), ("c", "")):
+for _v, _defs in [v for v in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_SB\n#define G20_NPB 1\n"), ("c", "")) if v[0] in DIAG20]:
     try:
         if _v == "c":  # gemv19 with 2 blocks per SM, exposed as g20_gemm
             _g20[_v] = load_inline(
@@ -383,6 +394,9 @@ def _run(st, layer, x, out, cand):
     elif kind == "g13":
         sm, nib, hdr, scale = st[("g13", layer)]
         _mod.g13_gemv(sm, nib, hdr, x, out, scale, *c[2:])
+    elif kind == "g21":
+        sm, nib, hdr, scale = st[("g13", layer)]
+        _mod.g21_gemv(sm, nib, hdr, x, out, scale, *c[2:], _SMS, st["cnt"][:0], 0, st[("tk21", layer, c)])
     elif kind == "g14":
         rows = out.shape[1]
         sw, nw, hdr, scale = st[("g14", layer, c[1], rows)]
@@ -445,6 +459,11 @@ def _tune(st, reps=25):
         for layer, cfgs in BF16_G17.items():
             for c in cfgs:
                 shapes.setdefault((layer, c[0]), []).append(("g17", c))
+        for layer, cfgs in BF16_G21.items():
+            if ("g13", layer) in st:
+                for c in cfgs:
+                    st[("tk21", layer, c)] = torch.zeros(1, dtype=torch.int64, device=st[layer].device)
+                    shapes.setdefault((layer, c[0]), []).append(("g21", c))
     if _g19 is not None:
         for layer, cfgs in BF16_G19.items():
             for c in cfgs:
