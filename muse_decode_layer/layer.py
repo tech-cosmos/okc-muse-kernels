@@ -541,7 +541,7 @@ if TK2_PDL13 or TK2_PDL2:
 """ % (int(TK2_PDL13), int(TK2_PDL2)))
 _G12_SRC = None  # @@G12@@
 # proj's gemv13 (m = 1) / gemv14 (m = 8) over losslessly compressed 12-bit BF16 weights (g13_src.cu / g14_src.cu =
-# r-proj 21bec6b, inlined by build.py; _compress/_pack13/_pack14 below = proj's). Only where the weight compresses
+# r-proj 3f173eb: bit-exact escape headers, inlined by build.py; _compress/_pack13/_pack14 below = proj's). Only where the weight compresses
 # (else gemv10/12 as before). H200 (proj judge): pooler m1 17.8 -> 15.5, qkv m1 11.5 -> 11.0, pooler m8 18.8 -> 16.3,
 # qkv m8 13.9 -> 13.0 us.
 _G13_SRC = None  # @@G13@@
@@ -552,10 +552,10 @@ G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
 
 
 def _compress(w):
-    """proj's lossless 12-bit BF16: sign|mantissa byte and 4-bit exponent code c = e - base per weight (base = max
-    exponent - 15; decoded exponent 112 | c, sums rescaled by scale = 2^(base - 112)); weights below the window are
-    escapes (code 0, byte 0, decoding to 2^(base - 127)) fixed by a per-row header of G13_ESC (col, delta / scale)
-    entries. None if a row has more than G13_ESC escapes."""
+    """Lossless 12-bit BF16 (gemv13/gemv14): sign|mantissa byte and 4-bit exponent code c = e - base per weight
+    (base = max exponent - 15; decoded exponent 112 | c, so sums are rescaled by scale = 2^(base - 112)); weights below
+    the window (zeros, tiny values) are escapes: code 0, byte 0 (decodes to 2^(base - 127)) plus a per-row header of
+    G13_ESC (col, true / scale) entries (exact; kernels subtract 2^-15 = 2^(base - 127) / scale). None if a row has more than G13_ESC escapes."""
     n, k = w.shape
     b = w.contiguous().view(torch.int16).int() & 0xFFFF
     e = (b >> 7) & 0xFF
@@ -569,12 +569,26 @@ def _compress(w):
     code = torch.where(esc, 0, code)
     sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F))
     scale = 2.0 ** (base - 112)
+    # empty slots: col 0, value 2^-15 (the kernels add x[col] * (value - 2^-15): exactly 0)
     hdr = torch.zeros(n, G13_ESC, 2, dtype=torch.float32, device=w.device)
+    hdr[:, :, 1] = 2.0 ** -15
     rows, cols = esc.nonzero(as_tuple=True)  # row-major order
     if len(rows):
         slot = torch.arange(len(rows), device=w.device) - torch.searchsorted(rows, rows)
         hdr[rows, slot, 0] = cols.int().view(torch.float32)
-        hdr[rows, slot, 1] = (w[rows, cols].float() - 2.0 ** (base - 127)) / scale
+        hdr[rows, slot, 1] = w[rows, cols].float() / scale  # BF16 over a power of two: exact in FP32
+    # round trip: every weight decodes to its original bits (else no compression for this weight)
+    dec = torch.where(esc, 0, (((sm & 0x80) << 8) | ((code + base) << 7) | (sm & 0x7F)))
+    dec = dec.to(torch.int32).where(dec < 32768, dec - 65536).to(torch.int16).view(torch.bfloat16)
+    if len(rows):
+        fix = (hdr[rows, slot, 1] * scale).to(torch.bfloat16)
+        if not torch.equal(fix.view(torch.int16), w[rows, cols].contiguous().view(torch.int16)):
+            return None
+        dec[rows, cols] = fix
+        if not torch.equal(hdr[rows, slot, 1] * scale, w[rows, cols].float()):
+            return None
+    if not torch.equal(dec.view(torch.int16), w.contiguous().view(torch.int16)):
+        return None
     return code, sm, hdr, scale
 
 
