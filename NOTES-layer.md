@@ -377,3 +377,23 @@
   (PDL after pr1); its ~1 us is not on the critical path the way the timeline suggests. Reverted: main = v38 code.
   LESSON: A/B kernel-code changes against the ORIGINAL binary (variants/sub_vNN.py from git), not a flag inside the
   modified binary: shared instantiations change for every T.
+
+## Session 13 (2026-10-26 05:55-07:10Z)
+- v40 (e964348): moe_src = r-moe 258d49d (TK2F_DYN 84204: tk2f writes y32 in route-slot order pre-scaled, moe_norm3 =
+  moe_norm2<true>; T=1 stays 204 for n2u). The layer's UNPOOL_PDL anchor ("__global__ void __launch_bounds__(512)
+  moe_norm2(") still matches (now under a template line, patches both). H100 ab_flag 3 rounds: d16 217.2/319.8 ->
+  215.9/319.0, d32 216.2/444.2 -> 215.4/443.3. POOLER_BMM[32] = 4 slabs: tie (dead).
+- H100 d32 sliding timeline (v40): qkv splitK 16.9 + reduce 2.0, nds 13.8, o 9.0, boundary 4.0, router_split 6.9 ||
+  pooler bmm 32.4 (s143; _routing starved until it ends), rmsnorm 2.0, tk2f 97.7, norm2 4.0, unpool 26.7, boundary 4.3.
+  Non-expert bytes ~197 MB (59 us H100 floor) vs ~119 us: the m32 GEMMs are the layer-side gap (proj lane, g19 m32).
+- v41 (4afa8ea): TK2F_LATE_TRIG 3 (layer.py text patch of moe_src's tk2f): the start-of-kernel
+  griddepcontrol.launch_dependents is removed and every CTA triggers when it reaches its gemm2 rows (between the two
+  tk2f_consume calls); n2u (T=1, N2U_CFG (8, 1)) and moe_norm2/3 (T>1, g_pdl 4 -> 6) are PDL secondaries. Dependents
+  now land on SMs freed by drained tk2f CTAs (the old start trigger let them co-reside and slow tk2f: s8 dead ends).
+  H100 d1 timeline: n2u starts 2 us before tk2f ends; tail (tk2f end -> boundary end) 10.0 -> 8.6 us. Variants (H100
+  bench, 2 rounds, us): 1 = trigger at CTA end: d1 -0.5/-0.2; 2 = gemm2 start, T=1 only: d1 -0.9/-0.7; 3 = 2 at all
+  T + norm2 PDL: d1 -0.9/-0.8, d16 -2.7/-1.1, d32 -0.5/-1.0, v1 -0.7/0.0 (geomean proxy 1.540 -> 1.546). Tests 13/13,
+  tk2f_stress 0/600, scored_test 0, replay_test 0.
+  Check 36073e6e **1.9526x** (11,585 us): d1 70.9/80.7 (best ever; v36 72.1/83.7), d16 147.7/222.3, d32 177.2/330.0,
+  v1 120.4/126.8, v16 267.9/361.8, v32 354.1/550.3. Beats board 1.9459 by noise-level 0.35%: NOT submitted (last spare
+  of 9 today); submit first thing after 00:00Z 2026-10-27 (or today if a later check clearly wins).

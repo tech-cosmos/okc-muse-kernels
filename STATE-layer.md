@@ -1,11 +1,14 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~05:55Z (end of session 12).
+Updated 2026-10-26 ~07:10Z (end of session 13).
 
 ## Board
 - **Best scored: e5512e00 = v33 (bb6fb77), 1.9459x, 11,624 us/step**, overall #56 at 04:50Z (#1 2.360x, #10 2.176x,
   #50 ~1.953x). v33 contains moe's old tk2f race (lead asked about withdrawing it: see COORD Judge runs line).
-- main = v38 code (s12 commits only add notes + a parse check in build.py; v39 9762bf6 XN reverted, check e6e0a00b 1.926x).
+- **main = v41 (4afa8ea)**: v38 + moe 258d49d (norm3, v40) + TK2F_LATE_TRIG 3 (tk2f triggers PDL at each CTA's gemm2
+  rows; n2u / moe_norm2/3 as PDL secondaries). **Check 36073e6e 1.9526x** (11,585 us; d1 70.9/80.7, d16 147.7/222.3,
+  d32 177.2/330.0, v1 120.4/126.8, v16 267.9/361.8, v32 354.1/550.3). NOT submitted (only the spare left today):
+  **SUBMIT v41 (or better) FIRST THING after 00:00Z 2026-10-27** (also replaces the racy e5512e00 if it scores higher).
 - v38 (d664b23) = v37 + proj pr8 at T=8 (same fusion with gemv14 pooler; H100 v1 -1.7/-1.8 us): check 0602febf
   1.936x (noisy run; v1 full +6.8 vs v37 unexplained: re-check before trusting; T=8 off = PR1_TOKENS (1,)).
 - v37 (d411cf4) = v36 + proj pr1 at T=1 (pooler+router+top-8 one launch; H100 d1 -2.4/-1.9 us) + moe 2466fac
@@ -15,7 +18,7 @@ Updated 2026-10-26 ~05:55Z (end of session 12).
   543b6ca9 scored 1.9395x (noise). Per shape (H200 us ours, ratio): d1 72.1/83.7 (2.369/2.174), d16 150.1/225.4
   (1.747/1.912), d32 181.1/311.0 (1.443/1.974), v1 121.6/132.8 (2.133/2.043), v16 273.0/359.4, v32 351.8/527.1.
 - Budget 2026-10-26 (resets 00:00Z): submits 8 of 9 used (keep the last as spare unless a check clearly wins);
-  checks 13 of 20 used at 05:50Z (s12).
+  checks 14 of 20 used at 07:05Z (s13).
 - Judge noise: SGLang's own per-shape times move 2-6% between runs; identical code's per-shape ratios spread ~+-1.5%,
   total ~+-1%: one check cannot resolve <2% changes. Decide on H100 interleaved A/Bs (tools/ab_flag.py), check to confirm.
 - SGLang per shape (H200 us sliding/full): d1 171/183, d16 262-271/431-444, d32 261-268/614-634, v1 259-261/271-280,
@@ -28,7 +31,7 @@ Updated 2026-10-26 ~05:55Z (end of session 12).
 ## Code (muse_decode_layer/)
 - `layer.py` = the layer. Inlined by **`python build.py` -> submission.py** (never edit submission.py by hand):
   `attn_src.py` = ~/attn submission.py @82866c6 (kernel_fn -> attn_kernel_fn, constexpr np2 fix, csl::decode patched
-  to trigger PDL dependents); `moe_src.py` = r-moe d899a76 (TK2F 204; T<=32 = moe_tk2f one launch; names prefixed `_moe_`; T>32 = its kernel_fn (moe_twf: gemm13+gemm2 in one persistent launch); layer.py patches moe_norm2 to
+  to trigger PDL dependents); `moe_src.py` = r-moe 258d49d (TK2F 204 at T=1, TK2F_DYN 84204 + moe_norm3 at T>1; tk2f trigger text-patched by TK2F_LATE_TRIG; T<=32 = moe_tk2f one launch; names prefixed `_moe_`; T>32 = its kernel_fn (moe_twf: gemm13+gemm2 in one persistent launch); layer.py patches moe_norm2 to
   trigger dependents); `g10_src.cu` = proj gemv10 (r-proj d894f4e, m=1), `g12_src.cu` = proj gemv12 (r-proj e71d015,
   m=8), `g13_src.cu`/`g14_src.cu` = proj gemv13 (m=1)/gemv14 (m=8) over lossless 12-bit BF16 (r-proj 3f173eb, bit-exact escape headers; packs `_pack13/_pack14` in `_g12_prepare`, used for qkv+pooler (G13_CFG/G14_CFG) when the weight compresses, built in `_g10_lib`), `lt_src.cu` = proj cuBLASLt explicit-algo GEMM (LT_CFG fixed H200 picks, `_lt_prepare`); layer.py `_g10_lib` builds g10/g12 in one load_inline and text-patches them (PDL trigger, PDL-secondary launch).
   Re-copy: `git -C ~/r-moe show <c>:muse_moe_w4a16/submission.py > moe_src.py` (check the 68-int route meta
@@ -70,6 +73,9 @@ Updated 2026-10-26 ~05:55Z (end of session 12).
    boundaries where the next kernel can't start until the 1-CTA/SM experts kernel drains. Remaining layer idea with
    real size: one persistent kernel for experts -> norm2 -> unpool -> boundary at T<=8 (CTAs move on to unpool rows
    as their expert rows finish, grid-wide counters; the boundary by the last finisher), est. -4..6 us d1/v1.
+   s13 v41 took the cheap part (dependents launch on drained SMs: H100 tail 10.0 -> 8.6). Next cheap one: the same
+   late trigger for g17 at T=8 (after norm3) / cuBLAS unpool can't; boundary-2 is already a PDL dependent.
+   Layer-side gap at T=16/32 is the cuBLAS GEMMs (H100 d32: non-expert ~119 us vs ~59 floor): proj's g19 m32 lane.
 0. Watch r-moe / r-proj Handoffs; re-copy + rebuild + test (bench.py test, tools/scored_test.py, tools/tk2f_stress.py N,
    tools/replay_test.py, tools/route_judge.py if upstream of the router changed) + H100 A/B (tools/ab_flag.py) + check.
    The layer calls moe_tk2f_launch directly at T=1 (`_experts_n2u`, cfg + 100000 for SA) and reimplements moe_norm2 in
@@ -85,6 +91,7 @@ Updated 2026-10-26 ~05:55Z (end of session 12).
 3. Experts are 50-60% of every T>=16 shape and 27 us of d1's 72 (moe lane: tk2f ~63% of H200 HBM peak at d1).
 
 ## Dead ends (details in NOTES)
+- s13: pooler bmm 4 slabs at T=32 (tie). LATE_TRIG variants 1 (trigger at CTA end) < 2 (gemm2 start, T=1) < 3 (all T).
 - s12: XN (pre-expert rmsnorm inside tk2f: +0.2..0.7 us as its own instantiation; in the shared one it slowed
   d16/d32 by 1-2 us), UPF (tk2f L2-prefetches the unpool slice: tie). A/B kernel edits against the original binary.
 - s10: g19 at T=32 (H200: proj diag + check 5cf5247d); g19 pooler on all 132 SMs (router starved, +4 us H100); router3
