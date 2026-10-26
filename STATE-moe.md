@@ -71,6 +71,10 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 23 summary (NOTES s23)
+- Layer v77 has TK2F_L2H 1; mode 4 vs 1 in a layer copy (H100, 6 rounds): tie on d1/d16/d32/v1. Keep the layer on 1.
+- Big-M re-checked: items at the dq/MMA floor + ~20 us wave tail; no H100 lever left without a cheaper dq.
+
 ## Session 22 summary (no speedup, no judge runs; NOTES s22)
 - Dead: FA3-style pingpong of the 2 consumer WGs (microbench 721 vs 737 cyc), dq without the bf16 multiply (no better
   overlap: the dq/wgmma serialization is not an FP16-pipe conflict), TWM_FN = moe_norm fused into twm's drain (4

@@ -672,3 +672,15 @@
     v4 (per-warp atom.acq_rel + queue, s_need prologue): v16 +5.1, v32 +1.5
   moe_norm as a PDL secondary is already resident when twm ends (~3 us of real work); fusing saves at most the
   launch, and any ticket work on the items costs as much. Dead.
+
+## Session 23 (2026-10-26 14:55Z - ~15:10Z) -- TK2F_L2H mode 4 vs mode 1 inside layer v77: tie; lane status
+- Layer v77 (r-layer 39e9919) carries TK2F_L2H 1 (s21 handoff line); main has mode 4. A/B in a /tmp copy
+  (/tmp/moe23/L, mode 4 = 2-line sed on moe_src.py, TUNE = {} appended to both, tools/ab_files.py, 6 rounds, A/B/A2):
+  d1 88.21/88.50/88.43 sl, 108.29/108.67/108.55 full; d16 204.73/205.35/204.62, 305.82/306.70/307.46;
+  d32 200.30/201.07/200.79, 430.24/430.95/431.01; v1 148.96/149.18/149.45, 161.60/161.43/161.94 (H100 us).
+  => mode 4 = mode 1 within A-vs-A2 noise. No request to layer (keep mode 1).
+- Budget arithmetic re-done for big-M (H200, s16/s18 numbers): light RT4 N8 items run at 31.7 GB/s/SM consumer-bound =
+  the H200's per-SM HBM share; hot RT2 N64 items are at wgmma peak (512 of 737 cycles MMA). So twm ~= sum of item
+  times / 132 + wave tail (~20 us, s19/s20). Without a cheaper dq (exhausted s11/s17/s22) big-M has no lever left;
+  a separate N128 hot kernel saves ~5% of hot-pass time only (dq 377/2 + MMA 512 vs 737 cycles per 64 tokens).
+- No judge runs (moe checks 20/20 used today; sandbox ends ~19:10Z before the reset).
