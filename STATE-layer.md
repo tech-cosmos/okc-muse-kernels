@@ -1,10 +1,17 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~13:55Z (session 33: main = v71 = v70 + BND_SPLIT, NOT judge-checked; budget for 10-26 spent).
+Updated 2026-10-26 ~15:20Z (session 34: main = v72 = v71 + O_PF, NOT judge-checked; budget for 10-26 spent).
+
+**s34: main = v72 (6baba9e)** = v71 + O_PF {32: 0.5, 128: 0.5}: sliding attention (nds at d32, nvs at v16) L2-prefetches
+half of o's W after each CTA's last K/V load (TUNE option {"o_pf": 0} at T=32/128). H100 ab_flag d32 sl -1.3/-1.5,
+v16 sl -0.8/-1.5 us; d16/v32/full layers lose or tie (off). Tests 13/13, scored all x3 0 bad, replay all 0/20 x2 seeds.
+FIRST CHECK OF THE NEXT SANDBOX: main (v72) as-is; compare per shape vs 0f065691/703d3a7e (v71 est. +0.2..0.3%,
+v72 +0.1%: d32 sl, v16 sl). Submit if it beats 1.9954x.
+Dead this session (NOTES s34): prefetch at nds start (zero-sum), POOL_PF (boundary prefetching the cuBLAS pooler at
+T=128), O_PF on _gd_full (full layers), NDS splits 4/16, split qkv/gate (d1 ~zero, only d16 could gain).
 
 **s33: main = v71 (a47269b)** = v70 + BND_SPLIT (_boundary row over SPL programs, redundant norms, sliced stores;
 bit-identical). H100 ab_flag: d1 -0.5/-1.0, v1 -1.1/-0.1, d16 -1.5/-1.9, d32 -1.5/-1.4 us; T=128/256 off (loses).
-FIRST CHECK OF THE NEXT SANDBOX: main (v71) as-is; compare per shape vs 0f065691/703d3a7e (est. +0.2..0.3%).
 
 **s32: main = v70 (909010f)** = v69 + proj QSS (qkv T=32 as 2 FP32 bmm slabs, summed in attention; TUNE qss, default on)
 + moe s20 twm AUTO K-split (TUNE twf_split 1022 at T=128/256). Check 0f065691 1.9754x; **submit 703d3a7e 1.9954x = board

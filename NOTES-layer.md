@@ -781,3 +781,28 @@
 - Considered, not built: moe_norm2 at T=16/32 split over columns. tk2f-side sums of squares (PF & 16) costs tk2f +2.4 us
   (s26 NU8_X note), and a spin/ticket split inside the norm saves at most ~1 us (the 1-block-per-token norm2 is ~3.6 us
   H100 after tk2f's end incl. the PDL release).
+
+## s34 (2026-10-26 13:44Z-): v72 O_PF (no judge runs: today's budget is spent)
+- H100 d1 timeline (idle GPU, v71): g13 0-14.0, csl 14.5-18.9, o g10 15.5-23.6, boundary 21.4-26.3, pr1 22.8-45.5,
+  rmsnorm 30.9-46.5, tk2f 46.0-83.6, n2u 79.5-87.9, boundary 84.0-89.8. d16: tk2f end 183.5 -> norm2 187.3 -> g19 unpool
+  208.2 -> boundary 212.0. d32: qkv 16.7, nds 17.2-30.3, combine -33.2, o nvjet 33.7-42.4 (8.7 us for 16.8 MB).
+- v72 O_PF {32: 0.5, 128: 0.5} (6baba9e): attention kernels take (pf_ptr, pf_bytes); nds/nvs's producer warp, after its
+  last K/V load is issued, bulk-L2-prefetches its CTA's share of the first half of o's W (g19 o pack when the tuner
+  picks g19:o). csl has the hook too (after its PV MMA) but is off (d16 loses). TUNE option {"o_pf": 0} at T=32/128.
+  H100 ab_flag (same state): d32 sl 202.84 -> 201.36, 203.10 -> 201.76 (fraction 1.0: -0.2; 0.3/0.7 -0.7); v16 sl
+  310.33 -> 309.50, 310.74 -> 309.18, 0.5 best of 0.3/0.5/0.7/1.0; v32 tie (off); d16 (csl, o g19) 0.5 +0.6, 1.0 +1.6 (off).
+  Prefetch at nds START: o 8.7 -> 6.5 but nds 13.0 -> 16.0 (zero-sum; same as s2's side-stream results).
+  NDS splits S 4/16 vs 8: +0.5/+2.8 (8 stays). Tests 13/13, scored sliding x2 0 bad, replay sliding 0/20 per shape.
+- DEAD POOL_PF (first boundary's extra programs L2-prefetch 8/16/24 MB of the cuBLAS pooler W at T=128): H100 v16 sl
+  300.18 -> 300.93/301.76/301.90 (the boundary's PF programs retire only when their bulk prefetches land, so the
+  non-PDL pooler starts later; same reason UPF3_AT 1 lost). Prefetch only pays from a kernel that runs long anyway.
+- DEAD O_PF on full layers (_gd_full, prefetch after each program's cp.wait_group(0), 1 chunk per lane): H100 ab_flag
+  d1 full 109.10 -> 109.57 (0.5) / 110.33 (1.0); d32 full 430.22 -> 430.26 / 431.70; d16 full 309.90 -> 310.61 / 312.21.
+  Full attention is HBM-bound (d16/d32) or o is a PDL-preloading g10 (d1). Also d16 sliding with cuBLAS o + O_PF 0.5:
+  208.72 -> 208.41 (noise); g19:o without PF 207.97. Patch not kept (re-derive from this note if needed).
+- Considered, measured, not built: split qkv into q/k/v (1280 rows) + gate (1024 rows, needed only after attention)
+  so the gate GEMV hides behind latency-bound attention. H100 g13 first-op in a graph: 2304 rows 14.21, 1280 rows 10.37,
+  gate 1024 rows 8.64 us (ramp-dominated). d1: -3.8 on qkv but the gate (8.6) outlasts csl (4.4): ~zero. d32 sliding:
+  nds holds the SMs' smem (2 CTAs/SM), full layers are KV-HBM-bound: only d16 sliding (csl) could hide it (~-4 us H100,
+  needs g19 split + csl ungated FP32 out + gated o GEMV or a cuBLAS-side gating pass). Est. <= +0.3%: parked.
+- Tests on v72: bench test 13/13; scored_test all 12 shapes x3 seeds 0 bad; replay_test all shapes 0/20, seeds 11+12.
