@@ -1,10 +1,10 @@
 # STATE-moe (muse_moe_w4a16)
 
 ## Board
-- Best submit: 9a73c24a84054989 @9aa37e0, **2.176x** (2026-10-26 01:05Z; check 74a049c0 same code 2.180x), #46.
-  Previous: ee945887 2.131x @128b11a. Top of board 2.55x (#10 2.37x, #20 2.31x).
-  Used 2026-10-26: checks 4 of 20, submits 2 (lead cap 9). Per-shape (submit 9a73c24a / check 74a049c0):
-  bs1 28.0/28.9, bs16 94.5/96.4, bs32 134.1/129.4, bs8 72.2/67.5, bs128 202.1/195.6, bs256 250.0/247.0.
+- Best submit: 6a92803ae4fc4a11 @f64440a, **2.190x** (2026-10-26 02:16Z; check 64c725e6 same code 2.205x), SA scale decode.
+  Previous: 9a73c24a 2.176x @9aa37e0. Top of board 2.55x (#10 2.37x, #20 2.31x).
+  Used 2026-10-26: checks 7 of 20, submits 3 (lead cap 9). Per-shape (submit 6a92803a / check 64c725e6):
+  bs1 28.8/27.1, bs16 93.9/94.5, bs32 128.7/128.8, bs8 67.0/71.0, bs128 197.4/203.0, bs256 248.0/246.5.
   Table below = s7 (ee945887) for reference.
   | load | bs | SGLang | ours | x | floor | s6 (fa39ed7) |
   |---|---|---|---|---|---|---|
@@ -23,6 +23,9 @@
   (tensor maps!) in the state. bench.py test runs a cloned state now.
 
 ## What's on main (submission.py)
+s9: TK2SA = TWSA = 1: e4m3 block scales decoded arithmetically (sca<K>(w) = __byte_perm(w,0,0x4K4K)*16 + 0x77007700)
+in tk2f_consume and tw_item (moe_twf) when prepare() found every scale positive normal (st["sa"]); else the smem LUT.
+moe_twf's choice is a host flag (moe_set_sa, set in kernel_fn). TK2FN = 0: fused norm (moe_tk2fn_launch) kept, dead.
 M <= 32 (decode, bs8): 2 launches, moe_tk2f (gemm13 rows then gemm2 rows in ONE persistent launch: one routing
 prologue, the ring continues, so the producer streams w2 while gemm13 drains) + moe_norm2.
 - s8: template <NC, NSTG, KPS, DYN>; KPS = k chunks per consumer warp per ring stage (stage = NC*KPS*1152 B).
@@ -84,6 +87,11 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 9 summary
+- 2.176x -> 2.190x (submit 6a92803a): arithmetic scale decode (SA) in decode tk2f: -5.7% instructions. Same in big-M
+  twf (-3% instr): judge noise, kept. Dead: fused post-expert norm in tk2f (judge bs1 +2 us, check 168fa04c).
+  bs1 anatomy (H100): routing 2 us, first data 4.4, phases ~3 TB/s, norm2 4.4 + gap; see NOTES s9.
+
 ## Session 8 summary
 - 2.131x -> 2.176x: tk2f stages of KPS = 2 k chunks per warp (NSTG 4, same 72 KB ring): fewer per-stage ops
   (-5% instructions), H200 bs8-32 -3..4%. KPS 4 (402): -6.5% instr but judge tie (2.157x). DYN row tail: H100 win,
@@ -92,11 +100,12 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - LESSON: the local H100 is DRAM-bound for decode (ncu dram 83%), the H200 is consumer-issue-bound: rank decode
   changes by smsp__inst_executed and stalls, not by H100 time; then a judge check.
 
-## Session 7 summary
-- 2.061x -> see Board: decode gemm13+gemm2 fused into one launch (moe_tk2f); found + worked around a race
-  in it (NOTES s7). Tools added: sweep_routings.py, race_ab.py, ab_decode.py, readbound.py.
-
 ## Ranked ideas
+00. (s9) Instructions still rule the H200 decode: tk2f gemm13 row loop = 1391 SASS instr/warp/row vs 832 for dq+mma
+   (before SA; SA took ~100 of the ~560 overhead). Next targets: ~137 address IMADs + 43 LEA (precompute smem
+   addresses per stage: NSTG=4 -> unroll the ring so stage offsets are constants), per-row reduce/epilogue (accumulate
+   2 rps before the cross-warp reduce), CS2R zeroing. Measure with tools/ncu_tk2f.sh (inst_executed), then judge.
+   bs1 (27-29 us vs 11.4 floor): routing prologue 2 us + first stage 2.4 us + norm2 4.4 us are fixed costs.
 0'. (s8) Cut consumer instructions further (that is what moved the H200): 16-token segments (idea 0 below, now
    on top of the KPS loop: tk2f_consume), fewer scale-LUT ops (4 LDS + extracts per kc), per-row reduce.
    bs1 (28 us vs 11.4 floor): 2-3 experts only, 2.1 TB/s locally; long_scoreboard stalls highest there: look at the
@@ -120,7 +129,9 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
    moe_route (multi-CTA route) -1 launch (~3 us).
 4. Clean-up: remove moe_sk / moe_tk / moe_gemm / route2 / act / moe_tb / moe_big / RT 2 moe_tw (~55 s compile).
 
-## Dead ends
+## Dead ends (older ones: NOTES-moe.md)
+- (s9) Post-expert norm fused into tk2f (last-M-CTA tickets, one-pass register norm): judge bs1 +2 us (168fa04c).
+  Also s7's grid-barrier version. A separate norm2 kernel is as cheap as any in-kernel tail on the H200.
 - (s7) norm fused into moe_tk2f behind a grid barrier (worse, bs1 +3 us); L2 bulk prefetch of next rows in tk2f
   (much worse); memset node for counters (+2.6 us; keep counters in state, zeroed by norm2).
 - (s6) moe_tw with 16 consumer warps x RT 1 (cfg 1118): 115M vs 78M instr, local +10%. Decode NSTG 6/12 (judge -5%).
@@ -135,12 +146,5 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   48-64 B; rows balanced by count while NG=2 rows cost more), one bs32 routing 12% faster. Reverted.
 - Register-ring stream-K decode (moe_sk, s3): ~19-21 instr/word, latency-bound (13.9 cycles/issue at 4
   warps/scheduler); TMA ring + x in registers is what worked.
-- moe_tk with NC=16 consumer warps: worse than NC=8 (proxy 186 vs 159 at bs16).
-- moe_big with 2 row tiles/warp (8 warps): spills at 128 regs, worse. 16 warps x 1 rt, 1 CTA/SM: worse
-  than 8 warps x 2 CTA/SM (tail: halving item size helped 10%). NS=4: worse than NS=8.
 - moe_stream (decode): old item structure + per-lane cp.async ring of weights AND x (no barriers, D=7 ahead
   across items), 1 CTA/SM: slower (bs32 178/115 vs 147/75 us): 2 warps/scheduler can't issue enough.
-- Bigger G with the K-split design: worse (activation traffic, registers).
-- Warp-independent full-K items with rolling D-chunk register prefetch (no smem reduce): bs16
-  155-175 vs 136 us, bs32 213-237 vs 191 (x loads not prefetched, 2 CTAs/SM).
-- minBlocks 5 for (1,1): spills, much worse (63/162/230/133).
