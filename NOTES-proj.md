@@ -1137,3 +1137,28 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   d32 full 413.5 -> 412.5 / 413.0. H100 is W-bound; the H200 (consumer-bound g19) should gain more.
 - Submission: print-only _diag24 (DIAG24: pool/unp m16 x2 cfgs + m32 x2, qkv m16 x2 + m32, o m16/m32; grids 132/108;
   +~1 min compile) beside _diag19d for the 00:00Z check. bench.py test 39/39, esc PASS.
+
+## s54 (2026-10-26 22:09-22:45Z, sandbox okc-night4, session 11): gemv24 SK (stream-K over ring stages): H100 layer d32 WIN
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z).
+- G24_TRACE (dev/s53/gemv24.cu + g24.py DEFS=G24_TRACE): per-warp globaltimer start/end after the wait, per-block ends.
+  H100 G132 static g24: m32 KC512 (2.6 tasks/warp) warps do 2 or 3 tasks: ends 10-12 us (2 tasks) vs 17-20 (3 tasks),
+  intra-block spread ~6 us; m16 KC1024 nq 0-1 (qkv: only ~27% of warps have a task). Coarse task quantization.
+- SK (template RR = R | 256; host decodes rr >> 8): block b owns global stages [SG b/G, SG (b+1)/G), warp w an equal
+  contiguous 1/WPB of them, flushing partials at every task boundary it crosses; escape fixups restricted to the segment's
+  k range [ks KC + st0 AP 32, ks KC + st1 AP 32) (bug found by the probe row: x offset must stay col - ks KC). ESCW 20 reps
+  PASS, bench test 39/39, esc PASS. With SK the work is balanced (10-11 stages/warp) but ends still spread 11-20 us
+  (per-warp HBM share variance, not quantization).
+- DEAD: DYN (block-local smem chunk claims, lane 0 claims at issue time, per-warp fifo, merges contiguous chunks):
+  C=1/2 +5..25 us (flush per chunk), even C=SPK (no extra flushes) +4 us vs static. Code dropped (not committed).
+- Standalone after a 3 us pred (us, SK | static, best cfg each), H200 proxy G88 x2 runs: qkv m16 11.4 | 11.8, m32 13.9 |
+  14.9; o m16 7.2 | 6.7, m32 9.0 | 8.2 (o loses); pool m16 20.3 | 19.5, m32 21.1 | 21.5; unp m16 20.9 | 19.9, m32 21.3 | 22.1.
+  bench diag24 (H100) G108: pool m16 (16,1024,2,4,16) 21.5 static | 19.5 SK, (16,1024,4,3,12) 19.1 static; unp m16 23.4 | 20.1.
+- Layer (copy of r-layer working tree incl. layer's uncommitted g24 s65 in /tmp/pj54/L; tools/ab_flag.py TUNE {}, 5 rounds
+  x seeds 99,7): T=32 g24sk pool+unp: d32 sl -1.3/-1.9, full -1.5/-1.1 us (WIN); g24sk qkv at T=32 +1..1.5; T=16 all
+  g24sk +0.4..0.9 (lose on H100). Layer tests 13/13 with g24sk forced at T=16/32 (pool/unp/qkv).
+  ab_files T=16 pooler cfg (16,1024,4,3,12,2,1) vs layer's (16,1024,2,4,16,2,1): sl -0.8, full tie; + unpool too: sl -0.6,
+  full -0.3: small, left to the H200 diag24 G108 read.
+- Handoff dev/s54/g24sk_layer.patch (applies on r-layer working tree as of 22:30Z incl. uncommitted g24): new g24_src.cu
+  (same kernel for r=1), G24_SKCFG, state["g24sk"], TUNE option g24sk:<key>, TUNE_BASE T=32 g24sk pool+unp ON, TUNE[16]
+  += 3 g24sk sets, TUNE[32] += g24sk off/qkv sets.
+- Submission: DIAG24 += SK twins (r 257) of every config (print-only, for the 00:00Z check).
