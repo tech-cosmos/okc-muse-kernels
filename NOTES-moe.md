@@ -707,3 +707,16 @@
 - No checks left, sandbox ends ~19:10Z; H100-measurable levers exhausted (s17-s24). Valued the remaining ideas against the
   layer's score weights (STATE s25): hot-expert single-pass kernel at v16/v32 (+0.15-0.3%) is the only one worth a build;
   deterministic barrier-free d1 via per-CTA K-slices + FP32 partials is <0.15% net (partial reduce eats most of the barrier gain).
+
+## Session 26 (2026-10-26 15:44Z - ~16:45Z) -- UPF4: unpool W L2 prefetch spread over moe_twm's main phase: DEAD (H100)
+- Idea: at v16/v32 twm is dq/MMA-bound (HBM ~60% busy), so let its producer lanes L2-prefetch (cp.async.bulk.prefetch.L2,
+  evict_last) the first SEG bytes of every unpool row, spread over the items numbered f0..f1 % of the work counter (not in
+  the drain, as layer s6 tried). Patch on a clone of r-layer f970e18: tools/s26/upf4_layer_patch.py <layer dir> (adds
+  UPF4 = {T: (seg, f0, f1)} + TUNE key "upf4"); tests 13/13.
+- H100 tools/ab_files.py verify, 3 rounds, TUNE = {} (A off / B 2048,10,70 = 16 MB / C 4096,10,70 = 32 MB / D 3072,20,90):
+  v16 sl 311.0 / 312.4 / 319.4 / 316.4, full 453.7 / 457.3 / 462.1 / 461.0; v32 sl 407.2 / 412.5 / 417.5 / 414.0,
+  full 662.2 / 665.9 / 671.7 / 668.5; v1 controls flat. Monotone loss in prefetch size.
+- bench.py prof v32 sliding A vs C: twm 254.8 -> 263.9 us, the unpool-side GEMMs only -0.4 / -1.1 us: the prefetched lines
+  do not survive ~500 MB of expert stream through L2 even with evict_last (twm's own evict_first hints notwithstanding).
+  Gain bound ~1 us even if twm lost nothing => dead on any GPU. Not sent to layer.
+- No judge runs (moe checks 20/20 used today; sandbox ends ~19:10Z).

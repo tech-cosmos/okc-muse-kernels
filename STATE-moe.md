@@ -71,6 +71,9 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 26 (15:44-16:45Z): UPF4 (unpool W L2 prefetch spread over twm's main phase) DEAD on the H100 layer harness:
+v16/v32 +1.4..10 us, monotone in size; unpool GEMMs gain <= 1.1 us (lines evicted by the expert stream). NOTES s26.
+
 ## Session 25 (15:26Z, paper only; no code, no judge runs): what is left, valued by layer score
 Judge layer profile 703d3a7e (H200, us): tk2f d1 28.7/21.2 (incl. PDL overlap), d16 69.7/44.1, d32 82.6/93.5, v1 62.4/83.8;
 twm v16 161.5/165.9, v32 221.7/221.8. Score per us: d1 sl 0.16%, v1 0.10, d16 0.07, d32 0.05, v16 0.04, v32 0.03.
@@ -142,6 +145,7 @@ Remaining moe ideas, all needing H200 time (next sandbox; moe checks = H200 DIAG
    moe_route (multi-CTA route) -1 launch (~3 us).
 
 ## Dead ends (older ones: NOTES-moe.md)
+- (s26) L2 prefetch of the unpool W from twm (spread over its main phase, evict_last): v32 +5..10 H100 us, unpool -1.
 - (s14) tw_item next-stage weight/scale LDS prefetch: twm v32 +8, twf +9.5 us (H100). TWM_TAIL13; TWM_TAIL + merge order.
 - (s12, H200 diag on layer routings) GS16 in any form (old, merged one-body tk2h, split weights 2-6): +4..8 us at d16/d32;
   per-segment gemm13->gemm2 counters (PSC): 0; deeper tk2f rings: +1..5; DYN: +3..10; NC16: +1..2. Weighted static
