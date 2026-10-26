@@ -2182,6 +2182,7 @@ NU8_DEFAULT = False
 # s28 QF32 (proj s19 request): at T=16 decode the g19 qkv stays FP32 into attention (csl sliding, _gd_full + merges full),
 # rounded to BF16 (RN) at each load: bit-identical to the torch cast it drops (H200 ea9421fa: 1.2-1.3 us per layer).
 QF32 = True
+QF32_NDS = True  # s29: also at T=32 (nds sliding templated on the qkv type; full = the same Gluon path as T=16)
 RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 -> 109.9 (8 rounds), 112.3 -> 110.7 (4)
 TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
 TK2FJ_TOKENS = (16, 32)  # s27: the same at T = 16/32 after joining the router's side stream before the rmsnorm
@@ -2261,8 +2262,9 @@ def kernel_fn(data, state):
     qkv = _g19(data["attn_input"], "qkv_gate", state)  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
     if qkv is None:
         qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf)
-    elif not (length == 1 and batch <= CSL_MAX_BATCH and _CSL is not None and HAVE_GLUON and USE_GDEC
-              and _opt(state, tokens, "qf32", QF32)):
+    elif not (length == 1 and HAVE_GLUON and USE_GDEC and _opt(state, tokens, "qf32", QF32)
+              and (batch <= CSL_MAX_BATCH and _CSL is not None
+                   or batch >= NDS_MIN_BATCH and (_NDS is not None or cfg["window"] == 0) and QF32_NDS)):
         qkv = qkv.to(torch.bfloat16)
     o = attn_kernel_fn({
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],

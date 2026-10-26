@@ -7,8 +7,8 @@ import bench, reference
 sub = bench.load_sub(sys.argv[1] if len(sys.argv) > 1 else "submission.py")
 w = reference.generate_weights(reference.WEIGHTS_SEED)
 cases = [dict(batch=b, ctx=80000, layer=l, page=1, q_len=1, dist="soft", **({"spread": "agentic"} if b > 1 else {}))
-         for b in (16, 8, 2, 1) for l in ("sliding", "full")]
-cases += [dict(batch=16, ctx=20000, layer="full", spread="mixed", dist="soft", page=1),
+         for b in (32, 16, 8, 2, 1) for l in ("sliding", "full")]
+cases += [dict(batch=32, ctx=3000, layer="sliding", spread="mixed", dist="soft", page=1), dict(batch=48, ctx=9000, layer="sliding", dist="soft", page=1), dict(batch=16, ctx=20000, layer="full", spread="mixed", dist="soft", page=1),
           dict(batch=8, ctx=2047, layer="sliding"), dict(batch=9, ctx=5000, layer="sliding", spread="mixed", page=1)]
 bad = 0
 for c in cases:

@@ -1739,8 +1739,24 @@ __device__ __forceinline__ void drescale(float (&o)[64], const float (&alpha)[2]
 // Decode (L 1, G 8): one consumer warpgroup for both KV heads. m64 rows 0-7 = head 0's 8 query heads (d 0-63 of the
 // K row; 64-127 zero), rows 8-15 = head 1's (d 64-127), rows 16-63 zero: only warp 0 has live rows and runs the
 // softmax; warps 1-3 just take part in the wgmmas (P = 0).
-template <int NS>
-__device__ __forceinline__ void dconsumer(Smem<NS>& sm, const __nv_bfloat16* __restrict__ qkv,
+// layer s29 (QF32 at T=32): qkv may be the FP32 output of the qkv GEMM; each element is rounded to BF16 (RN, as the
+// torch cast / GEMM output it replaces) at its load: everything downstream is bit-identical to the BF16 input.
+__device__ __forceinline__ unsigned qpk(float lo, float hi) {
+    __nv_bfloat162 t = __floats2bfloat162_rn(lo, hi);
+    return *(unsigned*)&t;
+}
+__device__ __forceinline__ uint4 qld8(const __nv_bfloat16* p) { return *reinterpret_cast<const uint4*>(p); }
+__device__ __forceinline__ uint4 qld8(const float* p) {
+    const float4 a = reinterpret_cast<const float4*>(p)[0], b = reinterpret_cast<const float4*>(p)[1];
+    return make_uint4(qpk(a.x, a.y), qpk(a.z, a.w), qpk(b.x, b.y), qpk(b.z, b.w));
+}
+__device__ __forceinline__ uint2 qld4(const __nv_bfloat16* p) { return *reinterpret_cast<const uint2*>(p); }
+__device__ __forceinline__ uint2 qld4(const float* p) {
+    const float4 a = *reinterpret_cast<const float4*>(p);
+    return make_uint2(qpk(a.x, a.y), qpk(a.z, a.w));
+}
+template <int NS, typename QT>
+__device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ qkv,
                                           const float* __restrict__ cs, Range rg, int split, int S, int qkv_w,
                                           float scale, int win, float* __restrict__ pacc, float* __restrict__ pml,
                                           uint8_t* __restrict__ kc, uint8_t* __restrict__ vc,
@@ -1767,10 +1783,10 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const __nv_bfloat16* __r
     if (w == 0) {   // Queries: row r = query head r (KV head r / 8); 2 lanes per row (32 d each).
         const int r = lane >> 1, half = lane & 1, h = r >> 3;
         const int pos = rg.seq;
-        const __nv_bfloat16* src = qkv + (long long)b * qkv_w + r * HD + half * 32;
+        const QT* src = qkv + (long long)b * qkv_w + r * HD + half * 32;
         uint4 raw[4];
 #pragma unroll
-        for (int j = 0; j < 4; ++j) raw[j] = reinterpret_cast<const uint4*>(src)[j];
+        for (int j = 0; j < 4; ++j) raw[j] = qld8(src + 8 * j);
         float4 cv[4], sv[4];
         const float4* cp = reinterpret_cast<const float4*>(cs + (long long)pos * HD + half * 16);
 #pragma unroll
@@ -1808,8 +1824,8 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const __nv_bfloat16* __r
             // The step's new token: lane = KV head (lane / 16), d 4 (lane % 16) + 0..3: RMS-norm + RoPE, E4M3 (as
             // _new), stored into the cache and into the new-token K row 0 / V^T key slot 0.
             const int hh = lane >> 4, d0 = (lane & 15) * 4, npos = rg.seq;
-            const __nv_bfloat16* kp = qkv + (long long)b * qkv_w + (16 + hh) * HD + d0;
-            const uint2 kr = *reinterpret_cast<const uint2*>(kp), vr = *reinterpret_cast<const uint2*>(kp + 2 * HD);
+            const QT* kp = qkv + (long long)b * qkv_w + (16 + hh) * HD + d0;
+            const uint2 kr = qld4(kp), vr = qld4(kp + 2 * HD);
             const float2 c2 = *reinterpret_cast<const float2*>(cs + (long long)npos * HD + d0 / 2);
             const float2 s2 = *reinterpret_cast<const float2*>(cs + (long long)npos * HD + 32 + d0 / 2);
             const long long slot = loc[b];
@@ -1925,13 +1941,13 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const __nv_bfloat16* __r
     }
 }
 
-template <int NS>
+template <int NS, typename QT>
 #ifdef NV_MAXR
 __global__ void __maxnreg__(NV_MAXR) nds(
 #else
 __global__ void __launch_bounds__(256, NV_MINB) nds(
 #endif
-const __nv_bfloat16* __restrict__ qkv, const float* __restrict__ cs,
+const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               uint8_t* __restrict__ kc, uint8_t* __restrict__ vc,
                                               const float* __restrict__ ks, const float* __restrict__ vsc,
                                               const long long* __restrict__ loc, const int* __restrict__ pt,
@@ -1954,7 +1970,7 @@ const __nv_bfloat16* __restrict__ qkv, const float* __restrict__ cs,
         producer<NS>(sm, kc, vc, pt, rg, maxp);
     } else {
         asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(NV_CREGS));
-        dconsumer<NS>(sm, qkv, cs, rg, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc, loc, ks[0], vsc[0], out);
+        dconsumer<NS, QT>(sm, qkv, cs, rg, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc, loc, ks[0], vsc[0], out);
     }
 }
 }  // namespace nv
@@ -1963,22 +1979,27 @@ void nds(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
          torch::Tensor loc, torch::Tensor pt,
          torch::Tensor seq, torch::Tensor pacc, torch::Tensor pml, torch::Tensor out, double qk_scale, int64_t S, int64_t ch,
          int64_t win) {
-    auto f = nv::nds<NV_NS>;
     const int smem = (int)sizeof(nv::Smem<NV_NS>) + 1024;
-    static bool once = false;
-    if (!once) { cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
     const int B = (int)seq.size(0);
-    f<<<dim3((unsigned)(S * B)), 256, smem, c10::cuda::getCurrentCUDAStream()>>>(
-        (const __nv_bfloat16*)qkv.data_ptr(), (const float*)cs.data_ptr(), (uint8_t*)kc.data_ptr(),
-        (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(),
-        (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(),
-        (const int*)seq.data_ptr(), (float*)pacc.data_ptr(), (float*)pml.data_ptr(), (float)qk_scale, (int)S, (int)ch,
-        (int)pt.size(1), (int)qkv.size(-1), (int)win, (__nv_bfloat16*)out.data_ptr());
+#define NDS_LAUNCH(QT) { \
+    auto f = nv::nds<NV_NS, QT>; \
+    static bool once = false; \
+    if (!once) { cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; } \
+    f<<<dim3((unsigned)(S * B)), 256, smem, c10::cuda::getCurrentCUDAStream()>>>( \
+        (const QT*)qkv.data_ptr(), NDS_ARGS); }
+#define NDS_ARGS (const float*)cs.data_ptr(), (uint8_t*)kc.data_ptr(), \
+        (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(), \
+        (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(), \
+        (const int*)seq.data_ptr(), (float*)pacc.data_ptr(), (float*)pml.data_ptr(), (float)qk_scale, (int)S, (int)ch, \
+        (int)pt.size(1), (int)qkv.size(-1), (int)win, (__nv_bfloat16*)out.data_ptr()
+    if (qkv.scalar_type() == at::kFloat) NDS_LAUNCH(float) else NDS_LAUNCH(__nv_bfloat16)
+#undef NDS_LAUNCH
+#undef NDS_ARGS
 }
 '''
 try:
     _NDS = _load_inline(
-        name="muse_nds_a2s10",
+        name="muse_nds_a2s10q",
         cpp_sources="void nds(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
                     "int64_t, int64_t, int64_t);",
@@ -13237,6 +13258,7 @@ NU8_DEFAULT = False
 # s28 QF32 (proj s19 request): at T=16 decode the g19 qkv stays FP32 into attention (csl sliding, _gd_full + merges full),
 # rounded to BF16 (RN) at each load: bit-identical to the torch cast it drops (H200 ea9421fa: 1.2-1.3 us per layer).
 QF32 = True
+QF32_NDS = True  # s29: also at T=32 (nds sliding templated on the qkv type; full = the same Gluon path as T=16)
 RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 -> 109.9 (8 rounds), 112.3 -> 110.7 (4)
 TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
 TK2FJ_TOKENS = (16, 32)  # s27: the same at T = 16/32 after joining the router's side stream before the rmsnorm
@@ -13316,8 +13338,9 @@ def kernel_fn(data, state):
     qkv = _g19(data["attn_input"], "qkv_gate", state)  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
     if qkv is None:
         qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf)
-    elif not (length == 1 and batch <= CSL_MAX_BATCH and _CSL is not None and HAVE_GLUON and USE_GDEC
-              and _opt(state, tokens, "qf32", QF32)):
+    elif not (length == 1 and HAVE_GLUON and USE_GDEC and _opt(state, tokens, "qf32", QF32)
+              and (batch <= CSL_MAX_BATCH and _CSL is not None
+                   or batch >= NDS_MIN_BATCH and (_NDS is not None or cfg["window"] == 0) and QF32_NDS)):
         qkv = qkv.to(torch.bfloat16)
     o = attn_kernel_fn({
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
