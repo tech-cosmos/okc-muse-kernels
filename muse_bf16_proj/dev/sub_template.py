@@ -49,6 +49,7 @@ _G16_SRC = r'''@@GEMV16@@'''
 _G19_SRC = r'''@@GEMV19@@'''
 _G20_SRC = r'''@@GEMV20@@'''
 _G22_SRC = r'''@@GEMV22@@'''
+_TG2_SRC = r'''@@TG2@@'''
 _G17_SRC = r'''@@GEMV17@@'''
 _G21_SRC = r'''@@GEMV21@@'''
 _R3_SRC = r'''@@ROUTER3@@'''
@@ -110,6 +111,9 @@ BF16_G16 = {"unpooler": [(16, 4, 4, 4, 128, 1, 2), (16, 4, 8, 2, 128, 1, 2)],
 # vs 18.7, unp1k 11.2 vs g17 7.3 (tuner us): DEAD, not tuned any more (s13 NOTES).
 BF16_G21 = {}
 BF16_G17 = {"unpooler": [(1, 4, 512), (1, 4, 256), (8, 4, 256), (8, 4, 128)]}
+# flashinfer 0.7.0 tinygemm_bf16 (TRT-LLM tinygemm2) ported to dev/tinygemm2.cu: TMA, 16 deep stages, n/16 blocks.
+# H100 (dev/tg2.py, s26): unpooler-1k m8 6.53 vs 7.26 us (g17); loses elsewhere (m1 all, o/qkv/pooler m8, m>=16).
+BF16_TG2 = {"unpooler": [(8,)]}
 # gemv19 (dev/gemv19.cu, dev/g19_lib.py): TMA-ring streamer over the 12-bit weights, FP32 out zeroed in-kernel + red.add
 # split-K partials, then a BF16 copy (g19_cvt). (m, kc, ap, ns, npre). Built for the layer (PDL W prefetch during the
 # previous kernel); standalone (no predecessor) H100 it ties cuBLAS at m16 (pooler 24.8 vs 28.0) and loses at m32.
@@ -257,6 +261,15 @@ for _v, _defs in [v for v in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_
             functions=["g20_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
     except Exception as _e:  # noqa: BLE001
         print("muse_proj gemv20", _v, "build failed:", _e)
+
+try:
+    _tg2 = load_inline(
+        name="muse_proj_tg2a", cpp_sources="void tg2(torch::Tensor, torch::Tensor, torch::Tensor, bool);",
+        cuda_sources=_TG2_SRC, functions=["tg2"], extra_ldflags=["-lcuda"],
+        extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"]) if BF16_TG2 else None
+except Exception as _e:  # noqa: BLE001
+    print("muse_proj tinygemm2 build failed:", _e)
+    _tg2 = None
 
 try:
     _lt = load_inline(
@@ -520,6 +533,8 @@ def _run(st, layer, x, out, cand):
         _g19.g19_cvt(o32, out) if _g19 is not None else out.copy_(o32)
     elif kind == "g17":
         _mod.g17_gemv(st[layer], x, out, *c)  # W[:n] prefix rows, in place
+    elif kind == "tg2":
+        _tg2.tg2(x, st[layer][:out.shape[1]], out, False)  # W[:n] prefix rows, BF16 out
     elif kind == "g12":
         _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
     else:
@@ -583,6 +598,10 @@ def _tune(st, reps=25):
             for c in cfgs:
                 if ("g22", layer, c[1], c[3]) in st:
                     shapes.setdefault((layer, c[0]), []).append(("g22", c))
+    if _tg2 is not None:
+        for layer, cfgs in BF16_TG2.items():
+            for c in cfgs:
+                shapes.setdefault((layer, c[0]), []).append(("tg2", c))
     if _lt is not None:
         for key, cfgs in BF16_LT.items():
             shapes.setdefault(key, []).extend(("lt", c) for c in cfgs)
