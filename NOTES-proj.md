@@ -701,3 +701,17 @@
   g19 loses ~1.2 us and qkv is the graph's first op (no PDL predecessor to hide g19's x arrival) -> dead.
 - Correction to the layer's s15 premise: gemv14 is NOT CUDA-core FMAs, it is gemv12's mma.sync structure + 12-bit decode.
   On the H200 g14 qkv m8 is ~2.3 us over a bare 28 MB stream (tuner 15.39 vs 13.05): <= ~0.2% layer score of room.
+
+## Session 30 (2026-10-26 14:19-14:40Z): does cuBLAS let a PDL dependent start early? (dev/pdl_cublas.py)
+- Graph: stamp kernel -> torch.matmul (cuBLAS) -> our kernel launched with/without the PDL attribute (132 blocks,
+  globaltimer at entry and after griddepcontrol.wait). H100, cold L2 (256 MB flush), median of 30 replays, us from stamp:
+  | GEMM (M,K,N) | cuBLAS kernels | no PDL start | PDL start / wait done |
+  | 16,4096,4608 | nvjet tst (no split) | 20.58 | 21.09 / 21.09 |
+  | 32,4096,4096 | nvjet tst (no split) | 19.90 | 19.74 / 19.74 |
+  | 16,4096,1024 | nvjet splitK + splitKreduce | 10.46 | 9.15 / 9.50 (-0.96) |
+  | 32,8192,4096 | nvjet splitK + splitKreduce | 37.06 | 35.20 / 35.71 (-1.35) |
+  So cublasLt's splitKreduce_kernel DOES trigger its dependents (STATE-layer's "cuBLAS never triggers" holds only for
+  the plain nvjet kernels): a PDL secondary with griddepcontrol.wait after a split-K cuBLAS GEMM saves ~1-1.4 us.
+- But the layer has no splitKreduce left (judge profile 703d3a7e: T<=32 qkv/pooler/unpool are g19 or QSS bmm; the
+  remaining nvjet kernels (o at d16 full/d32, verify T=128/256) are non-split). Nothing to apply now; useful only if a
+  future tuner pick brings a split-K cuBLAS back (then launch its successor with PDL). Not checked on the judge.

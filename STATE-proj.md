@@ -1,15 +1,13 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~14:50 UTC (end of session 29).
+Updated 2026-10-26 ~14:40 UTC (end of session 30).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
-- Before: 6d0fc4d4 (405439e) 1.2742x; d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 20/20 (s25 5abb71f1 1.3040: diag, DeepGEMM bf16 dead), scored 5/10 (cap 10). s23 check 2722e8c4 1.3108 (diag: g13 for o m1 loses on H200). s22 check ccf41026 1.3162 (diag: qkv m32 bmm slabs). s17 check 29a2b16b 1.3173 (diag: m=1 = bare stream). s16 checks fb2fe4ee 1.3071 (g22 diag), a9b13469 1.3161; submit 3810db09. s15 checks ce84da07 1.3001, 4e5fad5b 1.2951 (diag only). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
-  1.3064 (diag only).
+- Budget 10-26 used: checks 20/20 (s25 5abb71f1 1.3040: diag, DeepGEMM bf16 dead), scored 5/10 (cap 10). s23 check 2722e8c4 1.3108 (diag: g13 for o m1 loses on H200). s22 check ccf41026 1.3162 (diag: qkv m32 bmm slabs). s17 check 29a2b16b 1.3173 (diag: m=1 = bare stream). s16 checks fb2fe4ee 1.3071 (g22 diag), a9b13469 1.3161; submit 3810db09. s15 checks ce84da07 1.3001, 4e5fad5b 1.2951 (diag only). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844 1.3064 (diag only).
 - H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
@@ -19,7 +17,6 @@ Updated 2026-10-26 ~14:50 UTC (end of session 29).
 ## (prepare() picks per GPU since a566ba9: ROUTER_R3_TUNE).
 ## Per-shape H200 (check 7ba50b0a, 21bec6b): m1 qkv 11.2 o 6.3 pool 15.8 unp 4.6 router 5.1; m8 qkv 13.3 o 6.8 pool 16.6
 ## unp 6.6 router 8.1; m16 qkv 13.6 pool 19.1 unp 17.9; m32 qkv 13.8 pool 18.9 unp 18.9 (m>=16 = cuBLASLt, uncompressed).
-(Older per-shape speedup table, submit 22109e72: see git history.)
 Floors: qkv 7.9, o 3.5, pooler 14.0, unpooler 1.75 (m<=8) / 14.1, router 1.8; m256: 9.8/4.5/17.4/17.4/2.7.
 SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/24.8/30.7; unpooler 7 (m<=8) 18.7/20/24.
 
@@ -144,12 +141,10 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## Session 28: gemv23 (own BF16 SS-wgmma swap-AB GEMM for m128/256, packed W, cluster DSMEM split-K, BF16 out) DEAD:
 ## H100 loses 1-4 us at every m128 shape, m256 worse; H200 proxy (GRID 88 x0.73) loses too. Lead option (a) closed. NOTES s28.
 ## Session 29: M=8 gemv19 (layer's T=8 qkv) DEAD: H100 16.6 vs g14 15.4 us (g14 is already mma.sync). NOTES s29.
+## Session 30: cuBLASLt splitKreduce DOES trigger PDL dependents (H100: successor -1.0..1.4 us), plain nvjet does not;
+## but the layer has no split-K cuBLAS left (profile 703d3a7e), so nothing to apply. dev/pdl_cublas.py, NOTES s30.
 ## Next (ranked)
--18. (s29) Same as -17: wait for the lead's new-lane answer (Requests proj s28); no proj GEMM item left.
+-19. (s30) Still waiting for a lane (Requests proj s28/s30). Proj checks 20/20 today.
 -17. (s28) Nothing proj-side with size left: tomorrow's first proj check = main (tg2 unpooler m8 tuner candidate: read "tune unpooler m8" in the judge log; submit if > 1.3110).
    Ask the lead for a new lane (moe sub-task or layer glue) instead of more GEMM variants.
-(Older Next items -16..-8 and s10-s18: all built/measured or dead per NOTES; see git history of this file.)
-1. If the layer reports pr1/pr8 H200 numbers: tune rb/npf (pr1) on the judge via the layer's checks (layer owns them).
-2. m32 g19 fixed costs (flush, x arrival) after 0.
 
-Older ranked lists (s10 and before): see git history of this file / NOTES-proj.md.
