@@ -88,6 +88,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
+#define TWM_PB48 0  // n12: build moe_twm<.., PB 48> (python TWM_PB_M); DIAG builds only (+7 s compile)
 #define TK2F_L2H 0       // s21: tk2f weight-copy L2 hints (python TK2F_L2H): 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only; 4 = evict_last every group of a multi-group expert, evict_first else
 #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
 #define NORM_EARLY 0     // n4s1: twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them (python NORM_EARLY)
@@ -2546,7 +2547,7 @@ __device__ __forceinline__ void tw_hot(const char* smem, uint64_t* full, uint64_
   mbar_arrive(&empty[pst]);  // the slot held the exchange: release it only now
 }
 
-template <int NSTG, bool SA = false>
+template <int NSTG, bool SA = false, int PB = 64>  // n12: PB = big-class pass size (64; 48 = N48 passes)
 __global__ void __launch_bounds__(384, 1) moe_twm(
     const char* __restrict__ W13, const char* __restrict__ S13, const float* __restrict__ gs13,
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
@@ -2614,7 +2615,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     if (hx && nt > 64 && nt <= 128) nt = 0;
     const int big = nt > 32;
     const int hc = hot && nt > 64 && nt <= 96;  // s17 hot class: one pass, 1 tile per warp
-    const int npass = hc ? 1 : big ? (nt + 63) / 64 : (nt + 31) / 32;
+    const int npass = hc ? 1 : big ? (nt + PB - 1) / PB : (nt + 31) / 32;
     int c2 = hc ? 3 : big, c13 = hc ? 3 : big;
     if (tail | tail13) {
       int sfx = big ? 1 << 20 : npass;
@@ -2729,7 +2730,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
       }
       int g2, a, p, rb, h, j;
       decode(item, g2, a, p, rb, h, j);
-      const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? 64 : 32;
+      const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? PB : 32;
       const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
       const int k0 = h < 0 ? 0 : h * 32, k1 = h < 0 ? 64 : k0 + 32;
       const int mi = cl == 3 ? 4 : nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
@@ -2744,7 +2745,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
       const int xo = cl == 3 ? 96 * 128 : CG::XB;  // weights' offset in the stage
       const int bytes = wbytes + sbytes + xbytes;
       if (g2) {
-        const int b13 = s_big[0][a], PS13 = b13 == 3 ? 128 : b13 == 1 ? 64 : 32;
+        const int b13 = s_big[0][a], PS13 = b13 == 3 ? 128 : b13 == 1 ? PB : 32;
         const int need = ((s_off[e + 1] - s_off[e] + PS13 - 1) / PS13) * (b13 ? HG::NRB * (b13 == 3 ? 2 : 1) : CG::NRB);
         int v;
         for (;;) {
@@ -2798,7 +2799,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     if (item < 0) break;
     int g2, a, p, rb, h, j;
     decode(item, g2, a, p, rb, h, j);
-    const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? 64 : 32;
+    const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? PB : 32;
     const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
     float* pt = h < 0 ? nullptr : part + (size_t)(2 * j + h) * 16384;
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
@@ -2820,7 +2821,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
         case 1: TWI(2, 8); break;
         case 2: TWI(2, 16); break;
         case 3: case 4: TWI(2, 32); break;
-        default: TWI(2, 64); break;
+        default: TWI(2, PB); break;
       }
     }
 #undef TWI
@@ -3017,18 +3018,27 @@ static int64_t twm_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
     cudaFuncSetAttribute(moe_twm<NSTG, SA>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+#if TWM_PB48
+    cudaFuncSetAttribute(moe_twm<NSTG, SA, 48>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+#endif
     grid = nsm;
   }
   TMaps m13, m2;
   tw_maps(m13, xg_.data_ptr(), xg_.size(0));
   tw_maps(m2, inter_.data_ptr(), inter_.size(0));
-  return launch_k(moe_twm<NSTG, SA>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+#if TWM_PB48
+  auto kf = (g_hot & 2) ? moe_twm<NSTG, SA, 48> : moe_twm<NSTG, SA>;
+#else
+  TORCH_CHECK(!(g_hot & 2), "TWM_PB_M needs a TWM_PB48 build (DIAG)");
+  auto kf = moe_twm<NSTG, SA>;
+#endif
+  return launch_k(kf, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const char*)PTR(w13h_), (const char*)PTR(s13h_),
       (const char*)PTR(w2h_), (const char*)PTR(s2h_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
       (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(), (int*)tk_.data_ptr(),
       (float*)part_.data_ptr(), (int)std::min<int64_t>(ns, std::min<int64_t>(tk_.numel() / 2, part_.numel() / 32768)),
-      g_hot);
+      g_hot & 1);
 }
 int64_t moe_twm_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                        torch::Tensor gs2_, torch::Tensor w13h_, torch::Tensor s13h_, torch::Tensor w2h_,
@@ -4717,6 +4727,7 @@ def _lib():
         src = src.replace("#define TWM_L2H 0 ", f"#define TWM_L2H {int(TWM_L2H)} ")
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
             src = src.replace("#define TK2_EXP 0 ", "#define TK2_EXP 1 ")
+            src = src.replace("#define TWM_PB48 0 ", "#define TWM_PB48 1 ")
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=src,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
@@ -4888,6 +4899,7 @@ TWM_ORDER = 0  # s14: moe_twm item order (bits, see moe_twm): 76 = pass-minor + 
 #   over both phases (H100 layer v32 248.8 -> 239.9 us without TWM_TAIL (with it: 247), v16 = 0); 2 = timeline stamps
 TWM_ORDER_M = {256: 76}  # s14: per-M override
 RG = 1  # s33: moe_routegather (route + gather fused, one CTA per token) for M > 32
+TWM_PB_M = {}  # n12: {M: 48}: moe_twm's > 32-token experts run 48-token passes at wgmma N48 (s18 mb: 632 vs 737 cyc/stage at N64)
 HOT_M = {}  # s29: {M: grid}: moe_hot (65..128-token experts, one N 128 pass) on that many CTAs before moe_twm
 TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
 TWM_HOT_M = {}  # s17: per-M override
@@ -4941,7 +4953,9 @@ DIAG_VARIANTS = {  # s30 queued: H200 A/B of moe_hot (HOT_M) on the layer's v32 
            + [("h32o76", {"HOT_M": {256: 32}, "TWM_ORDER_M": {256: 76}}), ("o76", {"HOT_M": {}, "TWM_ORDER_M": {256: 76}}),
               ("offb", {"HOT_M": {}, "TWM_ORDER_M": {}}),
               ("h32rg0", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "RG": 0}), ("h32rg1", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "RG": 1}),
-              ("h32ne0", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "NORM_EARLY": 0}), ("offne0", {"HOT_M": {}, "TWM_ORDER_M": {}, "NORM_EARLY": 0})],
+              ("h32ne0", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "NORM_EARLY": 0}), ("offne0", {"HOT_M": {}, "TWM_ORDER_M": {}, "NORM_EARLY": 0})]
+           # n12: TWM_PB_M 48 (> 32-token experts in 48-token N48 passes; bitwise = off): G88 proxy v16 -1.1, v32 +5 proxy-us
+           + [("pb48", {"HOT_M": {}, "TWM_ORDER_M": {}, "TWM_PB_M": {128: 48}}), ("h32pb48", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "TWM_PB_M": {256: 48}})],
 }
 
 
@@ -5284,7 +5298,7 @@ def kernel_fn(data, st):
                 ns = -tl if tl else ns
                 if DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)
                 hg = HOT_M.get(M, 0)
-                lib.moe_set_hot(1 if hg else 0)
+                lib.moe_set_hot((1 if hg else 0) | (2 if TWM_PB_M.get(M, 64) == 48 else 0))
                 if hg:  # s29: experts with 65..128 tokens in one N 128 pass, moe_twm (PDL secondary) skips them
                     lib.moe_hot_launch(st["w13b2"], st["w13sb2"], st["gs13"], st["w2b2"], st["w2sb2"], st["gs2"], st["lut"],
                                        xg, meta, sroutes, inter, y, hg)

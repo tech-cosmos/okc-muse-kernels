@@ -1083,3 +1083,21 @@
 - Paper, not built: per-slice fused gemm13 -> gemm2 for d1 (each CTA does an intermediate slice's gate/up then the W2
   K-slice partial, FP32 partials reduced in norm2: no phase barrier). n10 already showed the H200 ring absorbs the d1
   barrier, and the finer granularity only removes 9 -> 8.73 row rounding (~3%, ~0.6 us). Not worth a 2 h build blind.
+
+## Night4 session 12 (2026-10-26 22:25Z - , no judge runs: moe checks 20/20 until 00:00Z) -- TWM_PB_M 48 (N48 big-class passes)
+- Layer routing histogram (tools/data/routes.pt): v16 has 17-18 local experts, 10-13 of them <= 8 tokens, 2-6 with 9-16,
+  0-2 with 17-32, 1-2 with 33-49, none > 64; v32 21/18/20 experts, 9-12 <= 8 tokens, 2 hot (73-97). twm already runs
+  <= 8-token passes at N8 (RT 4, HBM-bound), so the only consumer-bound passes at v16 are the 33-49-token experts (RT 2 N64).
+- Built s18's untested alternative: moe_twm<NSTG, SA, PB> (PB = big-class pass size; 48 = 48-token passes at wgmma N48 in
+  place of N64, NOT an extra instantiation: SASS of <.., 48> = <.., 64>: LDL 9 / STL 7, gsb0 0x0 10 / 0x1 40, 104 HGMMA).
+  Host: moe_set_hot bit 1; python TWM_PB_M = {M: 48}. Bitwise = PB 64 on the 10 layer v16/v32 routings + 30 skewed
+  synthetic (tools/n12/pb_t.py, HOT_M {} and {256: 32}): 0 bad, 0 non-bitwise.
+- H100 full grid (proxy.py, 3 rounds, us): v16 o 195.0 | pb 198.4; v32 o 244 | pb 249.6; with hot 32 at v32: 228.6 vs 228.3.
+  Per seed v16 (o/pb): s7 [39, 49 tok] 194.9/206.3 (49 = 48 + 1: a whole 2nd pass for one token), s11 189.6/189.4,
+  s13 205.0/206.2, s17 196.1/196.7, s99 196.7/198.4.
+- G88 H200 proxy (sub_g MOE_GRID=88, 3 rounds): v16 o 231.6 | pb 230.4 (-1.2 proxy-us = ~-0.9 H200 us), v32 +5.
+  Per seed v16: s7 -1.5, s11 -4.0, s13 -2.6, s17 +2.0, s99 +0.2. => at best ~0.05% layer score at v16 (weight .055/us).
+- Compile cost of the 2 extra instantiations: +7 s (fresh _lib(): 89 -> 96 s). So: #define TWM_PB48 0 (not compiled;
+  TWM_PB_M then TORCH_CHECKs), _lib() sets it to 1 in DIAG builds only. 00:00Z DIAG: + pb48 (v16 {128: 48}) and h32pb48
+  (v32 {256: 48} with hot 32). Rule: pb48 < off by >= 1.5 us at v16 on the H200 -> offer the layer TUNE pb48 at T=128
+  (TWM_PB48 1 there); else close it.

@@ -69,6 +69,11 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 12 (22:25-23:15Z, no judge runs): TWM_PB_M 48 (twm's > 32-token experts in 48-token N48 passes,
+  bitwise; #define TWM_PB48, compiled in DIAG builds only: +7 s compile). G88 proxy v16 -1.2, v32 +5 proxy-us; H100 full
+  grid v16 +3.4 (a 49-token expert -> 48 + 1 passes). Queued in the 00:00Z DIAG as pb48 / h32pb48 (dry run 109 s, PASS).
+  Rule: pb48 >= 1.5 us under off at v16 on the H200 -> offer layer TUNE pb48 at T=128; else close it (NOTES n12).
+
 ## Night4 session 11 (22:06-22:30Z, no judge runs): DIAG dry run 107 s total (safe), tests PASS. READ the 00:00Z DIAG with
   `python muse_moe_w4a16/tools/n11/diag_read.py ~/r-moe/muse_moe_w4a16/profiles/submission.<job>.log` (or the cwd's profiles/).
   Decision rules: bal wins d16/v1 -> tell layer (TUNE bal); h16w*p4 wins d32 -> layer's tk2h TUNE value; l2h0/l2h1 beat gs8
@@ -85,23 +90,9 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   copy pattern, uq = unique bytes, sq16..64 = contiguous single copies). H100: tk2f = its copy pattern's rate; 16 KB+
   copies ~6% faster than 8 KB. tk2f KPS 4 (84404/84403/404) DEAD (H100 +2..6 us, bitwise). Read diag9s vs diag12 gs8.
 
-## Night4 session 8: BAL ported into the layer (tools/n8/patch_layer_bal.py); layer v97 runs it (TUNE bal at T=16/32).
-
-## Night4 session 7 (20:50-21:50Z, no judge runs) -- tk2f phase transition (NOTES n7)
-- G88 timeline: rows cost the same in both phases; the loss is the transition (wait for the slowest CTA 0.8-2.3 + first
-  gemm2 row +0.5-0.8 proxy-us). ILV (rows strided over CTAs) DEAD: each CTA reloads 64 KB x per segment (+200 MB L2->SM).
-- BAL (TK2F_DYN 98204, bitwise = main): per-segment counters + extra rows of the two phases on different CTAs. G88 proxy
-  v1 -1.4, d16 -0.6..1.0, d32 0, d1 +1.4 proxy-us; H100 d32 +1.5..2.6. In the 00:00Z DIAG as bal / bal1.
-
-## Night4 session 6 (20:18-21:00Z, no judge runs) -- r-moe 3710aa8 + 82d6781: tk2h PF4 + layer port (NOTES n6)
-- tk2h (merged-phase consumer, GS8/GS16) now has PF4 (slot-ordered pre-scaled y32 -> moe_norm3, like main tk2f 84204):
-  python TK2H_PF4 (cfg + 4) or TK2H_M = {M: W} (GS16 + PF4, weight W). Bitwise = main (tools/n6/h4_ab.py 0/1680).
-- #define TK2H_P4 1 builds only the SA tk2h PF4 kernels (no TK2_EXP); non-EXP builds TORCH_CHECK any other tk2h cfg.
-- tools/n6/patch_layer_h16.py ports it into a layer moe_src.py (layer s58 is wiring it as TUNE option tk2h at T=16/32).
-- H100 in the layer harness: h16w3p4 LOSES d16 +4, d32 +2..7 us (DRAM-bound H100); G88 proxy d32 -6 proxy-us. Only the
-  H200 decides: the 00:00Z DIAG has h8p4 / h16w2p4 / h16w3p4 / h16w4p4 (moe-only), the layer's tuner does the rest.
-
-## Night4 s5 (1378d3e): GS16 H200 loss = row split; DIAG has h16w0/2/3/4 (tk2h); s1-2: NORM_EARLY + PDL .nc fix.
+## Night4 s7: BAL (TK2F_DYN 98204, bitwise; per-segment counters, rounding rows split over CTAs) in the DIAG as bal/bal1; ILV dead.
+## Night4 s6: tk2h PF4 (TK2H_PF4 / TK2H_M, #define TK2H_P4; bitwise) + tools/n6/patch_layer_h16.py; layer TUNE tk2h at T=16/32;
+  H100 layer harness loses (DRAM-bound), G88 proxy d32 -6: the H200 DIAG (h8p4/h16w*p4) + layer tuner decide (NOTES n6).
 
 ## Night4 session 3 (19:31-20:05Z, no judge runs) -- r-moe 1f3b71b
 - TK2F_L2H_RT (python, None = #define 4): run-time L2 hint mode, cfg + 1000000 * (mode + 1). H100 mode 4 vs 0: d16 -5.1, d32 -4.3.
