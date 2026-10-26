@@ -29,15 +29,23 @@ __device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
     asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
     return r;
 }
+__device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {  // s34: (a & b) | c
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
+    return r;
+}
 template <int P>
 __device__ __forceinline__ unsigned expo(unsigned nw) {
     const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
-    return (s & 0x07800780u) | 0x38003800u;
+    const unsigned z = gridDim.y >> 16, m2 = 0x07800780u >> z, cc = 0x38003800u >> z;  // s34 DEC4: opaque (== the immediates)
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
+    return r;
 }
 template <int P0>
 __device__ __forceinline__ void dec4(unsigned sw, unsigned nw, float* f) {
-    const unsigned q0 = (prmt(sw, 0x9180u) & 0x807f807fu) | expo<P0>(nw);
-    const unsigned q1 = (prmt(sw, 0xB3A2u) & 0x807f807fu) | expo<P0 + 1>(nw);
+    const unsigned q0 = lop_aob(prmt(sw, 0x9180u), 0x807f807fu, expo<P0>(nw));
+    const unsigned q1 = lop_aob(prmt(sw, 0xB3A2u), 0x807f807fu, expo<P0 + 1>(nw));
     f[0] = __uint_as_float(q0 << 16); f[1] = __uint_as_float(q0 & 0xffff0000u);
     f[2] = __uint_as_float(q1 << 16); f[3] = __uint_as_float(q1 & 0xffff0000u);
 }
