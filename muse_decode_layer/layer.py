@@ -134,6 +134,7 @@ UNPOOL_PDL = True
 POOLER_BMM = {16: 2, 32: 2}
 GEMV_PDL_SECONDARY = {(1, True): ("unpool_slice", "o"), (1, False): ("unpool_slice", "o"), (8, True): ("o", "unpool_slice"),
                       (8, False): ("unpool_slice",)}
+BND_SPLIT = {(1, 1): 4, (1, 2): 4, (8, 1): 2, (8, 2): 2, (16, 1): 4, (16, 2): 4, (32, 1): 2, (32, 2): 2}  # s33: (tokens, 1 | 2 = first | second boundary) -> programs per row (each stores N / SPL columns)
 LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference experts (tests of the Marlin-side glue)  # PDL after a cuBLAS producer: no gain (H100 o GEMM + boundary 12.64 vs 12.74 us)
 
 
@@ -144,13 +145,14 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
               NB: tl.constexpr, N: tl.constexpr, BGAIN: tl.constexpr, H32: tl.constexpr,
               EPS_POST: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr, pf_ptr=None, PF: tl.constexpr = 0,
               PF_NT: tl.constexpr = 512, RB: tl.constexpr = False, TRIG: tl.constexpr = False,
-              NS: tl.constexpr = 1, SS: tl.constexpr = 0):
+              NS: tl.constexpr = 1, SS: tl.constexpr = 0, SPL: tl.constexpr = 1):
     """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
     s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32).
     RB: the branch is FP32 (gemv19 output), rounded to BF16 first.
     PF > 0: the last PF programs instead L2-prefetch PF x PF_NT x 1 KB from pf_ptr (the router weight) and exit.
     TRIG: let the PDL dependent (the gemv19 pooler, which streams W before its griddepcontrol.wait) launch now.
-    NS > 1 (RB): the branch is the sum of NS FP32 split-K slabs SS elements apart (nu8)."""
+    NS > 1 (RB): the branch is the sum of NS FP32 split-K slabs SS elements apart (nu8).
+    SPL > 1 (s33 BND_SPLIT): SPL programs per row, each computes the row's norms redundantly and stores its N / SPL slice."""
     if TRIG:
         gdc_launch_dependents()
     if PF > 0:
@@ -159,13 +161,14 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
             tl.inline_asm_elementwise("cp.async.bulk.prefetch.L2.global [$1], 1024; mov.u32 $0, 0;", "=r,l",
                                       [pf_ptr + i.to(tl.int64) * 256], dtype=tl.int32, is_pure=False, pack=1)
             return
-    row = tl.program_id(0).to(tl.int64)
+    row = (tl.program_id(0) // SPL).to(tl.int64)
     cols = tl.arange(0, N)
     in_b = cols < NB
+    mine = (cols // (N // SPL)) == tl.program_id(0) % SPL
     # Weights and the incoming stream first: with PDL they load while the branch's producer finishes.
     alpha = tl.load(alpha_ptr + cols)
     beta = tl.load(beta_ptr + cols)
-    gain = tl.load(gain_ptr + cols)
+    gain = tl.load(gain_ptr + cols, mask=mine, other=0.0)
     if BGAIN:
         bgain = tl.load(bgain_ptr + cols, mask=in_b, other=0.0)
     s = tl.load(s_ptr + row * N + cols)
@@ -181,12 +184,12 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
         b = b * bgain
     rb = tl.rsqrt(tl.sum(b * b, 0) / N + EPS_POST)
     s = alpha * s + beta * (b * rb)
-    tl.store(s_out_ptr + row * N + cols, s)
+    tl.store(s_out_ptr + row * N + cols, s, mask=mine)
     rs = tl.rsqrt(tl.sum(s * s, 0) / N + EPS)
     h = s * rs * gain
-    tl.store(h_ptr + row * N + cols, h.to(tl.bfloat16))
+    tl.store(h_ptr + row * N + cols, h.to(tl.bfloat16), mask=mine)
     if H32:
-        tl.store(h32_ptr + row * N + cols, h)
+        tl.store(h32_ptr + row * N + cols, h, mask=mine)
 
 
 @triton.jit
@@ -2243,10 +2246,11 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None):
     stream2 = torch.empty_like(stream1)
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]
-    _boundary[(tokens,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
+    spl = BND_SPLIT.get((tokens, 2), 1)
+    _boundary[(tokens * spl,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
                          NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
                          EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, RB=f.dtype == torch.float32, num_warps=16,
-                         launch_pdl=pdl, NS=f.shape[0] if f.dim() == 3 else 1, SS=tokens * UNPOOL_SLICE)
+                         launch_pdl=pdl, NS=f.shape[0] if f.dim() == 3 else 1, SS=tokens * UNPOOL_SLICE, SPL=spl)
     return hidden, stream2
 
 
@@ -2304,11 +2308,12 @@ def kernel_fn(data, state):
                 and "pooler" in state.get("g14", {}) and G14_CFG["pooler"][0] == 8))
     bnd = pr1 and PR1_BND and tokens == 1 and a.dtype == torch.bfloat16
     if not bnd:
-      _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
+      spl = BND_SPLIT.get((tokens, 1), 1)
+      _boundary[(tokens * spl + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
                                PDL=pdl, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32,
                                TRIG=pr1 or (BOUNDARY_TRIG and ("pooler", tokens) in state.get("g19", {}) and "pooler" in G19_ON), num_warps=16,
-                               launch_pdl=pdl)
+                               launch_pdl=pdl, SPL=spl)
     main_stream, side_stream = torch.cuda.current_stream(), state["side_stream"]
     if tokens in ROUTER_AFTER_POOLER and pdl:
         # The pooler GEMV (triggers its dependents at start) first; the router is its PDL secondary on the same
