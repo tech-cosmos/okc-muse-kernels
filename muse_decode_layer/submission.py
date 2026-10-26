@@ -6410,6 +6410,14 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 // s11 moe_twm = moe_twf with the item shape chosen PER EXPERT: experts with > 32 tokens run RT 2 items with 64-token
 // passes (each dequantized weight serves 64 tokens; packing w*b2), the others RT 4 items with 32-token passes (w*b4).
 // Stage stride = the RT 4 stage (the RT 2 stage is smaller and uses the same x / weight / scale offsets scheme).
+#ifndef TWM_TL
+#define TWM_TL 0
+#endif
+__device__ __forceinline__ unsigned long long gtimer() {
+  unsigned long long t;
+  asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t));
+  return t;
+}
 template <int NSTG, bool SA = false>
 __global__ void __launch_bounds__(384, 1) moe_twm(
     const char* __restrict__ W13, const char* __restrict__ S13, const float* __restrict__ gs13,
@@ -6428,9 +6436,19 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   extern __shared__ __align__(1024) uint4 smem_tw[];
   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
   __shared__ uint32_t slut[256];
-  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[32];
+  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[2][32], s_ord[4];
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   int* done = meta + 68;
+  // s14: nsplit < 0 = no K split; instead the lightest (last) non-big experts whose RT 4 gemm2 items add up to
+  // <= -nsplit run their gemm2 at RT 2 with 32-token passes (class 2: half-size items, shorter drain)
+  // (-nsplit) >> 12 = the same for gemm13 (RT 4 gemm13 items of the lightest experts)
+  // (-nsplit) >> 24 = item order (s14): bit 0 alternating heavy / light experts, bit 1 timeline stamps, bit 2
+  // pass-minor items (rb-major: all passes of a row block adjacent: L2 reuse), bits 3-4 = merge the big (> 32 token)
+  // experts' items evenly into the first W = phi * N positions of each phase (phi 1, .85, .7), light ones between;
+  // bit 5: merge in gemm13 only; bit 6: merged set = multi-pass (> 64 token) experts only
+  const int tail = nsplit < 0 ? (-nsplit) & 4095 : 0, tail13 = nsplit < 0 ? ((-nsplit) >> 12) & 4095 : 0;
+  const int order = nsplit < 0 ? (-nsplit) >> 24 : 0;
+  nsplit = nsplit < 0 ? 0 : nsplit;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
   asm volatile("griddepcontrol.wait;" ::: "memory");
@@ -6443,14 +6461,28 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   __syncthreads();
   if (tid < 32) {
     const int nact = meta[0];
-    const int e = tid < nact ? meta[1 + tid] : 0;
+    const int sl = (order & 1) ? ((tid & 1) ? nact - 1 - (tid >> 1) : tid >> 1) : tid;
+    const int e = tid < nact ? meta[1 + sl] : 0;
     s_e[tid] = e;
     const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0, big = nt > 32;
-    s_big[tid] = big;
     const int npass = big ? (nt + 63) / 64 : (nt + 31) / 32;
+    int c2 = big, c13 = big;
+    if (tail | tail13) {
+      int sfx = big ? 1 << 20 : npass;
+#pragma unroll
+      for (int o = 1; o < 32; o <<= 1) {
+        const int v = __shfl_down_sync(0xffffffffu, sfx, o);
+        if (tid + o < 32) sfx += v;
+      }
+      if (!big && nt > 0 && sfx * CN::NRB <= tail) c2 = 2;
+      if (!big && nt > 0 && sfx * CG::NRB <= tail13) c13 = 2;
+    }
+    s_big[0][tid] = c13;
+    s_big[1][tid] = c2;
 #pragma unroll
     for (int gq = 0; gq < 2; ++gq) {
-      int incl = npass * (gq ? (big ? HN::NRB : CN::NRB) : (big ? HG::NRB : CG::NRB));
+      const int c = gq ? c2 : c13;
+      int incl = npass * (c ? (gq ? HN::NRB : HG::NRB) : (gq ? CN::NRB : CG::NRB));
 #pragma unroll
       for (int o = 1; o < 32; o <<= 1) {
         const int v = __shfl_up_sync(0xffffffffu, incl, o);
@@ -6470,6 +6502,15 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     for (int a = 32; a >= 0; --a)
       if (s_cum[1][a] >= n2 - nsplit) n2f = s_cum[1][a];
   const int ns = n2 - n2f, nitems = n13 + n2f + 2 * ns;
+  if (tid == 0) {
+    int nbig = 0;
+    while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
+    const int mrg = (order >> 3) & 3;
+    s_ord[0] = nbig;
+    s_ord[1] = mrg == 0 ? 0 : mrg == 1 ? 100 : mrg == 2 ? 85 : 70;
+    s_ord[2] = order & 36;
+  }
+  __syncthreads();
   // item -> (gemm2?, active slot a, pass p, row block rb, K half h (-1: whole K), split slot j)
   auto decode = [&](int item, int& g2, int& a, int& p, int& rb, int& h, int& j) {
     g2 = item >= n13;
@@ -6482,12 +6523,27 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
       it = n2f + j;
     }
     const int* cum = s_cum[g2];
+    const int phx = s_ord[1], ob = s_ord[2];
+    if (phx && h < 0 && !(g2 && (ob & 32))) {
+      const int nA = cum[s_ord[0]], N = cum[32];
+      if (nA > 0 && nA < N) {
+        const int W = max(nA, N * phx / 100);
+        const int ca = it < W ? it * nA / W : nA, ca1 = it + 1 <= W ? (it + 1) * nA / W : nA;
+        it = ca1 > ca ? ca : nA + it - ca;
+      }
+    }
     a = 0;
     while (cum[a + 1] <= it) ++a;
-    const int nrb = s_big[a] ? (g2 ? HN::NRB : HG::NRB) : (g2 ? CN::NRB : CG::NRB);
+    const int nrb = s_big[g2][a] ? (g2 ? HN::NRB : HG::NRB) : (g2 ? CN::NRB : CG::NRB);
     const int rem = it - cum[a];
-    p = rem / nrb;
-    rb = rem - p * nrb;
+    if (ob & 4) {
+      const int np = (cum[a + 1] - cum[a]) / nrb;
+      rb = rem / np;
+      p = rem - rb * np;
+    } else {
+      p = rem / nrb;
+      rb = rem - p * nrb;
+    }
   };
   if (warp >= 8) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
@@ -6503,7 +6559,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
       }
       int g2, a, p, rb, h, j;
       decode(item, g2, a, p, rb, h, j);
-      const int e = s_e[a], big = s_big[a], PS = big ? 64 : 32;
+      const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 1 ? 64 : 32;
       const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
       const int k0 = h < 0 ? 0 : h * 32, k1 = h < 0 ? 64 : k0 + 32;
       const int mi = nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
@@ -6514,7 +6570,8 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
       const CUtensorMap* map = g2 ? &maps2.m[mi] : &maps13.m[mi];
       const int bytes = WB + SB + (1024 << mi);
       if (g2) {
-        const int need = ((s_off[e + 1] - s_off[e] + PS - 1) / PS) * (big ? HG::NRB : CG::NRB);
+        const int b13 = s_big[0][a], PS13 = b13 == 1 ? 64 : 32;
+        const int need = ((s_off[e + 1] - s_off[e] + PS13 - 1) / PS13) * (b13 ? HG::NRB : CG::NRB);
         int v;
         for (;;) {
           asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(v) : "l"(done + e) : "memory");
@@ -6538,13 +6595,26 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   }
   asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory");
   int st = 0, ph = 0;
+#if TWM_TL
+  // s14 timeline (build with TWM_TL 1, order & 2): per CTA 64 u64 in part: [0] start, [1] items, 3 per item
+  // (start, end, item), [63] exit
+  unsigned long long* tl = (order & 2) ? reinterpret_cast<unsigned long long*>(part) + blockIdx.x * 64 : nullptr;
+  int ntl = 0;
+  if (tl && tid == 0) tl[0] = gtimer();
+#endif
   for (;;) {
     mbar_wait(&full[st], ph);
     const int item = s_item[st];
+#if TWM_TL
+    if (tl && tid == 0) {
+      if (item < 0) { tl[1] = ntl; tl[63] = gtimer(); }
+      else if (ntl < 20) { tl[2 + 3 * ntl] = gtimer(); tl[4 + 3 * ntl] = item; }
+    }
+#endif
     if (item < 0) break;
     int g2, a, p, rb, h, j;
     decode(item, g2, a, p, rb, h, j);
-    const int e = s_e[a], big = s_big[a], PS = big ? 64 : 32;
+    const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 1 ? 64 : 32;
     const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
     float* pt = h < 0 ? nullptr : part + (size_t)(2 * j + h) * 16384;
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
@@ -6576,6 +6646,10 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
         atomicAdd(done + e, 1);
       }
     }
+#if TWM_TL
+    if (tl && tid == 0 && ntl < 20) tl[3 + 3 * ntl] = gtimer();
+    ++ntl;
+#endif
   }
 }
 
@@ -7949,6 +8023,13 @@ _moe_TWF_RT = 4  # s11: 2 = moe_twf with RT 2 / 64-token passes (prepare then pa
 # bs256 267.0 us (RT 4: ~200 / ~247): worse when experts have <= 32 tokens; H100 layer v16 -5, v32 -7 us (H100 misleads)
 _moe_TWF_MIX = 1  # s11: 1 = moe_twm (RT 2 / 64-token passes for experts with > 32 tokens, RT 4 for the rest)
 _moe_TWF_RT_M = {}  # s11: per-M override, e.g. {256: 2} for the layer's verify 32 (hot experts with 90+ tokens: 34 vs 24 passes)
+_moe_TWM_TAIL = 0  # s14: moe_twm runs the gemm2 of the lightest experts (up to this many RT 4 items) at RT 2 / 32-token passes
+_moe_TWM_TAIL_M = {}  # s14: per-M override of TWM_TAIL
+_moe_TWM_TAIL13 = 0  # s14: same for the gemm13 items of the lightest experts (RT 4 gemm13 item budget)
+_moe_TWM_TAIL13_M = {}
+_moe_TWM_ORDER = 0  # s14: moe_twm item order (bits, see moe_twm): 76 = pass-minor + multi-pass experts' items merged evenly
+#   over both phases (H100 layer v32 248.8 -> 239.9 us without TWM_TAIL (with it: 247), v16 = 0); 2 = timeline stamps
+_moe_TWM_ORDER_M = {256: 76}  # s14: per-M override
 _moe_TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
 _moe_TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
 _moe__CFGS = (10, 11, 22, 118)
@@ -7974,10 +8055,10 @@ _moe_SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 _moe_DIAG = 0
 _moe__DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('decode 1', 17, 1), ('decode 1', 99, 1), ('decode 16', 7, 16), ('decode 16', 11, 16), ('decode 16', 13, 16), ('decode 16', 17, 16), ('decode 16', 99, 16), ('decode 32', 7, 32), ('decode 32', 11, 32), ('decode 32', 13, 32), ('decode 32', 17, 32), ('decode 32', 99, 32), ('verify 1', 7, 8), ('verify 1', 11, 8), ('verify 1', 13, 8), ('verify 1', 17, 8), ('verify 1', 99, 8), ('verify 16', 7, 128), ('verify 16', 11, 128), ('verify 16', 13, 128), ('verify 16', 17, 128), ('verify 16', 99, 128), ('verify 32', 7, 256), ('verify 32', 11, 256), ('verify 32', 13, 256), ('verify 32', 17, 256), ('verify 32', 99, 256)]
 _moe__DIAG_R = "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"
-_moe_DIAG_VARIANTS = {
-    "dec": [("gs8", {})] + [(f"pf{k}", {"TK2F": 80204 + 1000 * k, "TK2F_DYN": 80204 + 1000 * k}) for k in (4, 12)]
-           + [("gs8b", {})] + [(f"pf{k}b", {"TK2F": 80204 + 1000 * k, "TK2F_DYN": 80204 + 1000 * k}) for k in (4, 12)],
-    "big": [("main", {})],
+_moe_DIAG_VARIANTS = {  # s14 queued: H200 A/B of the twm item orders (H100: o76 v32 -9 us vs main, v16 0)
+    "dec": [("gs8", {})],
+    "big": [("main", {})] + [(f"o{o}", {"TWM_ORDER": o, "TWM_TAIL_M": {}}) for o in (0, 76, 12, 28, 92)]
+           + [("o76t", {"TWM_ORDER": 76}), ("mainb", {})],
 }
 
 
@@ -8033,8 +8114,82 @@ def _moe__diag(st):
         del graphs
     for (load, n), v in res.items():
         print(f"diag12 MEAN {load} {n}: {sum(v) / len(v):.1f} us", flush=True)
+    if _moe_DIAG_TL:
+        for load, seed, T, data in routes:
+            if T > _moe_TK2_MAX:
+                for o in _moe_DIAG_TL:
+                    _moe__diag_tl(st, data, f"{load} s{seed}", o)
     del flush
     torch.cuda.synchronize()
+
+
+_moe_DIAG_TL = ()  # s14: twm item orders to timeline in the diag (needs TWM_TL 1 in the CUDA source: diag copies only)
+
+
+def _moe__diag_tl(st, data, name, order):
+    """s14: per-CTA moe_twm timeline (TWM_TL build): exit spread, HBM-rate estimate per 10 us, item durations by kind."""
+    import collections
+    g = globals()
+    old = (g["TWM_ORDER"], g["TWM_TAIL_M"], g["TWM_ORDER_M"])
+    g["TWM_ORDER"], g["TWM_TAIL_M"], g["TWM_ORDER_M"] = order | 2, {}, {}
+    try:
+        for _ in range(3):
+            _moe_kernel_fn(data, st)
+        torch.cuda.synchronize()
+    finally:
+        g["TWM_ORDER"], g["TWM_TAIL_M"], g["TWM_ORDER_M"] = old
+    part, meta = st.pop("_tl")
+    tl = part.view(torch.int64)[:132 * 64].view(132, 64).cpu()
+    meta = meta.cpu()
+    t0 = tl[:, 0].min().item()
+    us = lambda v: (v - t0) / 1000
+    n = tl[:, 1]
+    ex = sorted(us(tl[c, 63].item()) for c in range(132))
+    rows = sorted((us(tl[c, 2 + 3 * k].item()), us(tl[c, 3 + 3 * k].item()), tl[c, 4 + 3 * k].item())
+                  for c in range(132) for k in range(min(n[c].item(), 20)))
+    na = meta[0].item(); off = meta[33:66].tolist()
+    E = [meta[1 + a].item() for a in range(na)]
+    nt = [off[e + 1] - off[e] for e in E]; big = [x > 32 for x in nt]
+    PS = [64 if b else 32 for b in big]; npass = [(x + q - 1) // q for x, q in zip(nt, PS)]
+    nbig = 0
+    while nbig < na and big[nbig] and (not (order & 64) or npass[nbig] > 1): nbig += 1
+    items = []
+    for g2, nrbl in ((0, [32 if b else 16 for b in big]), (1, [16 if b else 8 for b in big])):
+        lst = []
+        for a in range(na):
+            if order & 4:
+                lst += [(g2, a, q) for rb in range(nrbl[a]) for q in range(npass[a])]
+            else:
+                lst += [(g2, a, q) for q in range(npass[a]) for rb in range(nrbl[a])]
+        mrg = (order >> 3) & 3
+        if mrg and not (g2 and order & 32):
+            phx = {1: 100, 2: 85, 3: 70}[mrg]
+            nA = sum(npass[a] * nrbl[a] for a in range(nbig)); N = len(lst)
+            if 0 < nA < N:
+                W = max(nA, N * phx // 100); out = []
+                for it in range(N):
+                    ca = it * nA // W if it < W else nA; ca1 = (it + 1) * nA // W if it + 1 <= W else nA
+                    out.append(lst[ca] if ca1 > ca else lst[nA + it - ca])
+                lst = out
+        items += lst
+    T = ex[-1]; hb = [0.0] * (int(T / 10) + 2)
+    kinds = collections.defaultdict(list)
+    for a_, b_, it in rows:
+        g2, a, q = items[it]
+        nv = min(PS[a], nt[a] - q * PS[a])
+        kinds[(g2, int(big[a]), q > 0, (nv + 7) // 8 * 8)].append(b_ - a_)
+        if q: continue
+        mb = 0.55 if big[a] else 1.09
+        d = max(b_ - a_, 0.1)
+        for z in range(int(a_ / 10), int(b_ / 10) + 1):
+            lo, hi = max(a_, z * 10), min(b_, z * 10 + 10)
+            if hi > lo: hb[z] += mb * (hi - lo) / d
+    print(f"diagtl {name} o{order}: experts {na} exit min/med/max {ex[0]:.1f}/{ex[66]:.1f}/{ex[-1]:.1f} "
+          f"first g2 start {min(a for a, b, it in rows if items[it][0]):.1f} last g13 end "
+          f"{max(b for a, b, it in rows if not items[it][0]):.1f} tokens {nt}", flush=True)
+    print(f"diagtl {name} o{order} HBM TB/s per 10us: " + " ".join(f"{v / 10:.2f}" for v in hb), flush=True)
+    print(f"diagtl {name} o{order} kinds (g2 big reuse N: n mean): " + "; ".join(
+        f"{k[0]}{k[1]}{int(k[2])} {k[3]}: {len(v)} {sum(v) / len(v):.1f}" for k, v in sorted(kinds.items())), flush=True)
 
 
 _moe_TK2H = 0  # s12: merged-phase tk2f consumer (one main-loop body, i-cache): 8 = GS 8, 16 = GS 16 (from M >= TK2H_MIN16)
@@ -8117,6 +8272,9 @@ def _moe_kernel_fn(data, st):
             ns = _moe_TWF_SPLIT_M.get(M, _moe_TWF_SPLIT)
             part = (torch.full if _moe_TWF_DBG else torch.empty)((max(ns, 1) * 32768,), *((float("nan"),) if _moe_TWF_DBG else ()), dtype=torch.float32, device=dev)
             if _moe_TWF_MIX and "w2b2" in st:
+                tl = _moe_TWM_TAIL_M.get(M, _moe_TWM_TAIL) + 4096 * _moe_TWM_TAIL13_M.get(M, _moe_TWM_TAIL13) + (_moe_TWM_ORDER_M.get(M, _moe_TWM_ORDER) << 24)
+                ns = -tl if tl else ns
+                if _moe_DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)
                 lib.moe_twm_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["w13b2"],
                                    st["w13sb2"], st["w2b2"], st["w2sb2"], st["lut"], xg, meta, sroutes, inter, y, st["tk"],
                                    part, ns)
