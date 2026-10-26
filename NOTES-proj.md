@@ -342,3 +342,19 @@
   TORCH_CHECKs co-residency via cudaOccupancyMaxActiveBlocksPerMultiprocessor): NOW pool m16 19.94 -> 16.67 us
   (consumer throughput +20%); H100 full: ties at m16 (pool 21.1, qkv 13.1-13.8), loses at m32 (needs KC 512 to fit:
   pool 22.8, unp 23.5, qkv 17.0 vs 1-block KC1024 22.1/21.5/15.4). H200 decides: _diag20 in prepare().
+- H200 judge diags (my board, print-only `_diag20`, after a 3 us PDL predecessor; us over the predecessor):
+  check 2ef3aafd (a90ffda, 1.2953x) and 88800611 (e9cd9b5, 1.2934x; adds variant c = g19 2 blocks/SM):
+  | shape | g19 1 blk (BF16_G19 cfg) | g20a 1 blk | g20b 2 blk | g19 2 blk (c) |
+  | qkv m16 | 12.51-12.67 | 13.86 (1024,4,4) | **11.58-12.00** (1024,4,2) | 11.90 |
+  | qkv m32 | 15.49-15.84 | **15.04-15.14** (1024,4,4) | 15.30-15.42 (512,4,2) | 16.54 |
+  | pooler m16 | **15.94-16.10** | 20.03-20.35 | 17.31-17.44 | 17.15 |
+  | pooler m32 | **20.70-20.77** | 21.73 | 20.96-21.09 | 22.50 |
+  | unpooler m16 | **16.74-16.96** | 19.94-20.00 | 17.12-17.31 | 17.38 |
+  | unpooler m32 | **19.97-20.26** | 21.60 | 20.61-20.77 | 22.05 |
+  | o m16 | **7.26-7.46** | 8.00-8.32 | 7.62-8.00 | 8.48 |
+  g20 (wgmma) at the SAME config is 4 us slower than g19 at pooler m16 on the H200 (no ptxas serialization warning,
+  no spills): 8 dependent wgmma m64n16/32k16 per stage into one accumulator vs g19's independent mma.sync chains.
+  2 blocks/SM: the consumer gain is eaten by the smaller ring/x/partial buffers (KC 512, NS 2, NPB 1).
+  => DEAD for the layer: wgmma consumers, 2 blocks/SM (both kernels). Only qkv m16/m32 gain, and qkv is the
+  layer graph's first op (no PDL predecessor to overlap: the diag's case does not apply). g19 stays as handed off.
+- Budget 10-26: checks 12/20 (2ef3aafd, 88800611 diag only), scored 4/10. No submits (my board is a test bed).

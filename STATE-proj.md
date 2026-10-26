@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~05:45 UTC (session 11).
+Updated 2026-10-26 ~06:30 UTC (session 12).
 
 ## Board
 - **Best: submit 71145e34fe424844 = a1f0af7, 1.307x (3,695.6 us), proj rank 196** (router3 at router m9-128; its check
@@ -8,7 +8,7 @@ Updated 2026-10-26 ~05:45 UTC (session 11).
 - Before: 6d0fc4d4 (405439e) 1.2742x; d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 10/20, scored 4/10 (cap 9). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
+- Budget 10-26 used: checks 12/20, scored 4/10 (cap 9). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
   1.3064 (diag only).
 - H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
@@ -95,8 +95,21 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 - Lesson: under saturated HBM each dependent memory round trip costs ~3-4 us: keep ticket/last-block chains OFF the
   streaming blocks (extra finisher block spinning on an acquire counter).
 
+## Session 12: gemv20 (wgmma consumers) + 2 blocks/SM: DEAD on the H200 (table in NOTES s12)
+- dev/gemv20.cu/g20.py kept for reference (x by SW128 tensor map, wgmma m64nMk16 with A = dec8 regs: correct).
+- Found: g19/g20 consumers have ~0.28 us FIXED cost per ring stage per warp (barrier/tag/index/arrive latency, 8
+  consumer warps, 2.4 warps/scheduler); decode and mma add serially. H200 HBM delivers a 18 KB stage per SM in ~0.58
+  us, consumers need ~0.86 at m32 -> consumer-bound. More warps per SM via 2 blocks/SM: consumer +20% (H100 NOW) but
+  the smaller buffers lose more; wgmma per stage = 8 dependent wgmmas: slower than mma.sync. g19 1 block AP8 stays.
+- gemv19.cu gained G19_MINB / G19_NPB (defaults unchanged) + co-residency TORCH_CHECK for >1 block/SM.
+
 ## Next (ranked)
-0. **wgmma consumers for g19 (the layer's T=16/32 GEMMs, also a path to T=128/256).** On H200 g19 at m32 is issue-bound
+0. (s12) wgmma consumers: DONE, dead (see above). Remaining m32 idea: fewer, fatter stages per consumer sync
+   (one barrier per 2 ring slots, or a warp-specialized consumer that processes 2 slots per wait) to cut the 0.28 us
+   fixed cost without shrinking the ring; and moving the fixed index math out of the loop (tags carry ks/tr/st).
+   Also: the lead's 05:00Z direction (fuse glue into GEMM prologues/epilogues, overlap weight streams with
+   latency-bound phases) may beat more m32 GEMM tuning: ask layer for its H200 idle-interval list first.
+0-old. **wgmma consumers for g19 (the layer's T=16/32 GEMMs, also a path to T=128/256).** On H200 g19 at m32 is issue-bound
    (mma.sync + ldmatrix per token tile; HBM needs only ~10.4 us for 50 MB). Plan: consumer warps 0-7 = 2 warpgroups of 4
    row groups (64 rows); A = dec8 output in registers (same fragment layout as mma.sync m16n8k16 A: warp i of the WG =
    rows 16i..16i+15), B = x chunk in smem as K-major SW128 ([N tokens][64 k] blocks, N*128 B apart, desc LBO 1, SBO 64,
