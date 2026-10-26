@@ -473,3 +473,9 @@
   v1 122.4/129.2, v16 273.8/360.5, v32 345.9/519.3. H200 profile d32: g19 pooler+unpool 49.0 (2 calls) vs cuBLAS
   pooler 19.8 + o/unpool 26.5; d16 qkv g19 ~11.2 + cast 1.2 vs cuBLAS 12.6 + reduce 1.8. Submit held for later
   candidates (1 submit left; must be used before the sandbox ends ~19:10Z).
+- DEAD (H100, 8 rounds) qkv T=32 g19 (32,1024,4,4,4,2) + cast and o T=32 g19 (32,1024,4,4,2,2): d32 sliding +2.6..3.4,
+  full tie (5-round runs had shown -2.2: noise; use >= 8 rounds for 2 us effects). Pooler grid at T=32: 108 = 96 <
+  120/132 (+12 us: side-stream router starved). qkv g19 at T=8 (m=8): the pick fails prepare's check (unsupported);
+  asked proj for an M=8 mode-3 g19.
+- Session 15 summary: v43 (moe twm order) and v44 (proj g19 fixups + T=32 pooler/unpool + T=16 qkv, twm order reverted
+  per moe's proxy) on main; v44 check c6a00da7 1.9608x, submit HELD for the day's last bundle (STATE ACTION).

@@ -1,9 +1,12 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 08:50Z (session 15).
+Updated 2026-10-26 09:05Z (end of session 15).
 
 **ACTION: 1 scored run left for the sandbox (ends ~19:10Z): submit the best CHECKED code before ~17:30Z. Now: v44
-(de763eb) check c6a00da7 1.9608x > board 1.9558 = eligible. 2 checks left (20/20 resets 00:00Z, after the sandbox).**
+(de763eb) check c6a00da7 1.9608x > board 1.9558 = eligible (`okc submit muse_decode_layer/submission.py --json` on main
+if nothing better got checked). 2 checks left (20/20 used at 00:00Z reset = after the sandbox). Plan: integrate proj/moe
+handoffs posted by ~16:00Z (proj: g19 mode 3 BF16-out qkv T=16/32 and maybe M=8; moe: big-M via its H200 proxy), H100
+A/B in tools/ab_files.py, ONE bundle check, then submit whichever checked code is best.**
 
 ## Board
 - **Best scored: 371a17ee = v42 (cfd3bc5), 1.9558x, 11,566 us/step, overall #49** at 07:10Z 10-26 (#1 2.368x, #10 2.176x,
@@ -24,7 +27,7 @@ Updated 2026-10-26 08:50Z (session 15).
   dependent of the first boundary, which triggers at start; full unpool). **Best check ee80a8f8 1.9566x**; its submit
   543b6ca9 scored 1.9395x (noise). Per shape (H200 us ours, ratio): d1 72.1/83.7 (2.369/2.174), d16 150.1/225.4
   (1.747/1.912), d32 181.1/311.0 (1.443/1.974), v1 121.6/132.8 (2.133/2.043), v16 273.0/359.4, v32 351.8/527.1.
-- Budget 2026-10-26 (resets 00:00Z): submits 9 of 9 used (NO more today); checks 15 of 20 used at 07:10Z (s14).
+- Budget 2026-10-26 (resets 00:00Z, after the sandbox ends): submits 9 of 10 used (1 left); checks 18 of 20 used (2 left) at 09:00Z (s15).
 - Judge noise: SGLang's own per-shape times move 2-6% between runs; identical code's per-shape ratios spread ~+-1.5%,
   total ~+-1%: one check cannot resolve <2% changes. Decide on H100 interleaved A/Bs (tools/ab_flag.py), check to confirm.
 - SGLang per shape (H200 us sliding/full): d1 171/183, d16 262-271/431-444, d32 261-268/614-634, v1 259-261/271-280,
@@ -73,34 +76,27 @@ Updated 2026-10-26 08:50Z (session 15).
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
+-3. (s15) Watch Handoffs: proj is building g19 mode 3 (BF16 out, per-tile tickets) for qkv T=16/32 (drops v44's 1.2 us
+   cast at d16; m32 lost on H100 so far) and was asked for an M=8 g19 (T=8 qkv: g14 m8 is issue-bound, 13.0 us H200 vs
+   g19 m16 10.6). moe works big-M (v16/v32 twm) on its calibrated H200 proxy (H100 with the expert grid capped at 88,
+   x0.73): TRUST moe's proxy over full-grid H100 for expert kernels (it reversed the twm order call, v44 uses {}).
 -2. s14 state of the tail: d1 n2u ends ~5 us after the last tk2f CTA (PDL release ~0.9 + y32 L2 trip + reduce) + the
-   boundary ~2 us; v1 tail 11.6 us H100 (norm3 3.7, g17 4.6, boundary 3.3). Best open layer item: T=8 norm3+unpool
-   fusion (tk2f epilogue atomics for per-route sum of squares; split-K unpool, FP32 out into the boundary's RB path),
-   est. v1 -3..4 us. Every PDL edge costs ~1 us of release; flag spins need loads kept above the spin (bulk prefetch).
--1. s12 idle budget (COORD Requests "layer -> all (s12 05:30Z)"): every load is 8-9% of score off its floor; biggest
-   = moe twm at v16/v32 (~8%, moe lane), then the end-of-layer tail (~4%) and glue (~3.5%) = layer's. The cheap
-   glue fusions are now measured dead (XN, UPF, PR1_BND, n2u boundary epilogue): the tail/glue costs are kernel
-   boundaries where the next kernel can't start until the 1-CTA/SM experts kernel drains. Remaining layer idea with
-   real size: one persistent kernel for experts -> norm2 -> unpool -> boundary at T<=8 (CTAs move on to unpool rows
-   as their expert rows finish, grid-wide counters; the boundary by the last finisher), est. -4..6 us d1/v1.
-   s13 v41 took the cheap part (dependents launch on drained SMs: H100 tail 10.0 -> 8.6). Next cheap one: the same
-   late trigger for g17 at T=8 (after norm3) / cuBLAS unpool can't; boundary-2 is already a PDL dependent.
-   Layer-side gap at T=16/32 is the cuBLAS GEMMs (H100 d32: non-expert ~119 us vs ~59 floor): proj's g19 m32 lane.
-0. Watch r-moe / r-proj Handoffs; re-copy + rebuild + test (bench.py test, tools/scored_test.py, tools/tk2f_stress.py N,
-   tools/replay_test.py, tools/route_judge.py if upstream of the router changed) + H100 A/B (tools/ab_flag.py) + check.
-   The layer calls moe_tk2f_launch directly at T=1 (`_experts_n2u`, cfg + 100000 for SA) and reimplements moe_norm2 in
-   `_N2U_SRC`: update both when moe changes. proj is working on g19 at m32 for the H200 (its Next 1): when posted,
-   add ("pooler"/"unpool", 32) to G19_CFG and A/B the pooler grid (router starvation knee: H100 T=16 104-112 of 132).
-1. d1 (1 us = +0.16%): H100 timeline (v36): boundary ends 26.6, _router_fma 26.7-31.8 holds the SMs so the g13 pooler
-   starts 30.1 (3.4 late) and takes 19.4 (qkv g13 14.5); _routing (1 CTA) cannot get an SM until the pooler drains
-   (46.9-51.2); tk2f starts 51.3. Fewer pooler blocks: worse (132 95.1, 120 95.8, 96 96.2). Pooler + FP32 router +
-   top-8 in ONE kernel (blockIdx role split; the last router block does the routing) est. d1 -3..5 us, v1 similar.
-   DONE s11: pr1 at T=1 (v37), pr8 at T=8 (v38); H200 gains within noise so far.
-   Boundary fused into pr1 per block: loses (NOTES s11); a cluster/DSMEM-shared prologue is the remaining idea.
-2. T=16 o / qkv on g19: proj's H200 diag says o +0.8 worse, qkv has no PDL predecessor (first op): low value.
-3. Experts are 50-60% of every T>=16 shape and 27 us of d1's 72 (moe lane: tk2f ~63% of H200 HBM peak at d1).
+   boundary ~2 us; v1 tail 11.6 us H100 (norm3 3.7, g17 4.6, boundary 3.3). s15: the cluster fusion n2u8 and the
+   cluster boundary bndc are DEAD (NOTES s15): the tail needs a non-cluster idea or nothing.
+-1. Layer-side gap at T=16/32 is GEMMs: H200 d32 qkv cuBLAS 12.8 + splitK reduce 1.9, o 7.1 (cuBLAS); pooler/unpool now
+   g19 (v44). The experts (tk2f d16/d32, twm v16/v32) are 40-55% of every T>=16 shape: moe's lane.
+0. Re-copy procedure (moe/proj): `git -C ~/r-moe show <c>:muse_moe_w4a16/submission.py > moe_src.py` (check the patch
+   anchors in layer.py still match: asserts at import; layer overrides _moe_TWM_ORDER_M and _moe__lib (adds moe_set_upf));
+   proj g19 patches: `git apply -p1` on r-layer. Then bench.py test, tools/scored_test.py, tools/replay_test.py,
+   tools/tk2f_stress.py if tk2f changed, tools/ab_files.py old/new, check.
+1. Dead this session (don't retry without a new idea): every L2 prefetch of a next weight (unpool during tk2f/norm,
+   o during csl, more pooler chunks in pr1) on H100 AND H200; boundary variants (cluster, CUDA 1-CTA, 2-4 rows per
+   program); qkv/o g19 at T=32; csl overlapped with g13; T=8 norm3+unpool cluster fusion.
 
 ## Dead ends (details in NOTES)
+- s15: n2u8 (T=8 norm3+unpool on clusters), bndc (cluster boundary), CUDA 1-CTA boundary, BND_ROWS, UPF3 (unpool
+  W L2 prefetch at tk2f end / in norm; H200 diag b1ee542c d32 -4%), G10_PFL2 (o W prefetch during csl), pr1 npf 6-12,
+  qkv/o g19 at T=32 (8 rounds H100 +2.6..3.4), qkv g19 at T=8 (m=8 unsupported). Patches: dev/n2u8_s15.patch, dev/bndc_s15.patch.
 - s14: UPF2 (tk2f finishers L2-prefetch the unpool slice), N2U_BOUNDARY (still +2.8), BND_SPIN (flag-spin boundary:
   +2 us, race), g17 8/16 rows per block. RULE: no __ldg/.nc on producer data after griddepcontrol.wait (hoisted
   above it); register loads "before the wait" get sunk below it: use cp.async.bulk.prefetch.L2 / LDGSTS; check SASS.
