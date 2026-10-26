@@ -464,7 +464,7 @@ __device__ __forceinline__ void sa2(unsigned addr, unsigned mbar, float a, float
 __device__ __forceinline__ float bf(unsigned short x) { return __uint_as_float((unsigned)x << 16); }
 
 // layer s38: QT float = the FP32 qkv of the layer's g19 at T=8, rounded to BF16 (RN) at each load (as csl's QF32)
-template <int PAGE, typename QT>
+template <int PAGE, typename QT, bool PW = false>
 __global__ void __launch_bounds__(128) verify(const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               unsigned char* kc, unsigned char* vc, const int* __restrict__ pt,
                                               const int* __restrict__ seqs, const long* __restrict__ loc,
@@ -492,12 +492,23 @@ __global__ void __launch_bounds__(128) verify(const QT* __restrict__ qkv, const 
 
     // Every load that doesn't need the page table goes out first (warps issue in order, and the gathers' addresses
     // wait for the page-table trip): queries, the new token, the gate, scales; then cos/sin (needs seq).
+    // layer s62 (PW): a PDL secondary of the qkv GEMM: the qkv rows (queries, gate, new K/V) after griddepcontrol.wait,
+    // everything else (page table, cos/sin, K/V gathers) before it.
     const QT* qp = qkv + (long)tok * QKV_W + (h * 8 + g) * D + 16 * c;
     uint4 qa, qb;
-    csl::ld16(qp, qa, qb);
     // The block's new tokens 0..jt (only the new-token warp needs them).
     const bool newer = rank == 15 && wk == 3;
-    const unsigned gw = csl::ld2(qkv + (long)tok * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
+    unsigned gw;
+    unsigned nkw[L], nvw[L];
+#define VTK_QLOADS                                                                                             \
+    csl::ld16(qp, qa, qb);                                                                                     \
+    gw = csl::ld2(qkv + (long)tok * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);         \
+    _Pragma("unroll") for (int n = 0; n < L; ++n) {                                                            \
+        const int nn = min(n, jt);                                                                             \
+        const QT* kp = qkv + (long)(b * L + nn) * QKV_W + (HQ + h) * D + 2 * lane;                             \
+        nkw[n] = newer ? csl::ld2(kp) : 0u; nvw[n] = newer ? csl::ld2(kp + HKV * D) : 0u;                      \
+    }
+    if (!PW) { VTK_QLOADS }
     const long nloc = loc[tok];
     const float kscale = *ks, vscale = *vs;
     const float rks = 1.f / kscale, rvs = 1.f / vscale;
@@ -507,14 +518,11 @@ __global__ void __launch_bounds__(128) verify(const QT* __restrict__ qkv, const 
     int seq = spec >= 0 ? spec : seqs[b];
     // The block's new tokens 0..jt (only the new-token warp needs them), cos/sin rows and cache rows, all issued
     // before the gathers (clamped indices so the loads are unconditional).
-    unsigned nkw[L], nvw[L];
     float nco[L], nsi[L];
 #pragma unroll
     for (int n = 0; n < L; ++n) {
         // Predicated (not branched) so they stay in the first basic block, issued with the gathers.
         const int nn = min(n, jt);
-        const QT* kp = qkv + (long)(b * L + nn) * QKV_W + (HQ + h) * D + 2 * lane;
-        nkw[n] = newer ? csl::ld2(kp) : 0u; nvw[n] = newer ? csl::ld2(kp + HKV * D) : 0u;
         nco[n] = newer ? cs[(long)(seq + nn) * D + lane] : 0.f; nsi[n] = newer ? cs[(long)(seq + nn) * D + 32 + lane] : 0.f;
     }
     int pos;
@@ -557,6 +565,11 @@ __global__ void __launch_bounds__(128) verify(const QT* __restrict__ qkv, const 
         }
     }
 #undef CSL_LOADS
+    if (PW) {
+        asm volatile("griddepcontrol.wait;" ::: "memory");
+        VTK_QLOADS
+    }
+#undef VTK_QLOADS
     const float g0 = bf(gw & 0xffff), g1 = bf(gw >> 16);
     float x[16];
     {
@@ -733,7 +746,7 @@ __global__ void __launch_bounds__(128) verify(const QT* __restrict__ qkv, const 
 
 void vtk_verify(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor pt,
                 torch::Tensor seq, torch::Tensor loc, torch::Tensor ks, torch::Tensor vs, torch::Tensor out, int64_t page,
-                double qk_scale) {
+                double qk_scale, int64_t pw) {
     int batch = seq.size(0), mp = pt.size(1);
     const int spec = (batch == 1 && page == 1 && CSL_SPEC) ? mp - vtk::L : -1;
     cudaLaunchConfig_t cfg = {};
@@ -741,17 +754,20 @@ void vtk_verify(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
     cfg.blockDim = dim3(128);
     cfg.dynamicSmemBytes = 0;
     cfg.stream = c10::cuda::getCurrentCUDAStream();
-    cudaLaunchAttribute at[1];
+    cudaLaunchAttribute at[2];
     at[0].id = cudaLaunchAttributeClusterDimension;
     at[0].val.clusterDim.x = 16; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
-    cfg.attrs = at; cfg.numAttrs = 1;
+    at[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[1].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = at; cfg.numAttrs = pw ? 2 : 1;
 #define VTK_ARGS(QT) (const QT*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
     (unsigned char*)vc.data_ptr(), pt.data_ptr<int>(), seq.data_ptr<int>(), loc.data_ptr<long>(), ks.data_ptr<float>(), \
     vs.data_ptr<float>(), (__nv_bfloat16*)out.data_ptr(), mp, (float)qk_scale, spec
-#define VTK_LAUNCH(P, QT) { \
+#define VTK_LAUNCH1(P, QT, PW) { \
         static bool set = false; \
-        if (!set) { cudaFuncSetAttribute(vtk::verify<P, QT>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; } \
-        cudaLaunchKernelEx(&cfg, vtk::verify<P, QT>, VTK_ARGS(QT)); }
+        if (!set) { cudaFuncSetAttribute(vtk::verify<P, QT, PW>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; } \
+        cudaLaunchKernelEx(&cfg, vtk::verify<P, QT, PW>, VTK_ARGS(QT)); }
+#define VTK_LAUNCH(P, QT) { if (pw) VTK_LAUNCH1(P, QT, true) else VTK_LAUNCH1(P, QT, false) }
     const bool f32 = qkv.scalar_type() == at::kFloat;
     TORCH_CHECK(page == 1 || page == 64, "vtk: page 1 or 64");
     if (page == 1) {
@@ -760,6 +776,7 @@ void vtk_verify(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
         if (f32) VTK_LAUNCH(64, float) else VTK_LAUNCH(64, unsigned short)
     }
 #undef VTK_LAUNCH
+#undef VTK_LAUNCH1
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 '''
@@ -769,7 +786,7 @@ try:
         cpp_sources="void csl_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t, int64_t);"
                     "void vtk_verify(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double);",
+                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t);",
         cuda_sources=_CSL_SRC, functions=["csl_decode", "vtk_verify"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
@@ -3958,7 +3975,7 @@ def kernel_fn(data: Inputs) -> torch.Tensor:
         out = torch.empty((batch, length, hq * d), dtype=torch.bfloat16, device=device)
         _CSL.vtk_verify(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], page_table,
                         data["seq_lens"], data["cache_loc"], data["k_scale"], data["v_scale"], out, cfg["page_size"],
-                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E)
+                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, int(data.get("csl_pw", 0)))
         return out
     if _NVS is not None and cfg["window"] == 2048 and length == 8 and batch >= NVS_MIN_BATCH and hq == 16 \
             and hkv == 2 and d == 64 and cfg["page_size"] == 1 and cfg["rope_theta"]:

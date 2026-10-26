@@ -2282,7 +2282,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
-            {"pr1": False, "g19:pooler": True}, {"pr1": False, "g19:pooler": True, "g19:qkv_gate": True}),
+            {"pr1": False, "g19:pooler": True}, {"pr1": False, "g19:pooler": True, "g19:qkv_gate": True}, {"cslpw": True}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
               {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
@@ -2301,7 +2301,8 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True, "bal": True},
              (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s61: T=16 sliding moe n8 BAL (H100 real routings 4 seeds -2.6 us mean); s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
 # s62: tokens where decode sliding csl is a PDL secondary of the qkv GEMM (TUNE option cslpw). H100 ab_flag 5-6 rounds x
-# 3 seeds: d16 sliding -0.7..-1.0 us (csl CTAs still wait for g19's SMs: launch + prologue overlap only); d1 +1.3..1.7 (off).
+# 3 seeds: d16 sliding -0.7..-1.0 us (csl CTAs still wait for g19's SMs: launch + prologue overlap only); d1 +1.3..1.7 (off);
+# T=8 (vtk after g14, TUNE[8] option): v1 sliding -0.3..+0.0 (6 rounds x 3 seeds).
 CSL_PW_TOKENS = (16,)
 CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem carveout so 1 csl CTA/SM fits beside it from
 # the start (H100: csl starts at 2.8 us, but its gathers slow g19 17.3 -> 20.6 us: d16 sl +0.3..0.6 net; xb 1 qkv: same)
@@ -2674,10 +2675,10 @@ def kernel_fn(data, state):
     RF_TRIG = _opt(state, tokens, "rf_trig", RF_TRIG_DEFAULT)  # s27: attention's _red_fin (decode 1 full) triggers o after its wait
     # s62 CSL_PW: decode sliding csl as a PDL secondary of the g19 qkv (g19 triggers at start; csl's K/V gathers
     # go out before its griddepcontrol.wait, overlapping the GEMM's weight stream)
-    csl_pw = bool(cfg["window"] > 0 and length == 1 and _opt(state, tokens, "cslpw", tokens in CSL_PW_TOKENS))
+    csl_pw = bool(cfg["window"] > 0 and length in (1, 8) and _opt(state, tokens, "cslpw", tokens in CSL_PW_TOKENS))
     qkv = _g19(data["attn_input"], "qkv_gate", state,  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
                trig=csl_pw and (1 + 2 * bool(_opt(state, tokens, "cslcarve", CSL_PW_CARVE))))
-    csl_pw = csl_pw and (qkv is not None or tokens == 1)  # T=1: the qkv gemv13/10 triggers at start (GEMV_PDL)
+    csl_pw = csl_pw and (qkv is not None or tokens in (1, 8))  # T=1/8: the qkv gemv13/14 trigger at start (GEMV_PDL)
     slabs, qss = None, 0
     if (qkv is None and length == 1 and batch >= NDS_MIN_BATCH and HAVE_GLUON and USE_GDEC and QF32_NDS
             and (_NDS is not None or cfg["window"] == 0) and _opt(state, tokens, "qss", QSS_DEFAULT.get(tokens, False))):
