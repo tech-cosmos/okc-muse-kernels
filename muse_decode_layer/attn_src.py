@@ -749,7 +749,7 @@ void vtk_verify(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
 '''
 try:
     _CSL = _load_inline(
-        name="muse_csl_s96",
+        name="muse_csl_s96_" + __import__("hashlib").sha256(_CSL_SRC.encode()).hexdigest()[:10],
         cpp_sources="void csl_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t);"
                     "void vtk_verify(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
@@ -1381,7 +1381,7 @@ void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
 '''
 try:
     _NVS = _load_inline(
-        name="muse_nvs_a2s13h",
+        name="muse_nvs_a2s13h_" + __import__("hashlib").sha256(_NVS_SRC.encode()).hexdigest()[:10],
         cpp_sources="void nvs(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t);",
@@ -1995,7 +1995,7 @@ void nds(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
 '''
 try:
     _NDS = _load_inline(
-        name="muse_nds_a2s10q2",
+        name="muse_nds_a2s10q2_" + __import__("hashlib").sha256(_NDS_SRC.encode()).hexdigest()[:10],
         cpp_sources="void nds(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
                     "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
