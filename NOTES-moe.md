@@ -334,3 +334,4 @@
   v1 66.1/66.15/66.0. => pf4 (norm3 alone) -0.45 d16, -0.75 d32, 0 at d1/v1; 2 chains nothing.
 - MAIN: TK2F_DYN = 84204 (M > 1: slot-ordered pre-scaled y32 + moe_norm3), TK2F (M = 1) stays 204 because the layer's
   T=1 n2u reimplements moe_norm2 on the old y32 layout. Bitwise = before (pf_ab), bench test 15/15.
+- check adfb897e @078646e (DIAG, standalone speedup 2.177)
