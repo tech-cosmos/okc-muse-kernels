@@ -84,15 +84,9 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 - Lesson: under saturated HBM each dependent memory round trip costs ~3-4 us: keep ticket/last-block chains OFF the
   streaming blocks (extra finisher block spinning on an acquire counter).
 
-## Session 12: gemv20 (wgmma consumers) + 2 blocks/SM: DEAD on the H200 (table in NOTES s12)
-- dev/gemv20.cu/g20.py kept for reference (x by SW128 tensor map, wgmma m64nMk16 with A = dec8 regs: correct).
-- Found: g19/g20 consumers have ~0.28 us FIXED cost per ring stage per warp (barrier/tag/index/arrive latency, 8
-  consumer warps, 2.4 warps/scheduler); decode and mma add serially. H200 HBM delivers a 18 KB stage per SM in ~0.58
-  us, consumers need ~0.86 at m32 -> consumer-bound. More warps per SM via 2 blocks/SM: consumer +20% (H100 NOW) but
-  the smaller buffers lose more; wgmma per stage = 8 dependent wgmmas: slower than mma.sync. g19 1 block AP8 stays.
-- gemv19.cu gained G19_MINB / G19_NPB (defaults unchanged) + co-residency TORCH_CHECK for >1 block/SM.
+## Session 12: gemv20 (wgmma consumers) + 2 blocks/SM DEAD on H200; g19 m32 consumer-bound (~0.28 us/stage/warp). NOTES s12.
 
-## Session 13: lead item (5) T<=8 ramps: QG (csl beside the qkv GEMV, gate rows overlapped) and gemv21 (TMA-ring
+## Session 13: T<=8 ramps QG (csl beside qkv) + gemv21 (TMA-ring m=1) DEAD; g13 needs its whole register file. NOTES s13.
 ## m=1 GEMV) both DEAD (NOTES s13). Patch for the layer kept: dev/qg_layer.patch; edge trick dev/lc_edge.py: no gain.
 - Key facts: g13 needs its whole register file (60 x 1024) for speed; co-residency also needs the smem carveout attr.
   One global ticket counter cannot feed 132 CTAs per row (~0.5 us per round). mbarrier release-arrive waits for the
@@ -140,7 +134,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## but the layer has no split-K cuBLAS left (profile 703d3a7e), so nothing to apply. dev/pdl_cublas.py, NOTES s30.
 ## Session 31: pr1 router-W L2 prefetch with evict_last = WIN at T=1 (H100 layer d1 ~-1.3/-1.1 us, bitwise same): handoff
 ## dev/s31/pr1_evl_layer.patch; all layer prefetch sites evict_last (dev/s31/pf_last.py) d1 -1.8/-1.7. evict_first on W streams null. NOTES s31.
-## Session 32: evict_last on ALL 9 layer L2 prefetch sites + KV_PF (g13's prefetch.global.L2 of the d1 KV rows): layer
+## Session 32 (in layer v80+): evict_last on ALL 9 layer L2 prefetch sites + KV_PF (g13's prefetch.global.L2 of the d1 KV rows): layer
 ## v78 H100 d1 -2.0/-0.9 and -1.3/-1.4 us (2 runs), v1 noise, bitwise same at d1, tests/scored/replay clean. Handoff
 ## dev/s32/evl_all_layer.patch (supersedes s31's). Dead: O_PF/boundary hints, pr8/other prefetch.global.L2 hints. NOTES s32.
 ## Session 33: g13 (12-bit) for the layer's T=1 o as a PDL secondary: H100 d1 full ~-1 us, sliding bimodal 0..-1.9:
@@ -149,9 +143,6 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## Next (ranked)
 -22. (s33) Layer: add the g13o TUNE option (dev/s33/g13o_layer.patch) to the next sandbox's first check; read its
    'layer tune T=1' lines (g13o True vs default, sliding and full).
--21. (s32) Layer: next sandbox's first check should carry dev/s32/evl_all_layer.patch (est. ~+0.3% layer score).
--20. (s31) Layer: confirm the pr1 evict_last patch on the H200 in the next sandbox's first layer check. Other evict_last
-   candidates: any prefetch issued before a PDL wait while a big stream runs (attention's own pf, moe upf already in pf_last).
 -19. (s30) Still waiting for a lane (Requests proj s28/s30). Proj checks 20/20 today.
 -17. (s28) Nothing proj-side with size left: tomorrow's first proj check = main (tg2 unpooler m8 tuner candidate: read "tune unpooler m8" in the judge log; submit if > 1.3110).
    Ask the lead for a new lane (moe sub-task or layer glue) instead of more GEMM variants.
