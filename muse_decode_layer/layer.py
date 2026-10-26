@@ -142,11 +142,14 @@ LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference exper
 def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr, h_ptr, h32_ptr,
               NB: tl.constexpr, N: tl.constexpr, BGAIN: tl.constexpr, H32: tl.constexpr,
               EPS_POST: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr, pf_ptr=None, PF: tl.constexpr = 0,
-              PF_NT: tl.constexpr = 512, RB: tl.constexpr = False):
+              PF_NT: tl.constexpr = 512, RB: tl.constexpr = False, TRIG: tl.constexpr = False):
     """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
     s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32).
     RB: the branch is FP32 (gemv19 output), rounded to BF16 first.
-    PF > 0: the last PF programs instead L2-prefetch PF x PF_NT x 1 KB from pf_ptr (the router weight) and exit."""
+    PF > 0: the last PF programs instead L2-prefetch PF x PF_NT x 1 KB from pf_ptr (the router weight) and exit.
+    TRIG: let the PDL dependent (the gemv19 pooler, which streams W before its griddepcontrol.wait) launch now."""
+    if TRIG:
+        gdc_launch_dependents()
     if PF > 0:
         if tl.program_id(0) >= tl.num_programs(0) - PF:
             i = (tl.program_id(0) - (tl.num_programs(0) - PF)) * PF_NT + tl.arange(0, PF_NT)
@@ -586,11 +589,14 @@ _G19_SRC = None  # @@G19@@
 # in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
 # kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
 # npre, xb), proj's H100 picks (r-proj BF16_G19). Consumers round the FP32 out to BF16 (= the GEMM's BF16 output).
-G19_CFG = {("pooler", 16): (16, 1024, 4, 4, 2, 2), ("pooler", 32): (32, 1024, 4, 4, 2, 1),
-           ("unpool", 16): (16, 1024, 4, 4, 2, 2), ("unpool", 32): (32, 1024, 4, 4, 2, 1),
-           ("o", 16): (16, 512, 4, 3, 2, 2)}
+G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2)}
+# proj's H200 diag (after a 3 us PDL predecessor): m16 pooler AP8 15.7 vs 19.0, unpool tie, o +0.8, every m32 loses
+# (+1.5..5): m32 stays on cuBLAS / the bmm pooler. Was (H100 picks, s10 v35): pooler m16 (16, 1024, 4, 4, 2, 2),
+# m32 (32, 1024, 4, 4, 2, 1), unpool the same, o m16 (16, 512, 4, 3, 2, 2).
+G19_BUILD = [(16, 1024, 4, 4, 2, 2)]  # also compiled (A/B)
+BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
 G19_ON = {"pooler", "unpool"}  # o: H100 tie (cuBLAS after attention)
-G19_GRID = {("pooler", 16): 96, ("pooler", 32): 96}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16 132: +4, 96: -2 us vs 132)
+G19_GRID = {("pooler", 16): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
 _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _GPR3_SRC = None  # @@GPR3@@
 KV_PF = True  # s9: the qkv gemv13 L2-prefetches the window's KV rows for csl (d1 sliding; H100 csl 6.1-7.3 -> ~4 us)
@@ -772,7 +778,7 @@ def _g10_lib():
             src = src + "\n" + _GPR3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(PR3_CFG.values()) | set(PR3_BUILD))))
             if G19_CFG and _G19_SRC is not None:
                 src = src + "\n#define G19_ONLY2\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
-                    "G19_CASE(%d,%d,%d,%d,1,%d)" % (c[0], c[1], c[2], c[3], c[5]) for c in sorted(set(G19_CFG.values()))))
+                    "G19_CASE(%d,%d,%d,%d,1,%d)" % (c[0], c[1], c[2], c[3], c[5]) for c in sorted(set(G19_CFG.values()) | set(G19_BUILD))))
             else:
                 src = src + "\nvoid g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
@@ -1411,7 +1417,8 @@ def kernel_fn(data, state):
     npf = (state["router"].numel() * 4) // (512 * 1024) if tokens in ROUTER_L2_PF_TOKENS and fp32_router else 0
     _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
-                               PDL=pdl, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32, num_warps=16,
+                               PDL=pdl, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32,
+                               TRIG=BOUNDARY_TRIG and ("pooler", tokens) in state.get("g19", {}) and "pooler" in G19_ON, num_warps=16,
                                launch_pdl=pdl)
     main_stream, side_stream = torch.cuda.current_stream(), state["side_stream"]
     if tokens in ROUTER_AFTER_POOLER and pdl:
