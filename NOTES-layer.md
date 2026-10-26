@@ -1070,3 +1070,11 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   layer's moe_src had the same code: ids/tw (moe_norm, moe_norm2) and inv (moe_norm2) now __ldcg. SASS after: in
   moe_norm/moe_norm2/gathern/routegathern only prepared w1 loads precede the wait. Cache-op only (bitwise same math).
 - Tests: bench test 13/13, scored_test verify x3 seeds 0 bad, replay_test 0 fails.
+- DEAD (oracle, s54): qkv split at d1 sliding = q/k/v GEMV (1280 rows, first op) + gate GEMV (1024 rows, 12.6 MB 12-bit)
+  launched after csl as its PDL secondary, griddepcontrol.wait moved to the gate's END (so it streams beside csl; o =
+  its PDL secondary), gating epilogue NOT implemented (output wrong: timing upper bound). tools/gsplit_oracle.py
+  (`python tools/gsplit_oracle.py base|gs`, run from muse_decode_layer; GS_CFG env = g13 cfg of the gate, GS_PDL 1/2).
+  H100 timelines: qkv' 9.2-9.6 us (-3.5..4), but the gate takes 8-11 us beside csl (~1.3 TB/s: ramp-bound small GEMV,
+  shares SMs with csl and o's prologue) and o ends ~24 vs 23.4. ab_files tuner off, 8 rounds A B C A: base 86.32/86.22,
+  gate 240 blocks (2,2,2,1) 86.82, (2,1,4,1,480) 87.61 us. Wait-before-x version (pdl 1): +4 us. The qkv->o window is
+  ramp/latency-bound GEMVs at ~2 TB/s, not idle HBM: moving bytes into it doesn't pay (same lesson as s34/s38).
