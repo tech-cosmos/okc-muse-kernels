@@ -2782,8 +2782,14 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     a = 0;
     while (cum[a + 1] <= it) ++a;
     const int nrb = g2 ? NR2 : NR13, rem = it - cum[a];
-    p = rem / nrb;
-    rb = rem - p * nrb;
+    if (flags & 8) {  // pass-minor: all passes of a row block adjacent (later passes read the weights from L2)
+      const int np = (cum[a + 1] - cum[a]) / nrb;
+      rb = rem / np;
+      p = rem - rb * np;
+    } else {
+      p = rem / nrb;
+      rb = rem - p * nrb;
+    }
   };
   if (warp >= 16) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(TWQ_PREG) : "memory");
@@ -4350,7 +4356,8 @@ TWM_ORDER = 0  # s14: moe_twm item order (bits, see moe_twm): 76 = pass-minor + 
 TWM_ORDER_M = {256: 76}  # s14: per-M override
 TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
 TWM_HOT_M = {}  # s17: per-M override
-TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline)
+TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline,
+#   bit 3 = pass-minor item order; use 4 for plain on)
 TWQ_M = {}  # s17: per-M override, e.g. {128: 4} (proxy: v16 -6.5 proxy-us, v32 +4.6)
 TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
 TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
