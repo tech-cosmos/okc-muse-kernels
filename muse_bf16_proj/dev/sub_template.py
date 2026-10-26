@@ -138,6 +138,7 @@ DIAG19Q_S15 = {"qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (16, 1024, 8, 3, 3,
                             (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
 DIAG19Q = {}
 DIAG_SLAB = {}  # s22 diag done (check ccf41026: qkv m32 bmm2 16.03 vs lt 17.50 H200 us; NOTES s22); was {"qkv_gate": (16, 32), "o": (32,), "pooler": (32,)}
+DIAG_EXT = {"qkv_gate": (16, 32, 128, 256), "o": (128, 256), "pooler": (32, 128, 256), "unpooler": (128,)}  # s25: judge-image libs
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
@@ -475,6 +476,7 @@ def prepare(weights):
     _diag20(st)
     _diag19_stream()
     _diag_slab(st)
+    _diag_ext(st)
     st["rpick"] = _tune_router(st)
     return st
 
@@ -755,6 +757,53 @@ def _diag_slab(st):
             med = _graph_medians(fns)
             print(f"diagslab {layer} m{m}: pick {pick} {med[0] * 1e3:.2f} mm32 {med[1] * 1e3:.2f}",
                   " ".join(f"bmm{ns}:{t * 1e3:.2f}" for ns, t in zip(nss, med[2:])))
+
+
+def _diag_ext(st):
+    """Print only: which GEMM entry points the judge image's libraries export, and DeepGEMM's BF16 GEMM (if present)
+    vs this shape's pick, as graph replays after the cold-L2 flush (+ max abs diff to the pick's output)."""
+    import importlib
+    import time
+    t0 = time.time()
+    libs = {}
+    for name in ("deep_gemm", "flashinfer", "flashinfer.gemm", "sgl_kernel"):
+        try:
+            mod = importlib.import_module(name)
+            libs[name] = mod
+            names = sorted(a for a in dir(mod) if any(s_ in a.lower() for s_ in ("bf16", "gemm", "mm", "sms")))
+            print(f"diagext {name} {getattr(mod, '__version__', '?')}: {' '.join(names)[:2000]}")
+        except Exception as e:
+            print(f"diagext {name} import failed: {type(e).__name__}: {str(e)[:200]}")
+    fn = getattr(libs.get("deep_gemm"), "bf16_gemm_nt", None)
+    if fn is None or not DIAG_EXT:
+        return
+    g = torch.Generator(device="cuda")
+    g.manual_seed(7)
+    for layer, ms in DIAG_EXT.items():
+        for m in ms:
+            if time.time() - t0 > 240:
+                print("diagext: time cap")
+                return
+            try:
+                w = st[layer]
+                n, k = w.shape
+                x = torch.randn(m, k, generator=g, device=w.device).to(torch.bfloat16)
+                out = torch.empty(m, n, dtype=torch.bfloat16, device=w.device)
+                ref = torch.empty(m, n, dtype=torch.bfloat16, device=w.device)
+                pick = st["pick"].get((layer, m))
+                runp = (lambda: _run(st, layer, x, ref, pick)) if pick is not None else (lambda: torch.mm(x, w.t(), out=ref))
+                runp()
+                torch.cuda.synchronize()
+                t1 = time.time()
+                fn(x, w, out)
+                torch.cuda.synchronize()
+                jit = time.time() - t1
+                err = (out.float() - ref.float()).abs().max().item()
+                med = _graph_medians([runp, lambda: fn(x, w, out)])
+                print(f"diagext {layer} m{m}: pick {pick} {med[0] * 1e3:.2f} deep_gemm bf16_gemm_nt {med[1] * 1e3:.2f} us "
+                      f"(first call {jit:.1f} s, maxdiff {err:.3g})")
+            except Exception as e:
+                print(f"diagext {layer} m{m} failed: {type(e).__name__}: {str(e)[:300]}")
 
 
 def _diag19_stream():

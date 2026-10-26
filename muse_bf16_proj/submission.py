@@ -1532,6 +1532,11 @@ _G19_SRC = r'''// gemv19: gemv18's TMA-ring streamer over lossless 12-bit weight
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
 namespace g19 {
+#ifdef G19_RAW  // s24: plain BF16 weights (stages = mma A fragments, [atom][s][lane][16 B]): no decode, no escapes, scale 1
+constexpr int WB = 1024;
+#else
+constexpr int WB = 768;  // bytes per 16-row x 32-k atom: 512 sign|mantissa + 256 codes
+#endif
 constexpr int ESC = 8, NWC = 8;
 #ifdef G19_TRACE
 __device__ unsigned long long trace[132 * 64];
@@ -1612,7 +1617,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     // a tile's K reads it back, writes BF16, re-zeroes it); ctr[2 + tile] = atoms done per tile (+KA per call, never reset)
     constexpr int NWC = RG;  // 16-row groups per tile (one stage covers RG x AP atoms)
     static_assert(RPW == 1 || TS == 1, "config");
-    constexpr int NCW = NWC * TS / RPW, MT = M / TS, NT = MT / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * 768, XS = KC * 2 + 16, PBF = NWC * 16 * M;
+    constexpr int NCW = NWC * TS / RPW, MT = M / TS, NT = MT / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * WB, XS = KC * 2 + 16, PBF = NWC * 16 * M;
     static_assert(NA % AP == 0 && SPK % IS == 0 && NT % 2 == 0 && M <= 32, "config");  // NT even: x B fragments by ldmatrix.x4
     extern __shared__ __align__(128) unsigned char smem[];
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
@@ -1909,6 +1914,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
             xph[xb] ^= 1;
         }
         prev_xl = xl;
+#ifndef G19_RAW
         if (prev_end) {  // run start: its escape headers (rows g, g + 8 of the warp's row groups; lane c: slots 2c, 2c + 1)
             st0 = st;
 #pragma unroll
@@ -1918,6 +1924,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                 hd1[rr] = __ldg((const float4*)(hp0 + 8 * ESC) + c);
             }
         }
+#endif
         prev_end = end;
         const unsigned xbase = xs + xb * M * XS + xrow;
         const unsigned sb = ring + slot * SB + wr * AP * 512 + lane * 16, nb = ring + slot * SB + NWC * AP * 512 + wr * AP * 256 + lane * 8;
@@ -1955,6 +1962,17 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         constexpr int G = NT * RPW == 2 ? AP : AP < 2 ? AP : 2;
 #pragma unroll
         for (int j0 = 0; j0 < AP; j0 += G) {
+#ifdef G19_RAW
+            uint4 fa[RPW][G][2];
+            const unsigned rb_ = ring + slot * SB + wr * AP * 1024 + lane * 16;
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr)
+#pragma unroll
+                for (int j = 0; j < G; ++j)
+#pragma unroll
+                    for (int s = 0; s < 2; ++s)
+                        asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(fa[rr][j][s].x), "=r"(fa[rr][j][s].y), "=r"(fa[rr][j][s].z), "=r"(fa[rr][j][s].w) : "r"(rb_ + rr * AP * 1024 + (j0 + j) * 1024 + s * 512));
+#else
             uint4 sv[RPW][G];
             uint2 nv[RPW][G];
 #pragma unroll
@@ -1964,6 +1982,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                     asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(sv[rr][j].x), "=r"(sv[rr][j].y), "=r"(sv[rr][j].z), "=r"(sv[rr][j].w) : "r"(sb + rr * AP * 512 + (j0 + j) * 512));
                     asm volatile("ld.shared.v2.u32 {%0,%1}, [%2];" : "=r"(nv[rr][j].x), "=r"(nv[rr][j].y) : "r"(nb + rr * AP * 256 + (j0 + j) * 256));
                 }
+#endif
             unsigned bx[G][2][NT][2];
 #pragma unroll
             for (int j = 0; j < G; ++j)
@@ -1978,7 +1997,11 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                 for (int rr = 0; rr < RPW; ++rr)
 #pragma unroll
                     for (int s = 0; s < 2; ++s) {
+#ifdef G19_RAW
+                        const uint4 af = fa[rr][j][s];
+#else
                         const uint4 af = dec8(s ? sv[rr][j].z : sv[rr][j].x, s ? sv[rr][j].w : sv[rr][j].y, s ? nv[rr][j].y : nv[rr][j].x);
+#endif
 #pragma unroll
                         for (int jj = 0; jj < NT; ++jj) mma(s ? acc2[rr][jj] : acc[rr][jj], af, bx[j][s][jj][0], bx[j][s][jj][1]);
                     }
@@ -2008,7 +2031,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
 #pragma unroll
                 for (int e = 0; e < 4; ++e) { v[rr][jj][e] = acc[rr][jj][e] + acc2[rr][jj][e]; acc[rr][jj][e] = acc2[rr][jj][e] = 0.f; }
 #pragma unroll
-        for (int rr = 0; rr < RPW; ++rr)
+        for (int rr = 0; rr < (WB == 1024 ? 0 : RPW); ++rr)
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 if (sfix) break;
@@ -2078,7 +2101,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
 #if !defined(G19_OLDFIX) && !defined(G19_RFIX)
         // escape fixups on the stored partials, one escape at a time over the warp (lane = token): the in-range slots
         // (lane c holds slots 2c, 2c + 1 of rows g, g + 8) are found by ballots and walked in lane order, warp-uniformly
-        {
+        if (WB != 1024) {
             __syncwarp();
             const unsigned char* xt = smem + NS * SB + xb * M * XS + (th * MT + lane) * XS - ks * KC * 2;
 #pragma unroll
@@ -2238,7 +2261,7 @@ void g19_gemm_ob(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor 
               int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode, int64_t npre, int64_t xb, int64_t ts, int64_t rg, int64_t rpw,
               __nv_bfloat16* ob, int tm) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
-    const int sm = ns * rg * ap * 768 + xb * m * (kc * 2 + 16) + g19::NPB * rg * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8
+    const int sm = ns * rg * ap * g19::WB + xb * m * (kc * 2 + 16) + g19::NPB * rg * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8
 #ifdef G19_XQ
                  + 64
 #endif
@@ -3894,6 +3917,7 @@ DIAG19Q_S15 = {"qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (16, 1024, 8, 3, 3,
                             (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
 DIAG19Q = {}
 DIAG_SLAB = {}  # s22 diag done (check ccf41026: qkv m32 bmm2 16.03 vs lt 17.50 H200 us; NOTES s22); was {"qkv_gate": (16, 32), "o": (32,), "pooler": (32,)}
+DIAG_EXT = {"qkv_gate": (16, 32, 128, 256), "o": (128, 256), "pooler": (32, 128, 256), "unpooler": (128,)}  # s25: judge-image libs
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
@@ -4250,6 +4274,7 @@ def prepare(weights):
     _diag20(st)
     _diag19_stream()
     _diag_slab(st)
+    _diag_ext(st)
     st["rpick"] = _tune_router(st)
     return st
 
@@ -4530,6 +4555,53 @@ def _diag_slab(st):
             med = _graph_medians(fns)
             print(f"diagslab {layer} m{m}: pick {pick} {med[0] * 1e3:.2f} mm32 {med[1] * 1e3:.2f}",
                   " ".join(f"bmm{ns}:{t * 1e3:.2f}" for ns, t in zip(nss, med[2:])))
+
+
+def _diag_ext(st):
+    """Print only: which GEMM entry points the judge image's libraries export, and DeepGEMM's BF16 GEMM (if present)
+    vs this shape's pick, as graph replays after the cold-L2 flush (+ max abs diff to the pick's output)."""
+    import importlib
+    import time
+    t0 = time.time()
+    libs = {}
+    for name in ("deep_gemm", "flashinfer", "flashinfer.gemm", "sgl_kernel"):
+        try:
+            mod = importlib.import_module(name)
+            libs[name] = mod
+            names = sorted(a for a in dir(mod) if any(s_ in a.lower() for s_ in ("bf16", "gemm", "mm", "sms")))
+            print(f"diagext {name} {getattr(mod, '__version__', '?')}: {' '.join(names)[:2000]}")
+        except Exception as e:
+            print(f"diagext {name} import failed: {type(e).__name__}: {str(e)[:200]}")
+    fn = getattr(libs.get("deep_gemm"), "bf16_gemm_nt", None)
+    if fn is None or not DIAG_EXT:
+        return
+    g = torch.Generator(device="cuda")
+    g.manual_seed(7)
+    for layer, ms in DIAG_EXT.items():
+        for m in ms:
+            if time.time() - t0 > 240:
+                print("diagext: time cap")
+                return
+            try:
+                w = st[layer]
+                n, k = w.shape
+                x = torch.randn(m, k, generator=g, device=w.device).to(torch.bfloat16)
+                out = torch.empty(m, n, dtype=torch.bfloat16, device=w.device)
+                ref = torch.empty(m, n, dtype=torch.bfloat16, device=w.device)
+                pick = st["pick"].get((layer, m))
+                runp = (lambda: _run(st, layer, x, ref, pick)) if pick is not None else (lambda: torch.mm(x, w.t(), out=ref))
+                runp()
+                torch.cuda.synchronize()
+                t1 = time.time()
+                fn(x, w, out)
+                torch.cuda.synchronize()
+                jit = time.time() - t1
+                err = (out.float() - ref.float()).abs().max().item()
+                med = _graph_medians([runp, lambda: fn(x, w, out)])
+                print(f"diagext {layer} m{m}: pick {pick} {med[0] * 1e3:.2f} deep_gemm bf16_gemm_nt {med[1] * 1e3:.2f} us "
+                      f"(first call {jit:.1f} s, maxdiff {err:.3g})")
+            except Exception as e:
+                print(f"diagext {layer} m{m} failed: {type(e).__name__}: {str(e)[:300]}")
 
 
 def _diag19_stream():
