@@ -4223,6 +4223,8 @@ int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }
 
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
+#define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
+#define TK2_EXP 0        // s12: tk2h (TK2H/PSC) and weighted-split (TK2W) instantiations: H200 diags, no gain (off: compile time)
 
 __device__ __forceinline__ uint32_t bmul(uint32_t a, uint32_t b) {
   uint32_t d;
@@ -4958,6 +4960,8 @@ __global__ void __launch_bounds__(256) moe_act(const float4* __restrict__ acc13,
 }
 
 // As moe_norm, but y comes from Acc2 (FP32, sorted positions, x global scale).
+// SLOT (s13, moe_tk2f PF & 4): Y row = route slot tok * 8 + s, already scaled by gs2 * 256 (no inv / gs loads)
+template <bool SLOT = false>
 __global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y, const int* __restrict__ inv,
                                                  const int* __restrict__ ids, const float* __restrict__ tw,
                                                  const float* __restrict__ w1, const float* __restrict__ gs, int start,
@@ -4980,12 +4984,17 @@ __global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y, co
     loc[s] = e >= 0 && e < count;
     ss[s] = 0.f;
     if (loc[s]) {
-      const float gsc = gs[e] * 256.0f;
-      const float4* p = reinterpret_cast<const float4*>(Y + (size_t)inv[tok * 8 + s] * NOUT + tid * 8);
+      const float4* p = reinterpret_cast<const float4*>(Y + (size_t)(SLOT ? tok * 8 + s : inv[tok * 8 + s]) * NOUT + tid * 8);
       const float4 a = p[0], b = p[1];
       const float f[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+      if (SLOT) {
 #pragma unroll
-      for (int k = 0; k < 8; ++k) v[s][k] = f[k] * gsc * wv[k];
+        for (int k = 0; k < 8; ++k) v[s][k] = f[k] * wv[k];
+      } else {
+        const float gsc = gs[e] * 256.0f;
+#pragma unroll
+        for (int k = 0; k < 8; ++k) v[s][k] = f[k] * gsc * wv[k];
+      }
 #pragma unroll
       for (int k = 0; k < 8; ++k) ss[s] += v[s][k] * v[s][k];
     } else {
@@ -6633,7 +6642,7 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
   }
 }
 
-template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA = false>
+template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA = false, int PF = 0>
 __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* __restrict__ gs,
                                              const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
@@ -6656,8 +6665,8 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       off = s_off[e] + gi * 8;
       n = min(8, s_off[e + 1] - off);
       ci = a * 4 + gi;
-      if (!GATED) {  // all gemm13 rows written (by any CTA): see moe_tk2f
-        int c;
+      if (!GATED && !((PF & 2) && R != r0)) {  // all gemm13 rows written (by any CTA): see moe_tk2f. PF & 2 (s13): only
+        int c;                                    // at the CTA's first gemm2 row (cnt never decreases within a call)
         do {
           asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt) : "memory");
         } while (c < need);
@@ -6678,11 +6687,22 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
         }
       }
     }
-    float acc[2][4];
+    if ((PF & 1) && R + 1 == seg_end && R + 1 < r1) {  // s13: L1 prefetch of the next segment's x during this row
+      const int a2 = seg_end >= s_rs[a + 1] ? a + 1 : a;
+      const int e2 = s_e[a2], off2 = s_off[e2] + ((seg_end - s_rs[a2]) / RPE) * 8;
+      if (g < s_off[e2 + 1] - off2) {
+        const int row2 = GATED ? (s_srt[off2 + g] >> 3) : (off2 + g);
+        const char* p = reinterpret_cast<const char*>(X + (size_t)row2 * KD + 16 * t);
+#pragma unroll
+        for (int qq = 0; qq < NQ; ++qq) asm volatile("prefetch.global.L1 [%0];" ::"l"(p + (qq * NC + warp) * 128));
+      }
+    }
+    constexpr int NA = (PF & 8) ? 2 : 1;  // s13 PF & 8: 2 accumulator chains per tile (j even / odd), summed at the end
+    float acc[2][4], acc2[2][4];
 #pragma unroll
     for (int i = 0; i < 2; ++i)
 #pragma unroll
-      for (int r = 0; r < 4; ++r) acc[i][r] = 0.f;
+      for (int r = 0; r < 4; ++r) acc[i][r] = acc2[i][r] = 0.f;
 #pragma unroll
     for (int q = 0; q < NS; ++q) {
       mbar_wait(&full[st], ph);
@@ -6714,7 +6734,8 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
           for (int j = 0; j < 4; ++j) {
             uint32_t af[4];
             dq(u4get(wv, j), sc[2 * ii], sc[2 * ii + 1], af);
-            mma16816(acc[ii], af, u4get(xf[qq][j >> 1], (j & 1) * 2), u4get(xf[qq][j >> 1], (j & 1) * 2 + 1));
+            mma16816((NA == 2 && (j & 1)) ? acc2[ii] : acc[ii], af, u4get(xf[qq][j >> 1], (j & 1) * 2),
+                   u4get(xf[qq][j >> 1], (j & 1) * 2 + 1));
           }
         }
       }
@@ -6722,6 +6743,12 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       // overwrite the stage before some LDS had read it (seen as wrong weights in the first row after an x reload,
       // when 16 LDGs per thread are in flight: the s7 "first gemm2 row" race). Arrive once the data is consumed.
       mbar_arrive(&empty[cs]);
+    }
+    if (NA == 2) {
+#pragma unroll
+      for (int ii = 0; ii < 2; ++ii)
+#pragma unroll
+        for (int r = 0; r < 4; ++r) acc[ii][r] += acc2[ii][r];
     }
     float* red = s_red + rb * (NC * 256);
     rb ^= 1;
@@ -6762,7 +6789,8 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       const int tok = 2 * tt + (r & 1);
       if (tok < n) {
         const int col = (rp + ii * RPE) * 16 + gg + ((r & 2) ? 8 : 0);
-        reinterpret_cast<float*>(Out)[(size_t)(off + tok) * NOUT + col] = v;
+        if (PF & 4) reinterpret_cast<float*>(Out)[(size_t)s_srt[off + tok] * NOUT + col] = v * gsc;  // route slot order
+        else reinterpret_cast<float*>(Out)[(size_t)(off + tok) * NOUT + col] = v;
       }
     }
   }
@@ -6772,11 +6800,14 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
 // it against both 8-token groups (TWO): group 0's x fragments in registers (xf), group 1's in smem (xs, lane-private,
 // written by the same lane at the segment change). Dequant is ~70% of a row's instructions, so a 2-group row costs
 // ~1.15x a 1-group row instead of 2x. s_red holds 2 groups x 2 tiles (double-buffered).
-template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA, bool TWO>
+template <int NRT, int NC, int NSTG, bool GATED_, int KPS, bool SA, bool TWO, bool RTG = false>
 __device__ __forceinline__ void tk2g_row(const uint32_t* slut, const uint4 (&xf)[64 / NC][2], const uint4* xs, void* Out,
                                          int rp, int off, int n, float gsc, float* s_red, uint4* smem, uint64_t* full,
-                                         uint64_t* empty, int& st, int& ph, int& rb) {
-  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152, NG = TWO ? 2 : 1;
+                                         uint64_t* empty, int& st, int& ph, int& rb, bool gated_rt = false) {
+  // RTG (s12): gated is a run-time flag (gemm13 and gemm2 share ONE main-loop body: i-cache), RPE from it
+  const bool GATED = RTG ? gated_rt : GATED_;
+  const int RPE = RTG ? (gated_rt ? 256 : 128) : NRT / 2;
+  constexpr int NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152, NG = TWO ? 2 : 1;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const uint4* wsm = smem + warp * 32 + lane;
   float acc[NG][2][4];
@@ -6930,6 +6961,83 @@ __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* 
       if (tid == 0) {
         __threadfence();
         atomicAdd(cnt, R + 1 - max(seg_start, r0));
+      }
+    }
+  }
+}
+
+// s12 MERGED consumer (tk2h): both phases in ONE run-time loop, so the kernel holds one main-loop body per row kind
+// (GS 8: 1 body; GS 16: 2) instead of 2 / 4. GS16's loss was instruction-cache misses: ncu stall_no_instruction at
+// layer d1 923 -> 9418 (118 KB kernel vs 65 KB) with no 2-group row at all.
+template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false>
+__device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* __restrict__ gs13,
+                                             const float* __restrict__ gs2, const __nv_bfloat16* X,
+                                             __nv_bfloat16* inter, float* Y, int* cnt, int need, int a0, int a1, int b0,
+                                             int b1, const int* s_rs13, const int* s_rs2, const int* s_e,
+                                             const int* s_off, const int* s_srt, float* s_red, uint4* smem, uint4* s_x2,
+                                             uint64_t* full, uint64_t* empty, int& st, int& ph, int& rb) {
+  constexpr int NQ = 64 / NC;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
+  uint4 xf[NQ][2];
+  uint4* xs = GS == 16 ? s_x2 + warp * (NQ * 2 * 32) + lane : nullptr;
+#pragma unroll 1
+  for (int p = 0; p < 2; ++p) {
+    const bool gated = p == 0;
+    const int RPE = gated ? 256 : 128;
+    const int* s_rs = gated ? s_rs13 : s_rs2;
+    const float* gs = gated ? gs13 : gs2;
+    const __nv_bfloat16* Xp = gated ? X : inter;
+    void* Out = gated ? (void*)inter : (void*)Y;
+    const int r0 = gated ? a0 : b0, r1 = gated ? a1 : b1;
+    int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0;
+    float gsc = 0.f;
+#pragma unroll 1
+    for (int R = r0; R < r1; ++R) {
+      if (R >= seg_end) {
+        while (s_rs[a + 1] <= R) ++a;
+        const int gi = (R - s_rs[a]) / RPE;
+        seg_start = s_rs[a] + gi * RPE;
+        seg_end = seg_start + RPE;
+        const int e = s_e[a];
+        gsc = gs[e] * 256.0f;
+        off = s_off[e] + gi * GS;
+        n = min(GS, s_off[e + 1] - off);
+        if (!gated) {  // all gemm13 rows written (by any CTA): see moe_tk2f. PSC (s12): only this segment's 256 rows
+          // (segment j = gemm13 rows [256 j, 256 j + 256) = gemm2 rows [128 j, 128 j + 128); counter cnt[64 + j], j < 64)
+          const int* cp = PSC ? cnt + 64 + seg_start / 128 : cnt;
+          const int nd = PSC ? 256 : need;
+          int c;
+          do {
+            asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cp) : "memory");
+          } while (c < nd);
+        }
+#pragma unroll
+        for (int h = 0; h < GS / 8; ++h) {
+          if (h && n <= 8) break;
+          const bool v = h * 8 + g < n;
+          int row = 0;
+          if (v) row = gated ? (s_srt[off + h * 8 + g] >> 3) : (off + h * 8 + g);
+          const uint4* xr = reinterpret_cast<const uint4*>(Xp + (size_t)row * KD + 16 * t);
+#pragma unroll
+          for (int qq = 0; qq < NQ; ++qq) {
+            const int kc = qq * NC + warp;
+            uint4 x0 = make_uint4(0, 0, 0, 0), x1 = x0;
+            if (v) { x0 = __ldg(xr + kc * 8); x1 = __ldg(xr + kc * 8 + 1); }
+            if (h) { xs[(qq * 2) * 32] = x0; xs[(qq * 2 + 1) * 32] = x1; }
+            else { xf[qq][0] = x0; xf[qq][1] = x1; }
+          }
+        }
+      }
+      if (GS == 16 && n > 8)
+        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated);
+      else
+        tk2g_row<0, NC, NSTG, false, KPS, SA, false, true>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated);
+      if (gated && (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
+        asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+        if (tid == 0) {
+          __threadfence();
+          atomicAdd(PSC ? cnt + 64 + seg_start / 256 : cnt, R + 1 - max(seg_start, r0));
+        }
       }
     }
   }
@@ -7225,7 +7333,36 @@ __device__ __forceinline__ int tk2g_split(int b, int nact, int wt, int rps, cons
   return row;
 }
 
-template <int NC, int NSTG, int KPS, bool DYN, bool FN = false, bool SA = false, int GS = 8>
+// s12 WEIGHTED static split (GS 8): a row of an expert's first 8-token group streams its weights from HBM, rows of the
+// extra groups (hot experts) mostly hit L2 and cost ~wE/8 of it (H200 fit on layer routings: 4.4 / 6.97 us = 0.63).
+// Warp 0 computes CTA b's row bounds [r(b), r(b+1)) of a phase with RPS rows per group; lane = active expert index.
+// 32-bit math: total weight <= 64 groups x 256 rows x 8.
+__device__ __forceinline__ int tk2w_bound(int b, int nact, int wE, int rps, const int* s_e, const int* s_off) {
+  const int lane = threadIdx.x & 31;
+  const int c = lane < nact ? s_off[s_e[lane] + 1] - s_off[s_e[lane]] : 0;
+  const int ng = (c + 7) >> 3;
+  const int w = ng ? rps * (8 + (ng - 1) * wE) : 0;  // this expert's weight
+  int incl = w, rows = ng * rps;
+#pragma unroll
+  for (int o = 1; o < 32; o <<= 1) {
+    const int v = __shfl_up_sync(0xffffffffu, incl, o), r = __shfl_up_sync(0xffffffffu, rows, o);
+    if (lane >= o) { incl += v; rows += r; }
+  }
+  const int W = __shfl_sync(0xffffffffu, incl, 31);
+  const int p = (int)((long long)W * b / gridDim.x);
+  const int cum = incl - w, row0 = rows - ng * rps;
+  int res = 0x7fffffff;
+  if (ng && p >= cum && p < incl) {  // p falls in this expert: group 0 (weight 8 per row), then groups of weight wE
+    const int q = p - cum;
+    if (q < rps * 8) res = row0 + (q + 7) / 8;
+    else res = row0 + rps + (q - rps * 8 + wE - 1) / wE;
+  }
+  if (p >= W) res = __shfl_sync(0xffffffffu, rows, 31);
+  res = __reduce_min_sync(0xffffffffu, res);
+  return res;
+}
+
+template <int NC, int NSTG, int KPS, bool DYN, bool FN = false, bool SA = false, int GS = 8, int MRG = 0, int PF = 0>
 __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     const uint4* __restrict__ Wq13, const uint32_t* __restrict__ S13, const uint4* __restrict__ Wq2,
     const uint32_t* __restrict__ S2, const uint32_t* __restrict__ lut, const float* __restrict__ gs13,
@@ -7237,7 +7374,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   extern __shared__ __align__(128) uint4 smem[];
   __shared__ uint32_t slut[256];
   __shared__ int s_e[32], s_off[33], s_rs13[33], s_rs2[33], s_srt[256], s_wc[8][32], s_nact;
-  __shared__ float s_red[(GS == 16 ? 4 : 2) * NC * 256];
+  __shared__ float s_red[(GS == 16 || MRG ? 4 : 2) * NC * 256];
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   __shared__ int s_rid[4];
   __shared__ __align__(8) uint64_t ridb[4];
@@ -7344,6 +7481,16 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   int a0 = (int)((long long)n13 * blockIdx.x / gridDim.x), a1 = (int)((long long)n13 * (blockIdx.x + 1) / gridDim.x);
   int b0 = (int)((long long)n2 * blockIdx.x / gridDim.x), b1 = (int)((long long)n2 * (blockIdx.x + 1) / gridDim.x);
+  if (GS == 8 && !DYN && D > 0) {  // s12 weighted split (wE = D / 8 for extra-group rows), see tk2w_bound
+    __shared__ int s_ab[4];
+    if (warp == 0) {
+      const int v0 = tk2w_bound(blockIdx.x, nact, D, 256, s_e, s_off), v1 = tk2w_bound(blockIdx.x + 1, nact, D, 256, s_e, s_off);
+      const int v2 = tk2w_bound(blockIdx.x, nact, D, 128, s_e, s_off), v3 = tk2w_bound(blockIdx.x + 1, nact, D, 128, s_e, s_off);
+      if (lane == 0) { s_ab[0] = v0; s_ab[1] = v1; s_ab[2] = v2; s_ab[3] = v3; }
+    }
+    __syncthreads();
+    a0 = s_ab[0]; a1 = s_ab[1]; b0 = s_ab[2]; b1 = s_ab[3];
+  }
   if (GS == 16 && D > 8) {  // GS16: 2-group rows cost D/8 of a 1-group row: split the rows by weight, not count
     a0 = tk2g_split(blockIdx.x, nact, D, 256, s_e, s_off);
     a1 = tk2g_split(blockIdx.x + 1, nact, D, 256, s_e, s_off);
@@ -7368,6 +7515,11 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     }
   }
   int rb = 0;
+  if constexpr (MRG) {
+    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
+                                        s_srt, s_red, smem, smem + NSTG * NC * KPS * 72, full, empty, st, ph, rb);
+    return;
+  }
   if constexpr (GS == 16) {
     uint4* s_x2 = smem + NSTG * NC * KPS * 72;  // after the ring: 8 KB per consumer warp
     tk2g_consume<512, NC, NSTG, true, KPS, SA>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem,
@@ -7376,9 +7528,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
                                                 s_x2, full, empty, st, ph, rb);
     return;
   }
-  tk2f_consume<512, NC, NSTG, true, KPS, SA>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
+  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
                                     empty, st, ph, rb);
-  tk2f_consume<256, NC, NSTG, false, KPS, SA>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
+  tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
                                      empty, st, ph, rb);
   if constexpr (FN) {
     s_rt[tid] = rt;
@@ -7387,7 +7539,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
 }
 
-template <int NC, int NSTG, int KPS, bool DYN = false, bool FN = false, bool SA = false, int GS = 8>
+template <int NC, int NSTG, int KPS, bool DYN = false, bool FN = false, bool SA = false, int GS = 8, int MRG = 0, int PF = 0>
 static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const void* w2, const void* s2, const void* lut,
                        const void* gs13, const void* gs2, const void* x, const void* ids, int start, int count,
                        void* meta, void* sr, void* inv, void* inter, void* y, void* cnt, const void* tw = nullptr,
@@ -7398,11 +7550,11 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
     int dev, nsm;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
-    cudaFuncSetAttribute(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    cudaFuncSetAttribute(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
   cudaStream_t st = at::cuda::getCurrentCUDAStream();
-  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS>, grid, (NC + 1) * 32, SMEM, st, false,
+  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM, st, false,
       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
       (const float*)gs13, (const float*)gs2, (const __nv_bfloat16*)x, (const int*)ids, nr, start, count, (int*)meta,
       (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D, (const float*)tw, (const float*)w1,
@@ -7438,6 +7590,32 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     cnt_.data_ptr()
   const bool sa = cfg >= 100000;  // + 100000: SA (arithmetic scale decode; prepare() checked the scales)
   cfg %= 100000;
+  if (cfg > 80000 && cfg < 100000 && cfg % 1000 == 204) {  // s13 PF = cfg / 1000 % 10: 1 = L1 prefetch of the next segment's
+    // x one row ahead, 2 = gemm2's counter spin only at the CTA's first gemm2 row, 4 = y32 in route slot order, pre-scaled
+    // by gs2 * 256 (then moe_norm3 instead of moe_norm2), 8 = 2 accumulator chains per tile; built: 1, 2, 3, 4, 7, 12
+    const int pf = (int)(cfg - 80000) / 1000;
+    if (pf == 12) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 12>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 12>(0, TK2F_ARGS0);
+    if (pf == 4) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 4>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 4>(0, TK2F_ARGS0);
+    if (pf == 7) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 7>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 7>(0, TK2F_ARGS0);
+    if (pf == 1) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 1>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 1>(0, TK2F_ARGS0);
+    if (pf == 2) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 2>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 2>(0, TK2F_ARGS0);
+    return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 3>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 3>(0, TK2F_ARGS0);
+  }
+#if TK2_EXP
+  if (cfg >= 30000) {  // s12 merged-phase consumer (tk2h): + 30000 GS 8, + 40000 GS 16 (cfg / 1000 % 10 = 2-group weight),
+    // + 50000 / + 60000: the same with per-segment gemm13 -> gemm2 counters (PSC)
+    const int kind = (int)(cfg / 10000);
+    const int wt = 8 + (int)(cfg / 1000) % 10;
+    if (kind == 3) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 1>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 1>(0, TK2F_ARGS0);
+    if (kind == 4) return sa ? tk2f_go<8, 4, 2, false, false, true, 16, 1>(wt, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 16, 1>(wt, TK2F_ARGS0);
+    if (kind == 7) {  // + 70000: main consumer (tk2f_consume), weighted static split, wE = cfg / 1000 % 10
+      const int wE = (int)(cfg / 1000) % 10;
+      return sa ? tk2f_go<8, 4, 2, false, false, true>(wE, TK2F_ARGS0) : tk2f_go<8, 4, 2>(wE, TK2F_ARGS0);
+    }
+    if (kind == 5) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 2>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 2>(0, TK2F_ARGS0);
+    return sa ? tk2f_go<8, 4, 2, false, false, true, 16, 2>(wt, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 16, 2>(wt, TK2F_ARGS0);
+  }
+#endif
   if (cfg >= 20000) {  // + 20000: 16 consumer warps (NC 16), cfg % 1000 = KPS * 100 + NSTG (static rows)
     const int c = (int)(cfg % 1000);
     if (sa) {
@@ -7467,6 +7645,12 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     cnt_.data_ptr()
   if (sa && D < 0) {
     if (cfg == 402) return tk2f_go<8, 2, 4, false, false, true>(TK2F_ARGS);
+    if (TK2F_RING_SA) {  // s12: deeper rings with SA, for the H200 diag (MOE_TK2F_RING_SA build flag)
+      if (cfg == 208) return tk2f_go<8, 8, 2, false, false, true>(TK2F_ARGS);
+      if (cfg == 206) return tk2f_go<8, 6, 2, false, false, true>(TK2F_ARGS);
+      if (cfg == 403) return tk2f_go<8, 3, 4, false, false, true>(TK2F_ARGS);
+      if (cfg == 108) return tk2f_go<8, 8, 1, false, false, true>(TK2F_ARGS);
+    }
     return tk2f_go<8, 4, 2, false, false, true>(TK2F_ARGS);
   }
   if (cfg == 204) return tk2f_go<8, 4, 2>(TK2F_ARGS);
@@ -7520,9 +7704,18 @@ int64_t moe_act_launch(torch::Tensor acc13, torch::Tensor meta, torch::Tensor sr
 int64_t moe_norm2_launch(torch::Tensor acc2, torch::Tensor inv, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1,
                          torch::Tensor gs, int64_t start, int64_t count, double eps, torch::Tensor out, torch::Tensor zc) {
   const int M = (int)out.size(0);
-  return launch_k(moe_norm2, M, 512, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 2) != 0,
+  return launch_k(moe_norm2<false>, M, 512, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 2) != 0,
       (const float*)acc2.data_ptr(), (const int*)inv.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
       (const float*)w1.data_ptr(), (const float*)gs.data_ptr(), (int)start, (int)count, (float)eps,
+      (__nv_bfloat16*)out.data_ptr(), (int*)zc.data_ptr());
+}
+// s13: after moe_tk2f with PF & 4 (y32 rows = route slots, pre-scaled by gs2 * 256)
+int64_t moe_norm3_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1, int64_t start,
+                         int64_t count, double eps, torch::Tensor out, torch::Tensor zc) {
+  const int M = (int)out.size(0);
+  return launch_k(moe_norm2<true>, M, 512, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 2) != 0,
+      (const float*)y32.data_ptr(), (const int*)nullptr, (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
+      (const float*)w1.data_ptr(), (const float*)nullptr, (int)start, (int)count, (float)eps,
       (__nv_bfloat16*)out.data_ptr(), (int*)zc.data_ptr());
 }
 """
@@ -7575,6 +7768,8 @@ _moe__CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::T
         "torch::Tensor, torch::Tensor);"
         "int64_t moe_norm2_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, int64_t, int64_t, double, torch::Tensor, torch::Tensor);"
+        "int64_t moe_norm3_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, double, "
+        "torch::Tensor, torch::Tensor);"
         "int64_t moe_tk2f_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
@@ -7595,7 +7790,7 @@ def _moe__lib():
         _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=_moe_CUDA_SRC,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                       "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch",
-                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa"],
+                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
@@ -7725,7 +7920,14 @@ def _moe_prepare(weights):
     st["tk"] = torch.zeros(1024, dtype=torch.int32, device=dev)  # moe_twf split-item tickets (self-resetting)
     st["w1"] = (1.0 + weights["post_norm_w"].float()).contiguous()
     torch.cuda.synchronize()
+    global _moe__DIAG_DONE
+    if _moe_DIAG and not _moe__DIAG_DONE:
+        _moe__DIAG_DONE = True
+        _moe__diag(st)
     return st
+
+
+_moe__DIAG_DONE = False
 
 
 # (R, G) per batch size for gemm13 / gemm2: R row tiles (x16 rows) per item, G token groups of 8 per pass.
@@ -7752,7 +7954,7 @@ _moe_TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
 _moe__CFGS = (10, 11, 22, 118)
 _moe_SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
 _moe_TK2_MAX = 32  # M above this: big-M path
-_moe_TK2F_DYN = 204  # M > 1 cfg; 5402 = DYN row tail (D = 4): H100 bs8-32 -3..4% but judge no gain (check b890d69b 2.125x)
+_moe_TK2F_DYN = 84204  # M > 1 cfg. s13: 84204 = 204 + y32 in route-slot order pre-scaled + moe_norm3 (bitwise = 204; H200 diag adfb897e d16 -0.45, d32 -0.75 us). M = 1 (TK2F) stays 204: the layer's n2u reads the old y32 order. 5402 = DYN row tail (D = 4): judge no gain (b890d69b)
 _moe_TWSA = 1  # s9: same for moe_twf (big-M)
 _moe_TK2SA = 1  # s9: arithmetic e4m3 scale decode in moe_tk2f (when prepare() found all scales positive normal)
 _moe_TK2FN = 0  # s9: 1 = post-expert norm fused into moe_tk2f (moe_tk2fn_launch): judge bs1 +2 us (check 168fa04c), dead
@@ -7765,6 +7967,90 @@ _moe_TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K ha
 _moe_TK2F = 204  # decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 _moe_TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 _moe_SK_ZERO = 64  # CTAs zeroing Acc13 in route2
+
+
+# s12 DIAG (print only; never submit with DIAG on): H200 timing of expert variants on the LAYER's routings
+# (r-layer reference front + top-k, 5 seeds per load; /tmp/moe10/routes.pt), cold L2, CUDA-graph replay medians.
+_moe_DIAG = 0
+_moe__DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('decode 1', 17, 1), ('decode 1', 99, 1), ('decode 16', 7, 16), ('decode 16', 11, 16), ('decode 16', 13, 16), ('decode 16', 17, 16), ('decode 16', 99, 16), ('decode 32', 7, 32), ('decode 32', 11, 32), ('decode 32', 13, 32), ('decode 32', 17, 32), ('decode 32', 99, 32), ('verify 1', 7, 8), ('verify 1', 11, 8), ('verify 1', 13, 8), ('verify 1', 17, 8), ('verify 1', 99, 8), ('verify 16', 7, 128), ('verify 16', 11, 128), ('verify 16', 13, 128), ('verify 16', 17, 128), ('verify 16', 99, 128), ('verify 32', 7, 256), ('verify 32', 11, 256), ('verify 32', 13, 256), ('verify 32', 17, 256), ('verify 32', 99, 256)]
+_moe__DIAG_R = "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"
+_moe_DIAG_VARIANTS = {
+    "dec": [("gs8", {})] + [(f"pf{k}", {"TK2F": 80204 + 1000 * k, "TK2F_DYN": 80204 + 1000 * k}) for k in (4, 12)]
+           + [("gs8b", {})] + [(f"pf{k}b", {"TK2F": 80204 + 1000 * k, "TK2F_DYN": 80204 + 1000 * k}) for k in (4, 12)],
+    "big": [("main", {})],
+}
+
+
+def _moe__diag(st):
+    import zlib, base64
+    g = globals()
+    raw = zlib.decompress(base64.b64decode(_moe__DIAG_R))
+    routes, p = [], 0
+    for load, seed, T in _moe__DIAG_HDR:
+        loc = torch.frombuffer(bytearray(raw[p:p + T * 8]), dtype=torch.int8).view(T, 8).int().cuda()
+        p += T * 8
+        gen = torch.Generator(device="cuda").manual_seed(seed)
+        ids = torch.where(loc >= 0, loc + st["start"], (st["start"] + st["count"] + 5) % 256).int()
+        tw = torch.rand(T, 8, device="cuda", generator=gen)
+        data = {"hidden_states": torch.randn(T, _moe_H, device="cuda", generator=gen).bfloat16(), "topk_ids": ids,
+                "topk_weights": tw / tw.sum(-1, keepdim=True),
+                "config": {"bs": T, "d_hidden": _moe_H, "local_start": st["start"], "local_count": st["count"]}}
+        routes.append((load, seed, T, data))
+    flush = torch.zeros(256 << 20, dtype=torch.uint8, device="cuda").view(torch.int64)
+    sink = torch.empty((), dtype=torch.int64, device="cuda")
+    res = {}
+    for load, seed, T, data in routes:
+        vs = _moe_DIAG_VARIANTS["dec" if T <= _moe_TK2_MAX else "big"]
+        graphs = []
+        for name, ov in vs:
+            old = {k: g[k] for k in ov}
+            g.update(ov)
+            try:
+                _moe_kernel_fn(data, st)
+                torch.cuda.synchronize()
+                gr = torch.cuda.CUDAGraph()
+                with torch.cuda.graph(gr):
+                    o = _moe_kernel_fn(data, st)
+                gr.replay()
+                torch.cuda.synchronize()
+                graphs.append((name, gr, o))
+            finally:
+                g.update(old)
+        base = graphs[0][2].float()
+        ts = {n: [] for n, _, _ in graphs}
+        for _ in range(30):
+            for n, gr, _ in graphs:
+                torch.sum(flush, 0, out=sink)
+                a, b = torch.cuda.Event(True), torch.cuda.Event(True)
+                a.record(); gr.replay(); b.record()
+                torch.cuda.synchronize()
+                ts[n].append(a.elapsed_time(b) * 1e3)
+        for n, _, o in graphs:
+            t = sorted(ts[n])[len(ts[n]) // 2]
+            err = (o.float() - base).abs().max().item()
+            res.setdefault((load, n), []).append(t)
+            print(f"diag12 {load} s{seed} {n}: {t:.1f} us (maxdiff vs {graphs[0][0]} {err:.3g})", flush=True)
+        del graphs
+    for (load, n), v in res.items():
+        print(f"diag12 MEAN {load} {n}: {sum(v) / len(v):.1f} us", flush=True)
+    del flush
+    torch.cuda.synchronize()
+
+
+_moe_TK2H = 0  # s12: merged-phase tk2f consumer (one main-loop body, i-cache): 8 = GS 8, 16 = GS 16 (from M >= TK2H_MIN16)
+_moe_TK2H_MIN16 = 1
+_moe_TK2W = 0  # s12: weighted static row split for M > 1 (extra-group rows weigh TK2W / 8; 0 = by count), cfg + 70000
+_moe_TK2H_PSC = 0  # s12: 1 = per-segment gemm13 -> gemm2 counters (cnt[64 + seg]) instead of the global one
+_moe_TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
+
+
+def _moe__tk2f_cfg(M, st):
+    sa = 100000 if _moe_TK2SA and st["sa"] else 0
+    if _moe_TK2W and M > 1:
+        return sa + 70000 + _moe_TK2W * 1000
+    if _moe_TK2H:
+        return sa + (40000 + _moe_TK2H_W * 1000 if _moe_TK2H == 16 and M >= _moe_TK2H_MIN16 else 30000) + 20000 * _moe_TK2H_PSC
+    return (_moe_TK2F_DYN if M > 1 else _moe_TK2F) + sa + (10000 + _moe_TK2G_W * 1000 if _moe_TK2G and M >= _moe_TK2G_MIN else 0)
 
 
 def _moe_kernel_fn(data, st):
@@ -7790,9 +8076,12 @@ def _moe_kernel_fn(data, st):
                                  st["w1"], out, _moe_POST_NORM_EPS)
             return out
         if _moe_TK2F:
+            c = _moe__tk2f_cfg(M, st)
             lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
-                                st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"],
-                                (_moe_TK2F_DYN if M > 1 else _moe_TK2F) + (100000 if _moe_TK2SA and st["sa"] else 0) + (10000 + _moe_TK2G_W * 1000 if _moe_TK2G and M >= _moe_TK2G_MIN else 0))
+                                st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
+            if 80000 < c % 100000 < 100000 and (c % 100000 - 80000) // 1000 & 4:  # s13 slot-ordered y32
+                lib.moe_norm3_launch(y32, ids, tw, st["w1"], st["start"], st["count"], _moe_POST_NORM_EPS, out, st["cnt"])
+                return out
             lib.moe_norm2_launch(y32, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], _moe_POST_NORM_EPS, out,
                                  st["cnt"])
             return out
