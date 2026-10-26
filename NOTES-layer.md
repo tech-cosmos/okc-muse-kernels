@@ -640,3 +640,21 @@
   {"nu8": True, "g14alt:qkv_gate": 1}. Default off. Next idea if revisited: the sums for free = have tk2f write
   y32 with the w1 multiply folded... no: the cost is any extra epilogue work in tk2f's serialized row loop; a
   better place is a spare warp (tk2f's producer warp idles after its last stage) reading back the CTA's own y rows.
+
+## s27 (2026-10-26 11:26Z-) twq options, TK2FX / TK2FJ (tk2f as PDL secondary of the pre-expert rmsnorm)
+- v61 (6a2f780): moe s17 twq / twm_hot as TUNE options at T=128/256. moe's ready-made tools/s17/twq_layer.patch was cut
+  against an older layer.py and REVERTS v60's nu8 X: applied only its moe_src.py part + the twq hunks of layer.py by hand.
+  H100 tuner: T=128 picks twq 4 (sliding 361.0 -> 356.6, full 470.5 -> 454.5); T=256 keeps o76. Real ab_files 5 rounds vs
+  v60: v16 316.2/462.9 -> 311.6/459.7 us, rest tie. Forced twq 4/12 and twm_hot(+o76): scored verify x2 + replay 0/20 each.
+- v62 (5d79338) TK2FX at T=1/8 (pr1 paths, no side stream): moe_tk2f launched with the PDL attribute after the pre-expert
+  _rmsnorm_gain, which triggers (TRIG2) right after its own gdc_wait (pr1, which wrote the ids tk2f routes on, has then
+  completed). tk2f's routing + producer's first weight stages overlap the rmsnorm; its consumers griddepcontrol.wait
+  before the first x read; x via __ldcg (SASS: LDG.E.128.STRONG.GPU after ACQBULK; the lut LDG.CONSTANT before it is a
+  weight). One-shot host flag moe_set_tk2fpdl (tk2f_go reads and clears it). Without the attribute the wait is a no-op.
+  H100 timeline d1: tk2f starts 0.4 us after pr1 ends (was 1.3), pr1 end -> layer end 43.6 vs 45.5 us.
+  ab_files 6 rounds: d1 90.4/112.8 -> 89.9/111.8, v1 154.0/167.7 -> 152.1/167.8. Default ON, TUNE {tk2fx: False} at T=1/8.
+- v63 (4276630) TK2FJ: the same at T=16/32 (side-stream router): join the side stream BEFORE the rmsnorm (the rmsnorm
+  was not PDL there anyway: PDL_TOKENS = (1, 8)), tk2f its PDL secondary. ab_files 5 rounds: d16 212.4/313.3 ->
+  209.9/313.8, d32 205.7/433.8 -> 203.7/432.0. Default ON, TUNE {tk2fj: False}. (moe's H200 stamps: tk2f d1 routed 1.5,
+  first data 3.6 us after start: the H200 may gain more than the H100.)
+- Tests 13/13; scored d1/v1/d16/d32 x3, replay 0/30 x2 seeds, forced T=8 with and without nu8.

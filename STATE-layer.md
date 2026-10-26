@@ -1,6 +1,11 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~12:05Z (session 26).
+Updated 2026-10-26 ~11:45Z (session 27).
+
+**s27: main = v63 (4276630)** = v60 + moe s17 twq/twm_hot TUNE options at T=128/256 (H100 real v16 -4.6/-3.2) + TK2FX/TK2FJ
+(moe_tk2f = PDL secondary of the pre-expert rmsnorm at T=1/8/16/32, default ON, TUNE {tk2fx/tk2fj: False}; H100 real
+d1 -0.5/-1.0, v1 -1.9/0, d16 -2.5/+0.4, d32 -2.0/-1.8 us). Tests 13/13, scored + replay ok. NOT CHECKED: the ~14:30Z
+last check runs main (read every "layer tune" line of profiles/submission.<job>.log into NOTES).
 
 **s25: main = v59 (46fb62d) = v57 + tuner on SKEWED synthetic routing (`SYNTH_P`/`_synth_stream`: stream = sum of 8
 picked experts' unit router rows; local expert j picked w.p. SYNTH_P[j] = scored loads' mean shares; T=256 synth
