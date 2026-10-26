@@ -1001,3 +1001,18 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - H100 timelines v91 (tools/timeline.py): d16 sliding: o is g19 (PDL), no gap > 0.5 us; d32: qkv nvjet 16.9 -> nds +0.5,
   o nvjet 6.3 (16.8 MB, 2.7 TB/s) -> boundary +0.5 us. The "T>=16 cuBLAS gaps without PDL triggers" item is <= ~1 us per
   shape on the H100 now (H200 gaps need the 00:00Z layer check's profile).
+
+## s48 (2026-10-26 19:56-20:25Z, sandbox okc-night4, session 5): g19 escape-header/fixup cost at m32: measured; 2 fixes DEAD
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z). Question: of g19's m32 per-call overhead, how much is the
+  run-start escape-header __ldg (cold global loads under full HBM) and the run-end fixup walk (s15 pbuf path)?
+- New diag/option switches in dev/gemv19.cu (all default OFF; default build unchanged): G19_NOHDR (no header loads, empty
+  slots: escapes unfixed), G19_NOFIXB (headers loaded + ballots run, but no slot in range via an opaque khi), G19_FIX2
+  (fixup walk 2 escapes per round, loads first; bit-identical order), G19_HPF (next run's headers, predicted = static
+  order's next run, __ldg'd one run ahead into registers).
+- H200 proxy (H100 GRID 72 MODE 2 PRED 3000, dev/s44/g19ab.py, medians us, B-A):
+  NOHDR vs main: pool m32 -1.45, unp m32 -0.98, pool/unp m16 -0.42/-0.44 (upper bound: loads + fixups).
+  NOHDR vs NOFIXB: pool m32 -0.19, unp m32 -0.46 => the load stall is ~0.2-0.5, the fixups themselves ~0.5-1.2 us at m32.
+  FIX2 vs main (R 6): pool m32 +0.72, unp m32 +0.18, m16 -0.46/-0.07: noise/loss -> DEAD (the walk is not latency-chain bound).
+  HPF vs main (R 8): +0.38/+0.62 m32, +0.88/+0.35 m16: LOSS (run-start register copy waits on the prefetch / extra loads) -> DEAD.
+- Left over: <= ~1 us/call (proxy) of escape fixups at m32 (~0.7 H200, 4 calls at d32 = ~0.2% layer). Only a different escape
+  scheme (no per-run fixup: e.g. escapes as a tiny extra mma operand, or escape-free per-atom bases) could take it; not cheap.

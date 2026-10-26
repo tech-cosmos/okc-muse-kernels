@@ -98,6 +98,11 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 // M tokens (16/32), KC k per chunk, AP atoms (32 k) per warp per stage, NS ring stages, IS stages per tail item.
 // out FP32 [M, n] (zeroed by the primary), ctr int (zeroed by the primary). tail: stages left for dynamic items.
 // smem: ring [NS][SB] | x [2][M][XS] | pbuf [2][128 rows][M] f32 | barriers | tag [NS] int | ptag [2] int
+#ifdef G19_NOFIXB  // diag: headers loaded and tested, but no slot is in range (opaque): the fixups' own share
+#define KHI_B (khi - (int)(gridDim.z << 30))
+#else
+#define KHI_B khi
+#endif
 #ifndef G19_NPB
 #define G19_NPB 2
 #endif
@@ -389,6 +394,10 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     int q = 0, st0 = 0, prev_end = 1, prev_xl = 1;
     unsigned xph[2] = {0, 0}, xpc[2] = {0, 0};
     float4 hd0[RPW], hd1[RPW];
+#ifdef G19_HPF  // s48: the next run's headers (predicted: the static order's next run) are loaded one run ahead
+    float4 hn0[RPW], hn1[RPW];
+    int htr = -1;
+#endif
     for (int i = 0;; ++i) {
         const int slot = i % NS;
         bar_wait(bars + 8 * slot, (i / NS) & 1);
@@ -416,11 +425,35 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
 #ifndef G19_RAW
         if (prev_end) {  // run start: its escape headers (rows g, g + 8 of the warp's row groups; lane c: slots 2c, 2c + 1)
             st0 = st;
+#ifdef G19_HPF
+            const bool hit = tr == htr;
+            const int un = (u / SPK + 1) * SPK, trn = tm ? un / (S * SPK) : (un % (ntr * SPK)) / SPK;
+            htr = un < U ? trn : -1;
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr) {
+                if (hit) { hd0[rr] = hn0[rr]; hd1[rr] = hn1[rr]; }
+                else {
+                    const float2* hp0 = H + (long)((tr * NWC + wr + rr) * 16 + g) * ESC;
+                    hd0[rr] = __ldg((const float4*)hp0 + c);
+                    hd1[rr] = __ldg((const float4*)(hp0 + 8 * ESC) + c);
+                }
+                if (htr >= 0) {
+                    const float2* hq0 = H + (long)((htr * NWC + wr + rr) * 16 + g) * ESC;
+                    hn0[rr] = __ldg((const float4*)hq0 + c);
+                    hn1[rr] = __ldg((const float4*)(hq0 + 8 * ESC) + c);
+                }
+            }
+            if (false)
+#endif
 #pragma unroll
             for (int rr = 0; rr < RPW; ++rr) {
                 const float2* hp0 = H + (long)((tr * NWC + wr + rr) * 16 + g) * ESC;
+#ifdef G19_NOHDR  // diag: no header loads (empty slots: escapes unfixed): the header loads' share of the time
+                hd0[rr] = hd1[rr] = make_float4(0.f, 0x1p-15f, 0.f, 0x1p-15f); (void)hp0;
+#else
                 hd0[rr] = __ldg((const float4*)hp0 + c);
                 hd1[rr] = __ldg((const float4*)(hp0 + 8 * ESC) + c);
+#endif
             }
         }
 #endif
@@ -614,7 +647,29 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                     for (int pr = 0; pr < 2; ++pr) {
                         const float4 hq = h ? hd1[rr] : hd0[rr];
                         const float hx = pr ? hq.z : hq.x, hy = pr ? hq.w : hq.y;
-                        unsigned b = __ballot_sync(0xffffffffu, hy != 0x1p-15f && __float_as_int(hx) >= klo && __float_as_int(hx) < khi);
+                        unsigned b = __ballot_sync(0xffffffffu, hy != 0x1p-15f && __float_as_int(hx) >= klo && __float_as_int(hx) < KHI_B);
+#ifdef G19_FIX2  // s48: two escapes per round (loads of both issued first; same per-address order: bit-identical)
+                        while (b) {
+                            const int s1 = __ffs(b) - 1;
+                            b &= b - 1;
+                            const bool two = b != 0;
+                            const int s2 = two ? __ffs(b) - 1 : s1;
+                            b &= b - 1;
+                            const int col1 = __float_as_int(__shfl_sync(0xffffffffu, hx, s1)), col2 = __float_as_int(__shfl_sync(0xffffffffu, hx, s2));
+                            const float hv1 = __shfl_sync(0xffffffffu, hy, s1), hv2 = __shfl_sync(0xffffffffu, hy, s2);
+                            if (lane < MT) {
+                                float* pp1 = pbuf + pb * PBF + ((wr + rr) * 16 + (s1 >> 2) + 8 * h) * M + th * MT + lane;
+                                float* pp2 = pbuf + pb * PBF + ((wr + rr) * 16 + (s2 >> 2) + 8 * h) * M + th * MT + lane;
+                                const float xv1 = __bfloat162float(*(const __nv_bfloat16*)(xt + col1 * 2));
+                                const float xv2 = __bfloat162float(*(const __nv_bfloat16*)(xt + col2 * 2));
+                                const float p1 = *pp1, p2 = *pp2;
+                                const float r1 = fmaf(xv1, hv1, fmaf(xv1, -0x1p-15f, p1));
+                                if (!two) *pp1 = r1;
+                                else if ((s1 >> 2) == (s2 >> 2)) *pp1 = fmaf(xv2, hv2, fmaf(xv2, -0x1p-15f, r1));
+                                else { *pp1 = r1; *pp2 = fmaf(xv2, hv2, fmaf(xv2, -0x1p-15f, p2)); }
+                            }
+                        }
+#else
                         while (b) {
                             const int src = __ffs(b) - 1;
                             b &= b - 1;
@@ -626,6 +681,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                                 *pp = fmaf(xv, hv, fmaf(xv, -0x1p-15f, *pp));
                             }
                         }
+#endif
                     }
             __syncwarp();
         }

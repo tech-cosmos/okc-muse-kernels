@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~20:05 UTC (s47, sandbox okc-night4: PDL .nc-hoist SASS audit of proj kernels in layer v91 = no live hazard; unpool T=32 grid tie; checks 20/20 until 00:00Z; main unchanged).
+Updated 2026-10-26 ~20:25 UTC (s48: g19 m32 header/fixup cost measured, FIX2/HPF dead; s47, sandbox okc-night4: PDL .nc-hoist SASS audit of proj kernels in layer v91 = no live hazard; unpool T=32 grid tie; checks 20/20 until 00:00Z; main unchanged).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -141,6 +141,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## csl's window already carries o's pre-wait W stream; a side kernel alone costs ~2-3 us; bnd window = pr1's prologue.
 ## s47: SASS audit (dev/s47_pdl_audit.py) of all proj kernels in layer v91: no producer output read before griddepcontrol.wait;
 ## only pr1's non-bnd x/x32 __ldg (layer copy) is fragile -> Request to layer. unpool T=32 G19_GRID 96-132 = tie (H100).
+## s48: g19 m32 escape fixups ~0.5-1.2 us/call proxy, header-load stall ~0.2-0.5; pipelined fixups (G19_FIX2) and
+## one-run-ahead header prefetch (G19_HPF) both DEAD (NOTES s48). Diag switches G19_NOHDR/NOFIXB in gemv19.cu (off).
 ## Next sandbox (ranked; sandbox okc-night3 expired ~19:10Z 10-26 with proj checks 20/20, scored 5/10)
 1. proj's first check = main as is (DEC3 in g13/g14 m1/m8 picks; tg2 unpooler m8 candidate): read the 'tune' lines in the
    judge log (profiles/*.log); submit if > 1.3110. Layer's first check = its main v88 (carries DEC3, pr8 npf 212, g19 s15).
