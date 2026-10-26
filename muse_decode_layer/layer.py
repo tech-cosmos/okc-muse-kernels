@@ -549,7 +549,7 @@ def prepare(weights):
         "router": router, "router_hi": hi.contiguous(), "router_lo": lo.contiguous(),
         "router_hl2": torch.stack([hi, lo]).contiguous(),  # [2, 256, k] for pj_router3
         # [pooler; router hi; router lo]: one GEMM of h for both above 8 tokens (FUSED_ROUTER_TOKENS)
-        "pool_router": torch.cat([weights["pooler"], hi, lo]).contiguous() if FUSED_ROUTER_TOKENS else None,
+        "pool_router": torch.cat([weights["pooler"], hi, lo]).contiguous() if FUSED_ROUTER_TOKENS or FR_TUNE else None,
         "router_bias": weights["router_bias"].float().contiguous(),
         "res1": _residual(weights["attn_residual_gate"]), "res2": _residual(weights["ffn_residual_gate"]),
         "pre_ffn": gain("pre_ffn_norm"), "post_ffn": gain("post_ffn_norm"), "next_pre_attn": gain("next_pre_attn_norm"),
@@ -596,7 +596,8 @@ ROUTER_AFTER_POOLER = ()  # s5: tie/worse (router starved beside the pooler); to
 # above 8 tokens: pooler + SGLang's hi/lo BF16 router in one cuBLAS GEMM (FP32 out), no side stream. s7 H100: tie
 # (d32 GEMM 30.8 + splitK reduce 2.1 + routing 3.4 vs pooler || router 38.3 us; v32 -2..-10, v16 full +5): the fused
 # GEMM is the pooler + 3 us (router bytes at HBM rate), same as the overlap. Needs a better GEMM config to win (lt FP32 out).
-FUSED_ROUTER_TOKENS = ()
+FUSED_ROUTER_TOKENS = (256,)  # s37: + moe_gathern on its strided FP32 rows; H100 ab_files v32 sl/full -2.4/-2.5, -5.4/-4.4 us (2 runs); T=128 +3.5/0
+FR_TUNE = (128, 256)  # s37: T where TUNE option "fr" (fused pooler+router GEMM, default T in FUSED_ROUTER_TOKENS) exists
 TK2_PDL13 = False  # s5: H100 tie (d1 +1, v1 -1, d32 -1 us): rmsnorm is only 1.7 us and the safe join loses its own PDL
 TK2_PDL2 = False
 if TK2_PDL13 or TK2_PDL2:
@@ -1236,7 +1237,7 @@ assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, r"""template <bool F32>
 __global__ void __launch_bounds__(256) moe_gathern(const void* __restrict__ X, const float* __restrict__ gain,
                                                    const int* __restrict__ meta, const int* __restrict__ sroutes,
-                                                   uint32_t* __restrict__ XG, float eps) {
+                                                   uint32_t* __restrict__ XG, float eps, long xs) {
   const int pos = blockIdx.x, tid = threadIdx.x;
   __shared__ float s_r[8];
   asm volatile("griddepcontrol.wait;" ::: "memory");
@@ -1252,10 +1253,10 @@ __global__ void __launch_bounds__(256) moe_gathern(const void* __restrict__ X, c
     sw[i] = (o & ~31) | (8 * t + jh);
     float2 f;
     if constexpr (F32) {
-      f = __ldcg(reinterpret_cast<const float2*>(X) + row * (KD / 2) + sw[i]);
+      f = __ldcg(reinterpret_cast<const float2*>(X) + row * xs + sw[i]);
       f = __bfloat1622float2(__float22bfloat162_rn(f));
     } else {
-      const uint32_t u = __ldcg(reinterpret_cast<const unsigned int*>(X) + row * (KD / 2) + sw[i]);
+      const uint32_t u = __ldcg(reinterpret_cast<const unsigned int*>(X) + row * xs + sw[i]);
       f = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u));
     }
     v[i][0] = f.x; v[i][1] = f.y;
@@ -1279,14 +1280,15 @@ __global__ void __launch_bounds__(256) moe_gathern(const void* __restrict__ X, c
 }
 int64_t moe_gathern_launch(torch::Tensor x, torch::Tensor gain, torch::Tensor meta, torch::Tensor sroutes,
                            torch::Tensor xg, double eps) {
-  TORCH_CHECK(x.size(1) == KD && x.is_contiguous() && gain.numel() == KD, "moe_gathern: shape");
+  TORCH_CHECK(x.size(1) == KD && x.stride(1) == 1 && x.stride(0) % 2 == 0 && gain.numel() == KD, "moe_gathern: shape");
+  const long xs = (long)(x.stride(0) / 2);  // row stride in float2 (FP32) / bf16x2 (BF16) units
   if (x.scalar_type() == at::kFloat)
     return launch_k(moe_gathern<true>, (int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
         (const void*)x.data_ptr(), (const float*)gain.data_ptr(), (const int*)meta.data_ptr(), (const int*)sroutes.data_ptr(),
-        (uint32_t*)xg.data_ptr(), (float)eps);
+        (uint32_t*)xg.data_ptr(), (float)eps, xs);
   return launch_k(moe_gathern<false>, (int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const void*)x.data_ptr(), (const float*)gain.data_ptr(), (const int*)meta.data_ptr(), (const int*)sroutes.data_ptr(),
-      (uint32_t*)xg.data_ptr(), (float)eps);
+      (uint32_t*)xg.data_ptr(), (float)eps, xs);
 }
 """ + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_gathern_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double);"
@@ -1912,7 +1914,7 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
@@ -1931,13 +1933,15 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"tk2fx": False, "g14alt:qkv_gate": 1}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
-              {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}),
+              {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
+              {"fr": True, "twf_split": 66}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
               {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
               {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True}, {"twf_split": 66},
-              {"twf_split": 66, "twm_order": 76}, {"twf_split": 1022}, {"twf_split": 1022, "twm_order": 76})}
+              {"twf_split": 66, "twm_order": 76}, {"twf_split": 1022}, {"twf_split": 1022, "twm_order": 76}, {"fr": False},
+              {"fr": False, "twm_order": 76}, {"fr": False, "twm_order": 76, "lt:unpool": True})}
 # s35: per-(T, sliding) defaults under the tuner (the tune pick overrides them; {} = these): the picks both logged H200
 # tuners of 909010f (0f065691, 703d3a7e) agreed on, so a noisy judge tuner can't fall back to the slower setting.
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
@@ -2354,7 +2358,8 @@ def kernel_fn(data, state):
                 t.record_stream(side_stream)
         moe = _experts_moe(p, topk_weights, local_ids, state)
         return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
-    if tokens in FUSED_ROUTER_TOKENS and not fp32_router:
+    if (not fp32_router and state.get("pool_router") is not None
+            and _opt(state, tokens, "fr", tokens in FUSED_ROUTER_TOKENS)):
         # SGLang's router above 8 tokens = BF16 h against the BF16 hi/lo split of the FP32 weight (FP32 accumulation):
         # the same h as the pooler, so one GEMM [pooler; hi; lo] with FP32 output; the routing sums the hi/lo logits,
         # the rmsnorm rounds the pooler part to BF16 (what the BF16-out pooler GEMM returns). No side stream.
@@ -2365,10 +2370,16 @@ def kernel_fn(data, state):
         _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
                             E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
                             SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, num_warps=2)
-        p = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
-        _rmsnorm_gain[(tokens,)](pr, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=False, TRIG=False,
-                                 XS=D_EXPERT + 2 * N_EXPERTS, ROUND=True, num_warps=8)
-        moe = _experts_moe(p, wts, lids, state) if _use_moe(tokens) else (
+        # s37: T > 32: moe_route right after the routing, the pre-expert rmsnorm inside moe_gathern (strided FP32 rows)
+        gnorm = (tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and _opt(state, tokens, "gnorm", GNORM_DEFAULT))
+        bucket = _moe_bucket(state, lids) if gnorm and _opt(state, tokens, "bkt", BKT_DEFAULT) else None
+        if gnorm:
+            p = pr[:, :D_EXPERT]
+        else:
+            p = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
+            _rmsnorm_gain[(tokens,)](pr, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=False, TRIG=False,
+                                     XS=D_EXPERT + 2 * N_EXPERTS, ROUND=True, num_warps=8)
+        moe = _experts_moe(p, wts, lids, state, bucket, gnorm) if _use_moe(tokens) else (
             _experts_marlin if HAVE_SGL else _experts_local)(p, wts, lids, state)
         return _tail(moe, stream1, h, tokens, state, pdl) + (ids,)
     if pr1:  # pooler + router + routing in one launch (proj pr1), PDL secondary of the boundary: no side stream

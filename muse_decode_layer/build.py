@@ -54,6 +54,10 @@ csl_anchor = "    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31,
 assert attn.count(csl_anchor) == 2  # csl and its verify twin (no PDL dependent there)
 attn = attn.replace(csl_anchor, csl_anchor + '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n')
 moe = moe_namespaced((here / "moe_src.py").read_text())
+# s37: GNORM reads the pooler rows strided (fused pooler+router GEMM output): no contiguous() copy when gather_norm is set
+_a = '    x = data["hidden_states"].contiguous()\n'
+assert moe.count(_a) == 1
+moe = moe.replace(_a, '    x = data["hidden_states"] if data.get("gather_norm") is not None else data["hidden_states"].contiguous()\n')
 layer = layer.replace("# @@MOE@@\n", "# ---- experts (moe_src.py, names prefixed _moe_) ----\n" + moe + "\n# ---- layer ----\n")
 g10 = (here / "g10_src.cu").read_text()  # proj's gemv10 CUDA source, as a raw string literal in the layer
 Q3 = "'" * 3
