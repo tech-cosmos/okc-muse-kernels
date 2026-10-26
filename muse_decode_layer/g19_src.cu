@@ -251,12 +251,13 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
         // run end: rows rg*16 + g (+8), tokens jj*8 + 2c (+1), k in [klo, khi)
         const int rg = tr * NWC + w, nat = (st - st0 + 1) * AP;
         const int klo = ks * KC + st0 * AP * 32, khi = ks * KC + (st + 1) * AP * 32;
+        const bool sfix = !(nat == KA && PRE != 2);  // pbuf path: escape fixups applied in smem after the store (below)
         float v[NT][4];
 #pragma unroll
         for (int jj = 0; jj < NT; ++jj)
 #pragma unroll
             for (int e = 0; e < 4; ++e) { v[jj][e] = acc[jj][e] + acc2[jj][e]; acc[jj][e] = acc2[jj][e] = 0.f; }
-        {
+        if (!sfix) {
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 const float4 hq = h ? hd1 : hd0;
@@ -279,7 +280,7 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                 }
             }
         }
-        if (xl) {  // done with this x buffer (the fixups above were its last reads)
+        if (xl && !sfix) {  // done with this x buffer (the fixups above were its last reads)
             __syncwarp();
             if (lane == 0) bar_arrive(xempty + 8 * xb);
         }
@@ -298,6 +299,36 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
         for (int jj = 0; jj < NT; ++jj)
 #pragma unroll
             for (int h = 0; h < 2; ++h) *(float2*)(pw + 8 * h * M + jj * 8) = make_float2(v[jj][2 * h], v[jj][2 * h + 1]);
+        // escape fixups on the stored partials, one escape at a time over the warp (lane = token): the in-range slots
+        // (lane c holds slots 2c, 2c + 1 of rows g, g + 8) are found by ballots and walked in lane order, warp-uniformly
+        // (r-proj gemv19.cu s15: the old per-slot shfl/branch chain cost ~1 us per run end)
+        {
+            __syncwarp();
+            const unsigned char* xt = smem + NS * SB + xb * M * XS + lane * XS - ks * KC * 2;
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int pr = 0; pr < 2; ++pr) {
+                    const float4 hq = h ? hd1 : hd0;
+                    const float hx = pr ? hq.z : hq.x, hy = pr ? hq.w : hq.y;
+                    unsigned b = __ballot_sync(0xffffffffu, hy != 0x1p-15f && __float_as_int(hx) >= klo && __float_as_int(hx) < khi);
+                    while (b) {
+                        const int src = __ffs(b) - 1;
+                        b &= b - 1;
+                        const int col = __float_as_int(__shfl_sync(0xffffffffu, hx, src));
+                        const float hv = __shfl_sync(0xffffffffu, hy, src);
+                        if (lane < M) {
+                            float* pp = pbuf + pb * PBF + (w * 16 + (src >> 2) + 8 * h) * M + lane;
+                            const float xv = __bfloat162float(*(const __nv_bfloat16*)(xt + col * 2));
+                            *pp = fmaf(xv, hv, fmaf(xv, -0x1p-15f, *pp));
+                        }
+                    }
+                }
+            __syncwarp();
+        }
+        if (xl) {  // done with this x buffer (the fixups above were its last reads)
+            if (lane == 0) bar_arrive(xempty + 8 * xb);
+        }
         if (t == 0) ptag[pb] = tr;
         __syncwarp();
         if (lane == 0) bar_arrive(pfull + 8 * pb);

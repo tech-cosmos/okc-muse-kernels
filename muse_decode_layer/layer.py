@@ -605,14 +605,17 @@ _GPR8_SRC = None  # @@GPR8@@
 # in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
 # kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
 # npre, xb), proj's H100 picks (r-proj BF16_G19). Consumers round the FP32 out to BF16 (= the GEMM's BF16 output).
-G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2)}
+G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2),
+           # s15 (proj s15 handoff, with its escape-fixup rework): T=32 pooler/unpool, T=16 qkv (FP32 out + cast)
+           ("pooler", 32): (32, 1024, 8, 2, 2, 1), ("unpool", 32): (32, 1024, 8, 2, 2, 1),
+           ("qkv_gate", 16): (16, 1024, 4, 4, 4, 2)}
 # proj's H200 diag (after a 3 us PDL predecessor): m16 pooler AP8 15.7 vs 19.0, unpool tie, o +0.8, every m32 loses
 # (+1.5..5): m32 stays on cuBLAS / the bmm pooler. Was (H100 picks, s10 v35): pooler m16 (16, 1024, 4, 4, 2, 2),
 # m32 (32, 1024, 4, 4, 2, 1), unpool the same, o m16 (16, 512, 4, 3, 2, 2).
 G19_BUILD = [(16, 1024, 4, 4, 2, 2)]  # also compiled (A/B)
 BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
-G19_ON = {"pooler", "unpool"}  # o: H100 tie (cuBLAS after attention)
-G19_GRID = {("pooler", 16): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
+G19_ON = {"pooler", "unpool", "qkv_gate"}  # o: H100 tie (cuBLAS after attention)
+G19_GRID = {("pooler", 16): 108, ("pooler", 32): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
 _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _GPR3_SRC = None  # @@GPR3@@
 KV_PF = True  # s9: the qkv gemv13 L2-prefetches the window's KV rows for csl (d1 sliding; H100 csl 6.1-7.3 -> ~4 us)
@@ -1535,6 +1538,9 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     return f
 
 
+_moe_TWM_ORDER_M = {}  # s15: moe's H200 proxy (s16): order 76 at T=256 (r-moe 499bde6 default) loses ~3.6 us at v32
+
+
 def _tail(moe, stream1, h, tokens, state, pdl, f=None):
     """unpool -> second boundary: (next attention input, stream)."""
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
@@ -1564,7 +1570,8 @@ def kernel_fn(data, state):
         # the window's page-table entries (csl's speculative range: the table's last W + 1 columns)
         n_pf = min(pt.shape[1], cfg["window"] + 1)
         kv_pf = (pt[0, pt.shape[1] - n_pf:], kc, vc, n_pf, kc.stride(0) * kc.element_size())
-    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf)
+    qkv = _g19(data["attn_input"], "qkv_gate", state)  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
+    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf) if qkv is None else qkv.to(torch.bfloat16)
     o = attn_kernel_fn({
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],

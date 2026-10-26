@@ -9733,12 +9733,13 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
         // run end: rows rg*16 + g (+8), tokens jj*8 + 2c (+1), k in [klo, khi)
         const int rg = tr * NWC + w, nat = (st - st0 + 1) * AP;
         const int klo = ks * KC + st0 * AP * 32, khi = ks * KC + (st + 1) * AP * 32;
+        const bool sfix = !(nat == KA && PRE != 2);  // pbuf path: escape fixups applied in smem after the store (below)
         float v[NT][4];
 #pragma unroll
         for (int jj = 0; jj < NT; ++jj)
 #pragma unroll
             for (int e = 0; e < 4; ++e) { v[jj][e] = acc[jj][e] + acc2[jj][e]; acc[jj][e] = acc2[jj][e] = 0.f; }
-        {
+        if (!sfix) {
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 const float4 hq = h ? hd1 : hd0;
@@ -9761,7 +9762,7 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                 }
             }
         }
-        if (xl) {  // done with this x buffer (the fixups above were its last reads)
+        if (xl && !sfix) {  // done with this x buffer (the fixups above were its last reads)
             __syncwarp();
             if (lane == 0) bar_arrive(xempty + 8 * xb);
         }
@@ -9780,6 +9781,36 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
         for (int jj = 0; jj < NT; ++jj)
 #pragma unroll
             for (int h = 0; h < 2; ++h) *(float2*)(pw + 8 * h * M + jj * 8) = make_float2(v[jj][2 * h], v[jj][2 * h + 1]);
+        // escape fixups on the stored partials, one escape at a time over the warp (lane = token): the in-range slots
+        // (lane c holds slots 2c, 2c + 1 of rows g, g + 8) are found by ballots and walked in lane order, warp-uniformly
+        // (r-proj gemv19.cu s15: the old per-slot shfl/branch chain cost ~1 us per run end)
+        {
+            __syncwarp();
+            const unsigned char* xt = smem + NS * SB + xb * M * XS + lane * XS - ks * KC * 2;
+#pragma unroll
+            for (int h = 0; h < 2; ++h)
+#pragma unroll
+                for (int pr = 0; pr < 2; ++pr) {
+                    const float4 hq = h ? hd1 : hd0;
+                    const float hx = pr ? hq.z : hq.x, hy = pr ? hq.w : hq.y;
+                    unsigned b = __ballot_sync(0xffffffffu, hy != 0x1p-15f && __float_as_int(hx) >= klo && __float_as_int(hx) < khi);
+                    while (b) {
+                        const int src = __ffs(b) - 1;
+                        b &= b - 1;
+                        const int col = __float_as_int(__shfl_sync(0xffffffffu, hx, src));
+                        const float hv = __shfl_sync(0xffffffffu, hy, src);
+                        if (lane < M) {
+                            float* pp = pbuf + pb * PBF + (w * 16 + (src >> 2) + 8 * h) * M + lane;
+                            const float xv = __bfloat162float(*(const __nv_bfloat16*)(xt + col * 2));
+                            *pp = fmaf(xv, hv, fmaf(xv, -0x1p-15f, *pp));
+                        }
+                    }
+                }
+            __syncwarp();
+        }
+        if (xl) {  // done with this x buffer (the fixups above were its last reads)
+            if (lane == 0) bar_arrive(xempty + 8 * xb);
+        }
         if (t == 0) ptag[pb] = tr;
         __syncwarp();
         if (lane == 0) bar_arrive(pfull + 8 * pb);
@@ -10645,14 +10676,17 @@ void pr8_launch(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double sca
 # in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
 # kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
 # npre, xb), proj's H100 picks (r-proj BF16_G19). Consumers round the FP32 out to BF16 (= the GEMM's BF16 output).
-G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2)}
+G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2),
+           # s15 (proj s15 handoff, with its escape-fixup rework): T=32 pooler/unpool, T=16 qkv (FP32 out + cast)
+           ("pooler", 32): (32, 1024, 8, 2, 2, 1), ("unpool", 32): (32, 1024, 8, 2, 2, 1),
+           ("qkv_gate", 16): (16, 1024, 4, 4, 4, 2)}
 # proj's H200 diag (after a 3 us PDL predecessor): m16 pooler AP8 15.7 vs 19.0, unpool tie, o +0.8, every m32 loses
 # (+1.5..5): m32 stays on cuBLAS / the bmm pooler. Was (H100 picks, s10 v35): pooler m16 (16, 1024, 4, 4, 2, 2),
 # m32 (32, 1024, 4, 4, 2, 1), unpool the same, o m16 (16, 512, 4, 3, 2, 2).
 G19_BUILD = [(16, 1024, 4, 4, 2, 2)]  # also compiled (A/B)
 BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
-G19_ON = {"pooler", "unpool"}  # o: H100 tie (cuBLAS after attention)
-G19_GRID = {("pooler", 16): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
+G19_ON = {"pooler", "unpool", "qkv_gate"}  # o: H100 tie (cuBLAS after attention)
+G19_GRID = {("pooler", 16): 108, ("pooler", 32): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
 _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _GPR3_SRC = r'''// Router at m >= 9 as SGLang's BF16 hi + lo split with FP32 accumulation, in ONE GEMM kernel: split-K tensor-core
 // GEMM (mma.sync m16n8k16, x = A, W rows = B), hi and lo MMAs into the same FP32 accumulators (sharing x fragments).
@@ -11801,6 +11835,9 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     return f
 
 
+_moe_TWM_ORDER_M = {}  # s15: moe's H200 proxy (s16): order 76 at T=256 (r-moe 499bde6 default) loses ~3.6 us at v32
+
+
 def _tail(moe, stream1, h, tokens, state, pdl, f=None):
     """unpool -> second boundary: (next attention input, stream)."""
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
@@ -11830,7 +11867,8 @@ def kernel_fn(data, state):
         # the window's page-table entries (csl's speculative range: the table's last W + 1 columns)
         n_pf = min(pt.shape[1], cfg["window"] + 1)
         kv_pf = (pt[0, pt.shape[1] - n_pf:], kc, vc, n_pf, kc.stride(0) * kc.element_size())
-    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf)
+    qkv = _g19(data["attn_input"], "qkv_gate", state)  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
+    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf) if qkv is None else qkv.to(torch.bfloat16)
     o = attn_kernel_fn({
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
