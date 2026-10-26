@@ -272,12 +272,14 @@ def _router_fma(h_ptr, w_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr, BT:
 @triton.jit
 def _routing(part_ptr, bias_ptr, ls_ptr, ids_ptr, lids_ptr, wts_ptr, T, E: tl.constexpr, KS: tl.constexpr,
              TOPK: tl.constexpr, LOCAL: tl.constexpr, MULT: tl.constexpr, REPS: tl.constexpr,
-             SKS: tl.constexpr = 0, ST: tl.constexpr = 0, TRIG: tl.constexpr = False):
+             SKS: tl.constexpr = 0, ST: tl.constexpr = 0, TRIG: tl.constexpr = False, PDL: tl.constexpr = False):
     """One token: scores = sigmoid(MULT logits); the top TOPK of scores + bias (lowest index on ties);
     weights = picked scores / (their sum + REPS); local ids = (id - local_start) mod E, -1 off this GPU.
-    TRIG (s39 ROUTE_PDL): let the PDL dependent (moe_route) launch now."""
+    TRIG (s39 ROUTE_PDL): let the PDL dependent (moe_route) launch now. PDL: launched as a PDL secondary (of pr3)."""
     if TRIG:
         gdc_launch_dependents()
+    if PDL:
+        gdc_wait()
     t = tl.program_id(0)
     e = tl.arange(0, E)
     logit = tl.zeros((E,), dtype=tl.float32)
@@ -339,8 +341,10 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
     lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
     wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
+    rpdl = pr3 is not None and _opt(state, tokens, "route_pdl", ROUTE_PDL)
     _routing[(tokens,)](part, state["router_bias"], local_start, ids, lids, wts, tokens, E=N_EXPERTS, KS=ks,
-                        TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2)
+                        TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, PDL=rpdl,
+                        num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2, launch_pdl=rpdl)
     return ids, lids, wts
 
 
@@ -871,7 +875,11 @@ def _g10_lib():
                 assert src13.count(x_) == 1, x_
                 src13 = src13.replace(x_, y_)
             src = src + "\n" + src13 + "\n" + _R3_SRC.replace("R3_CONFIGS", " ".join("R3_CASE(%d,%d,%d)" % c for c in sorted(set(ROUTER3_CFG.values()))))
-            src = src + "\n" + _GPR3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(PR3_CFG.values()) | set(PR3_BUILD))))
+            # s39 ROUTE_PDL: pr3::router lets its PDL dependent (_routing, which waits before reading the logits) launch
+            # once its MMA part is done (the wait for the zero kernel, before the atomics)
+            _a = '    asm volatile("griddepcontrol.wait;\\n" ::: "memory");  // out zeroed\n'
+            assert _GPR3_SRC.count(_a) == 1
+            src = src + "\n" + _GPR3_SRC.replace(_a, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + _a).replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(PR3_CFG.values()) | set(PR3_BUILD))))
             if G19_CFG and _G19_SRC is not None:
                 src = src + "\n#define G19_ONLY2\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
                     "G19_CASE(%d,%d,%d,%d,1,%d)" % (c[0], c[1], c[2], c[3], c[5]) for c in sorted(set(G19_CFG.values()) | set(G19_BUILD))))
