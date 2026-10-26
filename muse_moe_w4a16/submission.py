@@ -2502,13 +2502,108 @@ __device__ __forceinline__ void tk2d_consume(const uint32_t* slut, const float* 
   }
 }
 
-template <int NC, int NSTG, int KPS, bool DYN>
+// s9 fused post-expert norm (FN): every CTA takes a ticket (cnt[4], monotonic over calls: generation g = cnt[7], read
+// at kernel start, before any ticket of the call) after its gemm2 rows; the last M take one token each, wait until all
+// G CTAs have ticked, then do moe_norm2's work for it in one pass (y rows from L2, all loads in flight at once) and
+// write out. The last ticket zeroes cnt[0] (every CTA is past its gemm2 wait) and bumps cnt[7]. Replaces moe_norm2
+// and its launch (moe_norm2, used by the other paths, zeroes all counters: consistent with this too).
+// s_rt[i] / s_rg[i]: route i's topk weight and global scale * 256 (0 when not local), s_inv[i]: its y row (-1).
+template <int NC>
+__device__ __forceinline__ void tk2f_norm(int* cnt, int M, const int* s_inv, const float* s_rt, const float* s_rg,
+                                          const float* __restrict__ w1, const float* Y, float eps,
+                                          __nv_bfloat16* __restrict__ out, float* s_ss, int* s_tk, int gen) {
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, G = gridDim.x;
+  float wv[16];
+  {
+    const float4* wp = reinterpret_cast<const float4*>(w1);
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const float4 a = __ldg(wp + h * 512 + tid * 2), b = __ldg(wp + h * 512 + tid * 2 + 1);
+      wv[h * 8 + 0] = a.x; wv[h * 8 + 1] = a.y; wv[h * 8 + 2] = a.z; wv[h * 8 + 3] = a.w;
+      wv[h * 8 + 4] = b.x; wv[h * 8 + 5] = b.y; wv[h * 8 + 6] = b.z; wv[h * 8 + 7] = b.w;
+    }
+  }
+  asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+  if (tid == 0) {
+    __threadfence();
+    const int t = atomicAdd(cnt + 4, 1) - gen * G;
+    if (t == G - 1) {  // last ticket: all CTAs are done with cnt[0]
+      cnt[0] = 0;
+      __threadfence();
+      atomicExch(cnt + 7, gen + 1);
+    }
+    s_tk[0] = t;
+    s_tk[1] = gen;
+  }
+  asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+  const int tok = s_tk[0] - (G - M);
+  if (tok < 0) return;
+  gen = s_tk[1];
+  int pos[8];
+  float gsc[8];
+#pragma unroll
+  for (int s = 0; s < 8; ++s) {
+    pos[s] = max(s_inv[tok * 8 + s], 0);  // not local: row 0 (valid memory), scaled by 0
+    gsc[s] = s_rg[tok * 8 + s];
+  }
+  {
+    const int need = (gen + 1) * G;
+    int c;
+    do {
+      asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt + 4) : "memory");
+    } while (c < need);
+  }
+  float v[8][16], ss[8];
+#pragma unroll
+  for (int s = 0; s < 8; ++s) {
+    const float4* p = reinterpret_cast<const float4*>(Y + (size_t)pos[s] * NOUT);
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const float4 a = __ldg(p + h * 512 + tid * 2), b = __ldg(p + h * 512 + tid * 2 + 1);
+      v[s][h * 8 + 0] = a.x; v[s][h * 8 + 1] = a.y; v[s][h * 8 + 2] = a.z; v[s][h * 8 + 3] = a.w;
+      v[s][h * 8 + 4] = b.x; v[s][h * 8 + 5] = b.y; v[s][h * 8 + 6] = b.z; v[s][h * 8 + 7] = b.w;
+    }
+  }
+#pragma unroll
+  for (int s = 0; s < 8; ++s) {
+    ss[s] = 0.f;
+#pragma unroll
+    for (int k = 0; k < 16; ++k) { v[s][k] *= gsc[s] * wv[k]; ss[s] += v[s][k] * v[s][k]; }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) ss[s] += __shfl_xor_sync(0xffffffffu, ss[s], o);
+    if (lane == 0) s_ss[warp * 8 + s] = ss[s];
+  }
+  asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+  float acc[16];
+#pragma unroll
+  for (int k = 0; k < 16; ++k) acc[k] = 0.f;
+#pragma unroll
+  for (int s = 0; s < 8; ++s) {
+    float tot = 0.f;
+#pragma unroll
+    for (int w = 0; w < NC; ++w) tot += s_ss[w * 8 + s];
+    const float fs = gsc[s] != 0.f ? s_rt[tok * 8 + s] * rsqrtf(tot / NOUT + eps) : 0.f;
+#pragma unroll
+    for (int k = 0; k < 16; ++k) acc[k] += fs * v[s][k];
+  }
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    uint4 o;
+    __nv_bfloat162* op = reinterpret_cast<__nv_bfloat162*>(&o);
+#pragma unroll
+    for (int k = 0; k < 4; ++k) op[k] = __floats2bfloat162_rn(acc[h * 8 + 2 * k], acc[h * 8 + 2 * k + 1]);
+    reinterpret_cast<uint4*>(out + (size_t)tok * NOUT)[h * 256 + tid] = o;
+  }
+}
+
+template <int NC, int NSTG, int KPS, bool DYN, bool FN = false>
 __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     const uint4* __restrict__ Wq13, const uint32_t* __restrict__ S13, const uint4* __restrict__ Wq2,
     const uint32_t* __restrict__ S2, const uint32_t* __restrict__ lut, const float* __restrict__ gs13,
     const float* __restrict__ gs2, const __nv_bfloat16* __restrict__ X, const int* __restrict__ ids, int nroutes,
     int start, int count, int* __restrict__ meta, int* __restrict__ sroutes, int* __restrict__ inv,
-    __nv_bfloat16* inter, float* __restrict__ Y, int* cnt, int D) {
+    __nv_bfloat16* inter, float* __restrict__ Y, int* cnt, int D, const float* __restrict__ tw,
+    const float* __restrict__ w1, __nv_bfloat16* __restrict__ out, int M, float eps) {
   static_assert(NC == 8, "routing uses 8 warps x 32 ids");
   extern __shared__ __align__(128) uint4 smem[];
   __shared__ uint32_t slut[256];
@@ -2517,7 +2612,11 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   __shared__ int s_rid[4];
   __shared__ __align__(8) uint64_t ridb[4];
+  __shared__ int s_inv[FN ? 256 : 1], s_tk[2];
+  __shared__ float s_rt[FN ? 256 : 1], s_rg[FN ? 256 : 1];
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  int gen = 0;  // FN: this call's generation (see tk2f_norm); thread 0 only
+  if (FN && tid == 0) asm volatile("ld.relaxed.gpu.global.b32 %0, [%1];" : "=r"(gen) : "l"(cnt + 7) : "memory");
   for (int i = tid; i < 256; i += (NC + 1) * 32) slut[i] = lut[i];
   if (tid == 0) {
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], NC * 32); }
@@ -2567,6 +2666,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       if (c > 0) s_e[rk] = tid;
     }
     __syncthreads();
+    if (FN && warp < 8) s_inv[warp * 32 + lane] = e >= 0 ? s_wc[warp][e] + rank : -1;
     if (e >= 0) {
       const int i = warp * 32 + lane, pos = s_wc[warp][e] + rank;
       s_srt[pos] = i;
@@ -2624,32 +2724,64 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     }
     return;
   }
+  float rt = 0.f, rg = 0.f;  // FN: route tid's topk weight and gs2 * 256 (0: not local), used by tk2f_norm
+  if (FN && tid < nroutes) {
+    const int e = ids[tid] - start;
+    if (e >= 0 && e < count) {
+      rt = tw[tid];
+      rg = gs2[e] * 256.0f;
+    }
+  }
   int rb = 0;
   tk2f_consume<512, NC, NSTG, true, KPS>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
                                     empty, st, ph, rb);
   tk2f_consume<256, NC, NSTG, false, KPS>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
                                      empty, st, ph, rb);
+  if constexpr (FN) {
+    s_rt[tid] = rt;
+    s_rg[tid] = rg;
+    tk2f_norm<NC>(cnt, M, s_inv, s_rt, s_rg, w1, Y, eps, out, s_red, s_tk, gen);
+  }
 }
 
-template <int NC, int NSTG, int KPS, bool DYN = false>
+template <int NC, int NSTG, int KPS, bool DYN = false, bool FN = false>
 static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const void* w2, const void* s2, const void* lut,
                        const void* gs13, const void* gs2, const void* x, const void* ids, int start, int count,
-                       void* meta, void* sr, void* inv, void* inter, void* y, void* cnt) {
+                       void* meta, void* sr, void* inv, void* inter, void* y, void* cnt, const void* tw = nullptr,
+                       const void* w1 = nullptr, void* out = nullptr, float eps = 0.f) {
   constexpr int SMEM = NSTG * NC * KPS * 1152;
   static int grid = 0;
   if (!grid) {
     int dev, nsm;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
-    cudaFuncSetAttribute(moe_tk2f<NC, NSTG, KPS, DYN>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    cudaFuncSetAttribute(moe_tk2f<NC, NSTG, KPS, DYN, FN>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
   cudaStream_t st = at::cuda::getCurrentCUDAStream();
-  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN>, grid, (NC + 1) * 32, SMEM, st, false,
+  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN>, grid, (NC + 1) * 32, SMEM, st, false,
       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
       (const float*)gs13, (const float*)gs2, (const __nv_bfloat16*)x, (const int*)ids, nr, start, count, (int*)meta,
-      (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D);
+      (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D, (const float*)tw, (const float*)w1,
+      (__nv_bfloat16*)out, nr / 8, eps);
 }
+
+// s9: moe_tk2f with the post-expert norm fused (FN): writes out [M, H] bf16 directly; no moe_norm2 after it.
+int64_t moe_tk2fn_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2_, torch::Tensor s2_,
+                         torch::Tensor lut_, torch::Tensor gs13_, torch::Tensor gs2_, torch::Tensor x_,
+                         torch::Tensor ids_, int64_t start, int64_t count, torch::Tensor meta_, torch::Tensor sr_,
+                         torch::Tensor inv_, torch::Tensor inter_, torch::Tensor y_, torch::Tensor cnt_, int64_t cfg,
+                         torch::Tensor tw_, torch::Tensor w1_, torch::Tensor out_, double eps) {
+  const int nr = (int)ids_.numel();
+  if (nr > 256) return -2;
+#define TK2FN_ARGS 0, nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), \
+    PTR(ids_), (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), \
+    y_.data_ptr(), cnt_.data_ptr(), PTR(tw_), PTR(w1_), out_.data_ptr(), (float)eps
+  if (cfg == 402) return tk2f_go<8, 2, 4, false, true>(TK2FN_ARGS);
+  return tk2f_go<8, 4, 2, false, true>(TK2FN_ARGS);
+#undef TK2FN_ARGS
+}
+
 
 // cfg = KPS * 100 + NSTG: 108 (s7 default), 204 (s8), 208, 402, 403, 206; + 1000 * (D + 1): DYN tail (204/402 only)
 int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2_, torch::Tensor s2_,
@@ -2775,6 +2907,10 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "int64_t moe_tk2f_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
+        "int64_t moe_tk2fn_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, "
+        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, torch::Tensor, torch::Tensor, "
+        "torch::Tensor, double);"
         "int64_t moe_set_pdl(int64_t, int64_t);"
         "int64_t moe_set_blk(int64_t);")
 
@@ -2785,7 +2921,7 @@ def _lib():
         from torch.utils.cpp_extension import load_inline
         h = hashlib.sha256(CUDA_SRC.encode()).hexdigest()[:12]
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=CUDA_SRC,
-                           functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tb_launch",
+                           functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                       "moe_gather_launch", "moe_tw_launch", "moe_twf_launch",
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_set_pdl", "moe_set_blk"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
@@ -2936,6 +3072,7 @@ _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
 TK2_MAX = 32  # M above this: big-M path
 TK2F_DYN = 204  # M > 1 cfg; 5402 = DYN row tail (D = 4): H100 bs8-32 -3..4% but judge no gain (check b890d69b 2.125x)
+TK2FN = 1  # s9: post-expert norm fused into moe_tk2f (moe_tk2fn_launch; static cfg 204/402 only)
 TK2F = 204  # decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
@@ -2958,6 +3095,11 @@ def kernel_fn(data, st):
     if M <= TK2_MAX and TK2_NSTG:
         inv = torch.empty(M * TOP_K, dtype=torch.int32, device=dev)
         y32 = torch.empty((M * TOP_K, H), dtype=torch.float32, device=dev)
+        if TK2F and TK2FN:
+            lib.moe_tk2fn_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x,
+                                 ids, st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], TK2F, tw,
+                                 st["w1"], out, POST_NORM_EPS)
+            return out
         if TK2F:
             lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"],
