@@ -547,3 +547,46 @@
   64 at T=128 only, N48 replacing N64 at compile time: est. v16 -2.6 H200 us; v32 loses.)
 - Fit check, no build: tk2f (decode kernel) at v16 routings would cost ~197 H200 us (fit 14.1 + 6.97 E + 4.4 extra
   groups) vs twm's ~167: dead.
+
+## Session 19 (2026-10-26 12:04Z - ) -- warp-specialized dequant dead; big-M loss = last-wave load balance
+- **Warp-specialized dequant microbenchmark** (tools/s19/mb_ws.py, 1 CTA, cycles per twm-sized stage): 2 "T" WGs do
+  LDS.128 + twm's dq + STS.128 of BF16 A into a SW128 A ring (mbarrier full/empty), 2 "M" WGs run SS wgmma on it.
+  full / T only / M only: RT4 N8 2147/1031/1147, RT4 N16 2132/947/1194, RT4 N32 2206/979/1307, RT2 N32 974/636/715,
+  RT2 N64 (A ring 3-4) 1092-1103/582-637/844-869 vs twm RS-both 792 / ~900 / 1046 / - / 737. Even in separate warps the
+  two halves do not overlap (full ~ T + M), and SS alone is slower than RS: smem bandwidth (64 KB of A written + 64 KB
+  read per RT4 stage = ~1000 cycles at 128 B/clk). With s18 this closes every "dequant to smem" design on Hopper:
+  twm's RS register path stays. (NT 4 variants = 768 threads spill: ignore their numbers.)
+- **Big-M per-CTA timeline on the layer's routings** (H100, sub_tl19 = main + TWM_TL + MOE_GRID; /tmp/moe19/an.py):
+  items run in lockstep WAVES (inter-item gaps 0.2 us; RT4 light items ~34-37 us, RT2 hot ~34-40, N32 RT4 48-55) and
+  the end is a partial last wave. Loss = last exit - (first start + sum(item time) / G):
+    G88 (H200 proxy): v16 s7 20.1, s11 24.3; v32 s7 21.0, s11 17.1 us (items 480/480/600/624 = 5.45/5.45/6.82/7.09 waves)
+    G132 (H100 full): v16 s7 20.8, s11 15.7; v32 s7 25.4, s11 18.3 us (3.64/3.64/4.55/4.73 waves)
+  ~8-10% of twm's time, ~12-18 H200 us per v16/v32 call: the biggest single item left in the experts. The start-phase
+  "low HBM rate" (hot items first) does not cost time by itself (every item is per-SM-rate bound on the H200; order
+  only moves work around), so the lever is the tail: finer items in the last wave(s), sized from n_items mod grid.
+  Halves only help when the last wave is <= half full (items mod G <= G/2); quarters needed otherwise.
+- TWF_SPLIT_M (existing: last ns gemm2 items as 2 K halves, FP32 partial + ticket) on twm, 2 rounds x 5 seeds:
+    G88 (proxy) v16 base 231.5 / s66 232.0 / s132 235.7 / s264 236.8 / all 236.5; v32 293.7 / 294.4 / 297.9 / 305.8 / 305.8
+    G132 (H100) v16 base 205.8-207 / s33 204.9 / s50 205.3 / s66 202.4 / s88 202.6 / s100 203.2 / o76 206.0;
+               v32 252-253.7 / s33 244.3 / s50 242.9 / s66 242.6 / s88 242.9 / s100 244.2 / o76 237.8
+  Proxy and full-grid H100 disagree (the tail depends on G: the proxy's 88-CTA waves are not the H200's 132): only
+  the H200 can say -> layer TUNE options. Judge s11 (twf, not twm): {128: 132, 256: 66} tie.
+- New (default off, bit-identical when off): twm K-split combinable with order / hot (bit 22 of the launch code:
+  bits 12-21 = split count instead of tail13; merge order maps g2 items within [0, n2f) so split items stay last).
+- Bug found + fixed on the way: a K-split region that reached big/hot experts gave NaN (hot items take no K half);
+  the split region now stops at the last big expert (n2f loop breaks on s_big[1][a] != 0). Old TWF_SPLIT on twm with
+  large ns (s16's s264/s900 proxy runs) could hit this.
+- Tests: /tmp/moe19/t.py (60 big-M routings x {main, o76+s66, hot+o76+s200, o4+s33}): 0 bad, main bitwise unchanged,
+  split variants maxdiff 0.0039 (FP32 halves order); bench.py test all PASS.
+- Proxy (2 rounds x 5 layer seeds; H100 us), after the change:
+    G132 v16: o0 204.1 / s66 203.2 / o76 204.5 / o76s66 204.4 / o76s100 205.1 / hot+o76s66 204.7
+    G132 v32: o0 250.6 / s66 246.6 / o76 238.9 / o76s66 239.1 / o76s100 242.6 / hot+o76s66 247.7
+    G88  v16: o0 229.7 / s66 230.5 / o76 230.9 / o76s66 232.7 / o76s100 234.5 / hot+o76s66 232.7
+    G88  v32: o0 296.7 / s66 297.7 / o76 300.4 / o76s66 294.5 / o76s100 298.0 / hot+o76s66 295.4
+  => K halves move the tail by 0-4 us, sign depends on the grid (as the wave arithmetic predicts). Posted as H200 TUNE
+  options for the layer's last check (twf_split 66 at T=128/256, + order 76 at T=256). Not a real fix.
+- NEXT (the real fix, ~12-18 H200 us per v16/v32 call): size the tail from (items mod gridDim) in-kernel: a static
+  plan in moe_twm's prologue (all CTAs agree) that turns the last r + k*G items into pieces of ~L/4 (RT 2 class-2 rows x
+  K halves, or K quarters with FP32 red.global.add.v4 into an FP32 y and moe_norm reading FP32), so the last wave is
+  full. Needs a per-class item cost model (H200: RT4 N8 1.0, N16 1.15, N32 1.5, RT2 N64 1.0, RT2 small 0.65 x L).
+  Mind twm's register limit (any new live value spills): put the plan in smem.

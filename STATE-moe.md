@@ -70,6 +70,15 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 19 summary (big-M loss = last-wave load balance; WS dequant dead; NOTES s19)
+- Per-CTA timeline (layer routings): twm items run in lockstep waves (~35-45 us each); loss = makespan - perfect
+  balance = 16-25 H100-us (~12-18 H200 us) per v16/v32 call, the largest item left in the experts. Fix = tail pieces
+  sized from (items mod grid) in-kernel (NOTES s19 NEXT). K halves (TWF_SPLIT) only help if the last wave <= half full.
+- New option (off; main bitwise unchanged): TWF_SPLIT_M combinable with TWM_ORDER_M / TWM_HOT_M (launch-code bit 22);
+  split region limited to light experts (fixes NaN when it reached hot/big experts). Proxy 0-4 us either sign: given
+  to layer as H200 TUNE options (tools/s19/twm_split_moe_src.diff = moe_src.py-only patch).
+- DEAD: warp-specialized dequant (dq WGs -> smem A -> SS wgmma WGs): no overlap, smem-bandwidth bound (tools/s19/mb_ws.py).
+
 ## Session 18 summary (no speedup; why twm is slow; NOTES s18)
 - twm consumers never wait on the ring (stage timeline): compute-bound. Microbenchmark (tools/s18/mb_wgmma.py): dq ALU
   and wgmma do NOT overlap (RS or SS; SS/dequant-to-smem is worse): stage cost ~ dq + MMA. On the H200 light items
@@ -93,17 +102,8 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - Dead: dq IMAD/IMAD.WIDE rebalancing (+6..18%); exhaustive nibble-layout search (nothing beats 7 ALU + 1 IMAD);
   N48/N64/N96 passes in twq/twm (C7512: whole-kernel wgmma serialization); inline producer in warp 0 (2x slower).
 
-## Session 16 summary (H200 PROXY found; s14/s15: twm orders, TWM_TAIL, item-cost ablations: NOTES)
-- **H200 proxy for the expert kernels**: H100 with the persistent kernels' grid capped at 88 CTAs (MOE_GRID env in a
-  /tmp copy, tools/s16/README), times x 0.73 = H200 diag numbers (v16/v32/d16/v1 within 0.5%, d1/d32 ~5-8%), and it
-  orders TWM_TAIL variants like the H200 (full-grid H100 does not). USE IT for every big-M/decode A/B (no checks needed).
-- Proxy: TWM_ORDER_M {256: 76} (main, layer v43) loses ~5 proxy-us at v32 (~3.6 H200 us): told layer to set it {}.
-  Not changed on main yet (layer owns its copy; flip main's default next session if layer agrees / no H200 contradiction).
-- (WRONG, s17: the ablation builds were all TWX 0) "twm item cost is not consumer work". Dead: KG 2/4, 4 fragment
-  buffers + wait_group 3 (ptxas serializes), KPS 2 stages, x by bulk copy, TWF_SPLIT on the proxy.
-
-
 ## Ranked ideas
+-9. (s19) TOP: grid-aware twm tail (NOTES s19 NEXT): est. -12..18 H200 us per v16/v32 call.
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
    all their tokens needs N 96-128 accumulators = a SEPARATE kernel (ptxas sizes registers for the whole function).
    E.g. hot experts on their own launch on a subset of SMs concurrently with twm/twq for the rest (2 streams or one
