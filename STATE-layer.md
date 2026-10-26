@@ -1,6 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~14:05Z (session 32: main = v70 = BOARD BEST; today's budget spent: 0 checks, 0 submits left).
+Updated 2026-10-26 ~13:55Z (session 33: main = v71 = v70 + BND_SPLIT, NOT judge-checked; budget for 10-26 spent).
+
+**s33: main = v71 (a47269b)** = v70 + BND_SPLIT (_boundary row over SPL programs, redundant norms, sliced stores;
+bit-identical). H100 ab_flag: d1 -0.5/-1.0, v1 -1.1/-0.1, d16 -1.5/-1.9, d32 -1.5/-1.4 us; T=128/256 off (loses).
+FIRST CHECK OF THE NEXT SANDBOX: main (v71) as-is; compare per shape vs 0f065691/703d3a7e (est. +0.2..0.3%).
 
 **s32: main = v70 (909010f)** = v69 + proj QSS (qkv T=32 as 2 FP32 bmm slabs, summed in attention; TUNE qss, default on)
 + moe s20 twm AUTO K-split (TUNE twf_split 1022 at T=128/256). Check 0f065691 1.9754x; **submit 703d3a7e 1.9954x = board

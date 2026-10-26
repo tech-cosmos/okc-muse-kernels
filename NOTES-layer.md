@@ -759,3 +759,25 @@
   layer tune T=128 full: default 371.4us | {'lt:pooler': False} 377.8us | {'lt:qkv_gate': False} 371.9us | {'lt:o': True} 368.7us | {'lt:unpool': True} 369.6us | {'lt:o': True, 'lt:unpool': True} 369.0us | {'twm_order': 76} 370.1us | {'twq': 4} 361.5us | {'twq': 12} 364.4us | {'bkt': False} 370.0us | {'bkt': False, 'twq': 4} 362.0us | {'gnorm': False} 371.2us | {'gnorm': False, 'twq': 4} 366.3us | {'twf_split': 66} 367.6us | {'twf_split': 1022} 367.3us (confirm default 372.8 vs 362.2us) -> {'twq': 4}
   layer tune T=256 sliding: default 336.6us | {'lt:qkv_gate': False} 346.4us | {'lt:o': True} 338.1us | {'lt:pooler': True} 347.6us | {'lt:unpool': True} 337.8us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 347.2us | {'twm_order': 76} 346.3us | {'twm_order': 76, 'lt:unpool': True} 347.1us | {'twm_order': 4} 336.2us | {'twm_tail': 32} 333.7us | {'twq': 4} 346.0us | {'twq': 12} 345.6us | {'twm_hot': 1} 343.9us | {'twm_hot': 1, 'twm_order': 76} 343.0us | {'twm_hot': 1, 'twm_order': 76, 'lt:unpool': True} 341.1us | {'bkt': False} 341.2us | {'bkt': False, 'twm_order': 76, 'lt:unpool': True} 350.2us | {'gnorm': False} 338.8us | {'gnorm': False, 'twm_order': 76, 'lt:unpool': True} 348.0us | {'twf_split': 66} 341.0us | {'twf_split': 66, 'twm_order': 76} 339.6us | {'twf_split': 1022} 339.1us | {'twf_split': 1022, 'twm_order': 76} 348.6us (confirm default 337.4 vs 334.4us) -> {'twm_tail': 32}
   layer tune T=256 full: default 520.5us | {'lt:qkv_gate': False} 524.0us | {'lt:o': True} 520.3us | {'lt:pooler': True} 532.8us | {'lt:unpool': True} 521.0us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 532.3us | {'twm_order': 76} 521.1us | {'twm_order': 76, 'lt:unpool': True} 521.4us | {'twm_order': 4} 521.5us | {'twm_tail': 32} 511.4us | {'twq': 4} 539.6us | {'twq': 12} 534.2us | {'twm_hot': 1} 521.2us | {'twm_hot': 1, 'twm_order': 76} 520.2us | {'twm_hot': 1, 'twm_order': 76, 'lt:unpool': True} 520.8us | {'bkt': False} 524.5us | {'bkt': False, 'twm_order': 76, 'lt:unpool': True} 523.9us | {'gnorm': False} 523.9us | {'gnorm': False, 'twm_order': 76, 'lt:unpool': True} 523.2us | {'twf_split': 66} 509.5us | {'twf_split': 66, 'twm_order': 76} 511.6us | {'twf_split': 1022} 509.4us | {'twf_split': 1022, 'twm_order': 76} 510.7us (confirm default 522.8 vs 511.8us) -> {'twf_split': 1022}
+
+## s33 (2026-10-26 13:32Z-): v71 BND_SPLIT (no judge runs: today's 20 checks / 10 submits are spent)
+- Board: #42 at 1.995x (703d3a7e), #1 2.380x. Judge json: per-run d1 times spread 61-92 us (routing differs per seed:
+  local expert count), so the d1 median moves with the routing draw, not with jitter we can fix.
+- Why the boundary: H100 d1 timeline, the first _boundary ends 5.6 us after the o GEMV (1 CTA of 512 threads per row
+  moves ~224 KB: alpha/beta/gain/s/b loads + s_out/h/h32 stores; one SM's bandwidth bounds it). SASS check: its
+  constant/s loads stay above ACQBULK (no sinking).
+- v71 (a47269b) BND_SPLIT {(T, 1|2): SPL}: _boundary runs SPL programs per row; each loads the full row and computes
+  both norms redundantly (same Triton reductions, so bit-identical: /tmp unit test SPL 1/2/4/8 x T 1/8/16/32 x
+  RB/BGAIN/NB variants, 0 bad), but stores only its N/SPL columns (and loads only its gain slice).
+  H100 ab_flag (same state, interleaved): d1 SPL4 90.43/110.89 -> 89.97/109.68 (6 rounds), 91.04/110.64 -> 90.54/109.68
+  (8 rounds; first-only 90.98/110.08, second-only 90.42/110.06); v1 SPL2 152.84/166.24 -> 151.78/166.14, SPL4 151.66/166.27;
+  d16 SPL4 208.66 -> 208.02 (5 rounds), 209.94/312.60 -> 208.48/310.68 (6 rounds), SPL2 209.40/311.42; d32 SPL2
+  202.70/432.66 -> 201.14/431.28, SPL4 201.18/431.92. T=128/256 SPL2 LOSES (v16 +2.2/+1.7, v32 +5.2/+4.9): off there.
+  Defaults: T=1 4, T=8 2, T=16 4, T=32 2 (both boundaries). Tests 13/13, scored decode x2 0 bad, replay 0/20 all shapes.
+  NOTE ab_files (separate prepare() per file) showed d16 sliding +2.3: the two tuners picked different options; use
+  ab_flag for changes that don't touch the tuner.
+- tools/files_eq.py A B [filter] [seeds]: output diff of two files on scored shapes. v70 vs v70 itself differs at every
+  T>=8 shape (FP32 atomics in experts/g19: maxdiff 0.016-0.05 in hidden), d1 is bitwise reproducible.
+- Considered, not built: moe_norm2 at T=16/32 split over columns. tk2f-side sums of squares (PF & 16) costs tk2f +2.4 us
+  (s26 NU8_X note), and a spin/ticket split inside the norm saves at most ~1 us (the 1-block-per-token norm2 is ~3.6 us
+  H100 after tk2f's end incl. the PDL release).
