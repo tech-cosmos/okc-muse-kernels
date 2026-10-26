@@ -28,6 +28,17 @@ def pack19r(w, kc, ap, rg):
     return torch.cat([S, N], 1).contiguous(), hdr, scale
 
 
+RAW = "G19_RAW" in os.environ.get("DEFS", "")
+def pack19raw(w, kc, ap, rg):
+    """G19_RAW: plain BF16 stages, per (row group, atom): [s][lane (g, c)][hk][h][e] = the mma A fragments."""
+    n, k = w.shape
+    ks, ntr, spk = k // kc, n // (16 * rg), kc // 32 // ap
+    A = w.view(n // 16, 2, 8, ks, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 5, 2, 7, 6, 1, 8).reshape(ks, ntr, rg, spk, ap * 512)
+    pm = (1, 0, 3, 2, 4) if TM else (0, 1, 3, 2, 4)
+    A = A.permute(*pm).reshape(ks * ntr * spk, rg * ap * 512).contiguous().view(torch.uint8)
+    return A, torch.full((n, ESC, 2), 2.0 ** -15, device=w.device), 1.0
+
+
 SH = [("qkv", "qkv_gate", 2304), ("o", "o", 8192), ("pool", "pooler", 4096), ("unp", "unpooler", 8192), ("poolr", "pooler", 4608)]
 only = os.environ.get("SH")
 GRID = int(os.environ.get("GRID", torch.cuda.get_device_properties(0).multi_processor_count))
@@ -69,7 +80,7 @@ for nm, layer, n in SH:
         out = torch.empty(M, n, device="cuda")
         for (m_, kc, ap, ns, is_, tpb, xb_, ts_, rg_, rpw_) in cfgs:
             if m_ != M or k % kc: continue
-            if (kc, ap, rg_) not in packs: packs[(kc, ap, rg_)] = pack19r(W, kc, ap, rg_)
+            if (kc, ap, rg_) not in packs: packs[(kc, ap, rg_)] = (pack19raw if RAW else pack19r)(W, kc, ap, rg_)
             P, hdr, scale = packs[(kc, ap, rg_)]
             tail = tpb * GRID // is_ * is_
             er = (hdr[:, :, 1] != 2.0 ** -15).nonzero()

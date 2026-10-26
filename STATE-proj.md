@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~13:45 UTC (end of session 23).
+Updated 2026-10-26 ~13:25 UTC (end of session 24).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -141,7 +141,11 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## Session 22: QSS handoff (dev/qss_layer.patch): the layer's d32 qkv as 2 FP32 bmm slabs, attention sums them at load
 ## (no splitKreduce). H200 GEMM 16.03 vs lt 17.50 us; H100 layer d32 sliding/full -1.5 us each (TUNE pinned). NOTES s22.
 ## Session 23: gemv13 for o at m=1: H100 -0.4 us but H200 +0.35 (check 2722e8c4): DEAD. Don't hand it to the layer.
+## Session 24: QSS verified on layer v69 (+ Requests line for the ~14:30Z layer check). G19_RAW (plain BF16 g19, no
+## decode) DEAD in the H100 proxy (+1.5..3.5 us at m32: stream-bound on the extra bytes). NOTES s24.
 ## Next (ranked)
+-13. (s24) Read COORD/NOTES-layer for the ~14:30Z layer check: was QSS in it, and its "layer tune T=32" line (qss vs
+   {qss: False}). Sandbox ends ~19:10Z; tomorrow's sandbox has a fresh budget. No proj item above ~0.3% layer score left.
 -12. (s23) As -11. 1 proj check left today (sandbox ends ~19:10Z): keep it for an A/B the layer asks for.
 -11. (s22) Check COORD for the layer's verdict on QSS (its check's d32 numbers + tuner line for {"qss": False}). If the
    layer wants it at other T: v16/v32 qkv (T=128/256) is lt without split-K (no gain); d16 qkv is g19 (FP32 already).

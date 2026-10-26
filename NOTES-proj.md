@@ -610,3 +610,22 @@
   10.11: loses. As s17 found for qkv/pooler, the H200 m=1 GEMVs are not byte-bound at these sizes; o is latency-bound.
   Candidates removed again (comment kept in sub_template.py); submission.py = 2480c53 code. Not submitted.
 - Same log: o m8 lt 9.76 (g14 10.43-10.50, g12 10.11); unpooler m1 g17 7.17 (g13 8.35).
+
+## Session 24 (2026-10-26 13:12-13:25Z): QSS verified on layer v69; G19_RAW (plain BF16 g19) DEAD
+- QSS (dev/qss_layer.patch) was not in layer v69 (7d4f3ee). Applied it to a /tmp copy of v69: `git apply` clean, bench
+  test 13/13, tools/scored_test.py "decode 32" x3 bad 0, tools/replay_test.py 20 11,12 "decode 32" 0/20 each layer.
+  tools/qss_eq.py printed bad 2-3 at batch 2 full: the full attention path is itself nondeterministic there (6 identical
+  controls differ among themselves; the QSS output equals one of them; /tmp/qss_det.py), not a QSS bug. Posted a
+  Requests line so the layer bundles it into its ~14:30Z last check (it is a TUNE option, H200 can revert).
+- G19_RAW (DEFS=G19_RAW in dev/g19.py; gemv19.cu WB = 1024): stages hold plain BF16 weights already in mma A-fragment
+  order ([atom][s][lane][hk][h][e], pack19raw in g19.py), no decode, no escape headers/fixups, scale 1. Correct (g19.py
+  asserts). Idea: g19 at m32 is consumer-bound on H200 (decode ~0.4 us/stage), so trade 33% more bytes for no decode.
+  H100 proxy (GRID=88 MODE=2 PRED=3000, us; x0.73 ~ H200):
+    m32 cfg (kc,ap,ns,xb1)   12-bit  RAW   | consumer-only (G19_NOW) 12-bit RAW
+    pool 1024,8,2            25.18   27.52 |                         24.02  21.66
+    pool 1024,4,3            25.84   27.33 |                         25.14  21.49
+    unp  1024,8,2 / 4,3      24.90/25.02  28.48/26.94
+    qkv  1024,4,3            17.06   17.52 (cuBLAS 17.3-17.5)
+  RAW consumers are ~2.5-3.6 us faster but the stream then binds (27.3 vs its NOW 21.5): loses 1.5-3.5 us. DEAD.
+  Also: even the RAW consumer-only time (21.5) is far above the bare stream (~18.3 H100 / 13.7 H200 for 50 MB): the
+  per-stage fixed skeleton is the floor of the g19 design at m32, not decode alone.
