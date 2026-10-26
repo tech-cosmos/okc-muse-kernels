@@ -674,3 +674,20 @@
   fused (n2u / nu8 with W in smem before the wait), which is the same overlap idea: not tried. TG2 stays only as the
   proj-board tuner candidate at unpooler m8 (3addab4, not judge-checked).
 - Lesson: PDL-overlap microbenchmarks must use a predecessor that occupies SMs/smem like the real one (csl/nds/tk2f).
+
+## Session 28 (2026-10-26 13:52-14:30Z): gemv23 (BF16 SS-wgmma GEMM, m128/256): DEAD on H100 and in the H200 proxy
+- Why tried: lead's option (a); the verify-16/32 GEMMs are the largest gap to floor left (H200 lt qkv m128 18.8 tuner-us vs
+  8.4 floor; cuBLASLt picks 40x64 / 64x64 tiles without split-K, so W and x are re-read across tiles).
+- dev/gemv23.cu + dev/g23.py "M,BW,NS[,OB[,CL[,GRID]]]": swap-AB SS wgmma m64nMk16 (A = W stage [BW rows][64 k], B = x box
+  by SW128 tensor map), W repacked tile-major + pre-swizzled (pack23: chunk c of row r at c ^ r%8) so each stage is ONE bulk
+  copy; tile-aligned split-K; BW 128 = 2 WGs x 64 rows, BW 64 = 2 WGs split the k16 steps (smem sum); out FP32 by
+  red.add.v4 (zero kernel PDL primary) or direct BF16 when one block per tile; CL 2/3 = cluster split-K with DSMEM sum
+  into rank 0 then BF16 store. All configs pass vs float64 reference (rel err < 1e-5 FP32, < 4e-3 BF16).
+- Lesson 1: W through a 2-D tensor map (box 64 k x BW rows, rows 16 KB apart) streams at only ~2.3 TB/s on H100 (W-only
+  diag 28.6-30 us for 67 MB); contiguous packed bulk stages fixed nothing measurable here (end-to-end same), so the
+  W-only skeleton itself is ~4 us over a bare stream.
+- H100 (us, cold-L2 graphs; F.linear / bench lt pick): best g23 per shape: qkv m128 22.1 (BW64 c2) vs 20.5 / 18.2; o m128
+  11.55 (BW64 direct) vs 9.9 / 9.5; pool m128 30.0 (BW64 c2) vs 27.4 / 27.1; unp m128 27.9 (BW64 direct) vs 26.8 / 26.3;
+  m256 all +3..20 us. BW 128 (x/W 1) is SLOWER than BW 64 everywhere (unp c2 31.6 vs direct 27.9): not ingest-bound.
+- H200 proxy (GRID 88, x0.73): qkv m128 22.75 -> 16.6 vs judge lt ~15.9; pool m128 37.2 -> 27.1 vs ~21.4. Dead.
+- submission.py unchanged. No judge runs (proj checks 20/20 today).

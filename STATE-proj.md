@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~14:05 UTC (end of session 27).
+Updated 2026-10-26 ~14:30 UTC (end of session 28).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -149,7 +149,11 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## g17 7.26), main 3addab4 (NOT judge-checked yet). After a PDL pred it wins o m1/m8 and unp m1/m8 by 0.8-3.7 us (H100): handoff.
 ## Session 27: TG2 for the layer's o at T=1/8 DEAD in the layer harness (H100 +0.7..4 us; attention predecessor
 ## leaves no room for tg2's smem). Don't hand it to the layer again. NOTES s27.
+## Session 28: gemv23 (own BF16 SS-wgmma swap-AB GEMM for m128/256, packed W, cluster DSMEM split-K, BF16 out) DEAD:
+## H100 loses 1-4 us at every m128 shape, m256 worse; H200 proxy (GRID 88 x0.73) loses too. Lead option (a) closed. NOTES s28.
 ## Next (ranked)
+-17. (s28) Nothing proj-side with size left: tomorrow's first proj check = main (tg2 unpooler m8 tuner candidate, -15).
+   Ask the lead for a new lane (moe sub-task or layer glue) instead of more GEMM variants.
 -16. (s27) Tomorrow (fresh budget): -15's proj check (tg2 unpooler m8 standalone tuner pick) is the only open proj item;
    for the layer, no proj option is pending. Measure any PDL idea against the real predecessor (layer harness), not g19_pred.
 -15. (s26) Tomorrow's first proj check: main as is (tg2 at unpooler m8 in the tuner): read "tune unpooler m8" in the judge log;
