@@ -2,7 +2,7 @@
 
 ## Board
 - Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z). Board is a TEST BED only (lead 01:45Z): the layer counts.
-  Used 2026-10-26: checks 19 of 20 (s12 5 + s13 2 DIAG checks, never submit those), submits 3. s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
+  Used 2026-10-26: checks 20 of 20 (all DIAG since s12, never submit those), submits 3. Sandbox ends ~19:10Z (no reset). s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
   worse), d4909e24 2.170 (twm mixed: neutral). Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
   bs128 196-207, bs256 243-251 (judge noise +-4%).
 - **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.
@@ -83,18 +83,23 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
-## Session 13 summary
-- MAIN: TK2F_DYN = 84204 (M > 1): gemm2 writes y32 in route-slot order pre-scaled by gs2*256 -> moe_norm3 (moe_norm2<SLOT>,
-  one dependent-load level less). Bitwise = 204. H200 diag: d16 -0.45, d32 -0.75 us. TK2F (M=1) stays 204 (layer n2u).
-- H200 diag 1fdf6eb2/adfb897e: next-segment x L1 prefetch +0.3..1.1 us (dead), gemm2 counter spin-once 0, 2 accumulator
-  chains 0. DQW (rotations via IMAD.WIDE on the FMA pipe): warm proxy +18% (dead).
-- ncu warm proxy: issue 50.6%, ALU pipe (half rate) active 51% = issue; fmaheavy (HMUL2+IMAD, also half rate) 34%;
-  stalls spread (wait .94, long_sb .65, throttle .43, barrier .33 cycles/instr). No single limiter left in the consumer.
-- Checks used 2026-10-26: 19 of 20 (all diag); 1 left.
+## Session 14 summary (big-M twm for the layer's v16/v32; NO moe checks left in this sandbox)
+- MAIN 499bde6: TWM_ORDER_M = {256: 76}: moe_twm items pass-minor + the multi-pass (> 64 token) experts' items merged
+  evenly over each phase (keeps HBM busy in the first ~40 us, which heaviest-first wasted). H100 in r-layer harness:
+  v32 sliding 407.6 -> 401.7, full 664.6 -> 655.5 us (vs the tail-32 setting; vs layer's current copy ~-13). v16 0.
+  Waiting for an H200 verdict from a layer check (COORD Requests). TWM_TAIL (H200 -3 us at v32) clashes with the merge:
+  off. If the layer check says o76 loses: set TWM_ORDER_M = {}, TWM_TAIL_M = {256: 32} (H200-measured -3).
+- H200 diag/timeline tool for twm ready: `sh tools/mkdiag14.sh /tmp/x` (DIAG variants of orders + diagtl lines).
+- twm is co-bound (dq ~4 us + MMA 0.134 us/token per expert-pass vs 8.4 us HBM per expert on H100); see NOTES s14.
+- Dead: next-stage LDS prefetch in tw_item (+8..9.5 us), TWM_TAIL13, alternate-expert order, merge in gemm13 only.
 
+## Session 13: tk2f norm3 (slot-ordered y32, TK2F_DYN 84204) -0.5..0.75 us d16/d32; consumer has no single limiter (NOTES).
 ## Sessions 8-12: see NOTES (s10 race fix + layer harness, s11 twm/K-split).
 
 ## Ranked ideas
+-5. (s14) Drain of twm is still ~20-30 us (items ~40 us). Half-size tail items (TWM_TAIL) clash with the merge order;
+   try tail class only for the LAST B items after the merge window, or K-split of the last wave. And: fewer dq per token
+   for hot experts (128-token passes need N 128: registers).
 -4. (s13) Consumer dq is ~73% of instrs and both int pipes are half rate: only fewer dq ops per weight (sharing a dequant
    across >8 tokens = GS16, unexplained H200 loss) or a cheaper decode can move d16/d32 much. Phase-2 12% per-row gap on
    the H200 is NOT the segment change / counter spin (s13 diag). Untested: phase-2 timeline with no extra groups
@@ -131,6 +136,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 4. Clean-up: remove moe_sk / moe_tk / moe_gemm / route2 / act / moe_tb / moe_big / RT 2 moe_tw (~55 s compile).
 
 ## Dead ends (older ones: NOTES-moe.md)
+- (s14) tw_item next-stage weight/scale LDS prefetch: twm v32 +8, twf +9.5 us (H100). TWM_TAIL13; TWM_TAIL + merge order.
 - (s12, H200 diag on layer routings) GS16 in any form (old, merged one-body tk2h, split weights 2-6): +4..8 us at d16/d32;
   per-segment gemm13->gemm2 counters (PSC): 0; deeper tk2f rings: +1..5; DYN: +3..10; NC16: +1..2. Weighted static
   split (TK2W): H100 worse, and the H200 timeline shows balanced CTAs (nothing to fix).
@@ -143,14 +149,5 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - (s6) moe_tw with 16 consumer warps x RT 1 (cfg 1118): 115M vs 78M instr, local +10%. Decode NSTG 6/12 (judge -5%).
 - (s5) decode PDL (gemm2 secondary + routing recompute) and tk2_map blk 2 row order: judge worse (checks 52e5359f, 9acf8e84, 715085cb).
 - (s5) tw2 L2 prefetch of first item before griddepcontrol.wait: no local gain.
-- (s4) K-split tail for moe_tw (last `grid` items as 2 K halves, FP32 partials, 2nd finisher reduces): SM idle
-  20% -> 13% in ncu, judge WORSE (check 2c41a133 1.972x: bs128 249 / bs256 292 vs 233/278). 4 parts: worse in ncu.
-- (s4) moe_tb: TMA ring + mma.sync for big M (8 consumer warps, RT=4, x as 64 per-row 128-B bulk copies):
-  local 299/402 vs 259/332 (consumer latency + tiny copies).
-- (s4) moe_tw RT=4 / KG=2 / A ring of 4 at 384 threads: serialized wgmma (see above).
-- moe_tk2 with 16-token groups + per-segment NG=2 path (s3): proxy 3-14% slower on most routings (spills
-  48-64 B; rows balanced by count while NG=2 rows cost more), one bs32 routing 12% faster. Reverted.
-- Register-ring stream-K decode (moe_sk, s3): ~19-21 instr/word, latency-bound (13.9 cycles/issue at 4
-  warps/scheduler); TMA ring + x in registers is what worked.
-- moe_stream (decode): old item structure + per-lane cp.async ring of weights AND x (no barriers, D=7 ahead
-  across items), 1 CTA/SM: slower (bs32 178/115 vs 147/75 us): 2 warps/scheduler can't issue enough.
+- (s3-s4) older dead ends (moe_tw K-split tail, moe_tb, RT4/KG2 at 384 threads, 16-token tk2 groups, register-ring
+  stream-K, moe_stream): NOTES-moe.md sessions 3-4.

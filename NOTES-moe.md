@@ -335,3 +335,33 @@
 - MAIN: TK2F_DYN = 84204 (M > 1: slot-ordered pre-scaled y32 + moe_norm3), TK2F (M = 1) stays 204 because the layer's
   T=1 n2u reimplements moe_norm2 on the old y32 layout. Bitwise = before (pf_ab), bench test 15/15.
 - check adfb897e @078646e (DIAG, standalone speedup 2.177)
+
+## Session 14 (2026-10-26 05:36Z - ~06:40Z)
+- Lane = layer idle budget item (1): big-M twm at v16/v32 incl. the CTA drain. Checks: 1 left at start, used on diag
+  20d0b9c5 (moe board; never submit). The sandbox expires ~19:10Z, before the 00:00Z reset: NO more moe checks ever here.
+- TWM_TAIL (class 2 = gemm2 of the lightest experts at RT 2 / 32-token passes, half-size items; -nsplit encoding in
+  moe_twm's last arg: tail & 4095, tail13 >> 12, order >> 24). Bitwise = main. H100 layer routings v16 -4, v32 -8 us.
+  H200 diag 20d0b9c5 (MEAN 5 seeds): v16 t0 167.1 / t32 167.3 / t64 168.3 / t128 171.1 / all 171.5; v32 t0 215.3 / t32
+  212.0 / t64 213.5 / t128 216.4. => -3 us at v32 only. TWM_TAIL13 (gemm13 tail): nothing (H100, H200 +2..7).
+- Cost model (H100, 8 experts x T tokens, all 132 SMs): an RT 4 / N 32 expert-pass costs 8.3 us, RT 2 / N 64 12.6 us
+  = ~4.0 us dq + 0.134 us per token MMA; one expert's HBM read = 8.4 us: co-bound. (Note: kernel_fn at M <= 32 goes to the
+  OLD moe_tk path even with TK2_MAX = 0: don't use that to test twm at small T.)
+- ncu twm v32 s7 (H100): DRAM bytes 518 MB (= bytes floor: L2 dedups repeat passes), dram 67% of peak, issue 50%,
+  ALU 46%, tensor pipe 26%; stalls/issue: selected 1.0, wait .72, long_sb .56, not_sel .47, gmma .43, dispatch .40.
+- TIMELINE (TWM_TL build, order bit 2, stamps in `part`; /tmp tool -> now _diag_tl in submission.py, tools/mkdiag14.sh):
+  heaviest-first ordering makes the first ~40 us run at 0.7-1.5 TB/s (all CTAs on the hot experts' consumer-bound,
+  L2-reuse passes), a dip at the gemm13 -> gemm2 switch, drain ~25-40 us (items ~40 us each = 1 MB at the SM's share).
+  Light gemm13 items (N 8, 1.09 MB) take ~46 us = exactly the per-SM fair HBM share, also with NSTG 6 (+4%): ring depth
+  is not the cap.
+- TWM_ORDER bits: 1 alternate heavy/light experts (no effect: hot experts own most items), 4 pass-minor (rb-major), 8/16/24
+  Bresenham merge of the "A" experts' items over the first phi*N positions of each phase (phi 1/.85/.7), 32 merge in
+  gemm13 only (worse), 64 A = multi-pass (> 64 token) experts only (so v16 is untouched). First version had W = nA/phi
+  (= no merge): fixed. Order 76 timeline v32: start phase 1.3-2.4 TB/s, steady 2.5-2.9, CTA end -11 us (s7).
+  H100 standalone layer routings v32: o0+tail32 248.8, o76 239.9 (with tail 247: tail and merge clash), v16 = .
+  H100 r-layer harness copy (/tmp/moe14/layer, tools/ab_flag.py): v32 sliding/full main(tail) 407.6/664.6, o76 401.7/655.5,
+  no tail no order 414.3/668.5; o84/o92/o12 within 2-4 us of o76. MAIN = TWM_ORDER_M {256: 76}, TWM_TAIL_M {} (499bde6).
+  NOT H200-verified: the layer's check is the only judge left.
+- Dead: tw_item next-stage LDS prefetch (weights + scales at k16 group 3, full or x-component only): twm v32 +8 us
+  (spills 194 LDL), twf (no spills) +9.5 us. The early mbar_wait inside the group pipeline hurts.
+- Spill note: twm sits at the 232-register limit (22 LDL/10 STL after s14's prologue additions, all in per-item
+  prologue/epilogue, timing unchanged). Any extra live value in tw_item spills.
