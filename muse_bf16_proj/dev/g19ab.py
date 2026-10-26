@@ -11,14 +11,15 @@ exec(_g18[_g18.index("ESC = 8"):_g18.index("cfgs = ")])
 exec(_g18[_g18.index("def pack16"):_g18.index("SH = [")].replace('"G18_ILV" in', '"G18_NEVER" in'))
 cfgs = [tuple(map(int, c.split(","))) for c in sys.argv[1].split(";")]
 cfgs = [c + (1,)[len(c) - 4:] for c in cfgs]
-base = open(os.path.join(d, "gemv19.cu")).read().replace(
-    "G19_CONFIGS", " ".join("G19_CASE(%d,%d,%d,%d,1,%d,1,8,1)" % c for c in sorted(set(cfgs))))
+CASES = " ".join("G19_CASE(%d,%d,%d,%d,1,%d,1,8,1)" % c for c in sorted(set(cfgs)))
+# env SRC_A / SRC_B: source file per build (default dev/gemv19.cu for both)
+srcs = {b: open(os.environ.get("SRC_" + b, os.path.join(d, "gemv19.cu"))).read().replace("G19_CONFIGS", CASES) for b in "AB"}
 CPP = "void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_pred(torch::Tensor, torch::Tensor, int64_t);"
-def build(defs):
+def build(defs, base):
     src = "".join("#define %s\n" % x.replace("=", " ") for x in defs.split(",") if x) + base
     return load_inline(name="pj_g19ab_" + hashlib.md5(src.encode()).hexdigest()[:10], cpp_sources=CPP, cuda_sources=src,
                        functions=["g19_gemm", "g19_pred"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
-mods = {"A": build(os.environ.get("DEFS_A", "")), "B": build(os.environ.get("DEFS_B", ""))}
+mods = {b: build(os.environ.get("DEFS_" + b, ""), srcs[b]) for b in "AB"}
 def pack19r(w, kc, ap, rg=8):
     S, N, hdr, scale = pack16(w, kc)
     n, k = w.shape
