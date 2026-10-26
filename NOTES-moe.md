@@ -708,7 +708,7 @@
   layer's score weights (STATE s25): hot-expert single-pass kernel at v16/v32 (+0.15-0.3%) is the only one worth a build;
   deterministic barrier-free d1 via per-CTA K-slices + FP32 partials is <0.15% net (partial reduce eats most of the barrier gain).
 
-## Session 26 (2026-10-26 15:44Z - ~16:45Z) -- UPF4: unpool W L2 prefetch spread over moe_twm's main phase: DEAD (H100)
+## Session 26 (2026-10-26 15:44Z - 15:55Z) -- UPF4: unpool W L2 prefetch spread over moe_twm's main phase: DEAD (H100)
 - Idea: at v16/v32 twm is dq/MMA-bound (HBM ~60% busy), so let its producer lanes L2-prefetch (cp.async.bulk.prefetch.L2,
   evict_last) the first SEG bytes of every unpool row, spread over the items numbered f0..f1 % of the work counter (not in
   the drain, as layer s6 tried). Patch on a clone of r-layer f970e18: tools/s26/upf4_layer_patch.py <layer dir> (adds

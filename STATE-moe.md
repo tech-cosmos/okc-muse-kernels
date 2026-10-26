@@ -71,7 +71,7 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
-## Session 26 (15:44-16:45Z): UPF4 (unpool W L2 prefetch spread over twm's main phase) DEAD on the H100 layer harness:
+## Session 26 (15:44-15:55Z): UPF4 (unpool W L2 prefetch spread over twm's main phase) DEAD on the H100 layer harness:
 v16/v32 +1.4..10 us, monotone in size; unpool GEMMs gain <= 1.1 us (lines evicted by the expert stream). NOTES s26.
 
 ## Session 25 (15:26Z, paper only; no code, no judge runs): what is left, valued by layer score
@@ -85,22 +85,11 @@ Remaining moe ideas, all needing H200 time (next sandbox; moe checks = H200 DIAG
     Saves the gemm13->gemm2 barrier/tail (~1.5 us) minus the partial reduce (~0.8 us): est. net <1 us d1 => <0.15%. Low value.
  c. Everything else in Ranked ideas is measured dead or <0.1%.
 
+## Sessions 22-24 (summaries in NOTES s22/s23): big-M dq-bound, TK2F_L2H 4 = 1 in layer (tie)
 ## Session 24 summary (NOTES s24; no speedup, no judge runs)
 - Dead on the H200 proxy: tk2f stage-ahead LDS register prefetch (+2.4..4.3 proxy-us), 2 CTAs/SM tk2f (+9..23: register cap).
 - Paper: phase-2 "slowness" is mostly end-of-kernel accounting (~1.5 us at d32 left); barrier already hidden by the w2
   prefetch. Barrier-free split-K d1 (~-1.5 us, nondeterministic sums) parked.
-
-## Session 23 summary (NOTES s23)
-- Layer v77 has TK2F_L2H 1; mode 4 vs 1 in a layer copy (H100, 6 rounds): tie on d1/d16/d32/v1. Keep the layer on 1.
-- Big-M re-checked: items at the dq/MMA floor + ~20 us wave tail; no H100 lever left without a cheaper dq.
-
-## Session 22 summary (no speedup, no judge runs; NOTES s22)
-- Dead: FA3-style pingpong of the 2 consumer WGs (microbench 721 vs 737 cyc), dq without the bf16 multiply (no better
-  overlap: the dq/wgmma serialization is not an FP16-pipe conflict), TWM_FN = moe_norm fused into twm's drain (4
-  variants, best v16 +2 / v32 -1.6 us; tools/s22/twm_fn_dead.diff).
-- Floor: twm v32 is dq-bound (~5.6 GPU-us of dq per expert pass: ~146 + MMA 39 = ~185 vs 221 measured, HBM 140).
-  Remaining big-M levers are small (hot single pass ~5-10 us at v32, drain). Next sandbox: spend moe checks on H200
-  DIAGs the H100 cannot decide (TK2F_L2H 0 vs 4 on decode routings, if layer's first check is unclear).
 
 ## Session 21 summary (L2 cache hints on the expert weight streams; NOTES s21)
 - main = b32928b: TK2F_L2H = 4 (tk2f: evict_last on every row of an expert with > 8 tokens, evict_first on the rest)
