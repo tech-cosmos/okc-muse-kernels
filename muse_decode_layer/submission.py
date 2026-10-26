@@ -8802,7 +8802,7 @@ def prepare(weights):
     _g19_prepare(state)
     _lt_prepare(state)
     torch.cuda.synchronize()
-    _tune_g19_grid(state)
+    _tune(state)
     return state
 
 
@@ -10680,13 +10680,16 @@ void pr8_launch(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double sca
 G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2),
            # s15 (proj s15 handoff, with its escape-fixup rework): T=32 pooler/unpool, T=16 qkv (FP32 out + cast)
            ("pooler", 32): (32, 1024, 8, 2, 2, 1), ("unpool", 32): (32, 1024, 8, 2, 2, 1),
-           ("qkv_gate", 16): (16, 1024, 4, 4, 4, 2)}
+           ("qkv_gate", 16): (16, 1024, 4, 4, 4, 2),
+           # s19: H200-tuned in prepare (TUNE): qkv T=32 and o T=16/32 on g19 (configs already built for other picks)
+           ("qkv_gate", 32): (32, 1024, 8, 2, 2, 1), ("o", 16): (16, 1024, 4, 4, 2, 2), ("o", 32): (32, 1024, 8, 2, 2, 1)}
 # proj's H200 diag (after a 3 us PDL predecessor): m16 pooler AP8 15.7 vs 19.0, unpool tie, o +0.8, every m32 loses
 # (+1.5..5): m32 stays on cuBLAS / the bmm pooler. Was (H100 picks, s10 v35): pooler m16 (16, 1024, 4, 4, 2, 2),
 # m32 (32, 1024, 4, 4, 2, 1), unpool the same, o m16 (16, 512, 4, 3, 2, 2).
 G19_BUILD = [(16, 1024, 4, 4, 2, 2)]  # also compiled (A/B)
 BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
-G19_ON = {"pooler", "unpool", "qkv_gate"}  # o: H100 tie (cuBLAS after attention)
+G19_ON = {"pooler", "unpool", "qkv_gate", "o"}  # o: H100 tie (cuBLAS after attention)
+G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32)}  # prepared, used only if TUNE picks them (H100: tie/+3 us)
 G19_GRID = {("pooler", 16): 108, ("pooler", 32): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
 _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _GPR3_SRC = r'''// Router at m >= 9 as SGLang's BF16 hi + lo split with FP32 accumulation, in ONE GEMM kernel: split-K tensor-core
@@ -11746,53 +11749,68 @@ def _g19_prepare(state):
     del comp
 
 
-# (s18) The pooler's g19 grid at T=16/32 trades SMs with the side-stream router, whose speed differs by GPU (H200
-# _router_split 5.6 us vs H100 18.5): prepare() times the whole layer (CUDA graph replays, cold L2, synthetic sliding
-# decode inputs; shapes only) with each candidate grid and keeps the fastest in state["g19_grid"].
-G19_GRID_TUNE = {16: (108, 114, 120, 126, 132), 32: (108, 114, 120, 126, 132)}
-G19_TUNE_REPS = 40
+# (s18/s19) Choices where the H100 and the judge's H200 may disagree, tuned in prepare(): the whole layer is timed
+# (CUDA graph replays, cold L2, interleaved, median) on synthetic sliding decode inputs (shapes only, random data) with
+# each candidate option set; the fastest set per T is kept in state["tune"][T]. Options (defaults = no entry):
+# g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
+# kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T. A candidate that fails to run is skipped.
+# s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
+TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}),
+        16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}),
+        32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}),
+        8: ({}, {"pr1": False})}
+TUNE_REPS = 40
+TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}  # T -> (batch, q_len)
 
 
-def _synth_input(batch, dev, ctx=3000):
-    """A sliding-window decode step (page 1) of random data with the scored inputs' shapes and dtypes."""
+def _opt(state, tokens, name, default):
+    return state.get("tune", {}).get(tokens, {}).get(name, default)
+
+
+def _synth_input(batch, dev, ctx=3000, q_len=1):
+    """A sliding-window decode step / verify block (page 1) of random data with the scored inputs' shapes and dtypes."""
     g = torch.Generator(device=dev).manual_seed(1234)
+    tokens = batch * q_len
     seq = torch.full((batch,), ctx, dtype=torch.int32, device=dev)
-    maxp = ctx + 1
+    maxp = ctx + q_len
     pt = torch.randperm(batch * maxp, generator=g, device=dev).to(torch.int32).view(batch, maxp)
-    pos = seq.long()
-    stream = torch.randn((batch, HIDDEN), generator=g, device=dev)
+    pos = (seq.long()[:, None] + torch.arange(q_len, device=dev)).reshape(-1)
+    stream = torch.randn((tokens, HIDDEN), generator=g, device=dev)
     kc = (torch.randn((batch * maxp, 1, 2, 64), generator=g, device=dev) * 0.5).to(torch.float8_e4m3fn)
     vc = (torch.randn((batch * maxp, 1, 2, 64), generator=g, device=dev) * 0.5).to(torch.float8_e4m3fn)
     one = torch.tensor(1.0, dtype=torch.float32, device=dev)
     return {"stream": stream, "attn_input": (stream * torch.rsqrt(stream.square().mean(-1, keepdim=True) + RMS_EPS)).to(torch.bfloat16),
             "k_cache": kc, "v_cache": vc, "positions": pos,
-            "cache_loc": torch.gather(pt.long(), 1, pos[:, None]).view(-1),
-            "cache_seqlens": seq + 1, "cu_seqlens_q": torch.arange(batch + 1, dtype=torch.int32, device=dev),
+            "cache_loc": torch.gather(pt.long(), 1, pos.view(batch, q_len)).view(-1),
+            "cache_seqlens": seq + q_len, "cu_seqlens_q": torch.arange(0, tokens + 1, q_len, dtype=torch.int32, device=dev),
             "scheduler_metadata": None, "k_scale": one, "v_scale": one.clone(), "page_table": pt, "seq_lens": seq,
             "local_start": torch.zeros(1, dtype=torch.int32, device=dev),
-            "config": {"batch": batch, "q_len": 1, "tokens": batch, "hidden": HIDDEN, "num_q_heads": 16,
+            "config": {"batch": batch, "q_len": q_len, "tokens": tokens, "hidden": HIDDEN, "num_q_heads": 16,
                        "num_kv_heads": 2, "head_dim": 64, "page_size": 1, "window": 2048, "rope_theta": 500000.0,
                        "qk_scale_factor": 5.4730064863875, "sm_scale": 0.125, "kv_scale": 1.0,
                        "n_experts": N_EXPERTS, "top_k": TOP_K, "local_experts": LOCAL_EXPERTS}}
 
 
-def _tune_g19_grid(state):
-    grids = state["g19_grid"] = dict(G19_GRID)
-    if not G19_GRID_TUNE or "pooler" not in G19_ON:
+def _tune(state):
+    state["tune"] = {}
+    if not TUNE:
         return
     dev = state["unpool_slice"].device
     try:
         flush = torch.empty(256 << 20, dtype=torch.uint8, device=dev)
-        for tokens, cands in G19_GRID_TUNE.items():
-            if state.get("g19", {}).get(("pooler", tokens)) is None:
-                continue
-            data = _synth_input(tokens, dev)
-            graphs = {}
-            for grid in cands:
-                grids[("pooler", tokens)] = grid
+        for tokens, cands in TUNE.items():
+            data = _synth_input(TUNE_SHAPE[tokens][0], dev, q_len=TUNE_SHAPE[tokens][1])
+            graphs, ok = [], []
+            for opts in cands:
+                state["tune"][tokens] = opts
                 fn = lambda: kernel_fn(data, state)  # noqa: E731
-                fn()
+                try:
+                    fn()
+                except Exception as ex:  # noqa: BLE001  (host-side checks only: a CUDA fault would raise below)
+                    print(f"layer tune T={tokens} {opts} skipped ({type(ex).__name__}: {ex})", flush=True)
+                    continue
                 torch.cuda.synchronize()
+                ok.append(opts)
                 s = torch.cuda.Stream(dev)
                 s.wait_stream(torch.cuda.current_stream())
                 gr = torch.cuda.CUDAGraph()
@@ -11802,40 +11820,44 @@ def _tune_g19_grid(state):
                         fn()
                 torch.cuda.current_stream().wait_stream(s)
                 torch.cuda.synchronize()
-                graphs[grid] = gr
-            ts = {grid: [] for grid in cands}
-            for r in range(G19_TUNE_REPS + 3):
-                order = cands if r % 2 == 0 else cands[::-1]
-                for grid in order:
+                graphs.append(gr)
+            cands = ok
+            idx = list(range(len(cands)))
+            ts = [[] for _ in idx]
+            for r in range(TUNE_REPS + 3):
+                for i in (idx if r % 2 == 0 else idx[::-1]):
                     flush.zero_()
                     a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                     a.record()
-                    graphs[grid].replay()
+                    graphs[i].replay()
                     b.record()
                     b.synchronize()
                     if r >= 3:
-                        ts[grid].append(a.elapsed_time(b))
-            med = {grid: sorted(v)[len(v) // 2] for grid, v in ts.items()}
-            grids[("pooler", tokens)] = min(cands, key=lambda c: med[c])
-            print(f"g19 grid tune T={tokens}: " + " ".join(f"{c}:{med[c] * 1e3:.1f}us" for c in cands)
-                  + f" -> {grids[('pooler', tokens)]}", flush=True)
+                        ts[i].append(a.elapsed_time(b))
+            med = [sorted(v)[len(v) // 2] for v in ts]
+            best = min(idx, key=lambda i: med[i])
+            state["tune"][tokens] = cands[best]
+            print(f"layer tune T={tokens}: " + " | ".join(f"{cands[i] or 'default'} {med[i] * 1e3:.1f}us" for i in idx)
+                  + f" -> {cands[best] or 'default'}", flush=True)
             del graphs, data
         del flush
-    except Exception as ex:  # keep the fixed grids
-        print(f"g19 grid tune failed ({type(ex).__name__}: {ex}); using G19_GRID", flush=True)
-        state["g19_grid"] = dict(G19_GRID)
+    except Exception as ex:  # keep the defaults
+        print(f"layer tune failed ({type(ex).__name__}: {ex}); using defaults", flush=True)
+        state["tune"] = {}
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
 
 
 def _g19(x, key, state):
     """x @ W.T (key's weight) in FP32 by gemv19 (a PDL dependent of the previous kernel), or None."""
-    e = state.get("g19", {}).get((key, x.shape[0])) if key in G19_ON else None
+    m = x.shape[0]
+    on = key in G19_ON and _opt(state, m, "g19:" + key, (key, m) not in G19_DEFAULT_OFF)
+    e = state.get("g19", {}).get((key, m)) if on else None
     if e is None:
         return None
     c = e[4]
     out = torch.empty((x.shape[0], e[1].shape[0]), dtype=torch.float32, device=x.device)
-    grid = state.get("g19_grid", G19_GRID).get((key, x.shape[0]), _G19_SMS)
+    grid = G19_GRID.get((key, m), _G19_SMS)
     ctr = e[3].get(grid)  # the epoch barrier needs one counter per grid size
     if ctr is None:
         ctr = e[3][grid] = torch.zeros(2, dtype=torch.int32, device=x.device)
@@ -11946,7 +11968,7 @@ def kernel_fn(data, state):
     dev = data["stream"].device
     kc, vc, pt = data["k_cache"], data["v_cache"], data["page_table"]
     kv_pf = None
-    if KV_PF and tokens == 1 and cfg["window"] > 0 and kc.shape[1] == 1 and kc.is_contiguous() and vc.is_contiguous():
+    if _opt(state, tokens, "kv_pf", KV_PF) and tokens == 1 and cfg["window"] > 0 and kc.shape[1] == 1 and kc.is_contiguous() and vc.is_contiguous():
         # the window's page-table entries (csl's speculative range: the table's last W + 1 columns)
         n_pf = min(pt.shape[1], cfg["window"] + 1)
         kv_pf = (pt[0, pt.shape[1] - n_pf:], kc, vc, n_pf, kc.stride(0) * kc.element_size())
@@ -11969,7 +11991,7 @@ def kernel_fn(data, state):
     h32 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev) if fp32_router else stream1
     alpha, beta = state["res1"]
     npf = (state["router"].numel() * 4) // (512 * 1024) if tokens in ROUTER_L2_PF_TOKENS and fp32_router else 0
-    pr1 = (tokens in PR1_TOKENS and pdl and fp32_router and _GPR1_SRC is not None and not npf
+    pr1 = (tokens in PR1_TOKENS and _opt(state, tokens, "pr1", True) and pdl and fp32_router and _GPR1_SRC is not None and not npf
            and (tokens == 1 and "pooler" in state.get("g13", {}) or tokens == 8 and _GPR8_SRC is not None
                 and "pooler" in state.get("g14", {}) and G14_CFG["pooler"][0] == 8))
     bnd = pr1 and PR1_BND and tokens == 1 and a.dtype == torch.bfloat16
@@ -12028,7 +12050,8 @@ def kernel_fn(data, state):
             pk = state["g13"]["pooler"]
             _G10["lib"].pr1_launch(pk[0], pk[1], pk[2], h, pooled, pk[3], state["router"], h32, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
-                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens], 1,
+                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens][:4], _opt(state, tokens, "pr1_rb", PR1_CFG[tokens][4]),
+                                   PR1_CFG[tokens][5], _opt(state, tokens, "pr1_npf", PR1_CFG[tokens][6]), 1,
                                    [a, data["stream"], alpha, beta, state["pre_ffn"], stream1, h] if bnd else [],
                                    POST_NORM_EPS, RMS_EPS)
         else:
