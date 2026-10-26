@@ -890,3 +890,19 @@
   lut (twm/hot/twf/tw/twq) = prepared state, safe. moe_route / r-moe tk2f have no wait (not PDL secondaries here;
   layer owns its patched tk2f). Standalone outputs unchanged (cache op only); bench test 15/15.
   Layer: its moe_norm copy (and moe_norme) needs the same __ldcg on ids/tw if it runs it as a PDL secondary.
+
+## Night4 session 3 (2026-10-26 19:31Z - ~20:05Z, no judge runs: moe checks 20/20 until 00:00Z) -- L2 hints on the H200 DIAG
+- Found while reading: the s21 L2 cache hints (TK2F_L2H / TWM_L2H; layer v73/v76) have NEVER run on the H200: the last
+  moe check was 06:05Z (s14) and the layer's board run 703d3a7e is v70. The layer's first check tonight carries them blind.
+- r-moe 64212be: tk2f hint mode selectable at run time: python TK2F_L2H_RT (None = the #define) -> launch cfg +
+  1000000 * (mode + 1) -> host static g_tk2f_l2h -> new last kernel arg l2h. Only PF & 64 instantiations read it
+  (cfg 204 -> PF 64, 84204 -> PF 68, SA only; non-SA falls back to the default kernel); every other instantiation uses
+  the #define as before. First try (l2h read by every instantiation) cost d32 +0.4..0.8 / d16 +0..1 H100 us vs HEAD
+  (layout; 3 ABAB rounds), so default kernels stay compile-time: their SASS is now byte-identical to HEAD's (cuobjdump diff).
+- H100 layer routings (tools/layer_ab.py, cold L2), mode 4 / 0 / 1: d1 36.2/37.4/36.8, d16 82.1-82.9/87.5-88.1/86.2-87.2,
+  d32 105.6-105.7/110.0-110.7/105.8-106.2, v1 84.1-84.5/85.9-86.1/84.1-84.5 us. Outputs bitwise equal across all modes
+  (/tmp/n4s3_eq.py: 20 decode routings x modes None/0-4). Tests 15/15. No spills (regs = HEAD +-1).
+- DIAG_VARIANTS["dec"] = gs8 (mode 4) / l2h0 / l2h1: the 00:00Z DIAG check now also answers "do the hints help on the
+  H200" for d1/d16/d32/v1. Local DIAG dry run OK. If l2h0 wins on the H200: tell layer to set its #define TK2F_L2H 0.
+- Looked at and left (paper, all covered by earlier notes): tk2f is at ~4.06 TB/s per marginal expert on the H200 and its
+  in-layer fixed cost is mostly hidden by TK2FX/TK2FJ; twm is dq-bound (s18/s22) with the drain the only lever (s19/s20).

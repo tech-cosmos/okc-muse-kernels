@@ -71,6 +71,14 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 3 (19:31-20:05Z, no judge runs) -- r-moe 64212be
+- TK2F_L2H_RT (python, None = #define 4): run-time tk2f L2 hint mode via cfg + 1000000 * (mode + 1) (PF | 64 copies of
+  cfg 204 / 84204 SA; default kernels' SASS identical to HEAD). H100 mode 4 vs 0: d16 -5.1, d32 -4.3, v1 -1.6, d1 -0.6..1.2.
+- The hints never ran on the H200 (moe checks predate s21; layer board run is v70). DIAG "dec" now = gs8 (4) / l2h0 / l2h1.
+- FIRST CHECK AT 00:00Z (unchanged plan + this): `sed 's/^DIAG = 0$/DIAG = 1/' muse_moe_w4a16/submission.py >
+  /tmp/x/submission.py; okc check /tmp/x/submission.py --json`; grep "diag12 MEAN" in the job log. Report to layer:
+  hot G (h24/32/40), RG, NORM_EARLY (h32ne0/offne0) at v32/v16, and L2H mode (l2h0/l2h1 vs gs8) at d1/d16/d32/v1.
+
 ## Night4 session 2 (19:26-19:45Z, no judge runs) -- r-moe 5960afc
 - PDL .nc-hoist fix (layer s52 ask): moe_routegather (ids, X) and moe_norm (ids, tw) read producer outputs via __ldcg.
   SASS had moe_norm's ids LDG.CONSTANT above ACQBULK (real in the layer; Request posted). Tests 15/15, bitwise same.
@@ -90,22 +98,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - Handoff to layer posted (COORD): its route kernels (moe_route/moe_routegather/moe_gathern prologue) must zero
   meta[100 + e], its meta allocations must be >= 132 ints, then call moe_norme_launch after twm at T = 128/256.
 
-## Session 34 (18:25Z, no judge runs; sandbox ends ~19:10Z): DIAG_VARIANTS "big" += h32rg0 / h32rg1 (RG 0/1 with hot 32),
-so the next sandbox's FIRST moe check (sed DIAG = 1 into a /tmp copy) A/Bs moe_hot G AND RG on the H200 in one run.
-Board code unchanged (DIAG = 0). Then report the winners to layer under Requests.
-
-## Session 33 (no judge runs): RG = 1 on main: moe_routegather (route + gather in one launch, stable order, bitwise =
-old, 15/15). H100 layer_ab v16 -1.1 us, v32 tie. Handoff for layer's moe_gathern at T=128 (NOTES s33). Next sandbox:
-first moe check = the queued moe_hot DIAG (s30), add RG 0/1 to DIAG_VARIANTS if cheap.
-
-## Session 29 (no judge runs): moe_hot BUILT (r-moe main, HOT_M default {} = board unchanged). Layer: _moe_HOT_M = {256: 32}
-+ 2 function names (tools/s29/README, hot_moe_src.diff). Bitwise = off; 48 skewed routings 0 bad. Layer copy H100: v32 sliding
-395.2 -> 387.4, full 646.3 -> 644.0 us; H200 proxy (HOT_EMU queued-CTA emulation) -18 proxy-us (~-13 H200 us). NOTES s29.
-NEXT: H200 DIAG (moe check) of HOT_M {256: 24/32/40} on the layer routings (DIAG_VARIANTS = python globals: works), or let
-the layer's tuner pick it as a T=256 option. Then: same idea at the 33..64-token experts (N64 RT2 passes already single)?
-no: those are one pass already. Next lever: the twm drain at v16/v32 (STATE idea -5).
-
-## Session 21: L2 hints TK2F_L2H = 4 / TWM_L2H = 1 on main (NOTES s21).
+## Session 29: moe_hot (65..128-token experts, one N128 pass); layer has it as a T=256 TUNE option (NOTES s29).
 
 ## Ranked ideas
 -9. (s19) grid-aware twm tail by K-split: DONE s20, tie (halves) / dead (quarters). Tail needs cheaper items, not finer.
