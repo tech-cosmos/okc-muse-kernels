@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~22:15 UTC (s52: PDL flag handoff vs griddepcontrol.wait DEAD (flag +0.25 us); g19 SWP (software-pipelined smem loads) and ACC4 (2x HMMA chains) DEAD on H100 consumer-only; ncu: short_sb 24%, not the bound. s51: G19_TAG2 queued in _diag19d. Checks 20/20 until 00:00Z; main default build unchanged).
+Updated 2026-10-26 ~22:20 UTC (s53: gemv24 (per-warp TMA rings, no producer warp) = H100 layer WIN at T=16/32 (-0.5..-3.5 us/layer, tuner options); handoff dev/s53/g24_layer.patch; print-only _diag24 queued for the 00:00Z check. Checks 20/20 until 00:00Z).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -135,6 +135,10 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## NOTM; full kernel tie on H100 (W-bound). Loop top 0.30 -> 0.14 kcyc/stage (clock64). NOTES s51.
 ## s52: dead (NOTES s52): flag-based PDL handoff (1.02 vs gdc.wait 0.77 us), G19_SWP, G19_ACC4 (switches off in gemv19.cu).
 ## Next (00:00Z check, ranked):
+## -1. (s53) The 00:00Z proj check log: 'diag24' lines (H200 g24 per op/m/cfg, G132/G108) vs 'diag19d ... main' and
+##    'diag19' pick: post per-op wins for layer (which g24:<key> TUNE options to default ON in TUNE_BASE). If g24 m16 pool
+##    loses on H200 (G72 proxy did), keep it a tuner option. Next build: dynamic task tail for g24 (per-SM HBM variance),
+##    m32 with KC 1024 (x in 2 halves), BF16-out variant for qkv. NOTES s53.
 ## 0. In the 00:00Z check log: diag19d 'NOTM' vs 'NOTM TAG2' (H200): >= 0.3 us win at m16/m32 -> TAG2 patch for layer's
 ##    g19_src.cu: patch READY dev/s51/tag2_layer.patch (handoff posted 21:50Z; layer H100 tie, tests 13/13): post the H200
 ##    numbers under Handoffs/Requests. diag19 'o m16' g19 vs pick: if g19 wins now -> layer TUNE option at T=16 o.

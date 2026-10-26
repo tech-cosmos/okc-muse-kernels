@@ -1107,3 +1107,33 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   ~25% of mma.sync peak), issue 32%. With smem latency, MMA chains and div/mod (s51) ruled out, what's left of the consumer
   time is the per-stage skeleton (~0.4 us) + run ends + x arrival (s50/s51), and low TLP (2 consumer warps per
   scheduler; more warps were slower in s14/s34). The 00:00Z H200 diag19d decomposition decides whether anything is left.
+
+## s53 (2026-10-26 21:47-22:20Z, sandbox okc-night4, session 10): gemv24 = per-warp TMA rings: WIN in the H100 layer (handoff)
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z). Lead 20:16Z: ONE bigger item for the layer's T>=16 GEMMs.
+- Idea: g19's consumer cost at m16/m32 includes the block-wide producer -> consumers -> empty-barrier handoff per stage
+  (s12/s50/s51: ~0.3-0.5 us per stage, the slowest warp gates the ring). dev/s53/gemv24.cu: NO producer warp. Each warp
+  owns split-K tasks (16 rows x KC k = KC/32 atoms, contiguous = pack19 with rg 1) and streams them through its OWN
+  NS-slot ring (lane 0 issues one bulk copy per slot and refills the slot right after reading it; fence.proxy.async
+  before the refill). Block b owns tasks [T b/G, T (b+1)/G) statically (t = ks * n/16 + row group), warp w every WPB-th;
+  the block's <= XB x chunks are bulk-loaded once after griddepcontrol.wait; out zeroed in the kernel + epoch-counter
+  barrier before the first red (as g19 mode 2); task end: escape fixups (g19's register ballot path, headers __ldg'd at
+  task start), partials -> per-warp smem tile -> red.global.add.v4. W prologue (npre slots) before the wait; npre bit 16
+  = launch_dependents at start (layer convention). Template R (row groups per task, x fragment reuse) exists: R 2/4 LOSE
+  (fewer warps fit; H100 +1..8 us). Harness dev/s53/g24.py "M,KC,AP,NS,WPB,XB[,R]" (env GRID, PRED, NPRE, DEFS
+  G24_NOW / G24_NOFIX, ESCW=1 adversarial escapes + exact spike rows, 20 reps: PASS all shapes/configs).
+- H100 after a 3 us PDL pred (us, g24 | g19 layer-like NOTM+TAG2, both with escapes), G132: pool m16 18.6 | 19.1,
+  m32 21.1 | 21.6, unp m16 18.8 | 19.7, m32 20.2 | 21.2. Consumer-only (NOW, no escapes): pool m16 10.1 | 11.8, m32
+  14.5 | 15.0, unp m16 9.8 | 12.3, m32 14.5 | 14.5, qkv m16 8.7 | 9.0, m32 11.7 | 12.4.
+  H200 proxy G88 (best cfg each): qkv m16 11.7 | 11.8, m32 14.7 | 15.7; o m16 6.7 | 7.2, m32 8.1 | 8.7 (cuBLAS 8.4);
+  pool m16 19.6 | 19.6, m32 22.3 | 23.0; unp m16 19.8 | 19.8, m32 22.3 | 22.8.
+  G72: qkv m16 11.8 | 11.6, m32 16.1 | 16.4; o m16 7.1 | 7.5, m32 8.7 | 9.9; pool m16 20.4 | 19.1 (loses), m32 24.8 | 26.6;
+  unp m16 20.3 | 20.6, m32 23.9 | 24.7. Best cfgs: m16 (16,1024,2,4,16,2) / o (16,512,2,4,16,2); m32 (32,512,4,3,12,2) or
+  (32,512,2,4,16,2). m32 KC 1024 doesn't fit with enough warps (x 64 KB x 2).
+- Layer: dev/s53/g24_layer.patch (on r-layer b889e7c): g24_src.cu (= gemv24.cu) inlined by build.py ("24"), G24_CFG,
+  _pack24/_g24_prepare (separate load_inline, per-pick F.linear check, inside _g19_prepare), _g19() takes TUNE option
+  g24:<key> first (same grid G19_GRID, same trig), TUNE[16] += g24 pool/unp/both/o/qkv, TUNE[32] += same + pool+unp+o.
+  Layer tests 13/13 with all g24 options forced (4 g24 calls per layer at T=16/32). H100 ab_flag, tuner off, 5 rounds:
+  d16 sl 195.1 -> 193.2 (pool+unp) / 192.9 (all), d16 full 294.8 -> 293.6 / 291.2, d32 sl 194.1 -> 192.5 / 194.9,
+  d32 full 413.5 -> 412.5 / 413.0. H100 is W-bound; the H200 (consumer-bound g19) should gain more.
+- Submission: print-only _diag24 (DIAG24: pool/unp m16 x2 cfgs + m32 x2, qkv m16 x2 + m32, o m16/m32; grids 132/108;
+  +~1 min compile) beside _diag19d for the 00:00Z check. bench.py test 39/39, esc PASS.
