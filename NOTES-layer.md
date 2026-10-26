@@ -1216,3 +1216,34 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Conclusion for the plan: at T=16/32 the three g19 calls (qkv at T=16, pooler, unpool) are ~65-75 us of ~200 us on H100
   at 1.6-2.2 TB/s; that, the experts (moe) and nds attention (15 us vs 5.6 us KV floor at d32) are where the time is.
   Layer glue is ~done; posted to proj under Requests.
+
+## s61 (2026-10-26 21:23Z-21:45Z, sandbox okc-night4, session 10): v97 = v96 + moe n8 BAL + proj s51 TAG2 (no judge runs: budget resets 00:00Z)
+- Integrated: moe n8 BAL (r-moe tools/n8/patch_layer_bal.py@de18925, run on muse_decode_layer/: tk2f per-segment
+  gemm13->gemm2 counters + rounding rows of the two phases on different CTAs; cfg + 1000000, SA pf 4 only, NU8 pf 5 needs
+  MOE_BAL_NU8 = not built) and proj s51 TAG2 (r-proj dev/s51/tag2_layer.patch, git apply -p1 clean: g19 consumers read
+  ks/st/tr from a producer-written smem int; split-K red.add order noise only).
+- BAL timing, H100 ab_flag 4 rounds ABBA, SEEDS 7,11,13,99, TUNE = {} (variants/s61_nt.py), us off/on/on/off:
+  d16 sl s7 166.9/162.4/162.2/166.4, s11 160.1/157.6/157.9/160.2, s13 166.2/162.5/163.0/166.0, s99 195.5/195.6/195.8/195.4
+  (mean -2.6); d16 full s7 279.6/276.1/276.4/279.8, s11 303.7/304.3/304.1/303.5, s13 274.0/274.2/283.2/274.3,
+  s99 294.7/296.7/297.1/294.7 (mixed); d32 sl s99 194.4/198.2/198.1/194.3 (+3.8), other seeds 0..+0.7; d32 full 0..+3;
+  d1 tie (BAL not used at T=1). Same picture as moe (d16 win, d32 loss).
+- Defaults: TUNE_BASE (16, True) += bal True; TUNE[16] += {bal: True}, {bal: False}; TUNE[32] += {bal: True},
+  {bal: True, lt:o}. H100 tuner (synthetic routing): T=16 sl keeps default (bal 223.2 / no-bal 224.3 us), T=16 full picks
+  {bal: True} (309.5 vs 310.9), T=32 picks tk2h 4 (bal 226.1, loses).
+- Tests: bench test 13/13 (tuner on); BAL forced: scored_test decode x2 0 bad, replay d16/d32 x seeds 11,23 0/80;
+  main: replay_test all 12 shapes x seeds 11,23 0/12 each, scored_test all 0 bad; tools/tk2f_bal_stress.py (BAL at
+  T=16/32 vs 3-launch path) 0/800 bitwise.
+- DEAD / bounded this session (H100):
+  * nds (instead of csl) at decode 16 sliding (CSL_MAX_BATCH 8, NDS_MIN_BATCH 16), S 8 / 16: +4.6 / +4.0 us (ab_flag 5
+    rounds: 195.3 -> 199.9 / 199.4). Full unaffected. (S 12 fails: _combine_hb needs a power-of-2 S.)
+  * pooler W L2 prefetch during sliding attention at T=16/32: g19 pooler is consumer-bound, a warm L2 does not speed it
+    (/tmp/s61/pool_warm.py: T=32 cold 27.0 us, each further back-to-back call 26.0; T=16 25.6/25.0).
+  * qkv at T=32/16 (QSS cuBLAS bmm 16.2/15.8 us cold) vs the best raw Triton read of the same 37.7 MB cold in a graph
+    (15.7 us, 264 programs; /tmp/s61/rd_bw.py): at the H100 cold-stream floor. Nothing layer-side there.
+  * T=1 pr1 SMEM-preload during csl/o (s45 idea) re-bounded: pr1 is 1024 thr x 64 regs (a full SM register file), so it
+    cannot co-reside with o; pr1 already preloads ~6 MB pre-wait during the boundary, and the csl window is not free
+    (G10_PFL2 +1.8 us). Realistic upper bound ~-3 us d1 for a multi-session rewrite (o+bnd+pr1 megakernel w/ grid
+    barrier): not started.
+- H100 timelines (main v96, tuner on): d1 sl 85.3 us = qkv g13 12.8 | csl 4.9 | o g13 -> 22.1 | bnd -> 25.2 | pr1 -> 44.1
+  (58 MB at ~3.1 TB/s) | rmsnorm | tk2f 44.6-78.9 | n2u -> 83.4 | bnd -> 85.3. v1 sl 148.0 = g14 15.2 | vtk 6.6 | g12 o -> 29.0 |
+  bnd -> 32.4 | pr8 -> 54.1 | tk2f 54.5-140.7 | nu8 -> 145.2 | bnd -> 148.0.

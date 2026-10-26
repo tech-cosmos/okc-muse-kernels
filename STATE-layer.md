@@ -1,19 +1,18 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 22:10Z (s59): **main = v96 = v95 + NU8D at T=8** (nu8 red.adds per-slot partials, no exchange; the
-T=8 boundary applies the per-slot post-expert norm scales; H100 v1 -0.6..0.9 sl / -0.4..0.6 full; TUNE[8] {nu8d: False}).
-NOT judge-checked. s60 (21:15Z): measurements only, no code change (NOTES s60: pooler-phase micro, pr3 T=32 dead again,
-nu8 variants on real v1: D < X; plain nu8 -0.9 sl / +0.2 full vs D, left to the H200 tuner). FIRST CHECK AFTER 00:00Z = main v96: read 'layer tune T=8' nu8d lines and 'T=16/32' tk2h lines. NOTES s59.
+Updated 2026-10-26 21:45Z (s61): **main = v97 = v96 + moe n8 BAL (tk2f balanced phases; TUNE_BASE d16 sliding on, TUNE bal at
+T=16/32) + proj s51 TAG2 (g19)**. H100 real routings: BAL d16 sl -2.6 us mean (4 seeds), d32 loses (tuner decides). NOT judge-checked.
+v96 = v95 + NU8D at T=8. FIRST CHECK AFTER 00:00Z = main v97: read 'layer tune T=8' nu8d, 'T=16/32' bal + tk2h lines. NOTES s59-s61.
 Board 21:00Z: #52 at 1.995x (#1 2.380x). Per-load ratios: d1 2.43, d16 1.88, d32 1.68, v1 2.19, v16 1.93, v32 2.00.
 
 Mains since v89 (all NOT judge-checked, H100-validated; NOTES s52-s59): v90 NORM_EARLY (T>=128) | v91 __ldcg moe_norm/norm2 |
 v92 pr1 __ldcg | v93 BND_SEP (T=8, v1 -1.0) | v94 G19_TRIG (T=16/32 boundaries PDL after g19, d16/d32 -1..2.8; TUNE g19trig) |
-v95 moe tk2h GS16+PF4 at T=16/32 (TUNE tk2h 3/4; G88 proxy d32 sl -9 proxy-us; H100 tuner picks tk2h 4 at T=32) | v96 NU8D.
+v95 moe tk2h GS16+PF4 at T=16/32 (TUNE tk2h 3/4; G88 proxy d32 sl -9 proxy-us; H100 tuner picks tk2h 4 at T=32) | v96 NU8D | v97 BAL + TAG2.
 The 00:00Z check reads the H200 tuner lines for all of these ('layer tune T=8/16/32/256'). Persistent T<=8 tail: bounded
 <= 1-2 us on paper (s57), not built.
 
 ## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
-1. `okc check muse_decode_layer/submission.py --json` on main (v96). Compare per shape vs 703d3a7e (d1 69.6/77.8,
+1. `okc check muse_decode_layer/submission.py --json` on main (v97). Compare per shape vs 703d3a7e (d1 69.6/77.8,
    d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5; tools/ckparse.py). Expected:
    v32 -8..14 us (moe_hot, RG), v1 -2..4 (pr8 npf 212, BND_SEP, NU8D), d16/d32 -1..5 (G19_TRIG, tk2h), d1 -1..2. Submit if > 1.9954x.
 2. Copy the profile's 'layer tune' lines into NOTES (every T: which TUNE option the H200 picked, and by how much).
@@ -110,6 +109,8 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
    program); qkv/o g19 at T=32; csl overlapped with g13; T=8 norm3+unpool cluster fusion.
 
 ## Dead ends (details in NOTES)
+- s61: nds at d16 sliding (+4..4.6 us); pooler W L2 prefetch at T=16/32 (g19 consumer-bound, warm L2 no faster); qkv T=16/32 at
+  H100 cold-stream floor; T=1 pr1 SMEM preload bounded ~-3 us (needs o+bnd+pr1 megakernel; not started).
 - s60: pr3 router at T=32 beside g19 pooler (+1.5..2.7 us in layer); pooler grid 108/120/132 all equal standalone (g19-bound).
 - s17: PR1 npf (pooler chunks L2-prefetched before the wait) 0/2/4: H100 d1 tie (91.5-91.6 us, 10 rounds); no H200 case.
 - s15: n2u8 (T=8 norm3+unpool on clusters), bndc (cluster boundary), CUDA 1-CTA boundary, BND_ROWS, UPF3 (unpool
