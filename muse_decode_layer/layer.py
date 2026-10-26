@@ -145,14 +145,18 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
               NB: tl.constexpr, N: tl.constexpr, BGAIN: tl.constexpr, H32: tl.constexpr,
               EPS_POST: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr, pf_ptr=None, PF: tl.constexpr = 0,
               PF_NT: tl.constexpr = 512, RB: tl.constexpr = False, TRIG: tl.constexpr = False,
-              NS: tl.constexpr = 1, SS: tl.constexpr = 0, SPL: tl.constexpr = 1, SEP: tl.constexpr = False):
+              NS: tl.constexpr = 1, SS: tl.constexpr = 0, SPL: tl.constexpr = 1, SEP: tl.constexpr = False,
+              sc_ptr=None, ids_ptr=None, tw_ptr=None, SC: tl.constexpr = False, SC_LOCAL: tl.constexpr = 0,
+              SC_K: tl.constexpr = 4096, SC_EPS: tl.constexpr = 0.0):
     """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
     s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32).
     RB: the branch is FP32 (gemv19 output), rounded to BF16 first.
     PF > 0: the last PF programs instead L2-prefetch PF x PF_NT x 1 KB from pf_ptr (the router weight) and exit.
     TRIG: let the PDL dependent (the gemv19 pooler, which streams W before its griddepcontrol.wait) launch now.
     NS > 1 (RB): the branch is the sum of NS FP32 split-K slabs SS elements apart (nu8).
-    SPL > 1 (s33 BND_SPLIT): SPL programs per row, each computes the row's norms redundantly and stores its N / SPL slice."""
+    SPL > 1 (s33 BND_SPLIT): SPL programs per row, each computes the row's norms redundantly and stores its N / SPL slice.
+    SC (s59 NU8D, with SEP): the branch is sum over the row's 8 route slots j (local: 0 <= ids < SC_LOCAL) of
+    tw_j rsqrt(sc[j] / SC_K + SC_EPS) br[j] (br = nu8 D's per-slot unpool rows [T * 8][NB], sc its sums of squares)."""
     if TRIG:
         gdc_launch_dependents()
     if PF > 0:
@@ -181,10 +185,20 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
         s_b = tl.load(s_ptr + row * N + jb)
         if BGAIN:
             bgain_b = tl.load(bgain_ptr + jb)
+        if SC:  # the routing (pr8's, complete long before nu8 ran) before the wait; [8, NB] tiles of per-slot values
+            sl8 = row * 8 + tl.arange(0, 8)[:, None] + jb[None, :] * 0
+            e8 = tl.load(ids_ptr + sl8)
+            loc8 = (e8 >= 0) & (e8 < SC_LOCAL)
+            tw8 = tl.load(tw_ptr + sl8)
         if PDL:
             gdc_wait()
         ks = tl.arange(0, NS)
-        bb = tl.sum(tl.load(br_ptr + ks[:, None] * SS + row * NB + jb[None, :]), 0) if NS > 1 else tl.load(br_ptr + row * NB + jb)
+        if SC:  # [8 slots, NB] tiles (masked to the local slots); per-slot scalars as broadcast tiles (no layout change)
+            ssq = tl.load(sc_ptr + sl8, mask=loc8, other=1.0)
+            sf = tl.where(loc8, tw8 * tl.rsqrt(ssq / SC_K + SC_EPS), 0.0)
+            bb = tl.sum(tl.load(br_ptr + sl8 * NB + jb[None, :], mask=loc8, other=0.0) * sf, 0)
+        else:
+            bb = tl.sum(tl.load(br_ptr + ks[:, None] * SS + row * NB + jb[None, :]), 0) if NS > 1 else tl.load(br_ptr + row * NB + jb)
         if RB:
             bb = bb.to(tl.bfloat16)
         bb = bb.to(tl.float32)
@@ -225,7 +239,8 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
 @triton.jit
 def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr,
                   TRIG: tl.constexpr, XS: tl.constexpr = 0, ROUND: tl.constexpr = False, NS: tl.constexpr = 1,
-                  SS: tl.constexpr = 0, z_ptr=None, ZN: tl.constexpr = 0, TRIG2: tl.constexpr = False):
+                  SS: tl.constexpr = 0, z_ptr=None, ZN: tl.constexpr = 0, TRIG2: tl.constexpr = False,
+                  zl_ptr=None, ids_ptr=None, ZL: tl.constexpr = 0, ZW: tl.constexpr = 1024):
     """One row: rmsnorm(x) (1 + w), BF16 in and out. ZN > 0: program 0 also zeroes z_ptr[:ZN] after its wait (nu8's
     sums of squares, accumulated by the following moe_tk2f). TRIG: let the dependent (moe_tk2 gemm13) launch now.
     XS: x row stride (0: N). ROUND: x is FP32, rounded to BF16 first (the pooler's output dtype).
@@ -242,6 +257,12 @@ def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, 
     if ZN > 0:
         if tl.program_id(0) == 0:
             tl.store(z_ptr + tl.arange(0, ZN), tl.zeros((ZN,), tl.float32))
+    if ZL > 0:  # s59 NU8D: zero this token's local slots' rows of nu8 D's red.add output (ids: the routing, complete)
+        sl8 = row * 8 + tl.arange(0, 8)
+        e8 = tl.load(ids_ptr + sl8)
+        loc8 = (e8 >= 0) & (e8 < ZL)
+        tl.store(zl_ptr + sl8[:, None] * ZW + tl.arange(0, ZW)[None, :], tl.zeros((8, ZW), tl.float32), mask=loc8[:, None])
+        tl.store(z_ptr + sl8, tl.zeros((8,), tl.float32), mask=loc8)  # and their sums of squares
     x = tl.load(x_ptr + row * (XS if XS else N) + cols)
     for i in tl.static_range(1, NS):
         x += tl.load(x_ptr + i * SS + row * (XS if XS else N) + cols)
@@ -1791,13 +1812,18 @@ namespace nu8 {
 // sums of squares of the local slots to y32 row 64 (zeroed with the counter at row 64 col 128 by the pre-expert
 // _rmsnorm_gain), then bump the counter; every block waits for 8 (blocks 0..7 are dispatched first and wait only on
 // each other: no deadlock while 8 SMs are free).
-template <int KB, bool X = false>
+// D (s59 NU8D): no exchange and no norm in nu8: per local slot i the block's k chunk of BF16(y_i w1) is the mma B
+// operand (slots as N), its FP32 partials red.add into out[slot][1024] (local slots' rows zeroed by the pre-expert rmsnorm), blocks of row
+// group 0 red.add their chunk's per-slot sums of squares to Y row 64 [slot]; the T=8 boundary (SC) forms
+// sum_i f_i rsqrt(ss_i / K + eps) P_i over the token's local slots (masked loads) and rounds it to BF16.
+template <int KB, bool X = false, bool D = false>
 __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const int* __restrict__ ids,
                                            const float* __restrict__ tw, const float* __restrict__ w1, int start,
                                            int count, float eps, const __nv_bfloat16* __restrict__ w,
                                            float* __restrict__ out, int* zc) {
     static_assert(KB == 512, "thread = k");
     constexpr int K = 4096, RB = 64, CPR = KB / 8, NKC = K / KB, LD = KB + 8;  // LD: padded smem row (bf16)
+    constexpr int YS = D ? KB + 8 : KB;  // ys row stride (floats; D: padded for the B fragment loads)
     extern __shared__ __align__(16) unsigned char nu8_smem[];
     __nv_bfloat16* sw = reinterpret_cast<__nv_bfloat16*>(nu8_smem);              // [RB][LD]
     __nv_bfloat16* sh = sw + RB * LD;                                            // [8][LD]
@@ -1837,7 +1863,7 @@ __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const in
     constexpr int CPS = KB / 4;  // 16-byte chunks per slot chunk
     for (int c = tid; c < nl * CPS; c += 512) {
         const int i = c / CPS, q = c % CPS;
-        const unsigned sa = (unsigned)__cvta_generic_to_shared(ys + i * KB + q * 4);
+        const unsigned sa = (unsigned)__cvta_generic_to_shared(ys + i * YS + q * 4);
         asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa), "l"(Y + (size_t)s_list[i] * K + k0 + q * 4) : "memory");
     }
     asm volatile("cp.async.commit_group;" ::: "memory");
@@ -1845,6 +1871,72 @@ __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const in
     int tb[9];
 #pragma unroll
     for (int t = 0; t <= 8; ++t) tb[t] = s_tb[t];
+    if constexpr (D) {
+        __shared__ float s_q[16][64];
+        asm volatile("cp.async.wait_all;" ::: "memory");
+        __syncthreads();
+        for (int i = 0; i < nl; ++i) ys[i * YS + tid] *= wv;  // y w1 (FP32, as moe_norm3)
+        if (rg == 0) {
+            for (int i = 0; i < nl; ++i) {
+                float q = ys[i * YS + tid];
+                q *= q;
+#pragma unroll
+                for (int o = 16; o; o >>= 1) q += __shfl_xor_sync(0xffffffffu, q, o);
+                if (lane == 0) s_q[warp][i] = q;
+            }
+        }
+        __syncthreads();
+        if (rg == 0 && tid < nl) {
+            float q = 0.f;
+#pragma unroll
+            for (int ww = 0; ww < 16; ++ww) q += s_q[ww][tid];
+            atomicAdd(const_cast<float*>(Y) + 64 * K + s_list[tid], q);  // zeroed by the rmsnorm
+        }
+        const int mt = warp & 3, kq = warp >> 2, g = lane >> 2, tq = lane & 3, nt = (nl + 7) >> 3;
+        float c[8][4];
+#pragma unroll
+        for (int n = 0; n < 8; ++n) c[n][0] = c[n][1] = c[n][2] = c[n][3] = 0.f;
+        const __nv_bfloat16* wa = sw + (mt * 16 + g) * LD + kq * (KB / 4) + 2 * tq;
+        const float* yb = ys + g * YS + kq * (KB / 4) + 2 * tq;
+#pragma unroll
+        for (int ks = 0; ks < KB / 64; ++ks) {
+            const int o = ks * 16;
+            const unsigned a0 = *reinterpret_cast<const unsigned*>(wa + o), a1 = *reinterpret_cast<const unsigned*>(wa + 8 * LD + o);
+            const unsigned a2 = *reinterpret_cast<const unsigned*>(wa + o + 8), a3 = *reinterpret_cast<const unsigned*>(wa + 8 * LD + o + 8);
+#pragma unroll
+            for (int n = 0; n < 8; ++n) {
+                if (n < nt) {
+                    const bool ok = n * 8 + g < nl;
+                    const float2 p0 = *reinterpret_cast<const float2*>(yb + n * 8 * YS + o);
+                    const float2 p1 = *reinterpret_cast<const float2*>(yb + n * 8 * YS + o + 8);
+                    __nv_bfloat162 q0 = __floats2bfloat162_rn(p0.x, p0.y), q1 = __floats2bfloat162_rn(p1.x, p1.y);
+                    const unsigned b0 = ok ? *reinterpret_cast<unsigned*>(&q0) : 0u, b1 = ok ? *reinterpret_cast<unsigned*>(&q1) : 0u;
+                    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                                 : "+f"(c[n][0]), "+f"(c[n][1]), "+f"(c[n][2]), "+f"(c[n][3])
+                                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+                }
+            }
+        }
+        __syncthreads();  // ys consumed: reuse as red [4 quarters][64 slots][64 rows]
+        float* red = ys;
+#pragma unroll
+        for (int n = 0; n < 8; ++n) {
+            if (n < nt) {
+                const int r = mt * 16 + g, col = n * 8 + 2 * tq;
+                red[(kq * 64 + col) * 64 + r] = c[n][0];
+                red[(kq * 64 + col + 1) * 64 + r] = c[n][1];
+                red[(kq * 64 + col) * 64 + r + 8] = c[n][2];
+                red[(kq * 64 + col + 1) * 64 + r + 8] = c[n][3];
+            }
+        }
+        __syncthreads();
+        for (int idx = tid; idx < nl * 64; idx += 512) {
+            const int i = idx >> 6, r = idx & 63;
+            const float v = red[i * 64 + r] + red[(64 + i) * 64 + r] + red[(128 + i) * 64 + r] + red[(192 + i) * 64 + r];
+            atomicAdd(out + (size_t)s_list[i] * 1024 + r0 + r, v);  // red.add over the 8 k chunks (zeroed by the rmsnorm)
+        }
+        return;
+    }
     if constexpr (X) {
         __shared__ float s_q[16][64];
         int* ctr = reinterpret_cast<int*>(const_cast<float*>(Y) + 64 * K + 128);
@@ -1917,10 +2009,10 @@ __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const in
 void nu8_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1, int64_t start, int64_t count,
                 double eps, torch::Tensor w, torch::Tensor out, torch::Tensor zc, int64_t kb, int64_t pdl) {
     TORCH_CHECK(y32.size(0) >= 65 && ids.numel() == 64 && w.size(0) >= 1024 && w.size(1) == 4096 &&
-                out.numel() == (4096 / (kb % 1000)) * 8 * 1024, "nu8: shape");
-    const int kb_ = (int)(kb % 1000);  // + 1000: X
+                out.numel() == (kb >= 2000 ? 64 : (4096 / (kb % 1000)) * 8) * 1024, "nu8: shape");
+    const int kb_ = (int)(kb % 1000);  // + 1000: X, + 2000: D
     cudaLaunchConfig_t lc = {}; lc.gridDim = (1024 / 64) * (4096 / kb_); lc.blockDim = 512;
-    lc.dynamicSmemBytes = 72 * (kb_ + 8) * 2 + 64 * kb_ * 4;
+    lc.dynamicSmemBytes = 72 * (kb_ + 8) * 2 + 64 * (kb_ + (kb >= 2000 ? 8 : 0)) * 4;
     lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
     la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0;
@@ -1931,10 +2023,12 @@ void nu8_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw, torch::T
     if (!init) {
         cudaFuncSetAttribute(nu8::nu8<512>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 512 * 4);
         cudaFuncSetAttribute(nu8::nu8<512, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 512 * 4);
+        cudaFuncSetAttribute(nu8::nu8<512, false, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 520 * 4);
         init = true;
     }
     if (kb == 512) cudaLaunchKernelEx(&lc, nu8::nu8<512>, NU8_ARGS);
     else if (kb == 1512) cudaLaunchKernelEx(&lc, nu8::nu8<512, true>, NU8_ARGS);
+    else if (kb == 2512) cudaLaunchKernelEx(&lc, nu8::nu8<512, false, true>, NU8_ARGS);
     else TORCH_CHECK(false, "nu8: kb");
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -2167,7 +2261,7 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); rg (bool) RG (s52); tk2h (int) moe n6 tk2h GS16+PF4 at T=16/32, 2-group weight W + 1 (s58); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); rg (bool) RG (s52); tk2h (int) moe n6 tk2h GS16+PF4 at T=16/32, 2-group weight W + 1 (s58); nu8d (bool) NU8_D (s59); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
@@ -2183,7 +2277,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
              {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
-            {"nu8": False}, {"nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
+            {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
             {"pr1": False, "g19:pooler": True}, {"pr1": False, "g19:pooler": True, "g19:qkv_gate": True}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
@@ -2486,6 +2580,14 @@ def _nu8_x(state, tokens):
     return _opt(state, tokens, "nu8x", NU8_X)
 
 
+NU8_D = True  # s59 NU8D: per-slot partials, the post-expert norm scales applied in the boundary (no exchange). TUNE "nu8d"
+# H100 ab_flag 6 rounds ABBA x 3 seeds (tuner off) vs X: v1 sliding -0.6..0.9, full -0.4..0.6 us (nu8 -0.7, boundary +0.6)
+
+
+def _nu8_d(state, tokens):
+    return _opt(state, tokens, "nu8d", NU8_D)
+
+
 def _experts_nu8(x, topk_weights, local_ids, state, y32):
     """T = 8: moe_tk2f (PF 20) -> nu8: the unpool slice as FP32 split-K slabs [D_EXPERT / NU8_KB, 8, 1024]. y32 [65, 4096]:
     row 64 (the slots' sums of squares) was zeroed by the pre-expert _rmsnorm_gain."""
@@ -2498,15 +2600,16 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
     inv = torch.empty(8 * TOP_K, dtype=torch.int32, device=dev)
     ids = local_ids.contiguous()
     tw = topk_weights.float().contiguous()
-    lib.moe_set_ss(st["w1"].data_ptr())
+    d = y32.shape[0] == 81  # NU8D (kernel_fn allocated the per-slot rows)
+    lib.moe_set_ss(0 if d else st["w1"].data_ptr())
     lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"],
-                        _moe__tk2f_cfg(8, st) + (0 if _nu8_x(state, 8) else 1000))
+                        _moe__tk2f_cfg(8, st) + (0 if d or _nu8_x(state, 8) else 1000))
     lib.moe_set_ss(0)
-    f = torch.empty((D_EXPERT // NU8_KB, 8, UNPOOL_SLICE), dtype=torch.float32, device=dev)
+    f = y32[65:81].view(8 * TOP_K, UNPOOL_SLICE) if d else torch.empty((D_EXPERT // NU8_KB, 8, UNPOOL_SLICE), dtype=torch.float32, device=dev)
     _G10["lib"].nu8_launch(y32, ids, tw, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, state["unpool_slice"], f, st["cnt"],
-                           NU8_KB + 1000 * _nu8_x(state, 8), 1)
-    return f
+                           NU8_KB + (2000 if d else 1000 * _nu8_x(state, 8)), 1)
+    return f, ((y32[64], ids, tw) if d else None)
 
 
 _moe_TWM_ORDER_M = {}  # s15: moe's H200 proxy (s16): order 76 at T=256 (r-moe 499bde6 default) loses ~3.6 us at v32
@@ -2517,7 +2620,7 @@ G19_TRIG_O_TOKENS = (16, 32)  # s57: the same for the g19 o GEMM (T=16 sliding p
 BND_SEP_TOKENS = (8,)  # s57 SEP: the T=8 second boundary loads nu8's 8 slabs as an [8, 1024] tile (H100 ab_flag v1 -1.0/-1.1 us; T=1 tie)
 
 
-def _tail(moe, stream1, h, tokens, state, pdl, f=None):
+def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
     """unpool -> second boundary: (next attention input, stream)."""
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
     if f is None:
@@ -2533,8 +2636,10 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None):
     _boundary[(tokens * spl,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
                          NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
                          EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, RB=f.dtype == torch.float32, num_warps=16,
-                         launch_pdl=pdl, NS=f.shape[0] if f.dim() == 3 else 1, SS=tokens * UNPOOL_SLICE, SPL=spl,
-                         SEP=sliced and tokens in BND_SEP_TOKENS)
+                         launch_pdl=pdl, NS=f.shape[0] if f.dim() == 3 else 1, SS=f.shape[1] * UNPOOL_SLICE if f.dim() == 3 else 0,
+                         SPL=spl, SEP=sliced and tokens in BND_SEP_TOKENS or sc is not None,
+                         **({} if sc is None else dict(sc_ptr=sc[0], ids_ptr=sc[1], tw_ptr=sc[2], SC=True,
+                                                     SC_LOCAL=LOCAL_EXPERTS, SC_K=D_EXPERT, SC_EPS=POST_NORM_EPS)))
     return hidden, stream2
 
 
@@ -2727,7 +2832,8 @@ def kernel_fn(data, state):
     if tk2fj:  # s27: join the side stream (routing) first: the rmsnorm loses its PDL, moe_tk2f becomes its PDL secondary
         main_stream.wait_stream(side_stream)
     rpdl = pdl and not tk2_pdl and not tk2fj
-    y32 = torch.empty((65, D_EXPERT), dtype=torch.float32, device=dev) if nu8 else None
+    nu8d = nu8 and _nu8_d(state, tokens) and local_ids.is_contiguous()
+    y32 = torch.empty((81 if nu8d else 65, D_EXPERT), dtype=torch.float32, device=dev) if nu8 else None
     gnorm = (not pr1 and not nu8 and tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and pooled.dim() == 2
              and pooled.is_contiguous() and _opt(state, tokens, "gnorm", GNORM_DEFAULT))
     if gnorm:
@@ -2735,7 +2841,8 @@ def kernel_fn(data, state):
     else:
       _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=rpdl,
                              TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
-                             launch_pdl=rpdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 else 0, TRIG2=tk2fx or tk2fj)
+                             launch_pdl=rpdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 and not nu8d else 0, TRIG2=tk2fx or tk2fj,
+                             zl_ptr=y32[65] if nu8d else None, ids_ptr=local_ids if nu8d else None, ZL=LOCAL_EXPERTS if nu8d else 0)
     if tk2fx or tk2fj:
         state["moe"]["lib"].moe_set_tk2fpdl(1)  # the next moe_tk2f launch (one-shot) is this rmsnorm's PDL secondary
     if not pr1:
@@ -2757,8 +2864,8 @@ def kernel_fn(data, state):
         f = _experts_n2u(p, topk_weights, local_ids, state)
         return _tail(None, stream1, h, tokens, state, pdl, f=f) + (topk_ids,)
     if nu8:
-        f = _experts_nu8(p, topk_weights, local_ids, state, y32)
-        return _tail(None, stream1, h, tokens, state, pdl, f=f) + (topk_ids,)
+        f, sc = _experts_nu8(p, topk_weights, local_ids, state, y32)
+        return _tail(None, stream1, h, tokens, state, pdl, f=f, sc=sc) + (topk_ids,)
     if _use_moe(tokens):
         moe = _experts_moe(p, topk_weights, local_ids, state, bucket, gnorm)  # all-reduce: identity
     else:
