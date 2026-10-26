@@ -264,3 +264,5 @@
   slabs worse; T=128/256 noise (not used).
 - DEAD: moe_norm2 as PDL secondary of tk2f (moe_set_pdl(6)): H100 d16/d32/v1 sliding +1.1..1.4 us. bmm split-K for o /
   unpool at T=16/32 standalone: unpool 25.4 -> 26.0 (S2), o 8.8 -> 9.5: cuBLAS non-split is better there.
+- check 0092b908 (v29, 9199ea7) **1.9492x, 11,605 us**: d1 73.2/85.0, d16 153.2/225.5, d32 180.8/337.7, v1 119.8/138.7,
+  v16 273.0/359.5, v32 369.1/543.2 (part of the gain over d3c8c88d is SGLang's reference moving +2-3%). Submitted.
