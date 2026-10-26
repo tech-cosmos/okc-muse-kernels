@@ -71,6 +71,11 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 4 (19:49-20:25Z, no judge runs) -- paper only
+- Dead on paper (NOTES n4s4): lossless 5/6-bit block-scale packing (exp 11..15 = 5 octaves; 6-bit costs +4% consumer
+  instr for -2.5% bytes) and an e4m3-cvt dequant (>= today's 12 instr / 8 weights). E2M1 codes uniform: incompressible.
+- Plan unchanged: FIRST CHECK AT 00:00Z = the DIAG run in the n4s3 section below.
+
 ## Night4 session 3 (19:31-20:05Z, no judge runs) -- r-moe 1f3b71b
 - TK2F_L2H_RT (python, None = #define 4): run-time tk2f L2 hint mode via cfg + 1000000 * (mode + 1) (PF | 64 copies of
   cfg 204 / 84204 SA; default kernels' SASS identical to HEAD). H100 mode 4 vs 0: d16 -5.1, d32 -4.3, v1 -1.6, d1 -0.6..1.2.

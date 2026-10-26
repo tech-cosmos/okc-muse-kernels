@@ -906,3 +906,20 @@
   H200" for d1/d16/d32/v1. Local DIAG dry run OK. If l2h0 wins on the H200: tell layer to set its #define TK2F_L2H 0.
 - Looked at and left (paper, all covered by earlier notes): tk2f is at ~4.06 TB/s per marginal expert on the H200 and its
   in-layer fixed cost is mostly hidden by TK2FX/TK2FJ; twm is dq-bound (s18/s22) with the drain the only lever (s19/s20).
+
+## Night4 session 4 (2026-10-26 19:49Z - ~20:25Z, no judge runs: moe checks 20/20 until 00:00Z) -- paper only, two dead ends
+- Judge weights (nvfp4.random_weights): E2M1 codes uniform over 16 patterns -> 4.0 bits, incompressible. Block scales
+  (e4m3) all positive, exponent field 11..15 (2^4..2^8): counts over all 256 experts w13 103 / 2.4M / 242M / 288M / 4.6M
+  (w2 alike). Scales are 1/9 of the expert byte stream.
+- DEAD (paper) lossless scale compression: 5 bits (2-bit exp + 3-bit mantissa) does not fit (exp 11 appears in ~1/3 of
+  the experts' w13; escapes would need a pre-SiLU fixup inside tk2f). 6 bits (3-bit exp offset): 4 fields do not pack
+  into a word with byte-free extraction; decode = SHF+LOP3+IMAD (3 instr) vs today's PRMT+IMAD (2) per scale, i.e.
+  ~+4% consumer instructions (104 per 64 weights today) for -2.2..2.8% bytes. Decode shapes are at ~85% HBM peak and
+  partly issue-bound: net ~0, and real checkpoints' wider scale ranges would hit the fallback. Not built.
+- DEAD (paper) e4m3-convert dequant (E2M1 nibble -> s00eem00 e4m3 byte = value * 2^-6, then cvt.rn.f16x2.e4m3x2):
+  {2,3,4,7} has no shifted copy disjoint from itself mod 8, so the second register costs SHF+SHF+LOP3; with 4 cvt (F2FP,
+  slower pipe) + 4 HMUL2 that is >= 12 instr per 8 weights (= today), needs FP16 x (BF16 -> FP16 not lossless below
+  2^-14): no. FP8 wgmma: needs FP8 x (rule) and k32 > the 16-wide scale block: no.
+- Budget view (layer score weights per us: d1 .16, v1 .10, d16 .07, d32 .05, v16 .04, v32 .03 %): tk2f d1/v1 are at
+  the HBM rate (4.06 TB/s per marginal expert vs a ~3.6-4.3 TB/s bare stream), big-M is dq-issue + last-wave bound
+  (s17-s20). No H100-testable moe item with size left; the 00:00Z DIAG check (STATE n4s3) is the next real step.
