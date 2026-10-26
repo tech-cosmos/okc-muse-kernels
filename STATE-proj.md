@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~07:20 UTC (session 13).
+Updated 2026-10-26 ~08:30 UTC (session 14).
 
 ## Board
 - **Best: submit 71145e34fe424844 = a1f0af7, 1.307x (3,695.6 us), proj rank 196** (router3 at router m9-128; its check
@@ -110,7 +110,13 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   same thread's pending atomics/stores.
 - pr1.cu: x32/x after the wait now __ldcg (robust vs ptxas hoisting; the layer's built SASS was already safe).
 
+## Session 14: gemv19 run end = the escape fixup loop (~1.06 us per run end, serialized shfl/branch chain) -> ballot
+## version (bit-identical; H100 -0.5..0.8 us per g19 call). Handoff posted, patch dev/g19_ballot_layer.patch (NOTES s14).
+- g19 at m32 is NOT smem-bound (RPW2 no gain); per stage decode ~0.4 + mma/ldsm ~0.4 + base ~0.5 us (H100 consumer-only).
+
 ## Next (ranked)
+-2. (s14) g19: fixups in the finisher warp (consumer run end 0.7 -> 0.1 us; NOTES s14 Next (a)), then npre cap so x
+   is not queued behind the W prologue, then x hot-spot (multicast). Each run end saved ~= 0.6 us per g19 call x ~2.
 -1. (s13) The ramps (lead item 5) left: qkv g13 at d1 (H200 ~10.8 us for 28 MB) and pr1. Ideas not tried: g13 with
    fewer, fatter loads per thread (U=4: 2 rows per chunk) to raise bytes in flight without more threads; a cp.async
    (LDGSTS) ring inside g13's structure (bytes in flight in smem, consumers = the same threads; no producer warp).

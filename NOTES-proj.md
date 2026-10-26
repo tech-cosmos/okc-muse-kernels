@@ -398,3 +398,27 @@
   the PR1_BND prologue's s/alpha/beta/gain inputs). Made pr1.cu robust anyway: x32 and x after the wait by __ldcg
   (dev/pr1.py OK). pr8: x32 by cp.async, ls by __ldg (input, not written by the primary): fine.
 - Checks 10-26: 13/20 (96165c87 1.3091x, diag only). Scored 4/10.
+
+## Session 14 (2026-10-26 07:08 - 08:30 UTC): gemv19 run-end cost = escape fixups; ballot fixup (handoff)
+- Lead item (5), T>=16 part. Tools: dev/g19.py PROF=1 (plain launches for ncu; ncu at /usr/local/cuda-13.0/bin/ncu:
+  hold /tmp/okc-gpu.lock around the ncu run, but then the script must not time (bench.time_graph re-takes the lock:
+  deadlock)), G19_TRACE now also stamps: consumer after griddepcontrol.wait (9), first x arrival (5), stage-0 compute
+  end (6), stage-1 end (8), first run end: start (11) / after fixups (12) / handed to finisher (14), finisher first
+  two buffers done (2, 3). Diag defines: G19_OLDFIX (old fixup loop), G19_NOFIX (skip fixups).
+- H100, pool m32 (1024,8,2,xb1), consumer-only (G19_NOW, NPRE=0): stage ~1.15-1.3 us each, but every run end (SPK = 4
+  stages) added ~1.06 us; NOMMA (no decode/mma) has the SAME 1.06 us run end, NOFIX 0.1 us => the escape fixup loop:
+  16 slots x (2 shfl -> compare -> divergent branch -> 8 LDS -> fma chain), fully serialized (SASS: BSSY/BSYNC per
+  slot, shfls not hoisted). Fix: 4 ballots (owner lanes test their own 2 slots per h), OR-fold over the 8 row lanes,
+  then a warp-uniform `continue` for empty slots. Same math/order: bit-identical. Run end 1.06 -> ~0.7 us.
+  Full kernel (MODE 2, PRED 3000, H100, 2 interleaved rounds): pool m16 21.3 -> 20.5, m32 23.7 -> 22.95, unp m32
+  23.6 -> 23.0, unp m16 22.1 -> 22.0. ESCW 12/12, tests 39/39. Patch for r-layer: dev/g19_ballot_layer.patch.
+- Not smem-bound: RG16 RPW2 (one x fragment feeds 2 row groups: half the ldmatrix traffic) gives the same per-stage
+  time (NOW 1.15 us). NOX (decode, no x/mma) 0.9 us/stage, NOMMA 0.5 us/stage: decode ~0.4 and mma+ldsm ~0.4 add up.
+  ncu (NOW): issue 0.31/scheduler, 2.5 warps/scheduler, top stalls = first-stage and x barrier waits.
+- Startup: with the pre-wait W prologue (npre 2 stages x 49 KB x 132 blocks = 13 MB), the x bulk loads issued after
+  griddepcontrol.wait queue behind it: x arrives at ~6 us (NPRE=0: ~2.6 us with a cold L2). In the layer this is
+  hidden only when the PDL predecessor runs longer than the prologue (~4 us on H100).
+- Next for g19: (a) fixups in the finisher warp (consumers write a compacted escape list per warp next to pbuf; the
+  finisher applies the same two fmas to pbuf before its red pass; x lifetime: finisher arrives on xempty too) ->
+  consumer run end ~0.1 us; (b) cap npre so x is not queued behind W when the predecessor is short; (c) x-arrival
+  2.6 us cold: 132 blocks hit the same 7 x chunks at once (L2 hot spot?): try TMA multicast over clusters of 2.
