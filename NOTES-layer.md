@@ -317,3 +317,18 @@
   tools/tk2f_stress.py 500 (now takes reps) 0/2000. Check 80eddcdc 1.9445x (tie with v33 6aaff5a2 1.9377 / scored
   1.9459). Submit 0b9801d2 1.9231x (noise-low): board best stays e5512e00 (v33, old race). Asked lead in COORD whether
   to withdraw e5512e00 (only rows with the fix would then be on the board at 1.927/1.923).
+- v35 (08f61b2): proj gemv19 (g19_src.cu, r-proj dev/gemv19.cu @6996d0c; one load_inline with the rest, -DG19_ONLY2)
+  for the pooler + full unpool at T=16/32 (FP32 out; _rmsnorm_gain ROUND / _boundary RB round to BF16 = SGLang's BF16
+  GEMM output). Pooler g19 on all 132 SMs starves the side-stream _router_split (1 g19 block/SM, ~180 KB smem): routing
+  ends late, H100 d16 +4 us; on 96 blocks -2. HANG lesson: the epoch barrier counter must be per grid size (old - old %
+  G + G): changing the grid on a shared counter deadlocked; _g19 now keeps one counter per grid. H100 d16 -6, d32 -3.5.
+  Check 5cf5247d 1.9238x: per-shape ratios show no H200 gain (d16 sliding 1.721 vs 1.709-1.745 history, d32 1.433).
+  proj's H200 diag (NOTES-proj s10): every m32 loses; m16 pooler wins with AP8 (1024,8,3,xb1) 15.7 vs 19.0.
+- v36 (4017c16): g19 only at T=16: pooler AP8 (16,1024,8,3,npre 3,xb1) on 108 blocks, first _boundary triggers its
+  dependents at start (BOUNDARY_TRIG) so the pooler streams W during it; unpool m16 (1024,4,4). H100 interleaved d16
+  219.3/324.2 (bmm) -> 213.2/316.5 (104 blocks), 112 214.9, 120 221.4 (router starved), 132 220.2. Without the unpool g19
+  full +4.7. Check ee80a8f8 **1.9566x** (best check; d16 1.747/1.912). Submit 543b6ca9 1.9395x (noise). Judge per-shape
+  speedups for identical code spread ~+-1.5% (SGLang's own times move 2-6%): single checks can't resolve <2% changes.
+- New tools: tools/ab_flag.py <file> <filter> <rounds> "<stmt>"... (interleaved A/B of module flags in one process/state),
+  tools/scored_test.py (check_implementation on scored shapes x seeds; the test list has no T=32), tools/replay_test.py
+  (route_judge-style graph replay on fresh inputs, full output check).
