@@ -272,9 +272,12 @@ def _router_fma(h_ptr, w_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr, BT:
 @triton.jit
 def _routing(part_ptr, bias_ptr, ls_ptr, ids_ptr, lids_ptr, wts_ptr, T, E: tl.constexpr, KS: tl.constexpr,
              TOPK: tl.constexpr, LOCAL: tl.constexpr, MULT: tl.constexpr, REPS: tl.constexpr,
-             SKS: tl.constexpr = 0, ST: tl.constexpr = 0):
+             SKS: tl.constexpr = 0, ST: tl.constexpr = 0, TRIG: tl.constexpr = False):
     """One token: scores = sigmoid(MULT logits); the top TOPK of scores + bias (lowest index on ties);
-    weights = picked scores / (their sum + REPS); local ids = (id - local_start) mod E, -1 off this GPU."""
+    weights = picked scores / (their sum + REPS); local ids = (id - local_start) mod E, -1 off this GPU.
+    TRIG (s39 ROUTE_PDL): let the PDL dependent (moe_route) launch now."""
+    if TRIG:
+        gdc_launch_dependents()
     t = tl.program_id(0)
     e = tl.arange(0, E)
     logit = tl.zeros((E,), dtype=tl.float32)
@@ -313,7 +316,7 @@ def _router_plan(tokens):
     return 64, 64, 64, 8, 4
 
 
-def _route(state, h, h32, local_start, tokens, router_pdl=False):
+def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     bt, be, bk, ks, warps = _router_plan(tokens)
     dev = h.device
     fp32 = tokens <= ROUTER_FP32_MAX_TOKENS
@@ -337,7 +340,7 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False):
     lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
     wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
     _routing[(tokens,)](part, state["router_bias"], local_start, ids, lids, wts, tokens, E=N_EXPERTS, KS=ks,
-                        TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, num_warps=2)
+                        TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2)
     return ids, lids, wts
 
 
@@ -427,6 +430,9 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 # (H200, us, SGLang incl. its torch post-norm at small T / theirs): bs1 77.3/42.5, bs8 143/106, bs16 196/159,
 # bs32 204/211, bs128 466/340, bs256 617/471.
 GNORM_DEFAULT = True  # s27 GNORM (H100 ab_files 4 rounds: v16 309.2/457.9 -> 309.3/455.1, v32 400.5/649.6 -> 398.4/647.6): T > 32 pre-expert rmsnorm fused into moe_gather (moe_gathern)
+ROUTING_WARPS_1_MIN_TOKENS = 33  # s39: _routing on 1 warp (shuffle-only reductions) above this T: bit-identical, H100 -0.4 us per call (2.84 vs 3.26 us
+# standalone); in the layer d16/d32 sliding lost 1.3/2.2 us with 1 warp (side stream, beside the g19 pooler): 2 warps there
+ROUTE_PDL = True  # s39: moe_route as a PDL secondary of _routing at T > 32 (see the moe_route patch)
 BKT_DEFAULT = True  # s27 (H100 ab_files 4 rounds: v32 404.2/652.6 -> 401.2/649.5, v16 tie; H200 router ends ~14 us before the pooler): T > 32: moe_route on the router's stream (before the join); moe_src kernel_fn takes data["bucket"]
 BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
 TK2_MAX_TOKENS = 32  # moe's TMA decode kernel (moe_tk2: route fused into gemm13, 3 launches) at T <= this
@@ -439,12 +445,13 @@ def _use_moe(tokens):
     return not HAVE_SGL or tokens not in MARLIN_TOKENS
 
 
-def _moe_bucket(state, local_ids):
-    """moe_src's route kernel: this GPU's routes bucketed by expert (meta, sorted route ids)."""
+def _moe_bucket(state, local_ids, pdl=False):
+    """moe_src's route kernel: this GPU's routes bucketed by expert (meta, sorted route ids). pdl (s39 ROUTE_PDL): as a
+    PDL secondary of the routing kernel just before it (which triggers at its start)."""
     dev = local_ids.device
     meta = torch.empty(100, dtype=torch.int32, device=dev)
     sroutes = torch.empty(local_ids.numel(), dtype=torch.int32, device=dev)
-    state["moe"]["lib"].moe_route_launch(local_ids, 0, LOCAL_EXPERTS, meta, sroutes)
+    (state["moe"]["lib"].moe_route_pdl_launch if pdl else state["moe"]["lib"].moe_route_launch)(local_ids, 0, LOCAL_EXPERTS, meta, sroutes)
     return meta, sroutes
 
 
@@ -1294,6 +1301,29 @@ int64_t moe_gathern_launch(torch::Tensor x, torch::Tensor gain, torch::Tensor me
 }
 """ + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_gathern_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double);"
+# s39 ROUTE_PDL: moe_route as a PDL secondary of the routing (which triggers at its start): its launch and smem setup
+# overlap the routing. It waits before reading ids, read with __ldcg (an __ldg/.nc load gets hoisted above the wait,
+# NOTES s14). Without the PDL attribute (moe_src's own paths) the wait is a no-op.
+_a = """  if (tid < 32) { cnt[tid] = 0; fill[tid] = 0; }
+  __syncthreads();
+  for (int i = tid; i < nroutes; i += blockDim.x) {
+    const int e = ids[i] - start;
+    if (e >= 0 && e < count) atomicAdd(&cnt[e], 1);"""
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("  __syncthreads();\n", '  __syncthreads();\n  asm volatile("griddepcontrol.wait;" ::: "memory");\n').replace("ids[i]", "__ldcg(ids + i)"))
+_a = """    if (e >= 0 && e < count) sroutes[base[e] + atomicAdd(&fill[e], 1)] = i;"""
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a.replace("    if", "    const int e = ids[i] - start;\n    if"),
+                                      _a.replace("    if", "    const int e = __ldcg(ids + i) - start;\n    if"))
+assert _moe_CUDA_SRC.count("__ldcg(ids + i) - start;") == 2 and "griddepcontrol.wait;\" ::: \"memory\");\n  for (int i = tid; i < nroutes; i += blockDim.x) {\n    const int e = __ldcg(" in _moe_CUDA_SRC
+_a = "int64_t moe_route_launch(torch::Tensor ids, int64_t start, int64_t count, torch::Tensor meta, torch::Tensor sroutes) {"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, """int64_t moe_route_pdl_launch(torch::Tensor ids, int64_t start, int64_t count, torch::Tensor meta, torch::Tensor sroutes) {
+  return launch_k(moe_route, 1, 1024, 0, at::cuda::getCurrentCUDAStream(), true, (const int*)ids.data_ptr(), (int)ids.numel(),
+                  (int)start, (int)count, (int*)meta.data_ptr(), (int*)sroutes.data_ptr());
+}
+""" + _a)
+_moe__CPP = _moe__CPP + "int64_t moe_route_pdl_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor);"
 
 
 def _moe__lib():  # = moe_src's _lib() + moe_set_upf
@@ -1305,7 +1335,7 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
-                                           "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch"],
+                                           "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch"],
                                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                                 extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
@@ -2373,12 +2403,14 @@ def kernel_fn(data, state):
         ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
         lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
         wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
-        _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
-                            E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
-                            SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, num_warps=2)
         # s37: T > 32: moe_route right after the routing, the pre-expert rmsnorm inside moe_gathern (strided FP32 rows)
         gnorm = (tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and _opt(state, tokens, "gnorm", GNORM_DEFAULT))
-        bucket = _moe_bucket(state, lids) if gnorm and _opt(state, tokens, "bkt", BKT_DEFAULT) else None
+        bkt = gnorm and _opt(state, tokens, "bkt", BKT_DEFAULT)
+        rpdl = bkt and _opt(state, tokens, "route_pdl", ROUTE_PDL)
+        _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
+                            E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
+                            SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, TRIG=rpdl, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2)
+        bucket = _moe_bucket(state, lids, rpdl) if bkt else None
         if gnorm:
             p = pr[:, :D_EXPERT]
         else:
@@ -2413,10 +2445,12 @@ def kernel_fn(data, state):
     else:
         side_stream.wait_stream(main_stream)
         with torch.cuda.stream(side_stream):
-            topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
+            bkt = _use_moe(tokens) and (TK2_MAX_TOKENS < tokens <= BUCKET_SIDE_MAX_TOKENS
+                                        or tokens > 32 and _moe_TW_CFG and _opt(state, tokens, "bkt", BKT_DEFAULT))
+            rpdl = bkt and _opt(state, tokens, "route_pdl", ROUTE_PDL)
+            topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens, trig=rpdl)
             # The experts' bucketing too, off the main stream's path.
-            bucket = (_moe_bucket(state, local_ids) if _use_moe(tokens) and (TK2_MAX_TOKENS < tokens <= BUCKET_SIDE_MAX_TOKENS
-                      or tokens > 32 and _moe_TW_CFG and _opt(state, tokens, "bkt", BKT_DEFAULT)) else None)
+            bucket = _moe_bucket(state, local_ids, rpdl) if bkt else None
     if pr1:
         pass
     elif tokens in POOLER_HI_PRIORITY:
