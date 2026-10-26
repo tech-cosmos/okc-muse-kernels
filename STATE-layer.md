@@ -1,6 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~12:16Z (session 28).
+Updated 2026-10-26 ~12:35Z (session 29).
+
+**s29: main = v68 (d196c9e)** = v67 + QF32_NDS (T=32 decode attention also takes FP32 qkv, bit-identical; default path
+unchanged since cuBLAS qkv is BF16; used if the tuner picks g19:qkv_gate@32, and ready for proj s20's FP32-out lt (wire
+as TUNE option when posted)). Tests 13/13. THE ~14:30Z LAST CHECK RUNS MAIN = v68.
 
 **s28: main = v67 (d51f68c)** = v66 + QF32 (T=16 decode: attention reads g19's FP32 qkv, rounding to BF16 at each load;
 drops the 1.2 us cast; bit-identical; H100 d16 -1.6/-2.6 us; TUNE {qf32: False}). Scored 24/24, replay 0/240, tests 13/13.

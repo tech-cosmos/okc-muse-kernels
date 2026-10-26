@@ -698,3 +698,16 @@
 - H100 ab_files 6 rounds (v66 vs v67): d16 sliding 210.59 -> 209.02, full 313.83 -> 311.26 us. Default ON, TUNE {qf32: False}.
 - Tests 13/13; scored all 12 shapes x2 seeds 24/24; replay all shapes 0/240 (20 inputs x 2 router seeds).
 - Not done: QF32 for nds (d32 sliding) — only matters if the H200 tuner picks g19:qkv at T=32 (it has not).
+
+## s29 (2026-10-26 12:17-12:35Z): v68 QF32_NDS
+- H100 timelines (main v67): d1 sliding tk2f end 93.2 -> n2u 97.7 -> boundary 100.0; d16 sliding tk2f end 192.4 ->
+  norm2 196.1 -> g19 unpool 217.0 -> boundary 221.3; v1 tk2f 154.0 -> nu8 158.5 -> boundary 162.9. H200 ea9421fa d32
+  sliding: tk2f 75.3, g19 pool+unp 50.2, qkv nvjet splitK 12.7 + splitKreduce 2.0, nds 10.0 + _combine_hb 1.6, norm2 9.3.
+- v68 (d196c9e): nds (decode sliding batch >= 32) templated on the qkv type (qld8/qld4 round FP32 to BF16 RN), layer
+  QF32 condition extended to batch >= NDS_MIN_BATCH (QF32_NDS). tools/qf32_eq.py now also batch 32/48 sliding:
+  bit-identical out + cache. (Its 2 "bad" rows are batch 8/16 FULL, untouched code: FP32-atomic nondeterminism where the
+  control happened to match; maxdiff 2e-7..6e-5.)
+- torch.mm(x, w.t(), out_dtype=float32) at m32 qkv: same nvjet splitK + FP32 splitKreduce, bit-identical after
+  rounding, 22.9 vs 23.2 us: no gain alone. The win at T=32 needs an FP32-native producer: g19 (tuner option) or proj s20.
+- H100 ab_files d32 5 rounds: main 202.1/431.7, g19 qkv@32 + cast 205.0/434.1, g19 qkv@32 + QF32 204.4/431.5 us.
+- Tests 13/13 (main and g19q variant), scored d32 x3 g19q / x2 main, replay g19q d32 0/40. No judge runs.
