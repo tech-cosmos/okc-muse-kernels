@@ -1,4 +1,4 @@
-# s12 merged-phase tk2h (TK2H 8 / 16) vs main tk2f bitwise over many routings (incl. T=1, T=8): python tools/h_ab.py [n]
+# s12 merged-phase tk2h (TK2H 8 / 16, TK2H_PSC 0 / 1) vs main tk2f bitwise over many routings (incl. T=1, T=8): python tools/h_ab.py [n]
 import sys, torch
 sys.path.insert(0, '.'); sys.path.insert(0, 'tools')
 import bench, submission
@@ -15,10 +15,10 @@ for r in range(int(sys.argv[1]) if len(sys.argv) > 1 else 200):
     cases.append({"hidden_states": x, "topk_ids": ids.int(), "topk_weights": tw, "config": {"bs": T, "local_start": st["start"], "local_count": st["count"]}})
 for d in cases:
     submission.TK2H = 0; ref = submission.kernel_fn(d, st).clone()
-    for h in (8, 16):
-        submission.TK2H = h; a = submission.kernel_fn(d, st).clone()
+    for h, psc in ((8, 0), (16, 0), (8, 1), (16, 1)):
+        submission.TK2H = h; submission.TK2H_PSC = psc; a = submission.kernel_fn(d, st).clone()
         torch.cuda.synchronize(); tot += 1
         if not torch.equal(a, ref):
-            bad += 1; print("MISMATCH", h, d["hidden_states"].shape[0], (a.float() - ref.float()).abs().max().item(), flush=True)
-submission.TK2H = 0
+            bad += 1; print("MISMATCH", h, psc, d["hidden_states"].shape[0], (a.float() - ref.float()).abs().max().item(), flush=True)
+submission.TK2H = 0; submission.TK2H_PSC = 0
 print("bad", bad, "of", tot)
