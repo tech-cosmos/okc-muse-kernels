@@ -1340,3 +1340,12 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   in-kernel + epoch barrier (one counter per grid, as g19). cslpw at d16 sliding: csl is now the PDL secondary of the g24
   qkv (still the graph's first kernel, so s63's audit holds: csl's pre-wait loads read only inputs).
 - FIRST CHECK AFTER 00:00Z = main v101: read 'layer tune T=16/32' g24 lines (H200 picks) besides the s64 list.
+
+## s66 (2026-10-26 22:30Z-, sandbox okc-night4, session 15): v102 = v101 + proj s54 g24 stream-K (g24sk) at T=32 pooler+unpool
+- No judge runs (budget resets 00:00Z). `git apply -p1 muse_bf16_proj/dev/s54/g24sk_layer.patch` (r-proj 0f2e581, thanks proj):
+  clean. G24_SKCFG (RR | 256 template = stream-K over ring stages), state["g24sk"], `_g19()` takes g24sk:<key> before g24:<key>.
+  TUNE_BASE (32, sl/full) += g24sk pooler+unpool; TUNE[16] on-options (pool+unp / qkv / all3), TUNE[32] off (both/pool/unp) + qkv on.
+- H100 ab_flag variants/s66_nt.py (TUNE {}), 4 rounds x SEEDS 7,11,99, us: [0] v102 | [1] SK off (= v101) | [2] v102 + SK qkv
+  d32 sl  203.9/211.2/192.6 | 205.3/212.1/194.7 | 204.6/212.1/193.1   (SK pool+unp -0.9..-2.1; +qkv loses 0.5..0.9)
+  d32 full 420.2/419.1/411.8 | 422.1/420.5/413.8 | 420.9/419.6/412.0   (-1.3..-2.0)
+- Tests: bench test 13/13; scored_test decode 32 x3 PASS; replay_test d32 seeds 11,23 0/160; route_judge d32 0/240.
