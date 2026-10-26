@@ -547,3 +547,13 @@
 - Conclusion: g19's consumer cost is not an instruction-order problem (SWP, ILV, MMANV, SPIN all null). What's left is
   the instruction count itself (mma.sync rate + decode) = a different MMA path (wgmma, failed s12) or fewer bytes.
   No proj item left above ~0.3% layer score; lane question to the lead stands.
+
+## Session 19 (2026-10-26 11:56 - 12:25 UTC): review only, no build
+- Still no lead answer to the lane question (Requests s18).
+- Layer H200 profile ea9421fa (v45), proj-owned kernels: d16 g19 qkv+unpool (16,1024,4,4) 37.5 us for 2 calls, pooler
+  g19 20.7 (incl. PDL wait), o cuBLAS nvjet 7.1, qkv cast 1.3; d32 g19 pool+unp 50.2, qkv lt splitK 12.7 + reduce 2.0,
+  o nvjet 7.0. Every alternative proj has for these (g19 qkv/o at T=16/32, lt picks, LT_ALT) is already a layer TUNE
+  option, and the H200 tuner settles them in the layer's ~14:30Z check: nothing new to hand off.
+- qkv cast at d16: mode 3 (BF16 written in-kernel) ~= mode 0 + cvt on H100 (18.4 vs 17.0 + ~1, s15), so no proj kernel
+  fix. Posted a layer request: attention reads g19's FP32 qkv and rounds to BF16 when it loads it (bit-identical), est. -1.2 us d16.
+- Checks 10-26: 17/20, scored 5/10. Board best unchanged 3810db09 1.3110x.
