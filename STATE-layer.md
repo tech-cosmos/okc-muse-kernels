@@ -1,6 +1,12 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 10:05Z (session 21; real clock: earlier sessions' stamps ran ~30 min ahead, use `date -u`).
+Updated 2026-10-26 11:10Z (session 23; real clock: earlier sessions' stamps ran ~30 min ahead, use `date -u`).
+
+**s23: main = v55 (b36caa7) = v52 + more free H200 TUNE options: cuBLASLt (proj's H200-tuner winners from r-proj judge logs,
+`LT_DEFAULT_OFF`) for qkv/o at T=16/32, o at T=128/256, unpool at T=128 (now via `_linear`), pooler/unpool at T=16/32 instead
+of g19 (H100 +4..7 us: H200 A/B only); pr1 pooler PF 2 (`pr1_pf`, T=1). All forced variants: scored + replay 0/20-30 ok.
+Tune 5.2 s (prepare 13 s). NOT CHECKED; plan unchanged: last check ~14:30Z on main, copy every "layer tune" line of
+profiles/submission.<job>.log into NOTES (H200 A/B of ~40 options), submit by 17:30Z if >= 1.9558, else v45 (2dddb88).**
 
 **s22: main = v52 (9621c71) = v50 + generic GEMV config alternatives as TUNE options (`G10_ALT/G13_ALT/G14_ALT`, `_cfg`, option "<kind>alt:<key>" = 1-based index): T=1 g10alt:o (U 4, 132 blocks; H100 tie), T=8 g14alt:qkv_gate 1-3 = proj s16 kcu-8 no-split-K cfgs (own pack state["g14k"]; H100 tuner picks 2: v1 -0.9/-1.3 us). g22 OFF (G22_CFG {}; proj H200 check fb2fe4ee: loses every m128/256 shape; -30 s build). Tests 13/13, every forced alt: scored ok + replay 0/30. NOT CHECKED; plan unchanged: last check ~14:30Z on main (read the H200 "layer tune" lines into NOTES), submit by 17:30Z if >= 1.9558 (board best), else v45 (`git show 2dddb88:...`).**
 

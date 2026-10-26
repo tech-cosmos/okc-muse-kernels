@@ -577,3 +577,18 @@
   Forced each: verify 1 x3 ok, replay 0/30. G22_CFG = {} (proj's H200 check fb2fe4ee: g22 loses at every m128/256:
   qkv m128 22.1 vs lt 18.8, pooler 29.6 vs 24.4) and its TUNE options removed: -30 s build.
 - Not ported: proj G13_CPA (cp.async ring m1): proj's tuner says it ties gemv13 VT 512, which tied on H200 (6b50e844).
+
+## Session 23 (2026-10-26 10:13Z-)
+- Budget at start: 1 submit, 1 check. Board #53 1.956x (#1 2.380x, #50 ~1.961x). No new moe/proj handoffs.
+- Source of H200 data: r-proj profiles/*.log "tune <key> m<T>: ... F:<F.linear> lt:<cfg i> ..." lines (30 judge runs each,
+  standalone incl. launch). Medians F -> best lt (us): qkv m16 17.48 -> 16.83 (cfg idx 3), m32 17.82 -> 17.25 (idx 3),
+  o m16 10.04 -> 9.77, m32 10.30 -> 9.98, m128 10.94 -> 10.73, m256 12.80 -> 12.54, unpooler m128 23.21 -> 22.96,
+  pooler m16/32 24.4 -> 22.0 (but g19 in-layer is the default there), pooler m128 29.3 -> 25.3 (= our LT_CFG).
+- v53 (66fef4c): those lt cfgs as TUNE options (LT_DEFAULT_OFF; T=16 qkv option also turns g19 qkv off). H100 tuner:
+  all within +-1.5 us (T=16 full picks lt:o -0.1, T=32 full lt qkv+o -1.4, T=128 sliding lt:o -2.7, full lt:unpool -0.5;
+  noise level). Forced all: scored d16/d32/v16/v32 x2 ok, replay 0/20 each.
+- v54 (3b5a373): pr1 pooler PF 2 (template instantiation (2,4,2,4)) as TUNE option pr1_pf (alone / with rb 32): H100
+  +0.5..0.9 sliding, tie full; PF 2 + npf 8 +3 us (dropped). Forced: scored decode 1 x3, replay 0/30.
+- v55 (b36caa7): lt pooler/unpool at T=16/32 instead of g19 (proj diag19 H200: m32 lt 20.3 vs g19 21.6, unpool 19.3 vs
+  20.3 after a 3 us PDL predecessor). H100 in-layer: +4..7 us (g19's PDL W prefetch wins): free H200 A/B only.
+  Forced: scored d16/d32 x2, replay decode 0/20. Tune 5.2 s, prepare 13.1 s total.
