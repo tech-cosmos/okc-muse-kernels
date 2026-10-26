@@ -397,3 +397,36 @@
   Check 36073e6e **1.9526x** (11,585 us): d1 70.9/80.7 (best ever; v36 72.1/83.7), d16 147.7/222.3, d32 177.2/330.0,
   v1 120.4/126.8, v16 267.9/361.8, v32 354.1/550.3. Beats board 1.9459 by noise-level 0.35%: NOT submitted (last spare
   of 9 today); submit first thing after 00:00Z 2026-10-27 (or today if a later check clearly wins).
+
+## Session 14 (2026-10-26 06:20-07:15Z)
+- Tool: per-CTA globaltimer stamps (generator /tmp/l14/mk_stamp.py: g_st in moe_tk2f start/gemm2/end, g_sn in n2u
+  start/after-wait/after-y-sync/end, read back by exported moe_stamps/n2u_stamps; recreate from this description).
+  H100 d1 sliding, v41: last tk2f CTA ends 34.2 us after tk2f start (CTA ends spread 31.0..34.2, gemm2 starts
+  20.7..25.2); n2u blocks start 32.8..34.4, pass griddepcontrol.wait at 35.2 (PDL release ~0.9 us after the last
+  tk2f CTA), y32 loaded + synced 38.1, end 40.4: 6.2 us after tk2f. The wait -> y-sync part was 3 dependent L2 round
+  trips (ids -> inv/gs -> Y).
+- **FOUND (SASS audit, /tmp/l14/sass_pdl.py: loads scheduled before ACQBULK = griddepcontrol.wait per kernel):**
+  (a) `__ldg` / ld.global.nc loads are hoisted ABOVE griddepcontrol.wait by ptxas (treated as invariant). g17 read x
+  with __ldg: as a PDL secondary it read stale x = the s8 "unexplained race" (actually deterministic: replay_test v1
+  15/15 fail, NaN/Inf on eager repeats). (b) the opposite: ptxas SINKS plain/nc register loads issued before the wait
+  to after it (acquire semantics), so "W loads before griddepcontrol.wait" did nothing in n2u (all W LDGs after
+  ACQBULK) and in g17-with-ldcg. cp.async.bulk.prefetch.L2 (UBLKPF) and LDGSTS stay in place; Triton gdc_wait
+  kernels (_boundary, _rmsnorm_gain) keep their loads before ACQBULK. Also an ld.acquire spin sinks earlier loads.
+  Audit of the current libs: pr1/pr8/g10/g12/g19/pr3 and moe twm/tk2f/norm2/3 have only weights/inputs (or pr1's
+  routing, complete) before their waits: no hazard. n2u<4,false> (unused) hoisted inv loads: hazard if ever used.
+- v42 (cfd3bc5): N2U_SLOT (T=1 tk2f PF&4 = 84204, y32 in slot order pre-scaled; n2u reads ids/tw before the wait,
+  one L2 trip after it; bitwise = 204), N2U_PFW (n2u bulk-prefetches its 64 KB of W rows into L2 before the wait),
+  g17 x __ldcg + W bulk prefetch + g17 as PDL secondary of moe_norm3 at T=8 (sliding and full). Bitwise = v41 (d1/v1,
+  5 seeds). H100 interleaved (tools/ab_files.py, whole files, 3-4 rounds): v1 154.6/169.7 -> 153.4/168.3; d1 within
+  noise (stamps: tail after tk2f 6.2 -> 5.0-5.4 us). Tests 13/13, replay 0/288 (seeds 11, 5), tk2f_stress 0/1200.
+  Check 9db0d4eb 1.9545x; **submit 371a17ee 1.9558x (11,566 us) = new board best, overall #49**: d1 71.4/82.3,
+  d16 145.1/223.9, d32 185.9/334.2, v1 120.5/132.4, v16 264.9/368.3, v32 368.0/544.3.
+- v1 tail now (H100): tk2f end -> norm3 end 3.7 -> g17 end 4.6 -> boundary end 3.3 (was 13.0 total, now 11.6).
+  g17 rows/block sweep in PDL mode: (8,4,256) stays (8/16 rows x 512 threads +3..9 us).
+- DEAD: UPF2 (first 4..32 finishing tk2f CTAs L2-prefetch the unpool slice at T=1: tie..+0.9 us; HBM is not idle in
+  the drain). N2U_BOUNDARY re-test: still +2.8 us. BND_SPIN (second boundary as a 1-block CUDA kernel, PDL secondary of
+  n2u WITHOUT griddepcontrol.wait, spinning on a store counter): +2 us (ptxas sank its vector preloads below the
+  acquire spin) and 1/10 replay fails at d1 full (race not found): reverted.
+- Next ideas: T=8 norm3+unpool fusion needs per-route sum-of-squares (tk2f epilogue atomics) + split-K unpool with
+  FP32 out (boundary RB path) to avoid 16 MB of redundant y32 reads; est. v1 -3..4 us. Any kernel edit that wants
+  loads before griddepcontrol.wait: use cp.async.bulk.prefetch.L2 or LDGSTS, check SASS with /tmp/l14/sass_pdl.py logic.

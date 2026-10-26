@@ -1,14 +1,15 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~07:10Z (end of session 13).
+Updated 2026-10-26 07:15Z (end of session 14).
 
 ## Board
-- **Best scored: e5512e00 = v33 (bb6fb77), 1.9459x, 11,624 us/step**, overall #56 at 04:50Z (#1 2.360x, #10 2.176x,
-  #50 ~1.953x). v33 contains moe's old tk2f race (lead asked about withdrawing it: see COORD Judge runs line).
-- **main = v41 (4afa8ea)**: v38 + moe 258d49d (norm3, v40) + TK2F_LATE_TRIG 3 (tk2f triggers PDL at each CTA's gemm2
-  rows; n2u / moe_norm2/3 as PDL secondaries). **Check 36073e6e 1.9526x** (11,585 us; d1 70.9/80.7, d16 147.7/222.3,
-  d32 177.2/330.0, v1 120.4/126.8, v16 267.9/361.8, v32 354.1/550.3). NOT submitted (only the spare left today):
-  **SUBMIT v41 (or better) FIRST THING after 00:00Z 2026-10-27** (also replaces the racy e5512e00 if it scores higher).
+- **Best scored: 371a17ee = v42 (cfd3bc5), 1.9558x, 11,566 us/step, overall #49** at 07:10Z 10-26 (#1 2.368x, #10 2.176x,
+  #50 ~1.953x). Per shape (H200 us): d1 71.4/82.3, d16 145.1/223.9, d32 185.9/334.2, v1 120.5/132.4, v16 264.9/368.3,
+  v32 368.0/544.3. Its check 9db0d4eb 1.9545x. (Old best e5512e00 1.9459 had moe's tk2f race; now superseded.)
+- **main = v42 (cfd3bc5)** = v41 + N2U_SLOT/N2U_PFW (n2u: slot-ordered y32, W L2 bulk prefetch) + g17 PDL at T=8 with
+  __ldcg x (the s8 "race" was ptxas hoisting __ldg above griddepcontrol.wait; see NOTES s14 SASS audit).
+- v41 (4afa8ea): TK2F_LATE_TRIG 3 (tk2f triggers PDL at each CTA's gemm2 rows; n2u / moe_norm2/3 as PDL secondaries).
+  Check 36073e6e 1.9526x.
 - v38 (d664b23) = v37 + proj pr8 at T=8 (same fusion with gemv14 pooler; H100 v1 -1.7/-1.8 us): check 0602febf
   1.936x (noisy run; v1 full +6.8 vs v37 unexplained: re-check before trusting; T=8 off = PR1_TOKENS (1,)).
 - v37 (d411cf4) = v36 + proj pr1 at T=1 (pooler+router+top-8 one launch; H100 d1 -2.4/-1.9 us) + moe 2466fac
@@ -17,8 +18,7 @@ Updated 2026-10-26 ~07:10Z (end of session 13).
   dependent of the first boundary, which triggers at start; full unpool). **Best check ee80a8f8 1.9566x**; its submit
   543b6ca9 scored 1.9395x (noise). Per shape (H200 us ours, ratio): d1 72.1/83.7 (2.369/2.174), d16 150.1/225.4
   (1.747/1.912), d32 181.1/311.0 (1.443/1.974), v1 121.6/132.8 (2.133/2.043), v16 273.0/359.4, v32 351.8/527.1.
-- Budget 2026-10-26 (resets 00:00Z): submits 8 of 9 used (keep the last as spare unless a check clearly wins);
-  checks 14 of 20 used at 07:05Z (s13).
+- Budget 2026-10-26 (resets 00:00Z): submits 9 of 9 used (NO more today); checks 15 of 20 used at 07:10Z (s14).
 - Judge noise: SGLang's own per-shape times move 2-6% between runs; identical code's per-shape ratios spread ~+-1.5%,
   total ~+-1%: one check cannot resolve <2% changes. Decide on H100 interleaved A/Bs (tools/ab_flag.py), check to confirm.
 - SGLang per shape (H200 us sliding/full): d1 171/183, d16 262-271/431-444, d32 261-268/614-634, v1 259-261/271-280,
@@ -67,6 +67,10 @@ Updated 2026-10-26 ~07:10Z (end of session 13).
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
+-2. s14 state of the tail: d1 n2u ends ~5 us after the last tk2f CTA (PDL release ~0.9 + y32 L2 trip + reduce) + the
+   boundary ~2 us; v1 tail 11.6 us H100 (norm3 3.7, g17 4.6, boundary 3.3). Best open layer item: T=8 norm3+unpool
+   fusion (tk2f epilogue atomics for per-route sum of squares; split-K unpool, FP32 out into the boundary's RB path),
+   est. v1 -3..4 us. Every PDL edge costs ~1 us of release; flag spins need loads kept above the spin (bulk prefetch).
 -1. s12 idle budget (COORD Requests "layer -> all (s12 05:30Z)"): every load is 8-9% of score off its floor; biggest
    = moe twm at v16/v32 (~8%, moe lane), then the end-of-layer tail (~4%) and glue (~3.5%) = layer's. The cheap
    glue fusions are now measured dead (XN, UPF, PR1_BND, n2u boundary epilogue): the tail/glue costs are kernel
@@ -91,6 +95,9 @@ Updated 2026-10-26 ~07:10Z (end of session 13).
 3. Experts are 50-60% of every T>=16 shape and 27 us of d1's 72 (moe lane: tk2f ~63% of H200 HBM peak at d1).
 
 ## Dead ends (details in NOTES)
+- s14: UPF2 (tk2f finishers L2-prefetch the unpool slice), N2U_BOUNDARY (still +2.8), BND_SPIN (flag-spin boundary:
+  +2 us, race), g17 8/16 rows per block. RULE: no __ldg/.nc on producer data after griddepcontrol.wait (hoisted
+  above it); register loads "before the wait" get sunk below it: use cp.async.bulk.prefetch.L2 / LDGSTS; check SASS.
 - s13: pooler bmm 4 slabs at T=32 (tie). LATE_TRIG variants 1 (trigger at CTA end) < 2 (gemm2 start, T=1) < 3 (all T).
 - s12: XN (pre-expert rmsnorm inside tk2f: +0.2..0.7 us as its own instantiation; in the shared one it slowed
   d16/d32 by 1-2 us), UPF (tk2f L2-prefetches the unpool slice: tie). A/B kernel edits against the original binary.
