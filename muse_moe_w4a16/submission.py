@@ -2557,7 +2557,8 @@ int64_t moe_twm_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 template <int NRT, int NC, int NSTG, int KPS>
 __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
                                              int r1, const int* s_rs, const int* s_e, uint4* smem, uint64_t* full,
-                                             uint64_t* empty, int& st, int& ph, int& i) {
+                                             uint64_t* empty, int& st, int& ph, int& i, uint64_t* xrdy = nullptr,
+                                             int early = 0) {
   constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * 1152, KB = NC * KPS;
   int a = 0;
   for (int R = r0; R < r1; ++R) {
@@ -2568,6 +2569,7 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
     const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
     for (int q = 0; q < NQ; ++q, ++i) {
       if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+      if (xrdy && i == early) mbar_wait(xrdy, 0);  // s15 FP: the consumers' first x loads go out before our burst
       char* sbase = reinterpret_cast<char*>(smem) + st * SB;
       mbar_expect_tx(&full[st], SB);
       bulk_g2s(sbase, src + q * KB * 32, KB * 512, &full[st]);
@@ -2583,7 +2585,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
                                              const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
-                                             int& ph, int& rb) {
+                                             int& ph, int& rb, uint64_t* xrdy = nullptr) {
   constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   uint4 xf[NQ][2];
@@ -2622,6 +2624,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
           xf[qq][1] = v ? __ldg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
         }
       }
+      if ((PF & 16) && GATED && R == r0) mbar_arrive(xrdy);  // s15 FP: x loads issued, the producer may stream
     }
     if ((PF & 1) && R + 1 == seg_end && R + 1 < r1) {  // s13: L1 prefetch of the next segment's x during this row
       const int a2 = seg_end >= s_rs[a + 1] ? a + 1 : a;
@@ -3298,6 +3301,70 @@ __device__ __forceinline__ int tk2w_bound(int b, int nact, int wE, int rps, cons
   return res;
 }
 
+#ifndef TK2F_PCNT
+#define TK2F_PCNT 1  // s15 FP: the producer counts routes per expert with plain smem atomics (no match_any)
+#endif
+#ifndef TK2F_EARLY
+#define TK2F_EARLY 1  // s15 FP: ring stages the producer issues before the consumers' first x loads are out
+#endif
+// s15 FP (PF & 16): the producer warp computes, on its own, the routing it needs (active experts in the consumers'
+// order, row starts per expert) and starts its weight copies at once, instead of waiting for the CTA's routing
+// prologue (2-4 block barriers, the s_srt scatter, meta writes). Same formulas as the consumers' routing: same rows.
+// Returns nact; p_e / p_rs13 / p_rs2 = s_e / s_rs13 / s_rs2. p_cnt: 32 ints of scratch. All 32 lanes call it.
+template <int GS>
+__device__ __forceinline__ int tk2f_proute(const int* __restrict__ ids, int nroutes, int start, int count, int* p_e,
+                                           int* p_rs13, int* p_rs2, int* p_cnt, int lane) {
+  p_cnt[lane] = 0;
+  int ev[8];
+#pragma unroll
+  for (int r = 0; r < 8; ++r) {
+    const int i = r * 32 + lane;
+    ev[r] = -1;
+    if (i < nroutes) {
+      const int v = ids[i] - start;
+      if (v >= 0 && v < count) ev[r] = v;
+    }
+  }
+  __syncwarp();
+#pragma unroll
+  for (int r = 0; r < 8; ++r) {
+    if (r * 32 >= nroutes) break;  // uniform
+    if (TK2F_PCNT) {
+      if (ev[r] >= 0) atomicAdd(&p_cnt[ev[r]], 1);
+    } else {
+      const unsigned m = __match_any_sync(0xffffffffu, ev[r]);
+      if (ev[r] >= 0 && (m & ((1u << lane) - 1)) == 0) atomicAdd(&p_cnt[ev[r]], __popc(m));
+    }
+  }
+  __syncwarp();
+  const int c = p_cnt[lane];
+  int rk = 0;
+#pragma unroll
+  for (int j = 0; j < 32; ++j) {
+    const int cj = __shfl_sync(0xffffffffu, c, j);
+    rk += (cj > c) || (cj == c && j < lane);
+  }
+  const int na = __popc(__ballot_sync(0xffffffffu, c > 0));
+  if (lane >= na) p_e[lane] = 0;
+  __syncwarp();
+  if (c > 0) p_e[rk] = lane;
+  __syncwarp();
+  const int e = p_e[lane];
+  const int ce = __shfl_sync(0xffffffffu, c, e);
+  const int ng = lane < na ? (ce + GS - 1) / GS : 0;
+  int incl = ng;
+#pragma unroll
+  for (int o = 1; o < 32; o <<= 1) {
+    const int v = __shfl_up_sync(0xffffffffu, incl, o);
+    if (lane >= o) incl += v;
+  }
+  p_rs13[lane + 1] = incl * 256;
+  p_rs2[lane + 1] = incl * 128;
+  if (lane == 0) { p_rs13[0] = 0; p_rs2[0] = 0; }
+  __syncwarp();
+  return na;
+}
+
 template <int NC, int NSTG, int KPS, bool DYN, bool FN = false, bool SA = false, int GS = 8, int MRG = 0, int PF = 0>
 __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     const uint4* __restrict__ Wq13, const uint32_t* __restrict__ S13, const uint4* __restrict__ Wq2,
@@ -3314,16 +3381,40 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   __shared__ int s_rid[4];
   __shared__ __align__(8) uint64_t ridb[4];
+  __shared__ __align__(8) uint64_t xrdy;  // s15 FP
   __shared__ int s_inv[FN ? 256 : 1], s_tk[2];
   __shared__ float s_rt[FN ? 256 : 1], s_rg[FN ? 256 : 1];
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  constexpr bool FP = (PF & 16) != 0;
+#define TK2F_SYNC() do { if (FP) asm volatile("bar.sync 4, %0;" ::"n"(NC * 32) : "memory"); else __syncthreads(); } while (0)
+  static_assert(!FP || (!DYN && !FN && GS == 8 && MRG == 0), "FP: static GS 8 path only");
   int gen = 0;  // FN: this call's generation (see tk2f_norm); thread 0 only
   if (FN && tid == 0) asm volatile("ld.relaxed.gpu.global.b32 %0, [%1];" : "=r"(gen) : "l"(cnt + 7) : "memory");
-  for (int i = tid; i < 256; i += (NC + 1) * 32) slut[i] = lut[i];
-  if (tid == 0) {
+  if (!FP || warp < NC)
+    for (int i = tid; i < 256; i += (FP ? NC : NC + 1) * 32) slut[i] = lut[i];
+  if (tid == (FP ? NC * 32 : 0)) {
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], NC * 32); }
     for (int i = 0; i < 4; ++i) mbar_init(&ridb[i], 1);
+    mbar_init(&xrdy, NC * 32);
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  if constexpr (FP) {  // s15: the producer warp routes for itself and streams at once (see tk2f_proute)
+    if (warp == NC) {
+      __shared__ int p_e[32], p_rs13[33], p_rs2[33], p_cnt[32];
+      const int na = tk2f_proute<GS>(ids, nroutes, start, count, p_e, p_rs13, p_rs2, p_cnt, lane);
+      asm volatile("bar.arrive 3, %0;" ::"n"((NC + 1) * 32) : "memory");  // ring barriers initialized
+      const int m13 = p_rs13[na], m2 = p_rs2[na];
+      if (lane == 0) {
+        int st = 0, ph = 0, i = 0;
+        tk2f_produce<512, NC, NSTG, KPS>(Wq13, S13, (int)((long long)m13 * blockIdx.x / gridDim.x),
+                                         (int)((long long)m13 * (blockIdx.x + 1) / gridDim.x), p_rs13, p_e, smem, full,
+                                         empty, st, ph, i, &xrdy, TK2F_EARLY);
+        tk2f_produce<256, NC, NSTG, KPS>(Wq2, S2, (int)((long long)m2 * blockIdx.x / gridDim.x),
+                                         (int)((long long)m2 * (blockIdx.x + 1) / gridDim.x), p_rs2, p_e, smem, full,
+                                         empty, st, ph, i);
+      }
+      return;
+    }
   }
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   {  // routing, as moe_tk2 GATED
@@ -3340,7 +3431,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       __syncwarp();
       if (e >= 0 && rank == 0) s_wc[warp][e] = __popc(m);
     }
-    __syncthreads();
+    TK2F_SYNC();
     if (tid < 32) {
       int c = 0;
 #pragma unroll
@@ -3357,6 +3448,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
 #pragma unroll
       for (int w = 0; w < 8; ++w) { const int cw = s_wc[w][tid]; s_wc[w][tid] = run; run += cw; }
       int rk = 0;
+#pragma unroll
       for (int j = 0; j < 32; ++j) {
         const int cj = __shfl_sync(0xffffffffu, c, j);
         rk += (cj > c) || (cj == c && j < tid);
@@ -3367,7 +3459,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       __syncwarp();
       if (c > 0) s_e[rk] = tid;
     }
-    __syncthreads();
+    TK2F_SYNC();
     if (FN && warp < 8) s_inv[warp * 32 + lane] = e >= 0 ? s_wc[warp][e] + rank : -1;
     if (e >= 0) {
       const int i = warp * 32 + lane, pos = s_wc[warp][e] + rank;
@@ -3380,7 +3472,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       if (tid == 0) meta[0] = s_nact;
     }
   }
-  __syncthreads();
+  TK2F_SYNC();
   const int nact = s_nact;
   if (tid < 32) {
     const int e = s_e[tid];
@@ -3395,7 +3487,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     s_rs2[tid + 1] = incl * 128;
     if (tid == 0) { s_rs13[0] = 0; s_rs2[0] = 0; }
   }
-  __syncthreads();
+  TK2F_SYNC();
   const int n13 = s_rs13[nact], n2 = s_rs2[nact];
   if constexpr (DYN) {
     const int G = gridDim.x, ns13 = max(0, n13 / G - D), ns2 = max(0, n2 / G - D);
@@ -3417,7 +3509,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   int a0 = (int)((long long)n13 * blockIdx.x / gridDim.x), a1 = (int)((long long)n13 * (blockIdx.x + 1) / gridDim.x);
   int b0 = (int)((long long)n2 * blockIdx.x / gridDim.x), b1 = (int)((long long)n2 * (blockIdx.x + 1) / gridDim.x);
-  if (GS == 8 && !DYN && D > 0) {  // s12 weighted split (wE = D / 8 for extra-group rows), see tk2w_bound
+  if (GS == 8 && !DYN && !FP && D > 0) {  // s12 weighted split (wE = D / 8 for extra-group rows), see tk2w_bound
     __shared__ int s_ab[4];
     if (warp == 0) {
       const int v0 = tk2w_bound(blockIdx.x, nact, D, 256, s_e, s_off), v1 = tk2w_bound(blockIdx.x + 1, nact, D, 256, s_e, s_off);
@@ -3464,8 +3556,10 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
                                                 s_x2, full, empty, st, ph, rb);
     return;
   }
+  if (FP) asm volatile("bar.sync 3, %0;" ::"n"((NC + 1) * 32) : "memory");  // the producer initialized the ring
+  if (FP && a0 >= a1) mbar_arrive(&xrdy);  // no gemm13 rows here: release the producer's gate at once
   tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
-                                    empty, st, ph, rb);
+                                    empty, st, ph, rb, &xrdy);
   tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
                                      empty, st, ph, rb);
   if constexpr (FN) {
@@ -3526,7 +3620,9 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     cnt_.data_ptr()
   const bool sa = cfg >= 100000;  // + 100000: SA (arithmetic scale decode; prepare() checked the scales)
   cfg %= 100000;
-  if (cfg > 80000 && cfg < 100000 && cfg % 1000 == 204) {  // s13 PF = cfg / 1000 % 10: 1 = L1 prefetch of the next segment's
+  if (cfg == 96204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 16>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 16>(0, TK2F_ARGS0);
+  if (cfg == 97204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 20>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 20>(0, TK2F_ARGS0);
+  if (cfg > 80000 && cfg < 96000 && cfg % 1000 == 204) {  // s13 PF = cfg / 1000 % 10: 1 = L1 prefetch of the next segment's
     // x one row ahead, 2 = gemm2's counter spin only at the CTA's first gemm2 row, 4 = y32 in route slot order, pre-scaled
     // by gs2 * 256 (then moe_norm3 instead of moe_norm2), 8 = 2 accumulator chains per tile; built: 1, 2, 3, 4, 7, 12
     const int pf = (int)(cfg - 80000) / 1000;
@@ -3897,7 +3993,7 @@ TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
 _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
 TK2_MAX = 32  # M above this: big-M path
-TK2F_DYN = 84204  # M > 1 cfg. s13: 84204 = 204 + y32 in route-slot order pre-scaled + moe_norm3 (bitwise = 204; H200 diag adfb897e d16 -0.45, d32 -0.75 us). M = 1 (TK2F) stays 204: the layer's n2u reads the old y32 order. 5402 = DYN row tail (D = 4): judge no gain (b890d69b)
+TK2F_DYN = 97204  # M > 1 cfg. s15: 97204 = 84204 + FP (producer routes for itself, x-first gate; bitwise = 84204; H100 tk2f -0.2..0.8 us).  s13: 84204 = 204 + y32 in route-slot order pre-scaled + moe_norm3 (bitwise = 204; H200 diag adfb897e d16 -0.45, d32 -0.75 us). M = 1 (TK2F) stays 204: the layer's n2u reads the old y32 order. 5402 = DYN row tail (D = 4): judge no gain (b890d69b)
 TWSA = 1  # s9: same for moe_twf (big-M)
 TK2SA = 1  # s9: arithmetic e4m3 scale decode in moe_tk2f (when prepare() found all scales positive normal)
 TK2FN = 0  # s9: 1 = post-expert norm fused into moe_tk2f (moe_tk2fn_launch): judge bs1 +2 us (check 168fa04c), dead
@@ -3907,7 +4003,7 @@ TK2G = 0  # s10: 1 = 16-token segments in moe_tk2f (2 token groups share each de
 TWF_DBG = 0
 TWF_SPLIT_M = {}  # s11 per-M override of TWF_SPLIT; judge c1659443 {128: 132, 256: 66}: tie (tail -12 us, twf +10 us)
 TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K halves (FP32 partials, ticket): shorter tail
-TK2F = 204  # decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
+TK2F = 96204  # s15: 96204 = 204 + FP (see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 
@@ -4096,7 +4192,7 @@ def kernel_fn(data, st):
             c = _tk2f_cfg(M, st)
             lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
-            if 80000 < c % 100000 < 100000 and (c % 100000 - 80000) // 1000 & 4:  # s13 slot-ordered y32
+            if c % 100000 == 97204 or (80000 < c % 100000 < 96000 and (c % 100000 - 80000) // 1000 & 4):  # s13 slot-ordered y32
                 lib.moe_norm3_launch(y32, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out, st["cnt"])
                 return out
             lib.moe_norm2_launch(y32, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], POST_NORM_EPS, out,
