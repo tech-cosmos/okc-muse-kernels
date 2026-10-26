@@ -962,3 +962,20 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   tools/ab_files.py "decode 16" 8 rounds, files A B B A (H100 us, medians): d16 sliding A 198.34/199.22 B 198.97/199.10
   (B-A +0.26), d16 full A 295.98/295.26 B 295.32/295.90 (B-A 0.0). Standalone s40's -0.1..-0.4 does not show in the layer.
   Keep npre 3. Nothing for layer.
+
+## s46 (2026-10-26 19:40-20:00Z, sandbox okc-night4, session 3): T=1 pooler W pre-fill beside csl/o/bnd = DEAD
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z). STATE Next 2's "SMEM-resident pooler" tested in its feasible
+  form: a side-stream filler kernel (dev/s46/pwf_layer.patch on r-layer b5e07ab = v91; pwf_k: 132 x 32 thr, one 32 KB
+  cp.async.bulk -> smem in flight per SM with an L2 evict_last hint) pulls pr1's pooler rows [424, 424+R) (the rows pr1
+  reads right after its PF prologue) into L2; joined at the end of kernel_fn. (True SMEM residency for pr1 would need pr1
+  resident during csl/o; it can't co-reside with o's 1024-thread blocks, and pr1 is already resident during bnd.)
+- H100 layer ab_flag (6 rounds, medians, us) d1 sliding / full: base 86.8/105.5; fork after qkv R 1700 (20 MB)
+  90.3/111.2, depth 2 90.7/111.2, R 900 89.4/108.2; 2nd run base 85.7/105.0, R 300 90.6/106.1, R 300 CH 16K 90.5/106.1,
+  R 600 CH 8K evict_normal 88.0/106.7. Timelines (dev/s46/tl2.py = tools/timeline.py + exec stmt): R 1700 dilates csl
+  5.4 -> 9.1 and o 8.4 -> 15.0 us (o's W stream runs pre-wait during csl: that window is NOT idle) while pr1's post-bnd
+  time drops only 19.8 -> 16.9. Even R = 1 (24 KB) costs csl +1.3, o end +1.8 us: a concurrent side kernel in that
+  chain costs by itself. Fork after attention / after o: the filler only gets SMs once o's blocks / pr1's blocks leave
+  (starts 22.3 / 30.3) and then competes with pr1: worse.
+- So at T=1 the only HBM-idle window is the boundary (~4.4 us), already covered by pr1's pre-wait prologue (deeper
+  prologue = pr1_npf: lost on H200, s35). Overlap ideas at d1 are closed; m=1 kernels are at bare-stream speed (s17).
+  What's left for d1 in proj's lane is fewer bytes (entropy-coded weights, s17 est. ~0.3% layer, big format change).

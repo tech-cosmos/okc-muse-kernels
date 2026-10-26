@@ -1,0 +1,122 @@
+--- a/muse_decode_layer/layer.py
++++ b/muse_decode_layer/layer.py
+@@ -2496,7 +2496,96 @@
+     return hidden, stream2
+ 
+ 
++# s46 proj PWF: at T=1 a side-stream filler pulls rows [PWF_R0, PWF_R0 + PWF_ROWS) of pr1's 12-bit pooler W into L2
++# (evict_last) during csl/o/boundary, keeping only PWF_DEPTH TMA chunks of PWF_CH bytes in flight per SM (proj s39).
++PWF_ROWS = 0
++PWF_AT = 0  # fork after 0 qkv, 1 attention, 2 o
++PWF_R0 = 424
++PWF_CH = 32768
++PWF_DEPTH = 1
++PWF_NB = 132
++PWF_POL = 1  # 1 evict_last, 0 evict_normal
++_PWF = {}
++_PWF_SRC = r"""
++#include <torch/extension.h>
++#include <c10/cuda/CUDAStream.h>
++__global__ void pwf_k(const char* p0, long n0, const char* p1, long n1, int ch, int depth, int pol) {
++    extern __shared__ __align__(128) char buf[];
++    __shared__ __align__(8) unsigned long long bar[8];
++    if (threadIdx.x) return;
++    const long c0 = (n0 + ch - 1) / ch, c1 = (n1 + ch - 1) / ch, nc = c0 + c1;
++    unsigned long long pl;
++    if (pol) asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pl));
++    else asm volatile("createpolicy.fractional.L2::evict_normal.b64 %0, 1.0;" : "=l"(pl));
++    for (int d = 0; d < depth; ++d) {
++        unsigned b = (unsigned)__cvta_generic_to_shared(&bar[d]);
++        asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" :: "r"(b));
++    }
++    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
++    auto issue = [&](long i, int d) {
++        const char* src; long len;
++        if (i < c0) { src = p0 + i * ch; len = n0 - i * ch; } else { src = p1 + (i - c0) * ch; len = n1 - (i - c0) * ch; }
++        if (len > ch) len = ch;
++        unsigned b = (unsigned)__cvta_generic_to_shared(&bar[d]);
++        unsigned dst = (unsigned)__cvta_generic_to_shared(buf + (long)d * ch);
++        asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(b), "r"((unsigned)len) : "memory");
++        asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1], %2, [%3], %4;"
++                     :: "r"(dst), "l"(src), "r"((unsigned)len), "r"(b), "l"(pl) : "memory");
++    };
++    long i = blockIdx.x; int d = 0, n = 0;
++    unsigned ph[8] = {0, 0, 0, 0, 0, 0, 0, 0};
++    for (; n < depth && i + (long)n * gridDim.x < nc; ++n) issue(i + (long)n * gridDim.x, n);
++    long nxt = i + (long)n * gridDim.x;
++    for (int k = 0; k < n; ) {
++        unsigned b = (unsigned)__cvta_generic_to_shared(&bar[d]);
++        unsigned ok = 0;
++        while (!ok) asm volatile("{ .reg .pred p; mbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2; selp.u32 %0, 1, 0, p; }"
++                                 : "=r"(ok) : "r"(b), "r"(ph[d]) : "memory");
++        ph[d] ^= 1;
++        if (nxt < nc) { issue(nxt, d); nxt += gridDim.x; } else ++k;
++        d = d + 1 == depth ? 0 : d + 1;
++    }
++}
++void pwf_launch(torch::Tensor a, int64_t o0, int64_t n0, torch::Tensor b, int64_t o1, int64_t n1, int64_t ch, int64_t depth,
++                int64_t nb, int64_t pol) {
++    const int smem = ch * depth;
++    static int set = 0;
++    if (set < smem) { cudaFuncSetAttribute(pwf_k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); set = smem; }
++    pwf_k<<<nb, 32, smem, c10::cuda::getCurrentCUDAStream()>>>((const char*)a.data_ptr() + o0, n0, (const char*)b.data_ptr() + o1,
++                                                              n1, ch, depth, pol);
++}
++"""
++
++
++def _pwf(state, tokens):
++    if not PWF_ROWS or tokens != 1 or "pooler" not in state.get("g13", {}):
++        return False
++    if "lib" not in _PWF:
++        from torch.utils.cpp_extension import load_inline
++        _PWF["lib"] = load_inline(name="muse_layer_pwf1", cpp_sources="void pwf_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
++                                  cuda_sources=_PWF_SRC, functions=["pwf_launch"], extra_cuda_cflags=["-O3"], verbose=False)
++    pk = state["g13"]["pooler"]
++    S, N = pk[0], pk[1]
++    rs, rn = S.numel() * S.element_size() // D_EXPERT, N.numel() * N.element_size() // D_EXPERT
++    r1 = min(D_EXPERT, PWF_R0 + PWF_ROWS)
++    main, side = torch.cuda.current_stream(), state["side_stream"]
++    side.wait_stream(main)
++    with torch.cuda.stream(side):
++        _PWF["lib"].pwf_launch(S, PWF_R0 * rs, (r1 - PWF_R0) * rs, N, PWF_R0 * rn, (r1 - PWF_R0) * rn, PWF_CH, PWF_DEPTH, PWF_NB, PWF_POL)
++    return True
++
++
+ def kernel_fn(data, state):
++    tokens = data["config"]["tokens"]
++    if not (PWF_ROWS and tokens == 1):
++        return _kernel_fn(data, state)
++    state["_pwf_t"] = True
++    r = _kernel_fn(data, state)
++    torch.cuda.current_stream().wait_stream(state["side_stream"])
++    return r
++
++
++def _kernel_fn(data, state):
+     cfg = data["config"]
+     _SLIDING[0] = cfg["window"] > 0
+     batch, length, tokens = cfg["batch"], cfg["q_len"], cfg["tokens"]
+@@ -2524,6 +2613,8 @@
+         qkv, qss = slabs[0], slabs[0].numel()
+     if qkv is None:
+         qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf)
++    if PWF_AT == 0 and state.pop("_pwf_t", False):
++        _pwf(state, tokens)
+     elif not qss and not (length == 1 and HAVE_GLUON and USE_GDEC and _opt(state, tokens, "qf32", QF32)
+               and (batch <= CSL_MAX_BATCH and _CSL is not None
+                    or batch >= NDS_MIN_BATCH and (_NDS is not None or cfg["window"] == 0) and QF32_NDS)
+@@ -2543,9 +2634,13 @@
+         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
+         "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
+         "seq_lens": data["seq_lens"], "config": cfg, "qkv_ss": qss, "qkv_slabs": slabs}).view(tokens, hq * d)
++    if PWF_AT == 1 and state.pop("_pwf_t", False):
++        _pwf(state, tokens)
+     a = _g19(o, "o", state)
+     if a is None:
+         a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
++    if PWF_AT == 2 and state.pop("_pwf_t", False):
++        _pwf(state, tokens)
+ 
+     fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
+     pdl = GLUE_PDL or (GEMV_PDL and tokens in PDL_TOKENS and _G10.get("lib") is not None)
