@@ -200,6 +200,7 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
         if (nb > 0) asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"(bytes) : "memory");
     };
     if (a.npf >= 100 && a.npf < 200) bulk_pf(a.npf - 100);  // before the wait
+    if (a.npf >= 1000) bulk_pf((a.npf - 1000) / 32);  // 1000 + pre * 32 + post: both
     if (a.npf > 1 && a.npf < 100 && t < NG * WG) {  // L2 prefetch of this warp-slot's next atoms (gemv14 order: atom stride WG * 32 lanes)
         const int gi2 = t / WG, wi2 = t % WG;
         const long wo2 = (((long)(rg0 + gi2)) * (KC / 32) + wi2) * 32;
@@ -234,7 +235,15 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
     }
 #pragma unroll
     for (int p = 0; p < XR; ++p) { stage(p); asm volatile("cp.async.commit_group;"); }
-    if (a.npf >= 200) bulk_pf(a.npf - 200);  // after the wait and the x / x32 / header copies are issued
+    if (a.npf >= 200 && a.npf < 1000) bulk_pf(a.npf - 200);  // after the wait and the x / x32 / header copies are issued
+    if (a.npf >= 1000 && (a.npf - 1000) % 32) {  // post part: atoms after the pre part
+        if (t < 2 * NG) {
+            const int pre = (a.npf - 1000) / 32, nb = min((a.npf - 1000) % 32, NA - PF - pre);
+            const long o0 = ((long)(rg0 + (t >> 1)) * (KC / 32) + (PF + pre) * WG) * 32;
+            const char* src = (t & 1) ? (const char*)(a.WN + o0) : (const char*)(a.WS + o0);
+            if (nb > 0) asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"((unsigned)nb * WG * 32 * ((t & 1) ? 4 : 8)) : "memory");
+        }
+    }
     auto router_item = [&]() {
     // router item
     if (XR >= 4) asm volatile("cp.async.wait_group 4;");

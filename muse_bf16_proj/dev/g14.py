@@ -13,7 +13,7 @@ src = open(os.path.join(d, "gemv14.cu")).read()
 src = src.replace("G14_CONFIGS", " ".join("G14_CASE(%d,%d,%d,%d,%d)" % (m, u, wg, pf, xp) for (m, u, wg, pf, bk, xp) in sorted(set(cfgs))))
 mod = load_inline(name="pj_g14_" + hashlib.md5(src.encode()).hexdigest()[:10],
                   cpp_sources="void g14_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
-                  cuda_sources=src, functions=["g14_gemm"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"])
+                  cuda_sources=src, functions=["g14_gemm"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"] + ["-D" + d_ for d_ in os.environ.get("DEFS", "").split()])
 
 
 def pack14(w, kc):
@@ -43,6 +43,10 @@ def pack14(w, kc):
     return S, N, hdr, scale
 
 
+import re as _re
+_ns = {"torch": torch}
+exec("G13_ESC = 8\n" + _re.search(r"(def _compress\(w\):.*?)\ndef _pack16", open(os.path.join(d, "sub_template.py")).read(), _re.S).group(1), _ns)
+_pack14s = _ns["_pack14"]
 SH = [("qkv", "qkv_gate", 2304), ("o", "o", 8192), ("pool", "pooler", 4096), ("unp1k", "unpooler", 1024), ("unp", "unpooler", 8192)]
 only = os.environ.get("SH")
 Wr = reference.generate_weights(reference.WEIGHTS_SEED)
@@ -66,7 +70,7 @@ for nm, layer, n in SH:
             if m_ != M or k % (1024 * u) or (n // 8) % bk or (n // 8 // bk) * wg > 32: continue
             thr = (n // 8 // bk) * wg * 32
             if M * (2048 * u + 64) + thr // 32 * ((M + 15) // 16) * 512 + (n // 8 // bk) * 8 * ESC * 8 > 227 * 1024: continue
-            if u not in packs: packs[u] = pack14(W, 1024 * u)
+            if u not in packs: packs[u] = _pack14s(W, 1024 * u)  # s36: sub_template packer (DEC3 layout)
             S, N, hdr, scale = packs[u]
             # probe: last token = one power of two at an escaped column (exact column of W expected)
             er = (hdr[:, :, 1] != 2.0 ** -15).nonzero()

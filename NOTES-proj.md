@@ -828,3 +828,29 @@
   with DEC4. tools/esc_probe.py is stale on layer main (g13_gemv signature).
 - The layer agent picked DEC3 up from the r-proj commit while I tested (its working tree, g22 left on the old layout via
   _pack19(dec3=False): correct, since g22_src.cu has the old decode).
+
+## Session 36 (2026-10-26 16:42-17:25Z): pr8 bulk L2 prefetch after the wait: WIN in the H100 layer (v1 -1.6 us)
+- No judge runs (proj checks 20/20 for 10-26). Item: layer s41 "pr8 23.5 us at 2.4 TB/s (m8 issue-bound)".
+- New probes (dev/pr8.cu / pr8.py): PRED=<ns> (PDL predecessor pr8_pred, 32x256 threads, triggers at start, like g19.py),
+  DEFS=PR8_NOW (W re-read from L1/L2), PR8_NOMATH (no decode/mma), PR8_RLAST / PR8_RMID=<atom> (router item placement);
+  TRACE=1 now honours PRED.
+- H100 standalone (no pred) 31.4 us; pooler only (npf -1) 26.2; NOW+NOMATH skeleton 17.7 (!); NOMATH 24.8: NOT issue-bound
+  (math adds ~1.4 us). PF 2/4/8 flat, PF 16 +8. Trace after a 3 us pred (median us): t1 (x32 slice landed) 10.5,
+  t2 (router partials stored) 14.1, t3 14.6, t4 (pooler loop end) 29.4, t5 31.0; loop = 50 MB in ~15 us (3.3 TB/s). So the
+  loss = the serialized prologue: router W (8.4 MB) + PF atoms (6.3 MB) queue ahead of x32, then ~3.5 us router math/sync
+  where HBM idles; plus a ~9 us t4 spread (blocks on the pred's SMs start ~3 us late, fixed work per block).
+- Fix: npf 2xx = one cp.async.bulk.prefetch.L2 per (row group, WS/WN) of atoms [PF, PF + xx), issued after the wait right
+  after the x/x32/header cp.asyncs (streams during the router phase). Standalone after a 3 us pred, 4 interleaved rounds:
+  npf 0 25.8-26.4 vs 212 25.0-25.7 (-0.8). 204-216 similar, 224 +0.8, PF2+208 no gain.
+- Dead: same prefetch BEFORE the wait (npf 1xx: 104/108 tie, 112+ worse; with PRED 6000 108 -1.4 but layer-like PRED
+  3-4 us loses), pre+post combos (npf 1000 + 32 pre + post: +0.4..3), router item after the loop (RLAST +5 us: the finisher
+  then waits on the slowest pooler block), router item mid-loop (RMID 4/8 tie, 16 +1), the old per-warp prefetch.global.L2
+  (npf 4-28: -0.5 at best), gemv14 qkv m8 with the same post-x prefetch (DEFS=G14_BPF=8/12/20: +0.2..1.2 us; g14 has no
+  router stall to fill).
+- Layer (/tmp/pj36 copies of r-layer 0dcefe6, TUNE = {} appended to both submission.py; B = new pr8_src.cu + PR8_CFG npf
+  212): ab_files A B B A, 7 rounds: v1 sliding 149.16 -> 147.60, full 161.87 -> 160.20 (-1.56/-1.67); 1st run (5 rounds)
+  full -1.6; 208/216/220 vs A also -1..-2.5 (noise between them). Tests 13/13, scored_test v1 x3 PASS, route_judge v1
+  0/80, replay_test 0 fails. files_eq: run-to-run differences in output[1] (next attention input) at v1 sliding seed 0
+  appear B vs B and A vs A (decode 1 full seed 1: 2 elements) = pre-existing nondeterminism, not pr8 (B with npf 0 == A).
+- Handoff: dev/s36/pr8_bpf_layer.patch (pr8_src.cu + PR8_CFG), `git apply -p1` on r-layer 0dcefe6. COORD Handoffs proj s36.
+- g14.py now packs with sub_template's _pack14 (DEC3 layout; its own pack14 was the old layout) and takes DEFS.

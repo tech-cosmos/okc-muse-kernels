@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~16:45 UTC (session 35).
+Updated 2026-10-26 ~17:25 UTC (session 36).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -141,7 +141,14 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## same 12 bits re-arranged (code bit 0 in the byte, sign + c1..c3 in the word at shift-friendly bits; prmt injects 0x38):
 ## 3 instr per BF16 pair (dec8 11 vs 16). H200 proxy g19 B-A: m16 -0.4..-1.65, pool m32 -0.48 us; layer H100 tie, tests
 ## 13/13 + scored 24/24, T=1/8 bitwise same. Layer agent integrating it (g22 kept on old layout). Old decode: -DPJ_DEC4.
+## Session 36: pr8 (layer T=8 pooler+router) bulk L2 prefetch of W atoms [PF, PF+12) per row group AFTER the wait (npf 212):
+## H100 layer ABBA v1 -1.56/-1.67 us, outputs unchanged; handoff dev/s36/pr8_bpf_layer.patch. pr8 is NOT issue-bound (no-math
+## +1.4 us only): its loss is the serialized prologue (router W + PF ahead of x32, ~3.5 us router math with HBM idle) and a
+## ~9 us block-finish spread. Dead: prefetch before the wait, router last/mid-loop, same prefetch in g14 qkv m8. NOTES s36.
 ## Next (ranked)
+-25. (s36) Layer should bundle pr8 npf 212 (and DEC3) into its next-sandbox first check. Remaining pr8 room (H100 ~25 us
+   after pred vs ~18 us bytes): the block-finish spread (blocks on the predecessor's SMs start late: try 2 row groups of
+   uneven size, or the late blocks skip the router item) and the router-math phase (fewer, fatter router items).
 -24. (s35) Layer's next-sandbox first check should carry DEC3 (layer is integrating it). proj's own first check tomorrow = main
    (DEC3 in g13/g14 m1/m8 picks, tg2 unpooler m8 candidate: read 'tune' lines in the judge log; submit if > 1.3110).
    DEC4 (v85) and g13o (v84) are already in the layer.

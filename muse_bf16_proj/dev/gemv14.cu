@@ -111,6 +111,14 @@ __global__ void __launch_bounds__(1024, 1) gemm(const uint2* __restrict__ WS, co
     unsigned wn_[PF];
 #pragma unroll
     for (int p = 0; p < PF; ++p) { ws_[p] = ld2(wbs + p * WG * 32); wn_[p] = ld1(wbn + p * WG * 32); }
+#ifdef G14_BPF  // s36 (as pr8 npf 2xx): bulk L2 prefetch of atoms [PF, PF + G14_BPF) of each row group (WS, WN)
+    if (t < 2 * NG) {
+        const int nb = min(G14_BPF, NA - PF);
+        const long o0 = (((long)ks * nrg_all + rg0 + (t >> 1)) * (KC / 32) + PF * WG) * 32;
+        const char* src = (t & 1) ? (const char*)(WN + o0) : (const char*)(WS + o0);
+        if (nb > 0) asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"((unsigned)nb * WG * 32 * ((t & 1) ? 4 : 8)) : "memory");
+    }
+#endif
     float acc[TT][4];
 #pragma unroll
     for (int tt = 0; tt < TT; ++tt) acc[tt][0] = acc[tt][1] = acc[tt][2] = acc[tt][3] = 0.f;
