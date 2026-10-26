@@ -1,0 +1,182 @@
+diff --git a/muse_moe_w4a16/submission.py b/muse_moe_w4a16/submission.py
+index cbdd977..d9341da 100644
+--- a/muse_moe_w4a16/submission.py
++++ b/muse_moe_w4a16/submission.py
+@@ -3265,7 +3265,7 @@ template <int NRT, int NC, int NSTG, int KPS>
+ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
+                                              int r1, const int* s_rs, const int* s_e, uint4* smem, uint64_t* full,
+                                              uint64_t* empty, int& st, int& ph, int& i, uint64_t* xrdy = nullptr,
+-                                             int early = 0, int l2h = TK2F_L2H) {
++                                             int early = 0, int l2h = TK2F_L2H, int rs = 1) {
+   constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * 1152, KB = NC * KPS;
+   int a = 0;
+ #if TK2F_L2H
+@@ -3275,7 +3275,7 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
+   asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol_last));
+   asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol_first));
+ #endif
+-  for (int R = r0; R < r1; ++R) {
++  for (int R = r0; R < r1; R += rs) {  // n7 ILV: rs = gridDim.x (row R of every segment on CTA R % G)
+     while (s_rs[a + 1] <= R) ++a;
+     const int e = s_e[a];
+     const int lr = (R - s_rs[a]) & (RPE - 1);
+@@ -3318,12 +3318,22 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float*
+                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
+                                              int& ph, int& rb, uint64_t* xrdy = nullptr) {
+   constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152;
++  // n7 ILV (PF & 32): CTA b takes rows b, b + G, b + 2G, ... of BOTH phases (every segment is spread over all CTAs), each
++  // gemm13 segment j publishes into its own counter cnt[64 + j] and gemm2 segment j waits only for that one. All CTAs
++  // walk the segments in the same order, so segment j's gemm13 rows are done ~(S - 1 - j) / S of phase 1 before any
++  // CTA needs them in phase 2: no phase barrier. The next segment's x is L1-prefetched one row ahead (gemm2: only after
++  // its counter was seen complete; the acquire is then skipped at the segment change, as it would drop L1).
++  constexpr bool ILV = (PF & 32) != 0;
++  const int RS = ILV ? (int)gridDim.x : 1;
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
+   uint4 xf[NQ][2];
+-  int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0, ci = 0;
++  int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0, ci = 0, nseg = 0;
++  bool pre_ok = false;  // ILV gemm2: the next segment's counter was already seen complete
++  bool pre_x = false;   // ILV: the next segment's x is (being) copied into xs by cp.async
++  uint4* xs = smem + NSTG * NC * KPS * 72 + warp * (NQ * 2 * 32) + lane;  // ILV: lane-private next-segment x
+   float gsc = 0.f;
+   const uint4* wsm = smem + warp * 32 + lane;
+-  for (int R = r0; R < r1; ++R) {
++  for (int R = r0; R < r1; R += RS) {
+     if (R >= seg_end) {
+       while (s_rs[a + 1] <= R) ++a;
+       const int gi = (R - s_rs[a]) / RPE;
+@@ -3334,7 +3344,17 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float*
+       off = s_off[e] + gi * 8;
+       n = min(8, s_off[e + 1] - off);
+       ci = a * 4 + gi;
+-      if (!GATED && !((PF & 2) && R != r0)) {  // all gemm13 rows written (by any CTA): see moe_tk2f. PF & 2 (s13): only
++      nseg = 0;
++      if (ILV && !GATED) {
++        if (!pre_ok) {
++          const int* cp = cnt + 64 + seg_start / RPE;
++          int c;
++          do {
++            asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cp) : "memory");
++          } while (c < 2 * RPE);
++        }
++        pre_ok = false;
++      } else if (!GATED && !((PF & 2) && R != r0)) {  // all gemm13 rows written (by any CTA): see moe_tk2f. PF & 2 (s13): only
+         int c;                                    // at the CTA's first gemm2 row (cnt never decreases within a call)
+         do {
+           asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt) : "memory");
+@@ -3344,6 +3364,15 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float*
+       int row = 0;
+       if (v) row = GATED ? (s_srt[off + g] >> 3) : (off + g);
+       const uint4* xr = reinterpret_cast<const uint4*>(X + (size_t)row * KD + 16 * t);
++      if (ILV && pre_x) {  // n7: x was copied during the previous row (same lane wrote it: no barrier)
++        asm volatile("cp.async.wait_all;" ::: "memory");
++#pragma unroll
++        for (int qq = 0; qq < NQ; ++qq) {
++          xf[qq][0] = v ? xs[(qq * 2) * 32] : make_uint4(0, 0, 0, 0);
++          xf[qq][1] = v ? xs[(qq * 2 + 1) * 32] : make_uint4(0, 0, 0, 0);
++        }
++        pre_x = false;
++      } else
+ #pragma unroll
+       for (int qq = 0; qq < NQ; ++qq) {
+         const int kc = qq * NC + warp;
+@@ -3357,6 +3386,37 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float*
+       }
+       if ((PF & 16) && GATED && R == r0) mbar_arrive(xrdy);  // s15 FP: x loads issued, the producer may stream
+     }
++    if (ILV && R + RS >= seg_end && R + RS < r1) {  // n7: next row starts a new segment: prefetch its x into L1
++      const int R2 = R + RS;
++      int a2 = a;
++      while (s_rs[a2 + 1] <= R2) ++a2;
++      const int gi2 = (R2 - s_rs[a2]) / RPE, e2 = s_e[a2], off2 = s_off[e2] + gi2 * 8;
++      bool ok = true;
++      if (!GATED) {
++        int c;
++        asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt + 64 + (s_rs[a2] + gi2 * RPE) / RPE) : "memory");
++        // every lane acquired for itself; the CTA-wide vote also keeps a late warp's acquire (L1 invalidate) from
++        // dropping lines another warp already prefetched
++        int r;
++        asm volatile("{ .reg .pred p, q; setp.ne.s32 p, %1, 0; bar.red.and.pred q, 1, %2, p; selp.s32 %0, 1, 0, q; }"
++                     : "=r"(r) : "r"((int)(c >= 2 * RPE)), "n"(NC * 32) : "memory");
++        ok = pre_ok = r != 0;
++      }
++      if (ok) {
++        if (g < s_off[e2 + 1] - off2) {
++          const int row2 = GATED ? (s_srt[off2 + g] >> 3) : (off2 + g);
++          const char* p = reinterpret_cast<const char*>(X + (size_t)row2 * KD + 16 * t);
++#pragma unroll
++          for (int qq = 0; qq < NQ; ++qq) {
++            const int kc = qq * NC + warp;
++            asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(smem_u32(xs + (qq * 2) * 32)), "l"(p + kc * 128) : "memory");
++            asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(smem_u32(xs + (qq * 2 + 1) * 32)), "l"(p + kc * 128 + 16) : "memory");
++          }
++        }
++        asm volatile("cp.async.commit_group;" ::: "memory");
++        pre_x = true;
++      }
++    }
+     if ((PF & 1) && R + 1 == seg_end && R + 1 < r1) {  // s13: L1 prefetch of the next segment's x during this row
+       const int a2 = seg_end >= s_rs[a + 1] ? a + 1 : a;
+       const int e2 = s_e[a2], off2 = s_off[e2] + ((seg_end - s_rs[a2]) / RPE) * 8;
+@@ -3444,11 +3504,14 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float*
+               __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+         }
+       }
+-      if (R + 1 == seg_end || R + 1 == r1) {  // publish this CTA's rows of the segment
++      ++nseg;
++      if (ILV ? (R + RS >= seg_end || R + RS >= r1) : (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
+         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+         if (tid == 0) {
+-          __threadfence();
+-          atomicAdd(cnt, R + 1 - max(seg_start, r0));
++          if (ILV) asm volatile("fence.acq_rel.gpu;" ::: "memory");  // n7: not the SC fence (__threadfence) per segment
++          else __threadfence();
++          if (ILV) atomicAdd(cnt + 64 + seg_start / RPE, nseg);
++          else atomicAdd(cnt, R + 1 - max(seg_start, r0));
+         }
+       }
+     } else if (NC == 8 || ct < 256) {
+@@ -4301,12 +4364,14 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
+       b1 = tk2g_split(blockIdx.x + 1, nact, D, 128, s_e, s_off);
+     }
+   }
++  if (PF & 32) { a0 = b0 = blockIdx.x; a1 = n13; b1 = n2; }  // n7 ILV: rows strided over the CTAs (see tk2f_consume)
+   int st = 0, ph = 0;
+   if (warp == NC) {
+     if (lane == 0) {
+       int i = 0;
+-      tk2f_produce<512, NC, NSTG, KPS>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv);
+-      tk2f_produce<256, NC, NSTG, KPS>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv);
++      const int rs = (PF & 32) ? (int)gridDim.x : 1;
++      tk2f_produce<512, NC, NSTG, KPS>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv, rs);
++      tk2f_produce<256, NC, NSTG, KPS>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv, rs);
+     }
+     return;
+   }
+@@ -4351,7 +4416,7 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
+                        const void* gs13, const void* gs2, const void* x, const void* ids, int start, int count,
+                        void* meta, void* sr, void* inv, void* inter, void* y, void* cnt, const void* tw = nullptr,
+                        const void* w1 = nullptr, void* out = nullptr, float eps = 0.f) {
+-  constexpr int SMEM = NSTG * NC * KPS * 1152 + (GS == 16 ? NC * 8 * 2 * 32 * 16 : 0);
++  constexpr int SMEM = NSTG * NC * KPS * 1152 + (GS == 16 || (PF & 32) ? NC * 8 * 2 * 32 * 16 : 0);
+   static int grid = 0;
+   if (!grid) {
+     int dev, nsm;
+@@ -4404,6 +4469,8 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
+     if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 64>(0, TK2F_ARGS0);
+     if (cfg == 84204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 68>(0, TK2F_ARGS0);
+   }
++  if (cfg == 98204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 36>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 36>(0, TK2F_ARGS0);  // n7 ILV + PF 4
++  if (cfg == 99204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 32>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 32>(0, TK2F_ARGS0);  // n7 ILV (M = 1: old y32 order)
+   if (cfg == 96204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 16>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 16>(0, TK2F_ARGS0);
+   if (cfg == 97204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 20>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 20>(0, TK2F_ARGS0);
+   if (cfg > 80000 && cfg < 96000 && cfg % 1000 == 204) {  // s13 PF = cfg / 1000 % 10: 1 = L1 prefetch of the next segment's
+@@ -5029,7 +5096,7 @@ def kernel_fn(data, st):
+             lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
+                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
+             c5 = c % 100000
+-            if c5 == 97204 or (80000 < c5 < 96000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
++            if c5 in (97204, 98204) or (80000 < c5 < 96000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
+                 lib.moe_norm3_launch(y32, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out, st["cnt"])
+                 return out
+             lib.moe_norm2_launch(y32, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], POST_NORM_EPS, out,

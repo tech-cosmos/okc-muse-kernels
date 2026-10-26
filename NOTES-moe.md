@@ -973,3 +973,26 @@
   for these shapes and the proxy says issue-bound H200 gains: only the H200 tuner can decide (TUNE candidate, never default).
 - Layer s58 was already wiring it (uncommitted r-layer work seen in a /tmp copy): TUNE option tk2h at T=16/32; told them
   under Requests that their value goes in as W directly (no -1).
+
+## Night4 session 7 (2026-10-26 20:50Z - ~21:50Z, no judge runs: moe checks 20/20 until 00:00Z) -- tk2f phase barrier: ILV dead, BAL queued
+- Lead 20:16Z item (hot-expert single pass) is DONE since s29 (layer v87 runs it). Took the tk2f phase-1 -> phase-2 transition.
+- G88 proxy per-row timeline of main (tools/n7/tl_rows.py, tk2h GS8 = main; stamps after each CTA's 1st/2nd row per phase):
+  steady row (R = 16-row tile pair, 72 KB) = 2.0-2.3 us in BOTH phases (the s12 "phase 2 is 12% slower per byte" is
+  NOT per-row cost); what costs is the transition: ph1end median -> counter ok 0.8-2.3 us (wait for the slowest CTA)
+  + the first gemm2 row 2.5-2.9 us (inter x load latency with the ring already full). d32 s7: ph1end 73.7/76.5/78.6,
+  cnt 78.8, row1 81.7, row2 84.0, end 118. d1 s7: ph1end 13.3/15.1/15.4, cnt 15.9, row1 18.4, end 22.5.
+- DEAD: ILV (CTA b takes rows b, b+G, ... of every segment, per-segment counters cnt[64 + j], next-segment x prefetch):
+  barrier gone (spin 0.3 us) but H100 d32 105.9 -> 130 (L1 prefetch) / 154 (cp.async smem prefetch), d16 +13..19.
+  ncu d32: +5.3M instr, L2 hit 10 -> 39%, long_scoreboard x2: every CTA reloads each segment's x (8 tok x 4096 x 2 B =
+  64 KB, ~0.9 R of weights) = +200 MB L2->SM. Any scheme that multiplies segment visits per CTA pays 64 KB per visit.
+  Diff kept in tools/n7/ilv_dead.diff (timeline tools tools/n7/mk_i.py + tli.py).
+- BAL (cfg 98204 = 84204 + PF 32; 99204 = 204 + PF 32 for M = 1): per-segment counters (cnt[64 + j], zeroed by
+  moe_norm2/3 as before) + the split puts gemm13's n13 % G extra rows on the LAST CTAs and gemm2's n2 % G on the FIRST,
+  so no CTA has an extra row in both phases (max rows ceil((n13 + n2) / G) instead of ceil + ceil). Bitwise = main
+  (tools/pf_ab.py 100 98204,99204: 0/240), bench test 15/15.
+  H100 full grid (layer_ab, 3 rounds): d16 83.0 -> 81.8, d32 105.7 -> 108.3, v1 84.0 -> 83.5, d1 (99204) 36.0 -> 36.4.
+  G88 proxy (2 rounds): d16 88.6/89.2 -> 88.0/88.2, d32 119.7/120.7 -> 119.5/120.7, v1 87.0/86.8 -> 85.6/85.5,
+  d1 36.8 -> 38.2. => if the H200 agrees: v1 ~-1.0, d16 ~-0.6 H200 us (~0.14% layer), d1 must stay 204.
+  Queued in DIAG "dec": bal (M > 1) and bal1 (also M = 1). Local DIAG dry run: d16 bal 81.7 vs gs8 83.1, d32 107.0 vs 105.5.
+- If bal wins on the H200 at v1/d16: the layer port is small (moe_src: the PF & 32 lines in tk2f_consume / moe_tk2f +
+  dispatch; layer's other kernels after tk2f must zero cnt[64..127] too, as moe_norm2/3 do: check n2u).

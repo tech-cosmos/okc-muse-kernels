@@ -70,6 +70,12 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 7 (20:50-21:50Z, no judge runs) -- tk2f phase transition (NOTES n7)
+- G88 timeline: rows cost the same in both phases; the loss is the transition (wait for the slowest CTA 0.8-2.3 + first
+  gemm2 row +0.5-0.8 proxy-us). ILV (rows strided over CTAs) DEAD: each CTA reloads 64 KB x per segment (+200 MB L2->SM).
+- BAL (TK2F_DYN 98204, bitwise = main): per-segment counters + extra rows of the two phases on different CTAs. G88 proxy
+  v1 -1.4, d16 -0.6..1.0, d32 0, d1 +1.4 proxy-us; H100 d32 +1.5..2.6. In the 00:00Z DIAG as bal / bal1.
+
 ## Night4 session 6 (20:18-21:00Z, no judge runs) -- r-moe 3710aa8 + 82d6781: tk2h PF4 + layer port (NOTES n6)
 - tk2h (merged-phase consumer, GS8/GS16) now has PF4 (slot-ordered pre-scaled y32 -> moe_norm3, like main tk2f 84204):
   python TK2H_PF4 (cfg + 4) or TK2H_M = {M: W} (GS16 + PF4, weight W). Bitwise = main (tools/n6/h4_ab.py 0/1680).
@@ -87,8 +93,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   okc check /tmp/moe5tl/submission.py --json` (grep diagth: per-CTA ph1end/wait/end on the H200) to pick the weight.
   PF 4 port + layer port: DONE n6.
 
-## Night4 session 4: paper only (scale packing / e4m3-cvt dequant dead, NOTES n4s4).
-
 ## Night4 session 3 (19:31-20:05Z, no judge runs) -- r-moe 1f3b71b
 - TK2F_L2H_RT (python, None = #define 4): run-time tk2f L2 hint mode via cfg + 1000000 * (mode + 1) (PF | 64 copies of
   cfg 204 / 84204 SA; default kernels' SASS identical to HEAD). H100 mode 4 vs 0: d16 -5.1, d32 -4.3, v1 -1.6, d1 -0.6..1.2.
@@ -103,7 +107,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   audit recipe NOTES n4s2). Both queued in the 00:00Z DIAG (h32ne0/offne0, h32rg0/1).
 
 ## Ranked ideas
--9. (s19) grid-aware twm tail by K-split: DONE s20, tie (halves) / dead (quarters). Tail needs cheaper items, not finer.
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
    all their tokens needs N 96-128 accumulators = a SEPARATE kernel (ptxas sizes registers for the whole function).
    E.g. hot experts on their own launch on a subset of SMs concurrently with twm/twq for the rest (2 streams or one
@@ -123,7 +126,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
    ring pass, or w2 tile pairs adjacent instead of 2048 rows apart (prepare repack), or x (inter) prefetch earlier).
    Also: first data at 3.6 us (routing 1.5 + 2.1 latency): let the producer warp do the routing alone (it only needs
    s_rs/s_e) and start bulk copies while the consumers build s_srt; or prefetch expert-0 weights of ALL experts? no.
--2. (s11, measured s12) TWF_MIX = 1 wins v16 -3.3, v32 -4.4 us on H200: make sure the layer re-copies (COORD).
 -1. (s10) Re-check the layer copied the race fix (COORD Requests). Then: why are GS16 phase-2 rows slower (timeline tool in
    NOTES s10: globaltimer per CTA at phase ends)? If fixable, GS16 cuts 8-17% instructions on the layer's d16/d32 and halves
    DRAM when L2 cannot dedup. Suspects: 64 KB extra smem (L1 carveout: inter __ldg x loads), xs LDS before mbar_wait, s_red x2.
