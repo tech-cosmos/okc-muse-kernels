@@ -603,3 +603,17 @@
   pick only if it beats the default by TUNE_MARGIN 0.1%. H100: T=32 full and T=256 full fall back to default (pick gains
   0.3/0.2 us vanished), the rest confirmed (T=8 full g14alt 1 -2.4, T=128 full lt o+unpool -2.8, T=1 full -1.0).
 - proj g22 is dead (H200); no new moe handoff. Last check still planned ~14:30Z.
+
+## s25 (2026-10-26 10:30Z-11:20Z real UTC)
+- Found: the prepare() tuner's synthetic stream was pure noise -> near-uniform routing (T=256 local counts [43,23,20,19,..],
+  29 experts) vs the scored loads' skew ([91-97,73-76,32-50,..], 18-21 experts; route_hist.py). Expert-kernel options
+  could not be judged. Fix v58 (7ab88e4): `_synth_stream` (TUNE_SKEW): each token's 8 experts = local j w.p. SYNTH_P[j]
+  (geometric-ish shares from route_hist, 20 hot local experts) + random off-GPU fill; stream = sum of their unit router
+  rows * sqrt(8192/8) + 0.3 noise. Synth now: T=256 362 routes/23 experts [96,70,49,29,19,..], T=128 204/21 [54,36,24,..],
+  T=32 39/11, T=16 28/13 (real 48-55/9-11, 23-24/6-10). Weights only, prepare-time, outputs discarded.
+- v58: TUNE option twm_order (76) at T=128/256. v59 (46fb62d): + twm_order 4, twm_tail 32 at T=256.
+  H100 tuner (skewed): T=256 sliding default 432.5 / o76 418.2 / o4 431.9 / t32 431.3; full 667.3 / 654.0 / 665.8 / 665.5
+  -> o76 (confirmed). T=128 o76 tie. Real scored inputs (ab_files verify 5 rounds, notwm vs v58): v32 415.5 -> 402.7,
+  666.3 -> 651.9 us; v1/v16 tie. (Unskewed tuner had o76 as a tie: 474.6 vs 473.0.)
+  H200 truth unknown (moe proxy: o76 +3.6 at v32; judge v43 89325570: -11/-4): the last check's tuner lines decide.
+- Forced each option: scored verify 32 x2 ok, replay 0/20 (o76 also v16). Tests 13/13. Prepare (incl. tune) ~4 s warm.

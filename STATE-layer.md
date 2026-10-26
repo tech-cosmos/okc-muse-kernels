@@ -1,15 +1,18 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~10:30Z real UTC (session 24).
+Updated 2026-10-26 ~11:20Z real UTC (session 25).
 
-**s24: main = v57 (7d14445) = v55 + proj s16 H200 lt picks as TUNE options (pooler/unpool m256 LT_DEFAULT_OFF; qkv m32
-alt cfg via new `LT_ALT` / option "ltalt:<key>") + tuner CONFIRM ROUND: a non-default pick must beat the defaults by
-TUNE_MARGIN 0.1% in a fresh 40-rep 2-way interleaved run (else defaults = v45 behaviour). Tests 13/13; forced new options:
-scored d32/v32 x2 ok, replay 0/20. NOT CHECKED. 1 CHECK + 1 SUBMIT LEFT. Plan unchanged: ~14:30Z real UTC run the last
-check on main (+ anything moe/proj post by ~14:15Z, as TUNE options), copy every "layer tune" line of
-profiles/submission.<job>.log into NOTES (H200 A/B of ~45 options); submit by 17:30Z that code if its check >= 1.9558
-(board best; ties ok), else v45 (`git show 2dddb88:muse_decode_layer/submission.py > /tmp/v45.py`, check ea9421fa 1.9634x).
-Push everything before 18:30Z.**
+**s25: main = v59 (46fb62d) = v57 + tuner on SKEWED synthetic routing (`SYNTH_P`/`_synth_stream`: stream = sum of 8
+picked experts' unit router rows; local expert j picked w.p. SYNTH_P[j] = scored loads' mean shares; T=256 synth
+[96,70,49,29,..] vs real [91-97,73-76,32-50,..]; before: near-uniform [43,23,20,..], so expert options were invisible)
++ moe_twm options at T=128/256: twm_order 76 / 4, twm_tail 32 (`_moe_TWM_ORDER_M`/`_moe_TWM_TAIL_M` set per trace from
+the tune). H100: tuner picks order 76 at T=256 (synth 418/654 vs 433/667); REAL scored A/B (ab_files 5 rounds) v32
+415.5->402.7 / 666.3->651.9 us, rest tie. moe's proxy says o76 loses ~3.6 on H200, judge v43 said -11/-4: the H200 tuner
+in the last check decides (read its "layer tune T=256" lines). Tests 13/13, forced options scored/replay ok. NOT CHECKED.
+1 CHECK + 1 SUBMIT LEFT. Plan unchanged: ~14:30Z real UTC run the last check on main (+ anything moe/proj post by
+~14:15Z, as TUNE options; expert options now tune on realistic loads), copy every "layer tune" line of
+profiles/submission.<job>.log into NOTES; submit by 17:30Z that code if its check >= 1.9558 (board best; ties ok), else
+v45 (`git show 2dddb88:muse_decode_layer/submission.py > /tmp/v45.py`, check ea9421fa 1.9634x). Push before 18:30Z.**
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
 option sets on synthetic inputs (shapes only) and keeps the fastest in state["tune"]; `_opt()` reads it at trace time.
