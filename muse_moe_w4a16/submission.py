@@ -2457,7 +2457,7 @@ static int64_t tk2f_go(int nr, const void* w13, const void* s13, const void* w2,
       (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt);
 }
 
-// cfg = KPS * 100 + NSTG: 108 (s7 default), 204, 208
+// cfg = KPS * 100 + NSTG: 108 (s7 default), 204 (s8), 208, 402, 403, 206
 int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2_, torch::Tensor s2_,
                         torch::Tensor lut_, torch::Tensor gs13_, torch::Tensor gs2_, torch::Tensor x_,
                         torch::Tensor ids_, int64_t start, int64_t count, torch::Tensor meta_, torch::Tensor sr_,
@@ -2469,6 +2469,9 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     cnt_.data_ptr()
   if (cfg == 204) return tk2f_go<8, 4, 2>(TK2F_ARGS);
   if (cfg == 208) return tk2f_go<8, 8, 2>(TK2F_ARGS);
+  if (cfg == 402) return tk2f_go<8, 2, 4>(TK2F_ARGS);
+  if (cfg == 403) return tk2f_go<8, 3, 4>(TK2F_ARGS);
+  if (cfg == 206) return tk2f_go<8, 6, 2>(TK2F_ARGS);
   return tk2f_go<8, 8, 1>(TK2F_ARGS);
 #undef TK2F_ARGS
 }
