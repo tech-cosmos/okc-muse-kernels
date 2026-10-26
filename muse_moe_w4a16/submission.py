@@ -2974,7 +2974,7 @@ int64_t moe_stream_launch(torch::Tensor desc_, torch::Tensor beg_, int64_t sb, i
   cudaStream_t st = at::cuda::getCurrentCUDAStream();
 #define STRM(N) { cudaFuncSetAttribute(moe_stream<N>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); \
     moe_stream<N><<<grid, 64, smem, st>>>((const long long*)desc_.data_ptr(), (const int*)beg_.data_ptr(), (int)sb); }
-  if (nstg == 8) STRM(8) else if (nstg == 3) STRM(3) else STRM(4)
+  if (nstg == 8) STRM(8) else if (nstg == 3) STRM(3) else if (nstg == 2) STRM(2) else STRM(4)
 #undef STRM
   return (int)cudaGetLastError();
 }
@@ -3368,6 +3368,9 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
   // n7 BAL (PF & 32): per-segment gemm13 -> gemm2 counters cnt[64 + j] (gemm2 segment j waits only for gemm13 segment j)
   // with the rounding rows placed so that no CTA gets an extra row in BOTH phases (see moe_tk2f)
   constexpr bool BAL = (PF & 32) != 0;
+  // n10 ER (PF & 128): release the ring slot right after its LDS (fence.proxy.async orders the generic-proxy smem reads
+  // before the producer's next bulk copy = async proxy) instead of after the dq/mma: the slot refills during the math.
+  constexpr bool ER = (PF & 128) != 0;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   uint4 xf[NQ][2];
   int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0, ci = 0;
@@ -3443,6 +3446,10 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       }
       const int cs = st;  // s10: arrive on empty only AFTER the stage's registers are used (see below)
       if (++st == NSTG) { st = 0; ph ^= 1; }
+      if (ER) {
+        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+        mbar_arrive(&empty[cs]);
+      }
 #pragma unroll
       for (int h = 0; h < KPS; ++h) {
         uint32_t sc[4];
@@ -3453,6 +3460,10 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
           sc[3] = slut[sw[h] >> 24];
         }
         const int qq = q * KPS + h;
+        if (PF & 256) {  // n10 timing probe only (wrong output): no math, keep the loads
+          acc[0][0] += __uint_as_float(sc[0] ^ wv0[h].x ^ wv1[h].y ^ xf[qq][0].x);
+          continue;
+        }
 #pragma unroll
         for (int ii = 0; ii < 2; ++ii) {
           const uint4 wv = ii ? wv1[h] : wv0[h];
@@ -3468,7 +3479,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       // s10 RACE FIX: arriving right after ISSUING the ring LDS (as before) let the producer's next bulk copy
       // overwrite the stage before some LDS had read it (seen as wrong weights in the first row after an x reload,
       // when 16 LDGs per thread are in flight: the s7 "first gemm2 row" race). Arrive once the data is consumed.
-      mbar_arrive(&empty[cs]);
+      if (!ER) mbar_arrive(&empty[cs]);
     }
     if (NA == 2) {
 #pragma unroll
@@ -4465,6 +4476,22 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 64>(0, TK2F_ARGS0);
     if (cfg == 84204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 68>(0, TK2F_ARGS0);
   }
+  if (cfg > 90000 && cfg < 96000 && (cfg / 1000 == 91 || cfg / 1000 == 94)) {  // n10 ER (+ PF 4 at 94xxx), cfg % 1000 = KPS * 100 + NSTG
+    const int c = (int)(cfg % 1000);
+    TORCH_CHECK(sa, "moe_tk2f ER: SA only");
+    if (cfg / 1000 == 94) {
+      if (c == 402) return tk2f_go<8, 2, 4, false, false, true, 8, 0, 196>(0, TK2F_ARGS0);
+      if (c == 403) return tk2f_go<8, 3, 4, false, false, true, 8, 0, 196>(0, TK2F_ARGS0);
+      return tk2f_go<8, 4, 2, false, false, true, 8, 0, 196>(0, TK2F_ARGS0);
+    }
+#if TK2_EXP
+    if (c == 412) return tk2f_go<8, 2, 4, false, false, true, 8, 0, 320>(0, TK2F_ARGS0);  // n10 probe: no math
+    if (c == 214) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 320>(0, TK2F_ARGS0);
+#endif
+    if (c == 402) return tk2f_go<8, 2, 4, false, false, true, 8, 0, 192>(0, TK2F_ARGS0);
+    if (c == 403) return tk2f_go<8, 3, 4, false, false, true, 8, 0, 192>(0, TK2F_ARGS0);
+    return tk2f_go<8, 4, 2, false, false, true, 8, 0, 192>(0, TK2F_ARGS0);
+  }
   if (cfg == 98204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 36>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 36>(0, TK2F_ARGS0);  // n7 BAL + PF 4
   if (cfg == 99204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 32>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 32>(0, TK2F_ARGS0);  // n7 BAL (M = 1: old y32)
   if (cfg == 96204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 16>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 16>(0, TK2F_ARGS0);
@@ -4904,7 +4931,11 @@ DIAG_VARIANTS = {  # s30 queued: H200 A/B of moe_hot (HOT_M) on the layer's v32 
            + [(f"h16w{w_}p4", {"TK2H": 16, "TK2H_W": w_, "TK2H_MIN": 9, "TK2H_PF4": 1}) for w_ in (2, 3, 4)]
            # n7: BAL = per-segment counters + rounding rows of gemm13 on the last CTAs, of gemm2 on the first (bitwise = main);
            # G88 proxy d16 -0.6..1.0, v1 -1.4, d32 0, d1 +1.4 proxy-us (bal1 = also at M = 1)
-           + [("bal", {"TK2F_DYN": 98204}), ("bal1", {"TK2F_DYN": 98204, "TK2F": 99204})],
+           + [("bal", {"TK2F_DYN": 98204}), ("bal1", {"TK2F_DYN": 98204, "TK2F": 99204})]
+           # n10: er = early ring release (fence.proxy.async after the stage LDS; bitwise = main; H100 tie); nm = NO MATH
+           # (timing probe, WRONG output): gs8 - nm = the most any consumer-side change (GS16, cheaper dq) can win on the
+           # H200 (H100: d1 1.0, d16 3.1, d32 3.7, v1 2.8 us)
+           + [("er", {"TK2F_DYN": 94204, "TK2F": 91204}), ("nm", {"TK2F_DYN": 91214, "TK2F": 91214})],
     "big": [("off", {"HOT_M": {}, "TWM_ORDER_M": {}})]
            + [(f"h{g_}", {"HOT_M": {256: g_}, "TWM_ORDER_M": {}}) for g_ in (24, 32, 40)]
            + [("h32o76", {"HOT_M": {256: 32}, "TWM_ORDER_M": {256: 76}}), ("o76", {"HOT_M": {}, "TWM_ORDER_M": {256: 76}}),
@@ -5043,6 +5074,8 @@ def _diag_stream(st, routes, flush, sink):
             vs.append((name, d, beg, 18432, nstg))
         d, beg = split_rows(rows(512, base[0], base[1], e1, 2), rows(256, base[2], base[3], e1, 2))
         vs.append(("uqk4", d, beg, 36864, 4))
+        d, beg = split_rows(rows(512, base[0], base[1], es, 2), rows(256, base[2], base[3], es, 2))
+        vs.append(("tkp4", d, beg, 36864, 4))  # n10: tk2f's copy pattern at KPS 4 (cfg 84404): does the PATTERN gain?
         for name, cb, nstg in (("sq16", 16384, 8), ("sq18", 18432, 4), ("sq18x8", 18432, 8), ("sq32", 32768, 4),
                                ("sq36", 36864, 4), ("sq64", 65536, 3)):
             d, beg = chunks(e1, cb)
