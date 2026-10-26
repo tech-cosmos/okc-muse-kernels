@@ -1162,3 +1162,22 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   (same kernel for r=1), G24_SKCFG, state["g24sk"], TUNE option g24sk:<key>, TUNE_BASE T=32 g24sk pool+unp ON, TUNE[16]
   += 3 g24sk sets, TUNE[32] += g24sk off/qkv sets.
 - Submission: DIAG24 += SK twins (r 257) of every config (print-only, for the 00:00Z check).
+
+## s55 (2026-10-26 22:32-23:00Z, sandbox okc-night4, session 12): gemv24 tail balancing: dynamic tail + L2 lend-prefetch DEAD
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z).
+- Motivation (G24_TRACE, H100 G132 SK): warp ends q0/50/90/100 ~11.5/17.2/18.5/20.2 us at pool m32 (same work per warp),
+  block-end med 18.5 / max 20.2, intra-block spread ~3 us: up to ~2 us/call if perfectly balanced.
+- dev/s55/gemv25.cu (= gemv24 + new kernel gemm_dt + g25_gemm) and harness dev/s55/g25.py (cfg 7th field "dPT:C" =
+  gemv25 with PT pool tasks per ks and C-stage chunks; 257 = g24 SK; 769 = g24 SK + PF). ESCW PASS for gemm_dt.
+  * gemm_dt: SK over the static part; the last PT row-group tasks of each ks = a global pool of C-stage chunks
+    (ctr[4 + ks], reset by block 0 before its epoch arrive), claimed by atomicAdd after the static range; ring sequence
+    data-driven (lane 0 writes the slot's stage index / -1 into smem meta before arrive.expect_tx), flush on task change.
+    H100 G132 pool m32: d0 22.35 vs SK 23.02 (tie), d64:4 26.8 (+4: 4-stage chunks = ~6 us of a warp, warps ended with 7-16
+    stages). v2 (first claim NS stages ahead, pre-claim the next, no blocking fallback ks): H200 proxy G88 still loses:
+    pool m32 SK 21.1 | d0 23.2 | d16:1 24.4 | d32:1 25.0 | d64:1 26.8; qkv m32 14.5 | 15.4 | 17.1 | 17.5 | 21.7;
+    m16 d16:2 / d32:4 +3.7..4.9. The stage-driven loop alone costs +1-2 us consumer-bound; each claim/flush more. DEAD.
+  * PF (g24 SK, RR bit 9): a warp that finishes L2-prefetches (cp.async.bulk.prefetch.L2, once per warp) the unissued rest
+    of each block-mate's range. H100 G132 +0.5..1.0 us (intra-block spread 2.85 -> 2.14 but median end 17.2 -> 18.0:
+    H100 is HBM-bound, the prefetch only moves bytes earlier), G88 proxy +0.5..1.1 everywhere. DEAD.
+- Lesson: in g24 the per-warp end spread is per-warp HBM share, and any rebalancing that adds claims, flushes or bytes in
+  flight in the main phase costs more than the ~2 us tail it targets. Static SK / static r1 stay (tuner picks).

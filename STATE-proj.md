@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~22:45 UTC (s54: gemv24 SK = stream-K over ring stages (template r|256): H100 layer d32 pool+unp
+Updated 2026-10-26 ~23:00 UTC (s55: g24 tail balancing dead. s54: gemv24 SK = stream-K over ring stages (template r|256): H100 layer d32 pool+unp
 -1.1..-1.9 us/shape, handoff dev/s54/g24sk_layer.patch; DIAG24 carries SK twins. s53: gemv24 (per-warp TMA rings, no producer warp) = H100 layer WIN at T=16/32 (-0.5..-3.5 us/layer, tuner options); handoff dev/s53/g24_layer.patch; print-only _diag24 queued for the 00:00Z check. Checks 20/20 until 00:00Z).
 
 ## Board
@@ -130,6 +130,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s54: g24 SK (r | 256): per-warp equal stage ranges, flush at task boundaries (fixes coarse task quantization; G24_TRACE
 ## shows m32 static warps doing 2 vs 3 tasks). H200 proxy: SK wins m32 + qkv m16, loses o and m16 pool/unp (G132); at G108
 ## SK fixes static (16,1024,2,4,16). DYN smem chunk claims DEAD (+4 us). NOTES s54.
+## s55: gemv24 tail balancing DEAD (dynamic tail pools gemm_dt dev/s55, +1..5 us proxy; finished-warp L2 lend-prefetch PF
+## +0.5..1 us). Per-warp end spread = HBM share; static SK/r1 stay. NOTES s55.
 ## Next (00:00Z check, ranked):
 ## -2. (s54) In the same log: diag24 r257 lines vs r1 (H200 SK vs static per op/m/grid): post which g24sk:<key> to default
 ##    ON (layer TUNE_BASE) per T; check pool/unp m16 G108 (16,1024,4,3,12) vs (16,1024,2,4,16) (H100 layer: sl -0.6..0.8).
