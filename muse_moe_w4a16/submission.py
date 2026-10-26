@@ -2199,11 +2199,20 @@ __global__ void __launch_bounds__(384, 1) moe_twf(
     __nv_bfloat16* out = g2 ? Y : Inter;
 #define TWI(NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
                                                         h < 0 ? 64 : 32, pt, tick + j, &s_flag, h ? -16384 : 16384)
-    switch ((nv + 7) >> 3) {
-      case 1: TWI(8); break;
-      case 2: TWI(16); break;
-      case 3: TWI(24); break;
-      default: TWI(32); break;
+    if constexpr (RT == 4) {
+      switch ((nv + 7) >> 3) {
+        case 1: TWI(8); break;
+        case 2: TWI(16); break;
+        case 3: TWI(24); break;
+        default: TWI(32); break;
+      }
+    } else {  // s11 RT 2: 64-token passes (each dequantized weight serves up to 64 tokens)
+      switch ((nv + 7) >> 3) {
+        case 1: TWI(8); break;
+        case 2: TWI(16); break;
+        case 3: case 4: TWI(32); break;
+        default: TWI(64); break;
+      }
     }
 #undef TWI
     if (!g2) {
@@ -2218,12 +2227,12 @@ __global__ void __launch_bounds__(384, 1) moe_twf(
   }
 }
 
-template <bool SA>
+template <bool SA, int RT>
 static int64_t twf_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_,
                        torch::Tensor s2_, torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_,
                        torch::Tensor sr_, torch::Tensor inter_, torch::Tensor y_, torch::Tensor tk_, torch::Tensor part_,
                        int64_t ns) {
-  constexpr int RT = 4, NSTG = 8;
+  constexpr int NSTG = 8;
   constexpr int SMEM = NSTG * TWC<RT, true, 8>::STG + 1024;
   static int grid = 0;
   if (!grid) {
@@ -2246,8 +2255,10 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
                        torch::Tensor s2_, torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_,
                        torch::Tensor sr_, torch::Tensor inter_, torch::Tensor y_, torch::Tensor tk_, torch::Tensor part_,
                        int64_t ns) {
-  return g_sa ? twf_go<true>(w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, tk_, part_, ns)
-              : twf_go<false>(w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, tk_, part_, ns);
+#define TWFA w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, tk_, part_, ns
+  if (g_sa & 2) return (g_sa & 1) ? twf_go<true, 2>(TWFA) : twf_go<false, 2>(TWFA);  // s11: RT 2, 64-token passes
+  return (g_sa & 1) ? twf_go<true, 4>(TWFA) : twf_go<false, 4>(TWFA);
+#undef TWFA
 }
 // ---- moe_tk2f: the decode gemm13 and gemm2 in ONE launch (moe_tk2 rows, one routing, one ring). Phase 1 = gemm13
 // rows, phase 2 = gemm2 rows (each split over the CTAs as in moe_tk2); the producer streams phase-2 weights as soon
@@ -3386,8 +3397,9 @@ PLAN_OVERRIDE = None
 TB_RT = 0  # big-M moe_tb on (1) or off (0: old moe_big path)
 TB_CFG = 48  # RT*10 + stages
 TW_CFG = 418  # big-M wgmma kernel moe_tw: RT*100 + KG*10 + stages (0: off)
+TWF_RT = 2  # s11: 2 = moe_twf with RT 2 / 64-token passes (needs 2 in TB_PACK: prepare packs w13b2/w2b2)
 TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
-TB_PACK = ()  # RT values packed in prepare for moe_tb
+TB_PACK = (2,)  # RT values packed in prepare (moe_tb; s11: 2 for moe_twf TWF_RT 2)
 _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
 TK2_MAX = 32  # M above this: big-M path
@@ -3399,7 +3411,7 @@ TK2G_W = 0  # s10: GS16 2-group row weight = (8 + TK2G_W) / 8 in the static row 
 TK2G_MIN = 17  # s10: GS16 only from this M (H100: GS16 is slower on the layer routings; A/B on the judge)
 TK2G = 0  # s10: 1 = 16-token segments in moe_tk2f (2 token groups share each dequantized weight fragment): judge bs32 +7 us (check b25182e8), H100 layer routings +6..18 us: off
 TWF_DBG = 0
-TWF_SPLIT_M = {128: 132, 256: 66}  # s11 per-M override of TWF_SPLIT (judge A/B)
+TWF_SPLIT_M = {}  # s11 per-M override of TWF_SPLIT; judge c1659443 {128: 132, 256: 66}: tie (tail -12 us, twf +10 us)
 TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K halves (FP32 partials, ticket): shorter tail
 TK2F = 204  # decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
@@ -3461,10 +3473,11 @@ def kernel_fn(data, st):
         xg = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
         lib.moe_gather_launch(x, meta, sroutes, xg)
         if TWF and rt == 4:
-            lib.moe_set_sa(1 if TWSA and st["sa"] else 0)
+            trt = TWF_RT if f"w2b{TWF_RT}" in st else 4
+            lib.moe_set_sa((1 if TWSA and st["sa"] else 0) | (2 if trt == 2 else 0))
             ns = TWF_SPLIT_M.get(M, TWF_SPLIT)
             part = (torch.full if TWF_DBG else torch.empty)((max(ns, 1) * 32768,), *((float("nan"),) if TWF_DBG else ()), dtype=torch.float32, device=dev)
-            lib.moe_twf_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["lut"], xg,
+            lib.moe_twf_launch(st[f"w13b{trt}"], st[f"w13sb{trt}"], st["gs13"], st[f"w2b{trt}"], st[f"w2sb{trt}"], st["gs2"], st["lut"], xg,
                                meta, sroutes, inter, y, st["tk"], part, ns)
             lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out)
             if TWF_DBG: st["dbg"] = (y, inter, meta, sroutes)
