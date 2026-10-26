@@ -1917,7 +1917,7 @@ def _g19_prepare(state):
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
             {"rf_trig": False}),
-        16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
+        16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
@@ -1926,8 +1926,8 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
              {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
              {"o_pf": 0}),
-        8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
-            {"nu8": True}, {"nu8": True, "nu8x": False}, {"nu8": True, "g14alt:qkv_gate": 1}, {"tk2fx": False},
+        8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
+            {"nu8": False}, {"nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
@@ -1938,6 +1938,10 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
               {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
               {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True}, {"twf_split": 66},
               {"twf_split": 66, "twm_order": 76}, {"twf_split": 1022}, {"twf_split": 1022, "twm_order": 76})}
+# s35: per-(T, sliding) defaults under the tuner (the tune pick overrides them; {} = these): the picks both logged H200
+# tuners of 909010f (0f065691, 703d3a7e) agreed on, so a noisy judge tuner can't fall back to the slower setting.
+# T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
+TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True}}
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
@@ -1948,7 +1952,9 @@ _SLIDING = [True]  # the current kernel_fn call's layer type (set at its start; 
 
 
 def _opt(state, tokens, name, default):
-    return state.get("tune", {}).get((tokens, _SLIDING[0]), {}).get(name, default)
+    key = (tokens, _SLIDING[0])
+    t = state.get("tune", {}).get(key, {})
+    return t[name] if name in t else TUNE_BASE.get(key, {}).get(name, default)
 
 
 # s25: skewed synthetic routing for the tuner (expert kernels' timing depends on the per-expert load, e.g. moe_twm's
