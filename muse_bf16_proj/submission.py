@@ -1628,7 +1628,11 @@ constexpr int WB = 768;  // bytes per 16-row x 32-k atom: 512 sign|mantissa + 25
 constexpr int ESC = 8, NWC = 8;
 #ifdef G19_TRACE
 __device__ unsigned long long trace[132 * 64];
+#ifdef G19_CLK  // s51: SM clock (cycles) instead of globaltimer (ns): intra-block intervals only
+__device__ __forceinline__ unsigned long long gt() { unsigned long long v; asm volatile("mov.u64 %0, %clock64;" : "=l"(v)); return v; }
+#else
 __device__ __forceinline__ unsigned long long gt() { unsigned long long v; asm volatile("mov.u64 %0, %globaltimer;" : "=l"(v)); return v; }
+#endif
 #define TR(slot) trace[blockIdx.x * 64 + (slot)] = gt()
 #else
 #define TR(slot)
