@@ -71,7 +71,7 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
-## Night4 session 3 (19:31-20:05Z, no judge runs) -- r-moe 64212be
+## Night4 session 3 (19:31-20:05Z, no judge runs) -- r-moe 1f3b71b
 - TK2F_L2H_RT (python, None = #define 4): run-time tk2f L2 hint mode via cfg + 1000000 * (mode + 1) (PF | 64 copies of
   cfg 204 / 84204 SA; default kernels' SASS identical to HEAD). H100 mode 4 vs 0: d16 -5.1, d32 -4.3, v1 -1.6, d1 -0.6..1.2.
 - The hints never ran on the H200 (moe checks predate s21; layer board run is v70). DIAG "dec" now = gs8 (4) / l2h0 / l2h1.

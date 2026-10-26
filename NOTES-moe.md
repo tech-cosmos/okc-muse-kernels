@@ -894,7 +894,7 @@
 ## Night4 session 3 (2026-10-26 19:31Z - ~20:05Z, no judge runs: moe checks 20/20 until 00:00Z) -- L2 hints on the H200 DIAG
 - Found while reading: the s21 L2 cache hints (TK2F_L2H / TWM_L2H; layer v73/v76) have NEVER run on the H200: the last
   moe check was 06:05Z (s14) and the layer's board run 703d3a7e is v70. The layer's first check tonight carries them blind.
-- r-moe 64212be: tk2f hint mode selectable at run time: python TK2F_L2H_RT (None = the #define) -> launch cfg +
+- r-moe 1f3b71b: tk2f hint mode selectable at run time: python TK2F_L2H_RT (None = the #define) -> launch cfg +
   1000000 * (mode + 1) -> host static g_tk2f_l2h -> new last kernel arg l2h. Only PF & 64 instantiations read it
   (cfg 204 -> PF 64, 84204 -> PF 68, SA only; non-SA falls back to the default kernel); every other instantiation uses
   the #define as before. First try (l2h read by every instantiation) cost d32 +0.4..0.8 / d16 +0..1 H100 us vs HEAD
