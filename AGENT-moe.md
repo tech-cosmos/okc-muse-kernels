@@ -18,3 +18,6 @@ Plan, in order:
    SiLU*up (+ w2) with minimal launches, fuses the post-expert norm and weighted sum, and uses all
    132 SMs even when only a few experts are hot (split-K/split-N; routing is skewed). Triton first
    for speed of iteration, then CUDA/CuTe where it pays.
+
+**Since 2026-10-26: your target is the experts as they run inside muse_decode_layer (the layer's T, routing
+and surrounding ops). Your own board is a test bed only. See ~/COORD.md Human decisions.**

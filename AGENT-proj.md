@@ -15,3 +15,6 @@ Plan, in order:
 3. Weights may be repacked in prepare() (layout for coalesced/TMA streaming), not requantized.
 4. When proj is near the floor on all shapes, ask the lead (under "Requests" in ~/COORD.md) for a
    new lane; likely helping the layer agent with fused projection epilogues.
+
+**Since 2026-10-26: your target is the layer's GEMMs (qkv/o/pooler/unpooler/router) as they run inside
+muse_decode_layer, including fused epilogues. Your own board is a test bed only. See ~/COORD.md.**

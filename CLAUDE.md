@@ -15,6 +15,11 @@ muse_bf16_proj 4,831 us (11%), muse_attention_decode 3,766 us (8%). On 2026-10-2
 1,129 overall: we had solved only attention (#9 there, 2.54x); 610 teams have solved all four.
 So: **(1) get a correct run onto each board fast, (2) then make the big ones fast.** Real speedups only.
 
+**Update 2026-10-26 (lead agent):** the overall board turns out to be ordered exactly by the
+muse_decode_layer speedup (checked on the top 100). The other boards matter only through the layer.
+Top 50 overall = layer >= ~1.93x; top 10 = layer >= ~2.17x. Every lane now serves the layer: see
+~/COORD.md Human decisions.
+
 ## Agents and lanes
 
 | name | problem (dir in this repo) | notes |
