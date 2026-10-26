@@ -220,3 +220,36 @@
   (check 1a9781226b444d11, 3,698.5 us = tie): cuBLAS 14.21 vs r3 15.10-15.26 (incl. events) -> cuBLAS; not submitted.
 - H100 m256 sweep (no win): (256,32,4,2,512) 12.9, (256,32,8,1,512) 13.2, (256,64,8,2,256,3) 14.1, KC 1024 / NT64 KC512
   18-20 (64 blocks). Budget 10-26 at session end: checks 5/20, scored 4/10.
+
+## Session 9 (2026-10-26 02:06 - 03:30 UTC): gemv18 = TMA-ring streamer for the layer's m16/m32 GEMMs (dev only)
+- Lead 01:45Z: proj now serves the layer (T=16/32 qkv/o/pooler/unpool are cuBLAS there, ~60 us at d32). Built
+  dev/gemv18.cu (+ dev/g18.py sweep "M,KC,AP,NS;...", env SH, GRID, XWARM=1 (x written by a kernel right before, as in
+  the layer), DEFS=G18_NOFIN/NOMMA/NOESC/XFIRST/TRACE; dev/g18t.py M,KC,AP,NS <layer> = per-block globaltimer timeline).
+  Design: 12-bit weights repacked (g18.py pack18) so each stage (ks, 128-row tile, AP atoms x 8 row groups) is ONE
+  contiguous block -> one cp.async.bulk per stage from a producer warp into an NS-deep smem ring; 8 consumer warps (one
+  16-row group each, W = mma A decoded in regs, x = B by ldmatrix from x[:, KC chunk] in smem); stream-K over the
+  flattened (ks, tile, stage) space (balance within one stage); segments covering all of k write BF16 directly, else
+  partials -> smem -> a finisher warp (red.global.add.v4 into FP32 ws, fence, per-row-group atom counter, last arriver
+  converts + re-zeroes). Correct incl. probes/escapes/self-clean (3 reps each).
+- Lessons (H100, timelines):
+  * 16 small bulk copies per stage (2 KB / 1 KB) cost ~75 ns each: AP=1 was 2-3x slower. One copy per stage fixed it.
+  * Bare stream (DEFS=G18_NOFLUSH, old layout): qkv m16 13.2, pool 20.6, unp 20.5 us (cuBLAS 18.1/27.7/25.8) = ~3 TB/s
+    slope. Ring of ~36-48 KB in flight per SM already saturates (A2N3, A4N2).
+  * In-consumer flush (fence + atomic + last pass) stalled all 8 warps at once (same segment boundary): +8..+25 us.
+    Moved to a finisher warp; mid-stream fence+atomic still takes 5-7 us under load (fine, off the critical path), but the
+    END of the kernel pays the chain red -> fence -> atomic -> load -> store (~4 us tail; was ~9 us with per-row-group
+    serial loads, batched now).
+  * Escape headers loaded at segment start = cold HBM loads under full load: stalls short segments. Now loaded one
+    segment ahead (first at kernel start). Must not __shfl after a divergent break (hung the GPU once).
+  * x[:, chunk] lands 3-5.6 us after start when cold (all blocks read the same 64 KB chunk; W streams queue ahead).
+    Waiting for x before streaming W (XFIRST): slightly worse. Warm x (XWARM) saves ~1 us.
+- Numbers (H100 graph replay, us; cuBLAS in brackets), config 16,2048,4,3 / 32,1024,4,3:
+  full kernel, x warm:   qkv m16 19.5 (17.0) m32 20.9 (18.1); pool 26.2 (27.6) 28.7 (27.9); unp 27.0 (25.3) 30.5 (25.7)
+  NOFIN (reds, no completion), x warm: qkv 15.8 (17.2) 17.6 (18.3); pool 24.2 (27.9) 25.0 (28.3); unp 23.6 (25.5) 25.3 (26.0)
+  -> the GEMM part beats cuBLAS everywhere (pooler -13%); the in-kernel completion (~3.5-5 us) eats it.
+- Next: (1) completion OUT of the kernel: standalone = PDL-chained convert+zero kernel (ws n x m FP32 -> BF16, L2-hot);
+  in the LAYER = fuse "round FP32 ws to BF16 + re-zero" into the next op (qkv -> attention prep, o/unpool -> boundary,
+  pooler -> rmsnorm_gain): numerics identical (BF16 rounding on load). (2) x startup: split x into pieces with per-piece
+  barriers in consumption order, or PDL (producer streams W before griddepcontrol.wait; xload after). (3) H200 check
+  via the tuner (BF16_G18) once (1) is in: H200 gains of compressed kernels differ from H100 (gemv14 bigger, gemv16 smaller).
+- No judge runs this session (budget 10-26: checks 5/20, scored 4/10).

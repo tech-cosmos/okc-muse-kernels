@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~02:00 UTC (session 8).
+Updated 2026-10-26 ~03:30 UTC (session 9).
 
 ## Board
 - **Best: submit 71145e34fe424844 = a1f0af7, 1.307x (3,695.6 us), proj rank 196** (router3 at router m9-128; its check
@@ -75,6 +75,12 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   compression gives 28/32 bits only).
 
 ## Next (ranked)
+-3. **Lane since 10-26 01:45Z: the layer's GEMMs at T=16/32** (cuBLAS there: d32 qkv 12.6, o+unpool 26.5, pooler 20.5
+   + 2 splitK reduces, H200). Candidate = dev/gemv18.cu (session 9, NOTES has the timeline lessons): TMA-ring streamer
+   over 12-bit weights, stream-K. Its GEMM part beats cuBLAS on H100 at every m16/m32 shape (warm x: pool m16 24.2 vs
+   27.9, qkv m16 15.8 vs 17.2, unp m32 25.3 vs 26.0) but the in-kernel completion (fence/counter/last pass) adds
+   3.5-5 us. Do: completion outside (PDL convert kernel; in the layer fused into the next op: hand off to layer under
+   Requests), x pieces / PDL W prefetch, then BF16_G18 in the tuner + one check for H200 numbers.
 -2. Router m256 (11.2 vs floor 2.7) and m128 (9.0): needs less split-K red volume AND less L2->SM traffic: x by TMA
    multicast to the n-tile blocks of a cluster of 2 (gemv16 has the machinery), or wgmma (compute ~3.5 us on mma.sync).
 -1. gemv16 on the H200 only ties lt: cut x staging further (the critical path is x latency at kernel start: W cannot
