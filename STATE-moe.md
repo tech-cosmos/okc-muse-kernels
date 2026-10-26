@@ -71,6 +71,12 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 2 (19:26-19:45Z, no judge runs) -- r-moe 5960afc
+- PDL .nc-hoist fix (layer s52 ask): moe_routegather (ids, X) and moe_norm (ids, tw) read producer outputs via __ldcg.
+  SASS had moe_norm's ids LDG.CONSTANT above ACQBULK (real in the layer; Request posted). Tests 15/15, bitwise same.
+  Audit recipe: cuobjdump -sass the built .so, per kernel count LDG.*CONSTANT before the first ACQBULK (NOTES n4s2).
+- First check at 00:00Z unchanged: the DIAG queue (h32ne0/offne0, h32rg0/1).
+
 ## Night4 session 1 (19:15-20:10Z, no judge runs: moe checks 20/20 until 00:00Z) -- NORM_EARLY on main (9898def)
 - Sandbox okc-night4 verified: bench test 15/15, DIAG copy runs (v32 off 247.7 / h32 231.0 / h32rg1 230.5 us H100).
 - NORM_EARLY = 1 (compile-time #define, python global picks the launcher): moe_twm / moe_hot bump meta[100 + e] per gemm2
