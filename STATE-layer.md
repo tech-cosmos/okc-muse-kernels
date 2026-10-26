@@ -1,6 +1,12 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 (session 38: main = v80, NOT judge-checked; budget for 10-26 spent).
+Updated 2026-10-26 (session 39: main = v83, NOT judge-checked; budget for 10-26 spent).
+
+**s39: main = v83 (7fad983)** = v80 + PDL edges in the routing glue: moe_route PDL secondary of _routing at T>32 and
+_routing on 1 warp there (v81), _routing PDL secondary of pr3 at T=128 (v82) and of _router_split at T=16/32 (v83).
+H100: v16 router-end -> twm-start 7.9 -> 5.7 us; d32 -0.5..0.9; rest tie (all bit-identical outputs). ab_files noise at
+v16/v32 is +-3 us between runs (twm): use /tmp/l39/tlm.py-style per-kernel timelines for small glue changes.
+FIRST CHECK OF THE NEXT SANDBOX = main (v83); compare per shape vs 703d3a7e (below) and read the T=8/T=256 tune lines.
 
 **s38: main = v80 (e598e41)** = v77 + g19 M=8 + vtk FP32 qkv (v78, T=8 TUNE candidate g19:qkv_gate) + T=8 candidates
 {pr1 off, g19:pooler} (v79) + proj s32 evict_last on all layer L2 prefetches (v80: H100 d1 -2.0/-0.8 us). Attention libs

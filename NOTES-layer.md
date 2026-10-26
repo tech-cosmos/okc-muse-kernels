@@ -884,3 +884,27 @@
   already W-in-registers + routing before the wait.
 - H200 budget (profile 703d3a7e): biggest non-expert item = g19 m32 pooler+unpool at d32 (2 calls 50.2 us, ~2.0 TB/s;
   standalone 19.7/call vs bare 13.9): asked proj (Requests s38).
+
+## s39 (2026-10-26 15:28Z-): v81-v83 = PDL edges in the routing glue (no judge runs: budget for 10-26 spent)
+- H100 timelines of v80 (tuner off, variants/s40_nt.py): d1 sl 86.7 us (qkv g13 13.2 | csl 5.5 | o ends 4.8 after csl |
+  bnd +2.5 | pr1 -> 44.8 | tk2f 45.1-80.2 | n2u +4.7 | bnd +1.8); v1 sl 150.1 (tk2f 82.9 us; nu8 +5.5; bnd +4.0); d32 full
+  _gd_full 245 us = 655 MB KV at 2.67 TB/s (80% of H100 peak; d16 78%): no attention headroom worth the layer's time.
+  v16 sl glue after the router: routing 3.6 -> moe_route 1.8 -> gathern 4.2 -> twm (7.9 us router end -> twm start).
+- _routing standalone (graph of 20, H100): 2 warps 3.26-3.44 us/call, 1 warp 2.84-2.99, 4 warps 3.5-3.75; a packed
+  int64 (order-preserving key bits << 8 | 255 - idx) single-max top-8 is bit-identical but NOT faster (2.99-3.13):
+  the kernel is launch/latency-bound, not reduction-bound. 1 warp is bit-identical (300 seeds incl. exact ties).
+- v81 (cacb271): moe_route launched as a PDL secondary of _routing at T > 32 (layer patch of moe_src: moe_route waits after
+  its smem init and reads ids with __ldcg; moe_route_pdl_launch; _routing TRIG at start) + _routing on 1 warp at T > 32
+  (ROUTING_WARPS_1_MIN_TOKENS 33). 1 warp at T = 16/32 lost d16/d32 sliding +1.3/+2.6 us in 2 runs (side stream beside the
+  g19 pooler; unexplained), so 2 warps there. First ab_files run said v16 sliding -4.7 us; later runs showed that was
+  noise (v16 sliding moves +-3 us between ab_files runs: twm's own replay spread).
+- v82 (f970e18): T=128 _routing as a PDL secondary of pr3::router (pr3 triggers before its atomics' wait; _routing PDL
+  waits first). H100 timeline v16 sl: router end -> twm start 7.9 (v80) -> 6.5 (v81) -> 5.7 us; tools via /tmp/l39/tlm.py
+  (N cold profiled replays per file, median twm start / layer end; ONE file per process: several modules in one process
+  share the .so statics and crash with an illegal address (harness artifact; one module with 12 captured graphs
+  replayed interleaved is fine: /tmp/l39/multi.py)): twm start -1..2 us vs v80.
+- v83 (7fad983): d16/d32 _routing as a PDL secondary of _router_split (TRIG at start). H100 ab_files 5 rounds: d16 -0.1/0.0,
+  d32 -0.9/-0.5. On H100 the routing ends before the g19 pooler; it is for the H200 (pooler relatively faster there).
+- DEAD: BND_SPLIT 2/4 at T = 128/256 (both boundaries): v16 sl +3/+8, v32 sl +6/+21 us (the big-T boundaries are
+  bandwidth-bound; split programs re-read the row).
+- All of v81-v83: tests 13/13, replay verify 0/120 + v16 0/80 + decode 0/90, route_judge v16 0/60 + decode 0/180, scored d32 2/2.
