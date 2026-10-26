@@ -80,6 +80,8 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   Layer patch: r-moe 300bd2c..4db82af diff applies onto r-layer moe_src.py (= 499bde6) with offsets; layer.py needs
   "moe_twq_launch" in _moe__lib's list + `_moe_TWQ_M` set from _opt(state, m, "twq", 0) + TUNE[128] += {"twq": 4}.
   (My HEAD also has s15's tk2f FP option text: re-copying the whole file breaks the layer's text anchors.)
+- **moe_twm hot class** (TWM_HOT, off): 65..96-token experts in one pass (1 tile/warp, N 80/96); proxy v32 -3.6..-7.6
+  proxy-us. In the same layer patch as TUNE options at T=256 (twm_hot, twm_hot + order 76 [+ lt:unpool]).
 - Dead: dq IMAD/IMAD.WIDE rebalancing (+6..18%); exhaustive nibble-layout search (nothing beats 7 ALU + 1 IMAD);
   N48/N64/N96 passes in twq/twm (C7512: whole-kernel wgmma serialization); inline producer in warp 0 (2x slower).
 
@@ -89,13 +91,10 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   orders TWM_TAIL variants like the H200 (full-grid H100 does not). USE IT for every big-M/decode A/B (no checks needed).
 - Proxy: TWM_ORDER_M {256: 76} (main, layer v43) loses ~5 proxy-us at v32 (~3.6 H200 us): told layer to set it {}.
   Not changed on main yet (layer owns its copy; flip main's default next session if layer agrees / no H200 contradiction).
-- twm item cost is per-SM intrinsic and NOT consumer work: at G16 with no dq/MMA/LDS/x an RT4 item still takes 34.6 us
-  (31.5 GB/s/SM); a bare cp.async.bulk ring with the same stage shape does it in ~19 us (tools/s16/ring3.py).
-  => NEXT: bisect that gap (ranked idea -6). Dead: KG 2/4, 4 fragment buffers + wait_group 3 (ptxas serializes),
-  KPS 2 stages, x by bulk copy, TWF_SPLIT on the proxy.
+- (WRONG, s17: the ablation builds were all TWX 0) "twm item cost is not consumer work". Dead: KG 2/4, 4 fragment
+  buffers + wait_group 3 (ptxas serializes), KPS 2 stages, x by bulk copy, TWF_SPLIT on the proxy.
 
-## Session 15 summary: big-M item-cost ablations (s16 corrected them: the 'ring floor' was L2 saturation; at low
-   concurrency the ring alone is the cost); tk2f FP option (producer routes itself) off: layer harness +0.2..1.8 us.
+## Session 15 summary: big-M item-cost ablations (superseded by s17); tk2f FP option (off: layer harness +0.2..1.8 us).
 ## Session 14 summary: twm item orders / TWM_TAIL / H200 timeline tool (NOTES s14).
 
 ## Ranked ideas
@@ -106,9 +105,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 -7. (s17) tk2f d1 fixed cost (H200 timeline s12: routed 1.5, first data 3.6, ph1 end 11-13, cnt ok 14.1, end 16-19):
    overlap gemm2 with gemm1's drain by I-chunk readiness (per-chunk counters, gemm2 K split by inter chunk), or start
    streaming the routed experts' w13 before griddepcontrol.wait if the layer can publish ids earlier. d1 weight .161.
--6. (s16) Find why moe_twm's ring ingests only ~31.5 GB/s per SM (ring-only, G16) when a bare bulk ring of the same
-   stage shape does ~60 (NOTES s16 bisect list), then check tk2f for the same cap (its H200 rate is also ~31 GB/s/SM).
-   Measure with tools/s16 (G16 warm items for the cap, G88 proxy for the H200 effect).
 -5. (s14) Drain of twm is still ~20-30 us (items ~40 us). Half-size tail items (TWM_TAIL) clash with the merge order;
    try tail class only for the LAST B items after the merge window, or K-split of the last wave. And: fewer dq per token
    for hot experts (128-token passes need N 128: registers).

@@ -484,3 +484,19 @@
   layer); T=256 sliding twq 426.0 vs default 433.5 but order 76 (+unpool lt) 417.7 wins. (ab_flag "_moe_TWQ = 0/4"
   shows no difference because the tuner's pick sets _moe_TWQ_M per call.) `git apply --check` OK on r-layer's tree.
 - N48 single pass in twq for 33..48-token experts: C7512 too (dead).
+- Proxy upper bound for one-pass hot experts (tools/s17 cap64.py: v32 routings with every expert capped at 64 tokens;
+  also drops 12% of routes): 270.0 vs 296.5 proxy-us.
+- **moe_twm hot class** (TWM_HOT / TWM_HOT_M, off; -nsplit bit 23; tail13 now 11 bits): experts with 65..96 tokens run
+  ONE pass with one 16-row tile per warp and N 80/96 (48 acc regs: fits twm's 168-reg budget, unlike RT 2 x N 96 which
+  serializes wgmma), items = half RT 2 row blocks of the w*b2 packing (contiguous 4 KB W + 512 B S per k chunk), x tile
+  by a 5th tensor map (96-row box) at the stage start, W at 12 KB, S at 16 KB. Gated: up warp -> gate warp FP32 exchange
+  through the item's LAST ring slot (24 KB), after `bar.sync 1, 256` (first version without it: NaNs in 33/125 big-M
+  routings = the other warpgroup's wgmma still reading that slot's x tile), slot released after the exchange.
+  Proxy G88 v32 3 rounds: o76 300.6 -> hot+o76 293.0; o0 295.9 -> hot 292.3; v16 unchanged (no 65..96 experts).
+  Smaller than the bound because hot items stream a 12 KB x tile per 4 KB of weights (ring-bound ~300 ns/stage).
+- Layer patch (tools/s17/twq_layer.patch) now carries both: TUNE twq at T=128/256, twm_hot (+ combos with order 76)
+  at T=256.
+- Layer copy with the combined patch: tests 13/13; H100 tuner: T=128 sliding picks twq (confirm 362.6 -> 359.6),
+  full twq (469.6 -> 454.2); T=256: twq 427.9/663.0 vs default 435.3/669.0 but o76+lt:unpool 419.6/655.9 wins; twm_hot
+  436.7/669.9, twm_hot+o76(+lt) 437.2/670.5 (H100 full grid: lose; the H200 proxy says -3.6..7.6 proxy-us: the judge's
+  tuner decides).
