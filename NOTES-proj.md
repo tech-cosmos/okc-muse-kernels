@@ -936,3 +936,7 @@ pred's own graph time. H100, MODE=2, numbers = graph(pred + g19) - graph(pred) i
 - No judge runs (proj checks 20/20; scored 5/10 but no check beats 1.3110). Sandbox ends ~19:10Z, push deadline 18:30Z: too
   short for a build + layer A/B. Condensed STATE-proj.md (155 -> 146 lines): s36-s40 summarized, "Next sandbox" plan rewritten
   (first check = main; then a fresh layer idle budget from v88; remaining small ideas ranked).
+
+## Session 42 (2026-10-26 18:12Z): sanity only, sandbox expires ~19:10Z
+- No judge runs (proj checks 20/20 for 10-26). main (6f068c9) re-verified on the H100: `python bench.py test` 39/39 PASS,
+  `python bench.py esc` PASS (12-bit round trip + adversarial escapes). The first check in the next sandbox = main as is (STATE Next 1).
