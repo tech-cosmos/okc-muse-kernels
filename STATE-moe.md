@@ -71,6 +71,17 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 25 (15:26Z, paper only; no code, no judge runs): what is left, valued by layer score
+Judge layer profile 703d3a7e (H200, us): tk2f d1 28.7/21.2 (incl. PDL overlap), d16 69.7/44.1, d32 82.6/93.5, v1 62.4/83.8;
+twm v16 161.5/165.9, v32 221.7/221.8. Score per us: d1 sl 0.16%, v1 0.10, d16 0.07, d32 0.05, v16 0.04, v32 0.03.
+Remaining moe ideas, all needing H200 time (next sandbox; moe checks = H200 DIAGs, never submits):
+ a. Hot-expert single-pass kernel (RT1 N128-256, separate function: C7512) on a subset of SMs next to twm at v16/v32:
+    est. 5-10 us v32 => +0.15-0.3%. Biggest left; 2-3 sessions of work.
+ b. Deterministic barrier-free d1: each CTA owns a 32-wide inter K-slice of every expert (w13 gate/up rows + w2 repacked
+    K-slice-major in prepare), FP32 partials [132][slot][4096] (6.5 MB in L2) summed in fixed order by n2u (layer-owned).
+    Saves the gemm13->gemm2 barrier/tail (~1.5 us) minus the partial reduce (~0.8 us): est. net <1 us d1 => <0.15%. Low value.
+ c. Everything else in Ranked ideas is measured dead or <0.1%.
+
 ## Session 24 summary (NOTES s24; no speedup, no judge runs)
 - Dead on the H200 proxy: tk2f stage-ahead LDS register prefetch (+2.4..4.3 proxy-us), 2 CTAs/SM tk2f (+9..23: register cap).
 - Paper: phase-2 "slowness" is mostly end-of-kernel accounting (~1.5 us at d32 left); barrier already hidden by the w2

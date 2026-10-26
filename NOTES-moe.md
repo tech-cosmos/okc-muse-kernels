@@ -702,3 +702,8 @@
   each CTA's own inter slice, FP32 partials/atomics) could save ~1.5 us at d1 (~0.3% score) at the cost of
   nondeterministic sums and a tk2f rewrite: parked. (d) f16-format dq (byte-local mask 0x8E008E00) has no 4-translate
   tiling either (same proof as the bf16 search), and would need x in f16: dead.
+
+## Session 25 (2026-10-26 15:26Z - 15:40Z) -- paper only
+- No checks left, sandbox ends ~19:10Z; H100-measurable levers exhausted (s17-s24). Valued the remaining ideas against the
+  layer's score weights (STATE s25): hot-expert single-pass kernel at v16/v32 (+0.15-0.3%) is the only one worth a build;
+  deterministic barrier-free d1 via per-CTA K-slices + FP32 partials is <0.15% net (partial reduce eats most of the barrier gain).
