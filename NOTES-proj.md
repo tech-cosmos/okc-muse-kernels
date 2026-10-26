@@ -979,3 +979,25 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - So at T=1 the only HBM-idle window is the boundary (~4.4 us), already covered by pr1's pre-wait prologue (deeper
   prologue = pr1_npf: lost on H200, s35). Overlap ideas at d1 are closed; m=1 kernels are at bare-stream speed (s17).
   What's left for d1 in proj's lane is fewer bytes (entropy-coded weights, s17 est. ~0.3% layer, big format change).
+
+## s47 (2026-10-26 19:48-20:05Z, sandbox okc-night4, session 4): PDL .nc-hoist SASS audit of proj kernels in layer v91 + unpool T=32 grid A/B
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z).
+- Audit (moe n4s2 found a real hoist in moe_norm): dev/s47_pdl_audit.py lists every load before the first ACQBULK
+  (= griddepcontrol.wait) per kernel of r-layer's built layer_g10_6aab317afa96.so (proj kernels inside the layer, v91 era);
+  each pre-wait load mapped to its param (c[0x0][0x2xx] base) by hand:
+  * g13 (all, incl. the g13o o@T=1 PDL secondary): pre-wait = W (.NA), escape headers H, KV_PF page table (prefetch only);
+    x pre-wait only when pdl == 0 (layer's `!pdl` guard), else x after ACQBULK by LDG.STRONG.GPU (__ldcg). SAFE.
+  * pr1 <2,4,{1,2},4>: pre-wait = W (.NA), router W (__ldcs, EF), headers, and bpre's s/alpha/beta/gain (prepared).
+    x / x32 loads sit AFTER ACQBULK, but the layer's pr1_src.cu non-bnd path (the live one: PR1_BND = False) still reads
+    them with __ldg (r-proj dev/pr1.cu has __ldcg since s13): safe in today's SASS, fragile -> Request to layer.
+  * pr8, g17, g19 (all cfgs, 0 pre-wait loads), g12, g10, pr3 (pre-wait LDGSTS = router hi/lo W only): SAFE.
+  * n2u / nu8 (layer's) read ids/tw BEFORE the wait by design: safe because pr1 -> _rmsnorm_gain (triggers after its own
+    wait) -> moe_tk2f (PDL secondary of the rmsnorm, no wait of its own, triggers at start) -> n2u: pr1 has completed
+    before n2u can launch. Holds only while the rmsnorm triggers after its wait (TRIG2): noted for layer.
+- In-layer A/B (copy of r-layer 5e93d29 = v91 in /tmp/pj47/L; tools/ab_flag.py "decode 32" 5 rounds, H100 medians us):
+  G19_GRID ('unpool', 32) 132 / 120 / 108 / 96 / 132: d32 sliding 197.68 / 197.46 / 197.89 / 197.41 / 197.10, full
+  415.89 / 415.76 / 415.62 / 416.34 / 415.73: all ties. On the H100 the T=32 unpool is not SM-bound in the layer (H200 is
+  consumer-bound per the proxy, so H100 can't decide this). Dead on H100; not worth an H200 check alone.
+- H100 timelines v91 (tools/timeline.py): d16 sliding: o is g19 (PDL), no gap > 0.5 us; d32: qkv nvjet 16.9 -> nds +0.5,
+  o nvjet 6.3 (16.8 MB, 2.7 TB/s) -> boundary +0.5 us. The "T>=16 cuBLAS gaps without PDL triggers" item is <= ~1 us per
+  shape on the H100 now (H200 gaps need the 00:00Z layer check's profile).
