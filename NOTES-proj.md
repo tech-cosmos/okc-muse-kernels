@@ -170,3 +170,24 @@
   submitted). check 863c78fcf9174248 (4c99cac, g16 picked at unpooler m16: 17.42 us vs 17.69): 1.2565x.
 - submit cf54d7712be64c9e (4c99cac, 10-26 00:01Z): 1.2480x (CI 1.229-1.267): tie with the board's 1.2482 (g16 picked at
   unpooler m16, 21.44 vs lt 21.44 in tune).
+
+## Session 7 (2026-10-26 00:05 - UTC): exact 12-bit headers, router2
+- Human 23:30Z fix done (3f173eb): escape header value = true / scale (BF16 over a power of two: exact in FP32); empty
+  slots = 2^-15 (col 0); kernels add x * (v - 2^-15) as fmaf(x, v, fmaf(x, -2^-15, s)). Real escapes have |v| < 2^-15
+  (e < base), so gemv16's "stop at first empty slot" test is now v == 2^-15. _compress decodes every weight (bytes +
+  codes, escapes from the header) and compares bits; any mismatch -> None (that layer stays uncompressed).
+- Exactness detail: with a single fma x * (v - 2^-15) the subtraction rounds for v far below the window (spike/probe
+  rows came out ~5e-18 relative off). Two fmas on the row's FULL sum are exact when only that weight contributes
+  (s = 8*2^-15 -> 0 -> 8v). gemv13 had the fixup on a partial sum in another warp: moved it to the row's reducing
+  thread (after the cross-warp sum). No measurable cost (H100 qkv m1 13.7 vs 14.0, pooler m8 23.7-23.9 vs 23.7).
+- bench.py esc: injects zeros, -0, BF16 denormals, 2^-100, values just below the window into 32 fixed columns
+  (2 per row at k=8192 where natural escapes reach 6/row, 3 per row else), checks all four layers compress, outputs pass,
+  and spike rows at those columns are bit-exact vs the FP64 reference (m = 1/8/16/32).
+- dev/g13-16.py sweep scripts updated to the new header format.
+- check 659bbeab27fd4b61 (3f173eb): 1.2515x, passed (same kernels as board otherwise).
+- router2 (dev/router2.cu, dev/r2.py): router m<=8 without split K. Block = R=2 whole rows (k=8192), 512 threads,
+  thread owns k = 4 (t + 512 j), j<4: x slice loaded straight into registers (BF16 pairs), 8 float4 W loads up front,
+  shuffle + one smem pass. H100: m1 6.9 -> 5.4 us, m8 9.8 -> 6.5 us. Configs: m1 R1/T1024 5.5, R2/T512 5.4,
+  R4/T512 6.5, R1/T256 5.6; m8 R2/T512 6.5, R2/T256 6.75, R1/T512 8.4. At m16 it loses (10.8 vs hi/lo g7 9.0), m32 far.
+- Dead: g7 (hi/lo mma) with token groups at router m128/256: 24-66 us vs cuBLAS 3-kernel path 11.8/13.6 (H100).
+  The cuBLAS path on H200 = splitK GEMM 5.2 + splitKreduce 1.6 + hi+lo add 1.4 us (m128).
