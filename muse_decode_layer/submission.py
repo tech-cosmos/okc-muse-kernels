@@ -9852,6 +9852,334 @@ void pr1_launch(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tenso
     TORCH_CHECK(false, "pr1: no config");
 }
 '''
+_GPR8_SRC = r'''// pr8: the layer's T=8 pooler (gemv14 body, S = 1: whole-K rows, x[8, 8192] staged in smem) + FP32 router
+// (h32 FP32 x FP32 W) + routing in ONE launch, a PDL secondary of the boundary. Every block (128 = n / 32 rows of
+// pooler each) also takes one router item: 16 rows x 1024 k (rows (b / 8) * 16.., k slice b % 8), W in registers loaded
+// before griddepcontrol.wait, x32 slice cp.async'd to smem first after it. Item partials [8 slices][8 tok][256] go to
+// scratch; the last of a row group's 8 slices (ticket) sums them in slice order (deterministic) into logits; the last
+// row group (ticket) does the routing (warp w = token w): sigmoid(MULT logit), top-8 of score + bias (lowest index on
+// ties), weights = picked / (sum + REPS), local ids. Counters self-reset. Triggers its dependents at start.
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+namespace pr8 {
+constexpr int ESC = 8;
+__device__ __forceinline__ uint4 ldw(const uint4* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ uint2 ld2(const uint2* p) {
+    uint2 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v2.u32 {%0,%1}, [%2];" : "=r"(v.x), "=r"(v.y) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ unsigned ld1(const unsigned* p) {
+    unsigned v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.u32 %0, [%1];" : "=r"(v) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
+    unsigned r;
+    asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
+    return r;
+}
+template <int P>
+__device__ __forceinline__ unsigned expo(unsigned nw) {
+    const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
+    return (s & 0x07800780u) | 0x38003800u;
+}
+__device__ __forceinline__ uint4 dec8(uint2 s, unsigned nw) {
+    uint4 r;
+    r.x = (prmt(s.x, 0x9180u) & 0x807f807fu) | expo<0>(nw);
+    r.y = (prmt(s.x, 0xB3A2u) & 0x807f807fu) | expo<1>(nw);
+    r.z = (prmt(s.y, 0x9180u) & 0x807f807fu) | expo<2>(nw);
+    r.w = (prmt(s.y, 0xB3A2u) & 0x807f807fu) | expo<3>(nw);
+    return r;
+}
+__device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+constexpr int E = 256, TOPK = 8, MT = 8, RROWS = 16, RSL = 8, RK = 8192 / RSL;
+struct Args {
+    const uint2* WS; const unsigned* WN; const float2* H; float scale; const __nv_bfloat16* x; __nv_bfloat16* out;
+    int n, nrg_all, bk;
+    const float4* rw; const float* x32; float* part; float* logits; int* cnt; const float* bias; const int* ls;
+    int* ids; int* lids; float* wts; float mult, reps; int local, npf;
+};
+
+__device__ __forceinline__ void route_token(const Args& a, const float* lgs, const float* bs_, int ls, int tok, int lane) {
+    float sc[E / 32], key[E / 32];
+#pragma unroll
+    for (int i = 0; i < E / 32; ++i) {
+        const int e = lane + 32 * i;
+        const float lg = lgs[tok * E + e];
+        sc[i] = 1.f / (1.f + expf(-lg * a.mult));
+        key[i] = sc[i] + bs_[e];
+    }
+    int myid = 0; float mysc = 0.f, sum = 0.f;
+#pragma unroll
+    for (int k = 0; k < TOPK; ++k) {
+        float bk = key[0]; int bi = lane; float bs = sc[0];
+#pragma unroll
+        for (int i = 1; i < E / 32; ++i)
+            if (key[i] > bk) { bk = key[i]; bi = lane + 32 * i; bs = sc[i]; }
+#pragma unroll
+        for (int o = 16; o; o >>= 1) {
+            const float ok = __shfl_xor_sync(0xffffffffu, bk, o);
+            const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
+            const float os = __shfl_xor_sync(0xffffffffu, bs, o);
+            if (ok > bk || (ok == bk && oi < bi)) { bk = ok; bi = oi; bs = os; }
+        }
+#pragma unroll
+        for (int i = 0; i < E / 32; ++i)
+            if (lane + 32 * i == bi) key[i] = -INFINITY;
+        if (lane == k) { myid = bi; mysc = bs; }
+        sum += bs;
+    }
+    if (lane < TOPK) {
+        a.ids[tok * TOPK + lane] = myid;
+        const int loc = (myid - ls + E) % E;
+        a.lids[tok * TOPK + lane] = loc < a.local ? loc : -1;
+        a.wts[tok * TOPK + lane] = mysc / (sum + a.reps);
+    }
+}
+
+// the extra block: waits for the 128 router items, sums their K slices in order (deterministic), routes the 8 tokens
+__device__ __forceinline__ void finish(const Args& a) {
+    const int t = threadIdx.x, lane = t & 31, wp = t >> 5;
+    __shared__ float lgs[MT * E], bs_[E];
+    __shared__ int done, ls_;
+    if (t < E) bs_[t] = __ldg(a.bias + t);
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    if (t == 0) ls_ = __ldg(a.ls);
+    if (t == 0) {
+        int v;
+        do {
+            asm volatile("ld.acquire.gpu.global.s32 %0, [%1];" : "=r"(v) : "l"(a.cnt) : "memory");
+            if (v < (E / RROWS) * RSL) __nanosleep(256);
+        } while (v < (E / RROWS) * RSL);
+        done = 1;
+    }
+    __syncthreads();
+    for (int i = t; i < MT * E; i += blockDim.x) {
+        float s = 0.f;
+#pragma unroll
+        for (int q = 0; q < RSL; ++q) s += __ldcg(a.part + (long)q * MT * E + i);
+        lgs[i] = s;
+        a.logits[i] = s;
+    }
+    __syncthreads();
+    if (wp < MT) route_token(a, lgs, bs_, ls_, wp, lane);
+    if (t == 0) a.cnt[0] = 0;
+}
+
+template <int KCU, int WG, int PF, int XP>
+__global__ void __launch_bounds__(1024, 1) fused(const Args a) {
+    constexpr int M = MT, XR = XP, KC = 1024 * KCU, TT = 1;
+    static_assert(KC == 8192, "pr8: S = 1 (whole-K rows)");
+    constexpr int NT = 8, NA = KC / 32 / WG;
+    static_assert(NA % (PF * XP) == 0 && XP <= 4, "x pieces: fully staged");
+    constexpr int PA = NA / XP, PB = KC / XP * 2;
+    constexpr int XS = XR * PB + 64;
+    extern __shared__ __align__(16) unsigned char smem[];
+    unsigned char* xs = smem;
+    float4* accp = (float4*)(smem + M * XS);
+    float2* hs = (float2*)(smem + M * XS + blockDim.x / 32 * TT * 512);
+    __shared__ int flag;
+    __shared__ float rred[RROWS][2][MT];
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    if ((int)blockIdx.x == a.bk) {
+        if (a.npf != -1 && a.npf != -2) finish(a);
+        else asm volatile("griddepcontrol.wait;" ::: "memory");
+        return;
+    }
+#ifdef PR8_TRACE
+    unsigned long long* tr = (unsigned long long*)(a.part + 8 * MT * E) + blockIdx.x * 8;
+#define TR(i) if (threadIdx.x == 0) { unsigned long long v_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(v_)); tr[i] = v_; }
+#else
+#define TR(i)
+#endif
+    TR(0)
+    const int t = threadIdx.x, lane = t & 31, wp = t >> 5, g = lane >> 2, c = lane & 3;
+    const int gi = wp / WG, wi = wp % WG, NG = blockDim.x / (32 * WG);
+    const int rg0 = blockIdx.x * NG, rg = rg0 + gi;
+    const int n = a.n;
+    float* xr = (float*)(smem + M * XS + blockDim.x / 32 * TT * 512 + NG * 8 * ESC * 8);  // [8][RK] FP32 x slice
+    // router item: rows ri * 16 + (t >> 6), k = sl * RK + (t & 63) * 4 + 256 j
+    const int ri = blockIdx.x / RSL, sl = blockIdx.x % RSL, rrow = ri * RROWS + (t >> 6), rq = t & 63;
+    const bool has_r = ri < E / RROWS && a.npf != -1;  // npf -1: no router item, -2: no tickets (timing probes)
+    float4 rwv[RK / 256];
+    const bool rlate = a.npf == 1;  // npf 1: router W loads after griddepcontrol.wait
+    if (has_r && !rlate) {
+#pragma unroll
+        for (int j = 0; j < RK / 256; ++j) rwv[j] = __ldcs(a.rw + ((size_t)rrow * 8192 + sl * RK + rq * 4 + 256 * j) / 4);
+    }
+    const long wo = (((long)rg) * (KC / 32) + wi) * 32 + lane;
+    const uint2* wbs = a.WS + wo;
+    const unsigned* wbn = a.WN + wo;
+    uint2 ws_[PF];
+    unsigned wn_[PF];
+#pragma unroll
+    for (int p = 0; p < PF; ++p) { ws_[p] = ld2(wbs + p * WG * 32); wn_[p] = ld1(wbn + p * WG * 32); }
+    if (a.npf > 1 && t < NG * WG) {  // L2 prefetch of this warp-slot's next atoms (gemv14 order: atom stride WG * 32 lanes)
+        const int gi2 = t / WG, wi2 = t % WG;
+        const long wo2 = (((long)(rg0 + gi2)) * (KC / 32) + wi2) * 32;
+        for (int p = PF; p < PF + a.npf && p < NA; ++p) {
+            asm volatile("prefetch.global.L2 [%0];" :: "l"(a.WS + wo2 + (long)p * WG * 32));
+            if (p % 2 == 0) asm volatile("prefetch.global.L2 [%0];" :: "l"(a.WN + wo2 + (long)p * WG * 32));
+        }
+    }
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    if (has_r && rlate) {
+#pragma unroll
+        for (int j = 0; j < RK / 256; ++j) rwv[j] = __ldcs(a.rw + ((size_t)rrow * 8192 + sl * RK + rq * 4 + 256 * j) / 4);
+    }
+    // x32 slice first (its own commit group), then the headers + x pieces (gemv14)
+    for (int i = t; i < M * (RK / 4); i += blockDim.x) {
+        const int r = i / (RK / 4), q = i % (RK / 4);
+        const unsigned sa = (unsigned)__cvta_generic_to_shared(xr + r * RK + q * 4);
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa), "l"(a.x32 + (long)r * 8192 + sl * RK + q * 4));
+    }
+    asm volatile("cp.async.commit_group;");
+    auto stage = [&](int p) {
+        for (int i = t; i < M * (PB / 16); i += blockDim.x) {
+            const int r = i / (PB / 16), q = i % (PB / 16);
+            const unsigned sa = (unsigned)__cvta_generic_to_shared(xs + r * XS + (p % XR) * PB + q * 16);
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa),
+                         "l"((const uint4*)(a.x + (long)r * KC + p * (KC / XP)) + q));
+        }
+    };
+    for (int i = t; i < NG * 8 * ESC / 2; i += blockDim.x) {
+        const unsigned sa = (unsigned)__cvta_generic_to_shared(hs + 2 * i);
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa), "l"(a.H + (long)rg0 * 8 * ESC + 2 * i));
+    }
+#pragma unroll
+    for (int p = 0; p < XR; ++p) { stage(p); asm volatile("cp.async.commit_group;"); }
+    // router item
+    if (XR >= 4) asm volatile("cp.async.wait_group 4;");
+    else if (XR == 3) asm volatile("cp.async.wait_group 3;");
+    else if (XR == 2) asm volatile("cp.async.wait_group 2;");
+    else asm volatile("cp.async.wait_group 1;");
+    __syncthreads();
+    TR(1)
+    if (has_r) {
+        float acc[MT];
+#pragma unroll
+        for (int i = 0; i < MT; ++i) {
+            float s0 = 0.f, s1 = 0.f;
+#pragma unroll
+            for (int j = 0; j < RK / 256; ++j) {
+                const float4 xv = *(const float4*)(xr + i * RK + rq * 4 + 256 * j);
+                s0 = fmaf(rwv[j].x, xv.x, s0); s1 = fmaf(rwv[j].y, xv.y, s1);
+                s0 = fmaf(rwv[j].z, xv.z, s0); s1 = fmaf(rwv[j].w, xv.w, s1);
+            }
+            float v = s0 + s1;
+#pragma unroll
+            for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+            acc[i] = v;
+        }
+        if (lane < MT) {
+            float v = acc[0];
+#pragma unroll
+            for (int i = 1; i < MT; ++i) if (lane == i) v = acc[i];
+            rred[t >> 6][(t >> 5) & 1][lane] = v;
+        }
+    }
+    __syncthreads();
+    if (has_r && t < RROWS * MT) {
+        const int r = t / MT, tok = t % MT;
+        __stcg(a.part + ((long)sl * MT + tok) * E + ri * RROWS + r, rred[r][0][tok] + rred[r][1][tok]);
+    }
+    TR(2)
+    if (has_r && a.npf != -2) {  // signal: partial stores happen-before thread 0's release add (cumulative)
+        __syncthreads();
+        if (t == 0) asm volatile("red.release.gpu.global.add.s32 [%0], 1;" :: "l"(a.cnt) : "memory");
+    }
+    TR(3)
+    // pooler (gemv14, S = 1)
+    float acc[TT][4];
+    acc[0][0] = acc[0][1] = acc[0][2] = acc[0][3] = 0.f;
+    for (int at = 0; at < NA; at += PF) {
+        if (at % PA == 0) {
+            const int pc = at / PA;
+            const int left = XP - 1 - pc;
+            if (left >= 3) asm volatile("cp.async.wait_group 3;");
+            else if (left == 2) asm volatile("cp.async.wait_group 2;");
+            else if (left == 1) asm volatile("cp.async.wait_group 1;");
+            else asm volatile("cp.async.wait_group 0;");
+            __syncthreads();
+        }
+#pragma unroll
+        for (int p = 0; p < PF; ++p) {
+            const uint4 wv = dec8(ws_[p], wn_[p]);
+            const int kb = ((at + p) * WG + wi) * 32 + c * 8;
+            const int kx = (kb - (at / PA) * (KC / XP) + ((at / PA) % XR) * (KC / XP)) * 2;
+            uint4 xa = *(const uint4*)(xs + g * XS + kx);
+            mma(acc[0], xa.x, 0u, xa.y, 0u, wv.x, wv.y);
+            mma(acc[0], xa.z, 0u, xa.w, 0u, wv.z, wv.w);
+            if (at + p + PF < NA) { ws_[p] = ld2(wbs + (at + p + PF) * WG * 32); wn_[p] = ld1(wbn + (at + p + PF) * WG * 32); }
+        }
+    }
+    TR(4)
+    accp[wp * 32 + lane] = make_float4(acc[0][0], acc[0][1], acc[0][2], acc[0][3]);
+    __syncthreads();
+    const int ne = NG * M * 8;
+    for (int i = t; i < ne; i += blockDim.x) {
+        const int row8 = i & 7, tok = (i >> 3) % M, rgl = (i >> 3) / M;
+        const int h = (tok >> 3) & 1, l = (tok & 7) * 4 + (row8 >> 1), e = h * 2 + (row8 & 1);
+        const float* base = (const float*)accp + (rgl * WG) * 128 + l * 4 + e;
+        float s = 0.f;
+#pragma unroll
+        for (int q = 0; q < WG; ++q) s += base[q * 128];
+        const float2* he = hs + (rgl * 8 + row8) * ESC;
+#pragma unroll
+        for (int e2 = 0; e2 < ESC; ++e2) {
+            const int col = __float_as_int(he[e2].x);
+            if (col >= 0 && col < KC) {
+                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2));
+                s = fmaf(xv, he[e2].y, fmaf(xv, -0x1p-15f, s));
+            }
+        }
+        a.out[(long)tok * n + (rg0 + rgl) * 8 + row8] = __float2bfloat16(s * a.scale);
+    }
+    TR(5)
+}
+}  // namespace pr8
+
+// ws_/wn/h/scale: _pack14(pooler W, 8192) (S = 1); x bf16 [8, 8192]; out bf16 [8, n]; rw fp32 [256, 8192];
+// x32 fp32 [8, 8192]; part fp32 [8 * 8 * 256] scratch; logits fp32 [8, 256] scratch; cnt int32 [1] zero
+// (self-reset by the finisher block, blockIdx bk); bias fp32 [256]; ls int32 [1]; ids/lids int32 [8, 8], wts fp32 [8, 8].
+// cfg: kcu (8), wg, pf, bk (blocks = bk = n / 8 / (rows groups per block); must be 128), xp, npf, pdl.
+void pr8_launch(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out,
+                torch::Tensor rw, torch::Tensor x32, torch::Tensor part, torch::Tensor logits, torch::Tensor cnt,
+                torch::Tensor bias, torch::Tensor ls, torch::Tensor ids, torch::Tensor lids, torch::Tensor wts,
+                double mult, double reps, int64_t local, int64_t kcu, int64_t wg, int64_t pf, int64_t bk, int64_t xp,
+                int64_t npf, int64_t pdl) {
+    const int m = x.size(0), k = x.size(1), n = out.size(1);
+    const int ng = n / 8 / bk, threads = ng * wg * 32;
+    const int sm = m * (1024 * kcu * 2 + 64) + threads / 32 * 512 + ng * 8 * pr8::ESC * 8 + 8 * pr8::RK * 4;
+    TORCH_CHECK(m == 8 && k == 8192 && kcu == 8 && bk == 128 && threads == 1024 && n / 8 % bk == 0 && sm <= 227 * 1024
+                && rw.size(0) == 256, "pr8: shape");
+    pr8::Args a{(const uint2*)ws_.data_ptr(), (const unsigned*)wn.data_ptr(), (const float2*)h.data_ptr(), (float)scale,
+                (const __nv_bfloat16*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, n / 8, (int)bk,
+                (const float4*)rw.data_ptr(), x32.data_ptr<float>(), part.data_ptr<float>(), logits.data_ptr<float>(),
+                cnt.data_ptr<int>(), bias.data_ptr<float>(), ls.data_ptr<int>(), ids.data_ptr<int>(), lids.data_ptr<int>(),
+                wts.data_ptr<float>(), (float)mult, (float)reps, (int)local, (int)npf};
+    cudaLaunchConfig_t lc = {}; lc.gridDim = bk + 1; lc.blockDim = threads; lc.dynamicSmemBytes = sm;
+    lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
+    la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0;
+#define PR8_CASE(U_, G_, P_, X_) \
+    if (kcu == U_ && wg == G_ && pf == P_ && xp == X_) { \
+        C10_CUDA_CHECK(cudaFuncSetAttribute(pr8::fused<U_, G_, P_, X_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm)); \
+        C10_CUDA_CHECK(cudaLaunchKernelEx(&lc, pr8::fused<U_, G_, P_, X_>, a)); return; }
+    PR8_CONFIGS
+    TORCH_CHECK(false, "pr8: no config");
+}
+'''
 # proj's gemv19 (g19_src.cu = r-proj dev/gemv19.cu @6996d0c): m = 16/32 GEMM over the 12-bit weights, FP32 out zeroed
 # in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
 # kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
@@ -10028,7 +10356,9 @@ G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv
 G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, wg, pf, bk, xp), m = 8
 # s11: proj pr1 (r-proj dev/pr1.cu@149d115): T=1 pooler (gemv13 body) + FP32 router + routing top-8 in ONE launch,
 # PDL secondary of the boundary (which triggers at start). (u, nv, minb, r, rb, blocks, npf). H100 d1 sliding 95.1 -> 92.5.
-PR1_TOKENS = (1,)
+PR1_TOKENS = (1, 8)  # 8: proj pr8 (r-proj dev/pr8.cu@3be546b): gemv14 pooler blocks also take a router item, an extra
+# finisher block sums the K slices + routes. H100 v1 158.1/172.4 -> 157.0/171.0 us (proj). cfg (kcu, wg, pf, bk, xp, npf)
+PR8_CFG = {8: (8, 8, 4, 128, 1, 0)}
 PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 4)}
 PR1_BND = False  # s11: the boundary fused into pr1 as a per-block prologue (each block re-reads 144 KB: H100 d1 +1.2/+0.3 us even with s/alpha/beta/gain loaded before the wait): off
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
@@ -10213,6 +10543,8 @@ def _g10_lib():
             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
             if _GPR1_SRC is not None:
                 src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c[:4] for c in sorted(set(PR1_CFG.values()))))
+                if _GPR8_SRC is not None:
+                    src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4]) for c in sorted(set(PR8_CFG.values()))))
             else:
                 src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
             _G10["lib"] = load_inline(
@@ -10233,8 +10565,12 @@ def _g10_lib():
                             "void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                             "void pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
                             "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                            "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double);",
-                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "pj_router3", "g19_gemm", "pr1_launch"],
+                            "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double);\n"
+                            + ("void pr8_launch(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
+                               "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                               "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else ""),
+                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "pj_router3", "g19_gemm", "pr1_launch"]
+                + (["pr8_launch"] if _GPR1_SRC is not None and _GPR8_SRC is not None else []),
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
             print("layer: gemv10/12 build failed, cuBLAS:", e)
@@ -10810,7 +11146,7 @@ def _g12_prepare(state):
     state["g12"] = {key: _pack12(w[key], 1024 * c[0]) for key, c in G12_CFG.items()}
     state["g12_ws"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=dev)
     state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
-    state["pr1_cnt"] = torch.zeros(4, dtype=torch.int32, device=dev)  # pr1's router ticket (self-resetting)
+    state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)  # pr1's router ticket (self-resetting)
     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n2u's last-block counter (self-resetting)
     state["g13"] = {key: pk for key in G13_CFG if (pk := _pack13(w[key])) is not None}
     state["g14"] = {key: pk for key, c in G14_CFG.items() if (pk := _pack14(w[key], 1024 * c[0])) is not None}
@@ -10921,9 +11257,10 @@ def kernel_fn(data, state):
     h32 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev) if fp32_router else stream1
     alpha, beta = state["res1"]
     npf = (state["router"].numel() * 4) // (512 * 1024) if tokens in ROUTER_L2_PF_TOKENS and fp32_router else 0
-    pr1 = (tokens in PR1_TOKENS and pdl and fp32_router and _GPR1_SRC is not None and "pooler" in state.get("g13", {})
-           and not npf)
-    bnd = pr1 and PR1_BND and a.dtype == torch.bfloat16
+    pr1 = (tokens in PR1_TOKENS and pdl and fp32_router and _GPR1_SRC is not None and not npf
+           and (tokens == 1 and "pooler" in state.get("g13", {}) or tokens == 8 and _GPR8_SRC is not None
+                and "pooler" in state.get("g14", {}) and G14_CFG["pooler"][0] == 8))
+    bnd = pr1 and PR1_BND and tokens == 1 and a.dtype == torch.bfloat16
     if not bnd:
       _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
@@ -10969,18 +11306,25 @@ def kernel_fn(data, state):
             _experts_marlin if HAVE_SGL else _experts_local)(p, wts, lids, state)
         return _tail(moe, stream1, h, tokens, state, pdl) + (ids,)
     if pr1:  # pooler + router + routing in one launch (proj pr1), PDL secondary of the boundary: no side stream
-        pk = state["g13"]["pooler"]
         pooled = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
-        logits = torch.empty(N_EXPERTS, dtype=torch.float32, device=dev)
+        logits = torch.empty((tokens, N_EXPERTS), dtype=torch.float32, device=dev)
         topk_ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
         local_ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
         topk_weights = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
         bucket = None
-        _G10["lib"].pr1_launch(pk[0], pk[1], pk[2], h, pooled, pk[3], state["router"], h32, logits, state["pr1_cnt"],
-                               state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
-                               ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens], 1,
-                               [a, data["stream"], alpha, beta, state["pre_ffn"], stream1, h] if bnd else [],
-                               POST_NORM_EPS, RMS_EPS)
+        if tokens == 1:
+            pk = state["g13"]["pooler"]
+            _G10["lib"].pr1_launch(pk[0], pk[1], pk[2], h, pooled, pk[3], state["router"], h32, logits, state["pr1_cnt"],
+                                   state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
+                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens], 1,
+                                   [a, data["stream"], alpha, beta, state["pre_ffn"], stream1, h] if bnd else [],
+                                   POST_NORM_EPS, RMS_EPS)
+        else:
+            pk = state["g14"]["pooler"]
+            part = torch.empty(8 * tokens * N_EXPERTS, dtype=torch.float32, device=dev)
+            _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
+                                   state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
+                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR8_CFG[tokens], 1)
     else:
         side_stream.wait_stream(main_stream)
         with torch.cuda.stream(side_stream):
