@@ -1,12 +1,14 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-25 ~23:10 UTC (session 5).
+Updated 2026-10-26 ~00:15 UTC (session 6).
 
 ## Board
 - **Best: submit f9cd875d5d5c4cbe = 21bec6b, 1.2482x** (lossless 12-bit weights at m1/m8). (#1 1.62x, #10 ~1.54x.)
 - Before: 22109e72 (42dac99) 1.2334x.
 - Previous: 202a2485 (134eda6, lt v9) 1.2111x; a55d6b55 (e71d015) 1.1757x.
-- main = 21bec6b (= submitted f9cd875d) + notes. Budget 10-25 used: checks 16/20, scored 9/10 (cap reached). Resets 00:00Z.
+- main = 4c99cac (+ notes): 21bec6b + gemv16 candidates (picked on the H200 only at unpooler m16, by ~0.3-0.6 us, not
+  every run). check 863c78fc 1.2565x; submit cf54d771 (10-26 00:01Z) 1.2480x = tie, board keeps f9cd875d.
+- Budget 10-26 used: checks 0/20, scored 1/10 (cap 9).
 
 ## Per-shape H200 (check 7ba50b0a, 21bec6b): m1 qkv 11.2 o 6.3 pool 15.8 unp 4.6 router 5.1; m8 qkv 13.3 o 6.8 pool 16.6
 ## unp 6.6 router 8.1; m16 qkv 13.6 pool 19.1 unp 17.9; m32 qkv 13.8 pool 18.9 unp 18.9 (m>=16 = cuBLASLt, uncompressed).
@@ -53,6 +55,12 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   R=2 row groups per warp (spills), gemv9 warp stream-K, CUDA-core math at m>=8, cuBLAS swap-AB.
 - unpooler m8 on gemv12 with 32 blocks: H200 5.71 once, 7.04/7.27 twice (same code): few-SM configs are fragile.
 
+## gemv16 (session 6, NOTES has the breakdown)
+- W = mma A operand, x via ldmatrix, x staged by TMA bulk multicast to mc=2 blocks sharing the k-chunk, S=1 path writes
+  outputs directly, S>1 pushes partials into the owner's smem (one cluster barrier). BF16_G16 in dev/sub_template.py.
+- H100: unpooler m16 23.0 vs cuBLAS 25.5, qkv m16 16.9 vs 18.1, pooler m16 25.2 vs 27.5. H200: ~par with lt (gains smaller).
+- Remaining cost over a bare reader (19.8 us at unpooler m16, H100): x staging ~1.5-2 us, math ~1.3 us, end ~0.5 us.
+
 ## Lossless 12-bit weights (session 5): the big lever
 - m=1 was already AT a bare reader's speed: only fewer bytes help. _compress in dev/sub_template.py: sign|mantissa byte
   + 4-bit exponent code (window 16 below max exp), escapes (~1/row) fixed from a per-row header. 25% fewer bytes.
@@ -61,6 +69,10 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   compression gives 28/32 bits only).
 
 ## Next (ranked)
+-1. gemv16 on the H200 only ties lt: cut x staging further (the critical path is x latency at kernel start: W cannot
+   start computing before x lands; ideas: start computing atoms whose x rows came first with per-row mbarriers; FP32->
+   nothing: x must stay BF16) and the math cost (2 row groups per warp sharing the ldmatrix x fragments). m32: needs
+   S=2 x mc=2 (clusters of 4, <=120 blocks) or a smaller-x scheme.
 0. Compressed m16/m32 kernel that beats cuBLASLt (decode 16/32 loads: qkv 1.0x, unpooler 1.0x, pooler 1.12-1.16x):
    bytes -25% => ~-3.5 us pooler/unpooler, -2 us qkv per shape if the kernel reaches reader speed. Idea: gemv13-style
    grid-stride over whole rows (no split K: k=8192 rows) with tensor cores (mma m16n8k16, W as A = 16 rows, x as B),

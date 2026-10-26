@@ -143,3 +143,30 @@
 - check 7ba50b0a348044ca (21bec6b): 1.2394x. submit f9cd875d5d5c4cbe (21bec6b): 1.2482x = NEW BEST (prev 1.2334).
 - Per-load H200 (check 7ba50b0a): decode1 1.41, verify1 1.47, decode16 1.17, decode32 1.14, verify16 1.15, verify32 1.15.
   The m>=16 loads are the drag: their BF16 shapes are still cuBLASLt on uncompressed weights.
+
+## Session 6 (2026-10-25 23:17 - 10-26 00:10 UTC): gemv16 for m16
+- dev/gemv16.cu (+ dev/g16.py sweep, same CLI as g15.py plus a 7th field mc): gemv15 restructured: W = mma A operand
+  (16 rows x k16; atom 16 rows x 32 k, lane = 16 B sign|mantissa + 8 B codes), x = B via ldmatrix.x4 (x row stride
+  KC*2+16 B: conflict-free). Debug macros (env DEFS=G16_NOMMA,G16_NORED,G16_NOP2,G16_NOESC,G16_NOX,G16_SYNCONLY) skip phases.
+- H100 breakdown, unpooler m16, k=4096, S=1 (no split-K), 128 blocks: pure W stream 19.8 us (= bare reader speed);
+  warp skew inside a block ~0; reduction phase 1 (slot sum + escapes) 0.3 us; phase 2 (cluster.sync x2 + DSMEM loads
+  + stores) ~2 us (!); x staging (128 blocks x 128 KB = 16.8 MB L2->SM) ~3 us; math (ldmatrix + mma) ~1.3 us.
+- Fixes: (1) S=1 writes outputs straight from phase 1 (no cluster): 26.85 -> 24.7. (2) x staged by TMA bulk copies
+  multicast to a cluster of mc=2 blocks with the same k-chunk (cp.async.bulk ... multicast::cluster + one mbarrier per
+  block, cluster.sync after mbarrier.init): 24.7 -> 23.0-23.3 (cuBLAS 25.5). mc=4 (or S=2 x mc=2) = clusters of 4: only
+  ~30 fit at 1 block/SM, 128 blocks -> 2 waves (33 us). (3) S>1: partials PUSHED into the owner block's smem
+  (st via map_shared_rank) + ONE cluster barrier, instead of sync / remote loads / sync: pooler m16 S=2 27.2 -> 25.2.
+  (4) conflict-free accumulator layout [warp][nt][e][lane] + escape loop stops at the first empty slot (value 0).
+- Dead/neutral: deeper prefetch (PF 8/16 at 512 threads, 128 regs): no gain; separate accumulators per k-step: neutral
+  (kept); issuing the W prologue before the cluster barrier / x multicast: worse (23.0 -> 23.6: x latency is critical);
+  x in pieces (XP 2/4): no gain; S=4/8 splits: much worse (cluster fit + reduction); gemv15 with the conflict-free
+  reduction: no change (25.18), reverted.
+- H100 standalone bests: unpooler m16 23.0 (S1 mc2, 16,4,4,4,128,1,2) vs cuBLAS 25.5; qkv m16 16.9 (S2 mc2 bk48:
+  16,4,4,4,48,1,2) vs 18.1; pooler m16 25.2 (S2 mc1) vs 27.5 (= gemv15). m32: S=1 impossible (x 256 KB), S2 needs mc2
+  -> clusters of 4; not explored.
+- H200 tuner (judge log): unpooler m16 g16 21.18-21.98 vs lt 21.44-21.76 (picked in 1 of 2 runs); qkv m16 g16 17.47 vs
+  lt 16.77; pooler m16 g16 23.26 vs lt 22.40. H200 gains are SMALLER than H100 here (opposite of gemv14 at m8).
+- check ae0e03fa12b24ae5 (46b45bb, unpooler g16 not picked = same kernels as the board run): 1.2595x (noise-high; not
+  submitted). check 863c78fcf9174248 (4c99cac, g16 picked at unpooler m16: 17.42 us vs 17.69): 1.2565x.
+- submit cf54d7712be64c9e (4c99cac, 10-26 00:01Z): 1.2480x (CI 1.229-1.267): tie with the board's 1.2482 (g16 picked at
+  unpooler m16, 21.44 vs lt 21.44 in tune).
