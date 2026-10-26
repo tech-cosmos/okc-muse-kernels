@@ -931,3 +931,8 @@ pred's own graph time. H100, MODE=2, numbers = graph(pred + g19) - graph(pred) i
   npre 1 is worse than deep everywhere; npre 2 vs 3 at pool m16 -0.1..-0.4 us (noise-level; the layer's pooler m16 cfg uses
   npre 3: a cheap A/B for the layer at most). Unpool: deepest best. Throttling our PDL prologues: dead. The s39 "one 32 KB
   in flight" rule matters for SIDE streams that run long beside a chain, not for g19's few-stage prologue.
+
+## Session 41 (2026-10-26 17:57-18:10Z): housekeeping only
+- No judge runs (proj checks 20/20; scored 5/10 but no check beats 1.3110). Sandbox ends ~19:10Z, push deadline 18:30Z: too
+  short for a build + layer A/B. Condensed STATE-proj.md (155 -> 146 lines): s36-s40 summarized, "Next sandbox" plan rewritten
+  (first check = main; then a fresh layer idle budget from v88; remaining small ideas ranked).

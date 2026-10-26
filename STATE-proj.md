@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~18:05 UTC (session 40).
+Updated 2026-10-26 ~18:05 UTC (session 41: state condensed, no new work).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -131,25 +131,16 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## same 12 bits re-arranged (code bit 0 in the byte, sign + c1..c3 in the word at shift-friendly bits; prmt injects 0x38):
 ## 3 instr per BF16 pair (dec8 11 vs 16). H200 proxy g19 B-A: m16 -0.4..-1.65, pool m32 -0.48 us; layer H100 tie, tests
 ## 13/13 + scored 24/24, T=1/8 bitwise same. Layer agent integrating it (g22 kept on old layout). Old decode: -DPJ_DEC4.
-## Session 36: pr8 (layer T=8 pooler+router) bulk L2 prefetch of W atoms [PF, PF+12) per row group AFTER the wait (npf 212):
-## H100 layer ABBA v1 -1.56/-1.67 us, outputs unchanged; handoff dev/s36/pr8_bpf_layer.patch. pr8 is NOT issue-bound (no-math
-## +1.4 us only): its loss is the serialized prologue (router W + PF ahead of x32, ~3.5 us router math with HBM idle) and a
-## ~9 us block-finish spread. Dead: prefetch before the wait, PF loads after it, router last/mid-loop, g14 bulk prefetch. NOTES s36.
-## s37/s38: pr8 tail = random block-finish spread (~3 us), not the pred's late SMs; PR8_RGI +0.25 dead (TRACE=2 tool); whole-rg
-## work queue ruled out (units >= 6 us > spread); only K split + combines left, <= ~0.1% layer: DEPRIORITIZED. NOTES s37/s38.
-## Session 39: H100 overlap probe dev/s39/fill.py: a concurrent HBM stream dilates latency chains (even launch-bound tiny
-## kernels) by ~its whole duration when it queues its whole range at once (zero-sum); with ONE 32 KB TMA in flight per SM it
-## streams at ~95% rate and dilates 40-60% less (16 KB: -75%, 8 KB: ~0 but half rate). NOTES s39 table.
-## Next (ranked)
--26. (s40) DONE, dead: throttled g19 prologue (npre 1-2) beside a memory-touching pred (g19.py PRED=-8: pointer chase)
-   does not beat deep npre (pool m16 npre 2 vs 3 -0.1..0.4 us = noise; unp deepest best). Pre-wait W streaming still saves
-   ~1.1-1.5 us beside a memory pred (3.2 beside a spin). NOTES s40. Open: layer s45 SMEM-resident pooler at T=1 only with a
-   shallow side filler (NOTES s39).
--25. (s36/s37) Layer should bundle pr8 npf 212 (and DEC3) into its next-sandbox first check (it is in layer v88). Remaining pr8 room
-   (H100 ~24.4 us after pred vs ~18 us bytes): random block-finish tail ~3 us (s37: dynamic K-half stealing, design in NOTES s37)
-   and the router-math phase (fewer, fatter router items). s38: the tail fix needs K split + combines, worth <= ~0.1% layer: low.
--24. (s35) Layer's next-sandbox first check should carry DEC3 (layer is integrating it). proj's own first check tomorrow = main
-   (DEC3 in g13/g14 m1/m8 picks, tg2 unpooler m8 candidate: read 'tune' lines in the judge log; submit if > 1.3110).
-   DEC4 (v85) and g13o (v84) are already in the layer.
--19. (s30) Still waiting for a lane (Requests proj s28/s30). Proj checks 20/20 today.
+## s36-s40 (detail in NOTES): pr8 bulk L2 prefetch npf 212 after the wait = WIN (H100 layer v1 -1.6 us, in layer v88). pr8
+## tail = random ~3 us block-finish spread; fixing it needs K split + combines, <= ~0.1% layer: deprioritized. s39 dev/s39/fill.py:
+## a side HBM stream beside a latency chain is zero-sum if it queues its whole range at once; ONE 32 KB TMA in flight per SM
+## streams at ~95% rate and dilates the chain 40-60% less (rule for any layer weight-overlap/side-stream idea). s40: throttling
+## g19's own few-stage pre-wait prologue (npre 1-2) beside a memory-touching pred: dead (keep deep npre).
 
+## Next sandbox (ranked; sandbox okc-night3 expired ~19:10Z 10-26 with proj checks 20/20, scored 5/10)
+1. proj's first check = main as is (DEC3 in g13/g14 m1/m8 picks; tg2 unpooler m8 candidate): read the 'tune' lines in the
+   judge log (profiles/*.log); submit if > 1.3110. Layer's first check = its main v88 (carries DEC3, pr8 npf 212, g19 s15).
+2. Ask layer for a fresh H200 idle budget from v88's profile; take the proj-owned rows (T<=8 GEMV ramps, T>=16 cuBLAS
+   gaps without PDL triggers). Ideas left: pooler m16 npre 2 vs 3 in the layer (cheap A/B, noise-level on H100); SMEM-resident
+   pooler at T=1 with a throttled (one 32 KB TMA/SM) filler beside csl/o/bnd (s39: <= ~4-6 us/d1 on H100, untested in layer).
+3. Below the line: pr8 K-split tail balancing (~0.1%), 11-bit format (~0.2-0.3%), g22/g23/DeepGEMM at m128/256 (dead).
