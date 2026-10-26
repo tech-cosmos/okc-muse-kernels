@@ -430,3 +430,24 @@
 - Next ideas: T=8 norm3+unpool fusion needs per-route sum-of-squares (tk2f epilogue atomics) + split-K unpool with
   FP32 out (boundary RB path) to avoid 16 MB of redundant y32 reads; est. v1 -3..4 us. Any kernel edit that wants
   loads before griddepcontrol.wait: use cp.async.bulk.prefetch.L2 or LDGSTS, check SASS with /tmp/l14/sass_pdl.py logic.
+
+## Session 15 (2026-10-26 07:10Z-)
+- v43 (928381a) = v42 + moe_src r-moe 499bde6 (moe_twm item order 76 at T=256). H100 interleaved vs v42 (5 rounds):
+  v32 414.4/667.8 -> 404.0/652.3 us, rest same. Check 89325570 1.9468x: v32 ours 354.2/541.9 vs 365.6/545.6 in
+  9db0d4eb (absolute -11/-4 us as moe predicted), but SGLang's own v32 came in 8% lower this run (673.9 vs 727.7):
+  ratio noise. d1 73.0/82.2, d16 149.6/221.7, d32 181.2/323.6, v1 119.1/130.5, v16 273.8/369.3. Not submitted
+  (does not beat 1.9558; v42 vs v43 differ only at v32).
+- DEAD n2u8 (dev/n2u8_s15.patch): T=8 moe_norm3 + unpool slice in ONE kernel on clusters of 8 CTAs (CTA rank r
+  normalizes token r into smem, the cluster reads all 8 rows over DSMEM, each CTA dots its rows). H100 v1 +3.4/+3.3
+  us at best (R 9 x CS 8 = 120 CTAs; CS 4/2 worse: each extra token per CTA is ~4-5 us of serial phase 1). Reasons:
+  only 15 clusters of 8 fit at 1 CTA/SM (512 thr x 128 regs), a cluster cannot be placed while tk2f's CTAs hold the
+  GPC (loses the PDL early start + W prefetch that g17 gets), phase 1 alone ~= moe_norm3, and the k-reduction over
+  512 threads is shuffle-bound (64 values x 5 shuffles x 16 warps; butterfly reduce-scatter = 62 shuffles helps).
+  Lessons (SASS): a C select between two array elements by lane bit became dynamically indexed LOCAL memory;
+  loops with two induction variables did not unroll (array to local); conditional y loads inside per-slot branches
+  were serialized (8 round trips): load unconditionally, then select. barrier.cluster.arrive.release = MEMBAR.ALL.GPU.
+- DEAD bndc (dev/bndc_s15.patch): both boundaries as a CUDA kernel on a cluster of 8 CTAs per row (1024 columns
+  each, the two sums over DSMEM, stores after the last barrier). Standalone cold: T=1 7.6 vs Triton 8.4 us, T=8 7.7
+  vs 8.4, T=32 9.4 vs 8.8, T=256 27.9 vs 15.7. In the layer worse everywhere (d1 +0.8, v1 +0.8, d32 +4.6, v32 +30):
+  the first boundary ends 6.3 us after the o GEMV (Triton 5.0), the second 3.4 after n2u (Triton 2.2).
+  Cluster size 16 needs cudaFuncAttributeNonPortableClusterSizeAllowed (launch error otherwise).

@@ -1,0 +1,208 @@
+diff --git a/muse_decode_layer/layer.py b/muse_decode_layer/layer.py
+index bba9b5b..1f0d3d4 100644
+--- a/muse_decode_layer/layer.py
++++ b/muse_decode_layer/layer.py
+@@ -791,7 +791,7 @@ def _g10_lib():
+                     "G19_CASE(%d,%d,%d,%d,1,%d)" % (c[0], c[1], c[2], c[3], c[5]) for c in sorted(set(G19_CFG.values()) | set(G19_BUILD))))
+             else:
+                 src = src + "\nvoid g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
+-            src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
++            src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC + "\n" + _BNDC_SRC
+             if _GPR1_SRC is not None:
+                 src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c[:4] for c in sorted(set(PR1_CFG.values()))))
+                 if _GPR8_SRC is not None:
+@@ -813,6 +813,8 @@ def _g10_lib():
+                             "void pj_router3(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                             "void n2u_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                             "int64_t, int64_t, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, std::vector<torch::Tensor>, double, double);\n"
++                            "void bndc_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, c10::optional<torch::Tensor>, "
++                            "torch::Tensor, torch::Tensor, torch::Tensor, c10::optional<torch::Tensor>, int64_t, double, double, int64_t, int64_t, int64_t);\n"
+                             "void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                             "void pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
+                             "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+@@ -820,7 +822,7 @@ def _g10_lib():
+                             + ("void pr8_launch(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
+                                "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                                "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else ""),
+-                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "pj_router3", "g19_gemm", "pr1_launch"]
++                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "bndc_launch", "pj_router3", "g19_gemm", "pr1_launch"]
+                 + (["pr8_launch"] if _GPR1_SRC is not None and _GPR8_SRC is not None else []),
+                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
+         except Exception as e:  # noqa: BLE001
+@@ -1035,6 +1037,129 @@ if TK2F_LATE_TRIG:
+         _a = "static int g_pdl = 4,"
+         assert _moe_CUDA_SRC.count(_a) == 1
+         _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "static int g_pdl = 6,")
++_BNDC_SRC = r'''namespace bndc {
++// s15: the boundary (as layer.py _boundary) on a cluster of CS CTAs per row: CTA rank c owns columns
++// [c N / CS, (c + 1) N / CS); the two sums of squares are combined over DSMEM (fixed order: the same value in every CTA).
++// Global stores wait until after the last cluster barrier (a release there would wait for them).
++__device__ __forceinline__ float csum(float* part, float v, int tid, int CS_) {
++    // block sum of v -> part (own smem slot), cluster barrier, sum of the CS slots over DSMEM
++    __shared__ float red[8];
++#pragma unroll
++    for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
++    if ((tid & 31) == 0) red[tid >> 5] = v;
++    __syncthreads();
++    if (tid == 0) {
++        float t = 0.f;
++#pragma unroll
++        for (int q = 0; q < 8; ++q) t += red[q];
++        *part = t;
++    }
++    asm volatile("barrier.cluster.arrive.release.aligned;\nbarrier.cluster.wait.acquire.aligned;" ::: "memory");
++    const unsigned la = (unsigned)__cvta_generic_to_shared(part);
++    float t = 0.f;
++    for (int c = 0; c < CS_; ++c) {
++        unsigned ra;
++        float x;
++        asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(ra) : "r"(la), "r"(c));
++        asm volatile("ld.shared::cluster.f32 %0, [%1];" : "=f"(x) : "r"(ra) : "memory");
++        t += x;
++    }
++    return t;
++}
++template <int CS, bool RB>
++__global__ void __launch_bounds__(256) bndc(const void* br, const float* s, const float* __restrict__ alpha,
++                                            const float* __restrict__ beta, const float* __restrict__ bgain,
++                                            const float* __restrict__ gain, float* s_out, __nv_bfloat16* h, float* h32,
++                                            int NB, float eps_post, float eps, int pdl, int trig) {
++    constexpr int N = 8192, V = N / CS / 256;
++    static_assert(V == 2 || V == 4, "cols per thread");
++    __shared__ float part[2];
++    const int tid = threadIdx.x;
++    unsigned rank;
++    asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(rank));
++    if (trig) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++    const size_t row = blockIdx.x / CS;
++    const int c0 = rank * (N / CS) + tid * V;
++    float al[V], be[V], ga[V], bg[V], sv[V], b[V];
++#pragma unroll
++    for (int k = 0; k < V; ++k) {
++        al[k] = alpha[c0 + k];
++        be[k] = beta[c0 + k];
++        ga[k] = gain[c0 + k];
++        bg[k] = bgain != nullptr && c0 + k < NB ? bgain[c0 + k] : 1.f;
++        sv[k] = __ldcg(s + row * N + c0 + k);
++    }
++    if (pdl) asm volatile("griddepcontrol.wait;" ::: "memory");
++#pragma unroll
++    for (int k = 0; k < V; ++k) {
++        float x = 0.f;
++        if (c0 + k < NB) {
++            if (RB) x = __bfloat162float(__float2bfloat16(__ldcg(reinterpret_cast<const float*>(br) + row * NB + c0 + k)));
++            else x = __bfloat162float(__ldcg(reinterpret_cast<const __nv_bfloat16*>(br) + row * NB + c0 + k));
++        }
++        b[k] = x * bg[k];
++    }
++    float q = 0.f;
++#pragma unroll
++    for (int k = 0; k < V; ++k) q += b[k] * b[k];
++    const float rb = rsqrtf(csum(&part[0], q, tid, CS) / N + eps_post);
++    q = 0.f;
++#pragma unroll
++    for (int k = 0; k < V; ++k) {
++        sv[k] = al[k] * sv[k] + be[k] * (b[k] * rb);
++        q += sv[k] * sv[k];
++    }
++    const float rs = rsqrtf(csum(&part[1], q, tid, CS) / N + eps);
++    // no CTA may exit while others still read its part[] (values already in registers: relaxed arrive)
++    asm volatile("barrier.cluster.arrive.relaxed.aligned;" ::: "memory");
++    if (V == 4) {
++        *reinterpret_cast<float4*>(s_out + row * N + c0) = make_float4(sv[0], sv[1], sv[2], sv[3]);
++        __nv_bfloat162 h0 = __floats2bfloat162_rn(sv[0] * rs * ga[0], sv[1] * rs * ga[1]);
++        __nv_bfloat162 h1 = __floats2bfloat162_rn(sv[2] * rs * ga[2], sv[3] * rs * ga[3]);
++        uint2 o;
++        o.x = *reinterpret_cast<unsigned*>(&h0);
++        o.y = *reinterpret_cast<unsigned*>(&h1);
++        *reinterpret_cast<uint2*>(h + row * N + c0) = o;
++        if (h32 != nullptr)
++            *reinterpret_cast<float4*>(h32 + row * N + c0) =
++                make_float4(sv[0] * rs * ga[0], sv[1] * rs * ga[1], sv[2] * rs * ga[2], sv[3] * rs * ga[3]);
++    } else {
++#pragma unroll
++        for (int k = 0; k < V; ++k) {
++            s_out[row * N + c0 + k] = sv[k];
++            h[row * N + c0 + k] = __float2bfloat16(sv[k] * rs * ga[k]);
++            if (h32 != nullptr) h32[row * N + c0 + k] = sv[k] * rs * ga[k];
++        }
++    }
++    asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory");
++}
++}  // namespace bndc
++void bndc_launch(torch::Tensor br, torch::Tensor s, torch::Tensor alpha, torch::Tensor beta, c10::optional<torch::Tensor> bgain,
++                 torch::Tensor gain, torch::Tensor s_out, torch::Tensor h, c10::optional<torch::Tensor> h32, int64_t nb,
++                 double eps_post, double eps, int64_t pdl, int64_t trig, int64_t cs) {
++    const int T = (int)s.size(0);
++    TORCH_CHECK(s.size(1) == 8192 && br.size(0) == T, "bndc: shape");
++    const bool rb = br.scalar_type() == torch::kFloat32;
++    cudaLaunchConfig_t lc = {}; lc.gridDim = T * cs; lc.blockDim = 256; lc.dynamicSmemBytes = 0;
++    lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[2];
++    la[0].id = cudaLaunchAttributeClusterDimension;
++    la[0].val.clusterDim.x = (unsigned)cs; la[0].val.clusterDim.y = 1; la[0].val.clusterDim.z = 1;
++    la[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
++    la[1].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 2 : 1;
++#define BNDC_ARGS br.data_ptr(), (const float*)s.data_ptr(), (const float*)alpha.data_ptr(), (const float*)beta.data_ptr(), \
++        bgain ? (const float*)bgain->data_ptr() : (const float*)nullptr, (const float*)gain.data_ptr(), \
++        (float*)s_out.data_ptr(), (__nv_bfloat16*)h.data_ptr(), h32 ? (float*)h32->data_ptr() : (float*)nullptr, (int)nb, \
++        (float)eps_post, (float)eps, (int)pdl, (int)trig
++    if (cs == 8 && !rb) cudaLaunchKernelEx(&lc, bndc::bndc<8, false>, BNDC_ARGS);
++    else if (cs == 8 && rb) cudaLaunchKernelEx(&lc, bndc::bndc<8, true>, BNDC_ARGS);
++    else if (cs == 16 && !rb) cudaLaunchKernelEx(&lc, bndc::bndc<16, false>, BNDC_ARGS);
++    else if (cs == 16 && rb) cudaLaunchKernelEx(&lc, bndc::bndc<16, true>, BNDC_ARGS);
++    else TORCH_CHECK(false, "bndc: cfg");
++    C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
++'''
++
++
+ _N2U_SRC = r'''namespace n2u {
+ // SLOT (s14, moe_tk2f PF & 4): y32 row = route slot s, pre-scaled by gs2 * 256 (no inv / gs loads); the routing (ids, tw:
+ // pr1's, complete before tk2f passed its own griddepcontrol.wait) is read before griddepcontrol.wait, so only the y32
+@@ -1448,6 +1573,14 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
+     return f
+ 
+ 
++BNDC_CS = 8  # s15: boundaries as bndc (CUDA, a cluster of BNDC_CS CTAs per row, DSMEM sums); 0 = Triton _boundary
++BNDC_TOKENS = None  # None = every T, else a tuple of T
++
++
++def _bndc_ok(tokens):
++    return bool(BNDC_CS) and (BNDC_TOKENS is None or tokens in BNDC_TOKENS) and _G10.get("lib") is not None
++
++
+ def _tail(moe, stream1, h, tokens, state, pdl, f=None):
+     """unpool -> second boundary: (next attention input, stream)."""
+     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
+@@ -1458,10 +1591,14 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None):
+     stream2 = torch.empty_like(stream1)
+     hidden = torch.empty_like(h)
+     alpha, beta = state["res2"]
+-    _boundary[(tokens,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
+-                         NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
+-                         EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, RB=f.dtype == torch.float32, num_warps=16,
+-                         launch_pdl=pdl)
++    if _bndc_ok(tokens):
++        _G10["lib"].bndc_launch(f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, None,
++                                UNPOOL_SLICE if sliced else HIDDEN, POST_NORM_EPS, RMS_EPS, int(pdl), 0, BNDC_CS)
++    else:
++        _boundary[(tokens,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
++                             NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
++                             EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, RB=f.dtype == torch.float32, num_warps=16,
++                             launch_pdl=pdl)
+     return hidden, stream2
+ 
+ 
+@@ -1499,7 +1636,11 @@ def kernel_fn(data, state):
+            and (tokens == 1 and "pooler" in state.get("g13", {}) or tokens == 8 and _GPR8_SRC is not None
+                 and "pooler" in state.get("g14", {}) and G14_CFG["pooler"][0] == 8))
+     bnd = pr1 and PR1_BND and tokens == 1 and a.dtype == torch.bfloat16
+-    if not bnd:
++    trig1 = pr1 or (BOUNDARY_TRIG and ("pooler", tokens) in state.get("g19", {}) and "pooler" in G19_ON)
++    if not bnd and not npf and _bndc_ok(tokens):
++        _G10["lib"].bndc_launch(a, data["stream"], alpha, beta, None, state["pre_ffn"], stream1, h,
++                                h32 if fp32_router else None, HIDDEN, POST_NORM_EPS, RMS_EPS, int(pdl), int(trig1), BNDC_CS)
++    elif not bnd:
+       _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
+                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
+                                PDL=pdl, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32,
