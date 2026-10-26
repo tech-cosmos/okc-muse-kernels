@@ -1,7 +1,7 @@
 # STATE-moe (muse_moe_w4a16)
 
 ## Board
-- Best submit: 6a92803ae4fc4a11 @f64440a, **2.190x** (2026-10-26 02:16Z; check 64c725e6 same code 2.205x), SA scale decode.
+- Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z; check 64c725e6 same code 2.205x), SA scale decode.
   Previous: 9a73c24a 2.176x @9aa37e0. Top of board 2.55x (#10 2.37x, #20 2.31x).
   Used 2026-10-26: checks 7 of 20, submits 3 (lead cap 9). Per-shape (submit 6a92803a / check 64c725e6):
   bs1 28.8/27.1, bs16 93.9/94.5, bs32 128.7/128.8, bs8 67.0/71.0, bs128 197.4/203.0, bs256 248.0/246.5.
