@@ -1,6 +1,7 @@
-# apply the s21 TK2F_L2H change to a layer moe_src.py (layer's tk2f_produce text, no FP xrdy): python patch_layer.py <moe_src.py> <mode>
+# apply the s21 TK2F_L2H change to a layer moe_src.py (layer's tk2f_produce text, no FP xrdy):
+#   python patch_layer.py <moe_src.py> <tk2f mode> [<twm mode 0|1>]
 import sys
-p, mode = sys.argv[1], int(sys.argv[2]); s = open(p).read()
+p, mode = sys.argv[1], int(sys.argv[2]); twm = int(sys.argv[3]) if len(sys.argv) > 3 else 0; s = open(p).read()
 def rep(old, new):
     global s
     assert s.count(old) == 1, old[:80]; s = s.replace(old, new)
@@ -72,4 +73,17 @@ rep('''  constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * 1152
       if (++st == NSTG) { st = 0; ph ^= 1; }
     }
   }''')
+if twm:
+    rep('''        tma2d(sb, map, kc * 64, off, &full[st]);
+        bulk_g2s(sb + xo, wsrc + (size_t)kc * WB, wbytes, &full[st]);
+        bulk_g2s(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, &full[st]);
+''', '''        tma2d(sb, map, kc * 64, off, &full[st]);
+        {  // s21: evict_last if a later pass of this expert re-reads these weights, else evict_first
+          uint64_t pol;
+          if (off + PS < s_off[e + 1]) asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol));
+          else asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol));
+          bulk_g2s_h(sb + xo, wsrc + (size_t)kc * WB, wbytes, &full[st], pol);
+          bulk_g2s_h(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, &full[st], pol);
+        }
+''')
 open(p, 'w').write(s)
