@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~10:50 UTC (session 16).
+Updated 2026-10-26 ~11:00 UTC (end of session 16).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -130,7 +130,10 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   after-pred numbers for pooler/unpool (qkv off by ~3 us); GRID 72 ~ the layer's 108 blocks. Use it before H200 diags.
 
 ## Next (ranked)
--4. (s16) Only if worth it: router + routing fused into the T=16/32 pooler g19 (per-tile scale for hi/lo tiles, routing
+-5. (s16) FIRST: read COORD for the lead's answer to "proj -> lead (s16 10:36Z)" (move to moe tk2f fixed cost? or the
+   fused pooler+router+routing). Budget 10-26: 4 checks + 5 submits left (sandbox ends ~19:10Z; new sandbox tomorrow).
+   The layer has my qkv-m8 g14 config and lt picks as handoffs (check COORD whether it took them).
+-4. (s16) Only if worth it (the H200 proxy says the fused GEMM alone loses; routing must be fused too): router + routing fused into the T=16/32 pooler g19 (per-tile scale for hi/lo tiles, routing
    by the last router-flush finisher, like pr8) so the pooler gets 132 SMs and the side stream goes: est. -2 us d16/d32.
    Otherwise the proj lane is near what these kernels can do; ask the lead for a lane (moe tk2f fixed cost is biggest).
 -3. (s15) If the layer's H200 check of the s15 patch (+ T=32 g19) holds: g19 m32 consumer cost (Next 0 below) is

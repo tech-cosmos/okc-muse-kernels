@@ -508,3 +508,4 @@
   volatile) 0; fused [pooler; router 512 rows] at 132-equiv (G88) m16 18.0 / m32 20.1 vs pooler alone at 108-equiv
   (G72) 16.15 / 20.81 -> with routing then on the critical path: loses; G19_NOXW (consumers never wait for x: upper
   bound of faster x staging) -0.2..0.7 us only.
+- Session 16 end (11:00Z): checks 10-26 16/20, scored 5/10. Board best 3810db09 1.3110x.
