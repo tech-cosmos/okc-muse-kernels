@@ -492,3 +492,11 @@
   s12). In the layer the pooler runs on 108 blocks (router beside it): consumer-bound -> 132/108 slower per call.
 - H100 layer timeline d32 sliding (r-layer 66fef4c copy): boundary 51.0-57.6, g19 pooler 51.6-83.7, _router_split
   57.5-76.4 (18.8 us on its ~24 SMs), routing 76.3-81.1, rmsnorm 83.7-86.3; unpool 181.9-211.6 after norm2 (190.1).
+- g19 x staging (H100 traces, NOW+NOMMA, after the 3 us pred): x chunk arrives ~2.1 us after griddepcontrol.wait at m32
+  KC 1024 (32 row copies x 2 KB), 1.7 us at KC 512 (32 x 1 KB), 1.5 us at m16 (16 x 2 KB): latency ~1 us + bytes +
+  copy count. G19_XPAR (producer warp in lockstep, x rows issued one per lane): x arrival unchanged, times -0.1..0.5 us
+  (noise level). G19_XQ (x in 4 quarters with one mbarrier each, stage waits only its quarter; 4x more 512 B copies):
+  correct but SLOWER (pool m32 27.4 vs 22.8, qkv m32 20.4 vs 15.0): small bulk copies are expensive. A 2D tensor-map
+  x box (SW128, 16 boxes per chunk) + swizzled ldmatrix addressing would cut copies; est. <= 1 us per call. Both off.
+- KC 2048 at m16 (AP 8, NS 2, xb 1): H100 108 blocks after pred -0.75..0.85 us (pool/unp), consumer-only +0.5: likely
+  no H200 gain (consumer-bound there). m32: KC 1024 stays best (512: +1..2, 2048: +6).

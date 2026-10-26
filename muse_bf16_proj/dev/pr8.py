@@ -92,6 +92,8 @@ if __name__ == "__main__":
                                                             ids, lids, wts, MULT, REPS, LOCAL, *cc, 0)) - e
                 print("time", cc, f"{t:.2f} us", flush=True)
     if os.environ.get("TRACE"):
+        import bench
+        bench.time_graph(lambda: None, reps=1)  # allocates the flush buffer
         for npf in (cfgs[0][5], -2):
             for _ in range(3):
                 torch.sum(bench._FLUSH.view(torch.int64), 0, out=bench._SINK)

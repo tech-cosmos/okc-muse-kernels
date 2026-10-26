@@ -90,12 +90,20 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
     float* pbuf = (float*)(smem + NS * SB + XB * M * XS);
     const unsigned bars = (unsigned)__cvta_generic_to_shared(pbuf + NPB * PBF);
-    int* tag = (int*)(pbuf + NPB * PBF) + 2 * (2 * NS + 8);  // after the barriers. per slot: u | xb << 29 | last x use << 30 | run end << 31 (-1: no more work)
+#ifdef G19_XQ  // x chunk in 4 quarters, one mbarrier each (xq[buffer][quarter], after the other barriers): stages start on their quarter
+#ifndef G19_XPAR
+#error "G19_XQ needs G19_XPAR"
+#endif
+    constexpr int XQB = 16;
+#else
+    constexpr int XQB = 0;
+#endif
+    int* tag = (int*)(pbuf + NPB * PBF) + 2 * (2 * NS + 8) + XQB;  // after the barriers. per slot: u | xb << 29 | last x use << 30 | run end << 31 (-1: no more work)
     int* ptag = tag + NS;                                 // per pbuf: tile | atoms << 12 (-1: consumers done)
     // PRE 3: tile read-back buffer [M][NWC * 16] f32 (bulk copy) + its mbarrier
     const unsigned cbuf = ((unsigned)__cvta_generic_to_shared(ptag + 2) + 127u) & ~127u, cbar = cbuf + M * NWC * 64;
     // full[NS], empty[NS], xfull[2], xempty[2], pfull[2], pempty[2]
-    const unsigned xfull = bars + 16 * NS, xempty = xfull + 16, pfull = xfull + 32, pempty = xfull + 48;
+    const unsigned xfull = bars + 16 * NS, xempty = xfull + 16, pfull = xfull + 32, pempty = xfull + 48, xq = xfull + 64;
     const int t = threadIdx.x, lane = t & 31, w = t >> 5, g = lane >> 2, c = lane & 3;
     const int nrg = n / 16, ntr = nrg / NWC, S = k / KC, KA = k / 32;
     const int U = S * ntr * SPK, US = U - tail;
@@ -107,6 +115,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         for (int i = 0; i < 2; ++i) {
             bar_init(xfull + 8 * i, 1); bar_init(xempty + 8 * i, NCW); bar_init(pfull + 8 * i, NCW); bar_init(pempty + 8 * i, 1);
         }
+        if (XQB) for (int i = 0; i < 8; ++i) bar_init(xq + 8 * i, 1);
         if (PRE == 3) bar_init(cbar, 1);
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
@@ -115,6 +124,88 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
 #ifdef G19_TRACE
     if (t == 0) { unsigned sm_; asm volatile("mov.u32 %0, %%smid;" : "=r"(sm_)); trace[blockIdx.x * 64 + 10] = sm_; }
 #endif
+#ifdef G19_XPAR
+    if (w == NCW) {  // producer warp, all lanes in lockstep: lane 0 issues W / tags / barriers, x rows go one per lane
+        int ra = (int)((long)US * blockIdx.x / gridDim.x), rb = (int)((long)US * (blockIdx.x + 1) / gridDim.x);
+        int xks[2] = {-1, -1}, xuse[2] = {0, 0}, xb = 1, i = 0;
+        auto xload = [&](int b_, int ks_) {
+#ifdef G19_XQ
+            if (lane == 0) for (int q4 = 0; q4 < 4; ++q4) bar_expect(xq + 8 * (b_ * 4 + q4), M * KC / 2);
+            __syncwarp();
+            for (int i4 = lane; i4 < 4 * M; i4 += 32) {  // quarter-major: quarter 0 of every row first
+                const int q4 = i4 / M, qq = i4 % M;
+                bulk(xs + b_ * M * XS + qq * XS + q4 * (KC / 2), x + (long)qq * k + (long)ks_ * KC + q4 * (KC / 4), KC / 2, xq + 8 * (b_ * 4 + q4));
+            }
+#else
+            if (lane == 0) bar_expect(xfull + 8 * b_, M * KC * 2);
+            __syncwarp();
+            for (int qq = lane; qq < M; qq += 32) bulk(xs + b_ * M * XS + qq * XS, x + (long)qq * k + (long)ks_ * KC, KC * 2, xfull + 8 * b_);
+#endif
+        };
+        if (PRE && npre > 0 && ra < rb) {  // out zeroed long before: stream the first stages' W while the previous kernel runs
+            const int ks0 = KSof(ra);
+            for (; i < npre && ra < rb && KSof(ra) == ks0; ++i, ++ra) {
+                const int st = ra % SPK;
+                const bool xl = ra + 1 == rb || KSof(ra + 1) != ks0;
+                if (lane == 0) {
+                    tag[i] = ra | (xl ? 1 << 30 : 0) | (ra + 1 == rb || st + 1 == SPK ? 1 << 31 : 0);  // x buffer 0
+                    bar_expect(bars + 8 * i, SB);
+                    bulk(ring + i * SB, WP + (long)ra * SB, SB, bars + 8 * i);
+                }
+            }
+            asm volatile("griddepcontrol.wait;" ::: "memory");
+            xb = 0; xks[0] = ks0; xuse[0] = 1;
+            xload(0, ks0);
+        } else {
+            asm volatile("griddepcontrol.wait;" ::: "memory");  // x, out, ctr ready
+        }
+        for (;;) {
+            if (ra >= rb) {  // next run: a tail item
+                if (tail == 0) break;
+                int it = 0;
+                if (lane == 0) it = atomicAdd(ctr, 1);
+                it = __shfl_sync(0xffffffffu, it, 0);
+                if (it * IS >= tail) break;
+                ra = US + it * IS; rb = ra + IS;
+            }
+            for (int u = ra; u < rb; ++u, ++i) {
+                const int ks = KSof(u), st = u % SPK;
+                if (ks != xks[xb]) {  // next x buffer, load chunk ks (consumers release a buffer after its last use)
+                    xb = XB == 2 ? xb ^ 1 : 0;
+                    if (xuse[xb]) bar_wait(xempty + 8 * xb, (xuse[xb] - 1) & 1);
+                    ++xuse[xb];
+                    xks[xb] = ks;
+                    xload(xb, ks);
+                }
+                const int slot = i % NS;
+                if (i >= NS) bar_wait(bars + 8 * (NS + slot), ((i / NS) - 1) & 1);
+                const bool end = u + 1 == rb || st + 1 == SPK;
+                const bool xl = u + 1 == rb || KSof(u + 1) != ks;
+                if (xl) xks[xb] = -1;  // released by the consumers after this stage: reload even if the next run has this ks
+                if (lane == 0) {
+                    tag[slot] = u | xb << 29 | (xl ? 1 << 30 : 0) | (end ? 1 << 31 : 0);
+                    if (i < 24) TR(40 + i);
+                    const unsigned full = bars + 8 * slot;
+#ifdef G19_NOW
+                    bar_arrive(full);
+#else
+                    bar_expect(full, SB);
+                    bulk(ring + slot * SB, WP + (long)u * SB, SB, full);
+#endif
+                }
+            }
+            ra = rb;
+        }
+        const int slot = i % NS;  // end marker
+        if (i >= NS) bar_wait(bars + 8 * (NS + slot), ((i / NS) - 1) & 1);
+        if (lane == 0) {
+            tag[slot] = -1;
+            bar_arrive(bars + 8 * slot);
+            TR(1);
+        }
+        return;
+    }
+#else
     if (w == NCW) {  // producer: one lane walks the static range, then the tail items
         if (lane == 0) {
             int ra = (int)((long)US * blockIdx.x / gridDim.x), rb = (int)((long)US * (blockIdx.x + 1) / gridDim.x);
@@ -177,6 +268,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         }
         return;
     }
+#endif
     if (w == NCW + 1) {  // finisher: pbuf [128 rows][M] -> out [M][n] by red.global.add.v4 (lane = token, 4 rows)
         asm volatile("griddepcontrol.wait;" ::: "memory");
         unsigned target = 0;
@@ -263,7 +355,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     const int wr = (w / TS) * RPW, th = w % TS;  // wr: the warp's first row group in the tile
     const unsigned xrow = (th * MT + (lane >> 4) * 8 + (lane & 7)) * XS + ((lane >> 3) & 1) * 16;
     int q = 0, st0 = 0, prev_end = 1, prev_xl = 1;
-    unsigned xph[2] = {0, 0};
+    unsigned xph[2] = {0, 0}, xpc[2] = {0, 0};
     float4 hd0[RPW], hd1[RPW];
     for (int i = 0;; ++i) {
         const int slot = i % NS;
@@ -274,7 +366,14 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         const int u = tg & 0x1FFFFFFF, xb = (tg >> 29) & 1;
         const bool end = tg < 0, xl = (tg >> 30) & 1;
         const int ks = KSof(u), tr = tm ? u / (S * SPK) : (u % (ntr * SPK)) / SPK, st = u % SPK;
+#ifdef G19_XQ
+        if (prev_xl) { xpc[xb] = xph[xb]; xph[xb] ^= 1; }  // a new x use of buffer xb: its quarters' phase parity
+        prev_xl = xl;
+        for (int q4 = (st * AP * 32) / (KC / 4); q4 <= ((st + 1) * AP * 32 - 1) / (KC / 4); ++q4) bar_wait(xq + 8 * (xb * 4 + q4), xpc[xb]);
+        if (false) {
+#else
         if (prev_xl) {  // first stage of an x use: wait for it
+#endif
             bar_wait(xfull + 8 * xb, xph[xb]);
             if (t == 0 && i == 0) TR(5);
             xph[xb] ^= 1;
@@ -610,6 +709,10 @@ void g19_gemm_ob(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor 
               __nv_bfloat16* ob, int tm) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const int sm = ns * rg * ap * 768 + xb * m * (kc * 2 + 16) + g19::NPB * rg * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8
+#ifdef G19_XQ
+                 + 64
+#endif
+
                  + (mode == 3 ? 128 + m * rg * 64 + 16 : 0);
     TORCH_CHECK(n % (16 * rg) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0) && npre <= ns && n / (16 * rg) <= 4096, "g19: shape");
     auto stream = c10::cuda::getCurrentCUDAStream();
