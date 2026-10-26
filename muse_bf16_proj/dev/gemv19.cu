@@ -36,7 +36,12 @@ __device__ __forceinline__ uint4 dec8(unsigned s0, unsigned s1, unsigned nw) {
     return r;
 }
 __device__ __forceinline__ void mma(float* c, const uint4& a, unsigned b0, unsigned b1) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+#ifdef G19_MMANV  // not volatile: a pure register op, free to be scheduled among the decode / ldmatrix work
+    asm(
+#else
+    asm volatile(
+#endif
+                 "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b0), "r"(b1));
 }
 __device__ __forceinline__ void ldsm4(unsigned addr, unsigned& d0, unsigned& d1, unsigned& d2, unsigned& d3) {
@@ -374,7 +379,9 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
 #else
         if (prev_xl) {  // first stage of an x use: wait for it
 #endif
+#ifndef G19_NOXW  // diag: never wait for x (garbage results): the x arrival's share of the time
             bar_wait(xfull + 8 * xb, xph[xb]);
+#endif
             if (t == 0 && i == 0) TR(5);
             xph[xb] ^= 1;
         }

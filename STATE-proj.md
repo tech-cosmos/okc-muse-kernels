@@ -126,6 +126,9 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   routing then on the critical path), g19 test_wait spin. g19 m32 H200 bound = consumers (H100 NOW: skeleton 9.8 +
   decode 2.3 + mma.sync 4.4 us at pool m32) and no variant tried so far helps.
 
+- **H200 proxy for g19** (NOTES s16): H100 `GRID=88 MODE=2 PRED=3000 python dev/g19.py ...`, times x 0.73 = judge g19
+  after-pred numbers for pooler/unpool (qkv off by ~3 us); GRID 72 ~ the layer's 108 blocks. Use it before H200 diags.
+
 ## Next (ranked)
 -4. (s16) Only if worth it: router + routing fused into the T=16/32 pooler g19 (per-tile scale for hi/lo tiles, routing
    by the last router-flush finisher, like pr8) so the pooler gets 132 SMs and the side stream goes: est. -2 us d16/d32.

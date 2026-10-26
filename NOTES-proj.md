@@ -500,3 +500,11 @@
   x box (SW128, 16 boxes per chunk) + swizzled ldmatrix addressing would cut copies; est. <= 1 us per call. Both off.
 - KC 2048 at m16 (AP 8, NS 2, xb 1): H100 108 blocks after pred -0.75..0.85 us (pool/unp), consumer-only +0.5: likely
   no H200 gain (consumer-bound there). m32: KC 1024 stays best (512: +1..2, 2048: +6).
+- **H200 PROXY for g19** (moe s16's trick): H100 with GRID=88 and times x 0.73 reproduces the judge's g19 numbers after
+  a 3 us PDL pred (ce84da07): pooler m16 (8,3) 15.55 vs H200 15.81, unp m16 16.08 vs 15.62, unp m32 17.88 vs 18.40,
+  pooler m32 18.14 vs 19.71 (orderings right); qkv m32 off by 3 (12.15 vs 15.39). `GRID=88 MODE=2 PRED=3000 python
+  dev/g19.py ...` then x 0.73 (H200 108 blocks ~ GRID 72). NOT valid for gemv13 (orders VT 512 last; H200 first).
+  Proxy verdicts: KC 2048 m16 16.1 vs 15.0 (loses: retracted the tune suggestion); G19_XPAR 0; G19_MMANV (mma asm not
+  volatile) 0; fused [pooler; router 512 rows] at 132-equiv (G88) m16 18.0 / m32 20.1 vs pooler alone at 108-equiv
+  (G72) 16.15 / 20.81 -> with routing then on the critical path: loses; G19_NOXW (consumers never wait for x: upper
+  bound of faster x staging) -0.2..0.7 us only.
