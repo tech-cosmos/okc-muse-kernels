@@ -3891,6 +3891,7 @@ DIAG19 = {}  # s15 diag done (check ce84da07, NOTES-proj s15)
 DIAG19Q_S15 = {"qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (16, 1024, 8, 3, 3, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1),
                             (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
 DIAG19Q = {}
+DIAG_SLAB = {"qkv_gate": (16, 32), "o": (32,), "pooler": (32,)}  # s22: print-only, split-K as FP32 bmm slabs (no reduce kernel) vs the pick
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
@@ -4246,6 +4247,7 @@ def prepare(weights):
     _diag19q(st)
     _diag20(st)
     _diag19_stream()
+    _diag_slab(st)
     st["rpick"] = _tune_router(st)
     return st
 
@@ -4502,6 +4504,30 @@ def _diag20(st):
                     names.append("g20%s%s err %.1e" % (v, c[1:], err))
             med = _graph_medians(fns)
             print(f"diag20 {layer} m{m} (pred {med[0] * 1e3:.2f}):", " | ".join(f"{nm_} +{(t - med[0]) * 1e3:.2f}" for nm_, t in zip(names, med[1:])))
+
+
+def _diag_slab(st):
+    """Print only: the layer's FP32-consumer option, x @ W^T split over k into ns FP32 slabs by one strided batched
+    GEMM (the consumer sums the slabs; no split-K reduce kernel) vs this shape's pick (BF16 out)."""
+    g = torch.Generator(device="cuda")
+    g.manual_seed(5)
+    for layer, ms in DIAG_SLAB.items():
+        w = st[layer]
+        n, k = w.shape
+        for m in ms:
+            x = torch.randn(m, k, generator=g, device=w.device).to(torch.bfloat16)
+            out = torch.empty(m, n, dtype=torch.bfloat16, device=w.device)
+            pick = st["pick"].get((layer, m))
+            fns = [lambda: _run(st, layer, x, out, pick) if pick is not None else torch.mm(x, w.t(), out=out),
+                   lambda: torch.mm(x, w.t(), out_dtype=torch.float32)]
+            nss = [ns for ns in (2, 3, 4, 8) if k % ns == 0]
+            for ns in nss:
+                kc = k // ns
+                fns.append(lambda ns=ns, kc=kc: torch.bmm(x.view(m, ns, kc).permute(1, 0, 2), w.view(n, ns, kc).permute(1, 2, 0),
+                                                          out_dtype=torch.float32))
+            med = _graph_medians(fns)
+            print(f"diagslab {layer} m{m}: pick {pick} {med[0] * 1e3:.2f} mm32 {med[1] * 1e3:.2f}",
+                  " ".join(f"bmm{ns}:{t * 1e3:.2f}" for ns, t in zip(nss, med[2:])))
 
 
 def _diag19_stream():
