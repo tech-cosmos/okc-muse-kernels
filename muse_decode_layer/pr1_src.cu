@@ -143,7 +143,7 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
     };
     auto pf = [&](int gg) {
         if (t == 0 && gg < NG)
-            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;"
+            asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }"
                          :: "l"(a.rw + (size_t)gg * R * (K / 4)), "r"(R * K * 4) : "memory");
     };
     if (g < NG) load(g);
@@ -272,8 +272,8 @@ __device__ __forceinline__ void pooler(const Args& a, int pb, int PB) {
         for (int p = PF; p < PF + a.npf; ++p) {
             const int ch = c + p * G;
             if (ch < nch) {
-                asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(a.S + (long)ch * (CE / 16)), "r"(CE) : "memory");
-                asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(a.N + (long)ch * (CE / 16)), "r"(CE / 2) : "memory");
+                asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }" :: "l"(a.S + (long)ch * (CE / 16)), "r"(CE) : "memory");
+                asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }" :: "l"(a.N + (long)ch * (CE / 16)), "r"(CE / 2) : "memory");
             }
         }
     BPre bp;

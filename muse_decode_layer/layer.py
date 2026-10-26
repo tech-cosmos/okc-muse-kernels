@@ -789,7 +789,7 @@ def _g10_lib():
                 # loads above below the wait: SASS showed only the first stage before ACQBULK); x by __ldcg (no .nc)
                 src = src.replace(anchor, '    if (pfl2)\n'
                                   '        for (long j = t; c + j * G < nch; j += 256)\n'
-                                  '            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(W + (c + j * G) * (CE / 8)), "r"(CE * 2) : "memory");\n'
+                                  '            asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }" :: "l"(W + (c + j * G) * (CE / 8)), "r"(CE * 2) : "memory");\n'
                                   '    asm volatile("griddepcontrol.wait;" ::: "memory");\n' + anchor.replace("__ldg(", "__ldcg("))
                 gsig = "__nv_bfloat16* __restrict__ out, int n) {"
                 assert src.count(gsig) == 1
@@ -850,8 +850,8 @@ def _g10_lib():
                  "        if (i < pfn) {\n"
                  "            const int pg = __ldg(pft + i);\n"
                  "            if (pg >= 0) {\n"
-                 "                asm volatile(\"prefetch.global.L2 [%0];\" :: \"l\"(pfk + (long)pg * pfrb));\n"
-                 "                asm volatile(\"prefetch.global.L2 [%0];\" :: \"l\"(pfv + (long)pg * pfrb));\n"
+                 "                asm volatile(\"prefetch.global.L2::evict_last [%0];\" :: \"l\"(pfk + (long)pg * pfrb));\n"
+                 "                asm volatile(\"prefetch.global.L2::evict_last [%0];\" :: \"l\"(pfv + (long)pg * pfrb));\n"
                  "            }\n        }\n    }\n"),
                 ("int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks) {",
                  "int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks,\n"
@@ -1015,7 +1015,7 @@ __global__ void __launch_bounds__(T) gemv(const uint4* __restrict__ w, const __n
     // s14: ptxas may sink the W register loads below griddepcontrol.wait (an acquire), so the block's R contiguous W
     // rows are also bulk-prefetched into L2 first (kept before ACQBULK in SASS).
     if (t == 0)
-        asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(w + (size_t)r0 * (K / 8)), "r"(R * K * 2) : "memory");
+        asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }" :: "l"(w + (size_t)r0 * (K / 8)), "r"(R * K * 2) : "memory");
     uint4 a[R][J];
 #pragma unroll
     for (int r = 0; r < R; ++r)
@@ -1139,7 +1139,7 @@ assert _moe_CUDA_SRC.count(_a) == 1
 if UPF3_AT == 0:
     _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a + "  if (upf != nullptr && tid < 32)\n"
                                           "    for (int r = blockIdx.x + gridDim.x * tid; r < upf_rows; r += gridDim.x * 32)\n"
-                                          "      asm volatile(\"cp.async.bulk.prefetch.L2.global [%0], %1;\" :: \"l\"(upf + (long)r * upf_rb), \"r\"(upf_seg) : \"memory\");\n")
+                                          "      asm volatile(\"{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }\" :: \"l\"(upf + (long)r * upf_rb), \"r\"(upf_seg) : \"memory\");\n")
 else:  # in moe_norm2/3 right after its griddepcontrol.wait (moe_tk2f complete: no competition with its stream)
     _i = _moe_CUDA_SRC.index("__global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y")
     _a = "int count, float eps, __nv_bfloat16* __restrict__ out, int* zc) {"
@@ -1152,7 +1152,7 @@ else:  # in moe_norm2/3 right after its griddepcontrol.wait (moe_tk2f complete: 
     if UPF3_AT == 1:  # bulk (the CTA retires only after its bulk prefetches complete: H100 norm +5.6, unpool -4)
         _pf = ("  if (upf != nullptr)\n"
                "    for (int r = blockIdx.x + gridDim.x * tid; r < upf_rows; r += gridDim.x * 512)\n"
-               "      asm volatile(\"cp.async.bulk.prefetch.L2.global [%0], %1;\" :: \"l\"(upf + (long)r * upf_rb), \"r\"(upf_seg) : \"memory\");\n")
+               "      asm volatile(\"{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }\" :: \"l\"(upf + (long)r * upf_rb), \"r\"(upf_seg) : \"memory\");\n")
     else:  # 2: per-line prefetch.global.L2 (fire and forget), lines spread over the grid
         _pf = ("  if (upf != nullptr) {\n"
                "    const int lpr = upf_seg >> 7, nl = upf_rows * lpr;\n"
@@ -1333,7 +1333,7 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
     // s14: ptxas sinks the W register loads below griddepcontrol.wait (an acquire: earlier loads may move after it;
     // SASS: every LDG of W after ACQBULK), so the block's R contiguous W rows are bulk-prefetched into L2 first.
     if (PFW && tid == 0)
-        asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(w + (size_t)r0 * (K / 8)), "r"(R * K * 2) : "memory");
+        asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }" :: "l"(w + (size_t)r0 * (K / 8)), "r"(R * K * 2) : "memory");
     uint4 a[R];
 #pragma unroll
     for (int r = 0; r < R; ++r) a[r] = g17::ldw(w + (size_t)(r0 + r) * (K / 8) + tid);
@@ -1569,7 +1569,7 @@ __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const in
     asm volatile("cp.async.commit_group;" ::: "memory");
     if (NU8_PF && blockIdx.x < gridDim.x / 2 && tid >= 64 && tid < 64 + RB) {  // the late half's W tiles into L2
         const int b2 = blockIdx.x + gridDim.x / 2, kc2 = b2 % NKC, rg2 = b2 / NKC;
-        asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(w + (size_t)(rg2 * RB + tid - 64) * K + kc2 * KB), "r"(KB * 2) : "memory");
+        asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }" :: "l"(w + (size_t)(rg2 * RB + tid - 64) * K + kc2 * KB), "r"(KB * 2) : "memory");
     }
     if (tid < 64) {  // the routing (pr8's, complete before moe_tk2f passed its own griddepcontrol.wait)
         const int e = ids[tid] - start;
