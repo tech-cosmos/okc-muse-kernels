@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~18:30 UTC (session 43: notes only, sandbox expiring ~19:10Z; checks 20/20; main unchanged = s42-verified).
+Updated 2026-10-26 ~19:35 UTC (s44, sandbox okc-night4: g19 m32 LONGRUN dead; checks 20/20 until 00:00Z; main unchanged, bench test PASS).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -137,6 +137,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## streams at ~95% rate and dilates the chain 40-60% less (rule for any layer weight-overlap/side-stream idea). s40: throttling
 ## g19's own few-stage pre-wait prologue (npre 1-2) beside a memory-touching pred: dead (keep deep npre).
 
+## s44: g19 m32 LONGRUN (runs spanning k-chunks, tile-major) DEAD: proxy pool m32 +0.3..+5 us even without fixups (NOTES s44).
 ## Next sandbox (ranked; sandbox okc-night3 expired ~19:10Z 10-26 with proj checks 20/20, scored 5/10)
 1. proj's first check = main as is (DEC3 in g13/g14 m1/m8 picks; tg2 unpooler m8 candidate): read the 'tune' lines in the
    judge log (profiles/*.log); submit if > 1.3110. Layer's first check = its main v88 (carries DEC3, pr8 npf 212, g19 s15).

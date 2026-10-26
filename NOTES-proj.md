@@ -945,3 +945,13 @@ pred's own graph time. H100, MODE=2, numbers = graph(pred + g19) - graph(pred) i
 No judge runs (proj checks 20/20 for 10-26; sandbox expires ~19:10Z). main unchanged (s42 re-verified: bench test 39/39, esc PASS).
 Next sandbox: first proj check = main as is; then pick up the layer's request list (COORD Requests) — the only open proj
 item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
+
+## s44 (2026-10-26 19:13-19:35Z, sandbox okc-night4, session 1): g19 m32 LONGRUN (fewer run ends) DEAD
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z). Sandbox re-verified: `python bench.py test` all PASS.
+- Question: is g19 m32's per-run-end flush (pbuf store + escape fixups + finisher red.add of 16 KB, every SPK stages =
+  every k-chunk) part of its consumer bound? dev/s44/gemv19_lr.cu (copy of gemv19.cu + G19_LONGRUN: tile-major stage order,
+  run ends only at a tile change, so a block's run spans k-chunks; x released at chunk ends; G19_NOFIX2 skips the smem
+  escape fixups) and dev/s44/g19ab.py (g19ab + TM packing for LONGRUN builds, env TOL). Both arms NOFIX2 (upper bound for B).
+  H200 proxy (GRID 72, PRED 3000, R 6), pool m32, B-A: (1024,8,2,xb1) +4.99 us (x reloaded per chunk into a single
+  buffer: stalls), (512,8,2,xb2) +0.34. => run-end flushes are NOT the m32 bound; tile-major order costs more x reloads
+  than it saves. DEAD. (s18's conclusion stands: g19 m32 = consumer instruction count, mma.sync + decode.)
