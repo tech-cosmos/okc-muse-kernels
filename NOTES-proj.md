@@ -282,3 +282,11 @@
 - Submission (b812fe4 -> this session): BF16_G19 tuner candidates (+ cvt) and _diag19 (print only: 3 us PDL predecessor +
   g19 vs the pick, per shape). H100 standalone: never picked. diag (pick vs g19): qkv m16 15.4/11.5, m32 16.5/16.0,
   pool m16 24.1/20.2, m32 25.9/24.6, unp m16 21.3/20.5, m32 25.1/22.9, o m16 7.9/6.9.
+- s10 later: xb (1 x buffer released at its last use), ts (2 warps per row group: dead, +5 us: decode doubled), rg 16 /
+  rpw 2 (dead, no gain on H100), grouped smem loads (m32 -0.7 us). No-W-load mode (G19_NOW) + timelines: per stage the
+  consumers run at ~6 TB/s-equivalent; the fixed costs are x arrival (~2 us to the first finished stage) and ~1 us per
+  segment flush (escape fixups + pbuf handoff) + tail.
+- Checks (diag only, never picked standalone; prepare prints "diag19"): 9b09c536 (6996d0c) 1.3136, 60ddb481 (966241b)
+  1.3296, f13197773 (cfd1faf) 1.3146. H200 after a 3 us PDL predecessor (g19 vs best pick): m16 pooler (1024,8,3,xb1)
+  15.8 vs 18.9, unp 16.5 vs 17.5, qkv (1024,4,4,xb2) 11.2 vs 13.2 [AP8 12.4], o +0.7 worse; m32 all worse (+0.8..2.8).
+  Bare TMA stream 50 MB: H200 13.7, H100 18.3 us. Budget 10-26 at session end: checks 9/20, scored 4/10.

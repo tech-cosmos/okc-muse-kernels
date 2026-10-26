@@ -1,9 +1,10 @@
 # gemv19 interface (for r-layer): m = 16/32 GEMM over lossless 12-bit BF16 weights, FP32 output [m, n].
 #   c = _compress(w)                      # sub_template._compress (bit-exact round trip; None -> keep cuBLAS)
-#   P = pack19(c, kc, ap)                 # uint8 [stages, 8 * ap * 768]: one contiguous block per stage
-#   lib = build([(m, kc, ap, ns), ...])   # load_inline of gemv19.cu (~40 s for 8 configs)
+#   P = pack19(c, kc, ap, rg)             # uint8 [stages, rg * ap * 768]: one contiguous block per stage (rg = 8)
+#   lib = build([(m, kc, ap, ns, xb, ts, rg, rpw), ...])   # load_inline of gemv19.cu (~40 s for 8 configs)
 #   ctr = torch.zeros(1, 2, dtype=torch.int32) per call site (ctr[1] = epoch counter: never reset; a state clone is fine)
-#   lib.g19_gemm(P, hdr, scale, x, out, ctr, kc, ap, ns, 1, grid, 0, 2, npre)
+#   lib.g19_gemm(P, hdr, scale, x, out, ctr, kc, ap, ns, 1, grid, 0, 2, npre, xb, ts, rg, rpw)
+#     use xb 1, ts 1, rg 8, rpw 1 (other values: dev/g19.py experiments, none better).
 #     x bf16 [m, k] contiguous, out fp32 [m, n] (any contents: the kernel zeroes it, then red.adds the split-K
 #     partials; exact FP32 sums of BF16 products, subnormal results flushed to 0 by red.add), grid = #SMs.
 #     Launched as a PDL dependent of the previous kernel on the stream: its producer streams the first ns weight stages
@@ -20,7 +21,7 @@ from torch.utils.cpp_extension import load_inline
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gemv19.cu")
 
 
-def pack19(c, kc, ap):
+def pack19(c, kc, ap, rg=8):
     """(code, sm, hdr, scale) from _compress -> stage-major uint8 [k/kc * n/128 * kc/32/ap, 8 * ap * 768]:
     stage (ks, 128-row tile, st) = [8 row groups x ap atoms x 32 lanes x 16 B of sign|mantissa][same x 8 B of codes]."""
     code, sm, hdr, scale = c
@@ -31,16 +32,16 @@ def pack19(c, kc, ap):
     sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=code.device)
     N = (perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8).long() << sh).sum(-1)
     N = torch.where(N >= 2 ** 31, N - 2 ** 32, N).int().contiguous()
-    ks, ntr, spk = k // kc, n // 128, kc // 32 // ap
-    S = S.view(ks, ntr, 8, spk, ap * 512).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, 8 * ap * 512)
-    N = N.view(torch.uint8).view(ks, ntr, 8, spk, ap * 256).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, 8 * ap * 256)
+    ks, ntr, spk = k // kc, n // (16 * rg), kc // 32 // ap
+    S = S.view(ks, ntr, rg, spk, ap * 512).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, rg * ap * 512)
+    N = N.view(torch.uint8).view(ks, ntr, rg, spk, ap * 256).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, rg * ap * 256)
     return torch.cat([S, N], 1).contiguous()
 
 
 def build(cfgs, src=None):
-    """cfgs: (m, kc, ap, ns) tuples; m in (16, 32), kc | k, (kc / 32) % ap == 0, smem <= 227 KB."""
+    """cfgs: (m, kc, ap, ns, xb, ts, rg, rpw) tuples; m in (16, 32), kc | k, (kc / 32) % ap == 0, smem <= 227 KB."""
     src = open(SRC).read() if src is None else src
-    src = src.replace("G19_CONFIGS", " ".join("G19_CASE(%d,%d,%d,%d,1)" % tuple(c) for c in sorted(set(map(tuple, cfgs)))))
+    src = src.replace("G19_CONFIGS", " ".join("G19_CASE(%d,%d,%d,%d,1,%d,%d,%d,%d)" % tuple(c) for c in sorted(set(map(tuple, cfgs)))))
     return load_inline(name="pj_g19_" + hashlib.md5(src.encode()).hexdigest()[:10],
-                       cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_cvt(torch::Tensor, torch::Tensor);",
+                       cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_cvt(torch::Tensor, torch::Tensor);",
                        cuda_sources=src, functions=["g19_gemm", "g19_cvt"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])

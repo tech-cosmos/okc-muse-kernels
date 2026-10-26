@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~03:30 UTC (session 9).
+Updated 2026-10-26 ~04:40 UTC (session 10).
 
 ## Board
 - **Best: submit 71145e34fe424844 = a1f0af7, 1.307x (3,695.6 us), proj rank 196** (router3 at router m9-128; its check
@@ -8,7 +8,7 @@ Updated 2026-10-26 ~03:30 UTC (session 9).
 - Before: 6d0fc4d4 (405439e) 1.2742x; d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 5/20, scored 4/10 (cap 9).
+- Budget 10-26 used: checks 9/20, scored 4/10 (cap 9). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146 (diag only).
 - H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
@@ -74,13 +74,28 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   better kernel than gemv12's structure), m128/m256 (cuBLASLt; would need own wgmma + decode), router (FP32: exponent
   compression gives 28/32 bits only).
 
+## gemv19 (session 10): the layer's T=16/32 GEMMs (lane since 10-26 01:45Z). Handoff posted (COORD proj s10).
+- dev/gemv19.cu, layer interface dev/g19_lib.py (pack19 from _compress; build; g19_gemm; g19_cvt), test dev/t19lib.py,
+  sweep dev/g19.py "M,KC,AP,NS,IS,TAILPB[,XB,TS,RG,RPW]" (env MODE=2 PRED=3000 = after a 3 us PDL predecessor, the
+  layer case; ESCW=1 adversarial escapes x40; DEFS=G19_NOW (no W loads: consumer-only), G19_TRACE + STAGES=1 timelines).
+- Design: TMA ring (one bulk copy per stage), FP32 out [m, n] zeroed IN the kernel (finisher warps; epoch-counter grid
+  barrier before the first red, counter never reset), split-K partials by red.global.add.v4 (subnormal sums -> 0), PDL:
+  producer streams npre W stages BEFORE griddepcontrol.wait, then x. One launch, no reduce kernel.
+- The win is the PDL overlap (W streams during the predecessor). Standalone (judge board) it only ties cuBLAS.
+- H200 (judge diag, us, after a 3 us PDL predecessor; pick = best of cuBLAS/lt/own): pooler m16 AP8 (1024,8,3,xb1)
+  15.65 vs 19.0; qkv m16 (1024,4,4) 11.2 vs 13.2; unp m16 tie; o m16 loses (+0.8); all m32 lose (+1.5..5).
+  Bare TMA stream 50 MB = 13.7 us H200 / 18.3 H100.
+- H100 lessons: consumers are not memory-bound on H200: no-W-load mode = 17 us at pooler m16; per stage ~6 TB/s
+  equivalent, the losses are x arrival (~2 us before the first stage completes) + ~1 us per segment flush + tail.
+  Dead: deeper rings, x first, interleaved layout, dynamic tail, per-SM calibration (not stable), ts 2, rpw 2, rg 16.
+
 ## Next (ranked)
--3. **Lane since 10-26 01:45Z: the layer's GEMMs at T=16/32** (cuBLAS there: d32 qkv 12.6, o+unpool 26.5, pooler 20.5
-   + 2 splitK reduces, H200). Candidate = dev/gemv18.cu (session 9, NOTES has the timeline lessons): TMA-ring streamer
-   over 12-bit weights, stream-K. Its GEMM part beats cuBLAS on H100 at every m16/m32 shape (warm x: pool m16 24.2 vs
-   27.9, qkv m16 15.8 vs 17.2, unp m32 25.3 vs 26.0) but the in-kernel completion (fence/counter/last pass) adds
-   3.5-5 us. Do: completion outside (PDL convert kernel; in the layer fused into the next op: hand off to layer under
-   Requests), x pieces / PDL W prefetch, then BF16_G18 in the tuner + one check for H200 numbers.
+0. Check 3 (f1319777) done: H200 m16 pooler 15.8 vs 18.9, unp 16.5 vs 17.5, qkv (AP4) 11.2 vs 13.2; m32 + o lose. Handoff
+   updated. Next: ask layer whether g19 is wired at d16; measure in a copy of r-layer harness (tools/timeline.py).
+1. m32 on H200: cut the fixed costs: flush (escape fixups loop 2 x 8 slots x shfl per run end; move them to the
+   finisher? pbuf handoff), x arrival (x by TMA from L2 right after the wait: 16-32 separate bulk copies; one 2D tensor
+   map copy?), fewer segments per block (KC 2048 with xb 1 at m16; at m32 x 128 KB doesn't fit).
+2. Standalone board: g19 is never picked (no predecessor). Board-only ideas below are low value (lead: test bed).
 -2. Router m256 (11.2 vs floor 2.7) and m128 (9.0): needs less split-K red volume AND less L2->SM traffic: x by TMA
    multicast to the n-tile blocks of a cluster of 2 (gemv16 has the machinery), or wgmma (compute ~3.5 us on mma.sync).
 -1. gemv16 on the H200 only ties lt: cut x staging further (the critical path is x latency at kernel start: W cannot
