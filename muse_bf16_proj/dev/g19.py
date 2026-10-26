@@ -13,17 +13,18 @@ cfgs = [c + (2, 1, 8, 1)[len(c) - 6:] for c in cfgs]  # XB (x buffers) 2, TS 1, 
 src = open(os.path.join(d, "gemv19.cu")).read()
 src = "".join("#define %s\n" % d_.replace("=", " ") for d_ in os.environ.get("DEFS", "").split(",") if d_) + src
 src = src.replace("G19_CONFIGS", " ".join("G19_CASE(%d,%d,%d,%d,%d,%d,%d,%d,%d)" % (c[:5] + c[6:]) for c in sorted(set(cfgs))))
-fns = ["g19_gemm", "g19_pred", "g19_zero", "g19_cvt"] + (["g19_trace"] if "G19_TRACE" in os.environ.get("DEFS", "") else [])
+fns = ["g19_gemm", "g19_gemm_bf16", "g19_pred", "g19_zero", "g19_cvt"] + (["g19_trace"] if "G19_TRACE" in os.environ.get("DEFS", "") else [])
 mod = load_inline(name="pj_g19_" + hashlib.md5(src.encode()).hexdigest()[:10],
-                  cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_pred(torch::Tensor, torch::Tensor, int64_t); void g19_zero(torch::Tensor, torch::Tensor); void g19_cvt(torch::Tensor, torch::Tensor);" + (" torch::Tensor g19_trace();" if "G19_TRACE" in os.environ.get("DEFS", "") else ""),
+                  cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_gemm_bf16(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_pred(torch::Tensor, torch::Tensor, int64_t); void g19_zero(torch::Tensor, torch::Tensor); void g19_cvt(torch::Tensor, torch::Tensor);" + (" torch::Tensor g19_trace();" if "G19_TRACE" in os.environ.get("DEFS", "") else ""),
                   cuda_sources=src, functions=fns, extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"])
 def pack19r(w, kc, ap, rg):
     """pack18 with rg 16-row groups per tile: stage (ks, tile of 16 rg rows, st) contiguous."""
     S, N, hdr, scale = pack16(w, kc)
     n, k = w.shape
     ks, ntr, spk = k // kc, n // (16 * rg), kc // 32 // ap
-    S = S.view(ks, ntr, rg, spk, ap * 512).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, rg * ap * 512)
-    N = N.view(torch.uint8).view(ks, ntr, rg, spk, ap * 256).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, rg * ap * 256)
+    pm = (1, 0, 3, 2, 4) if TM else (0, 1, 3, 2, 4)  # tile-major: (tile, ks, st)
+    S = S.view(ks, ntr, rg, spk, ap * 512).permute(*pm).reshape(ks * ntr * spk, rg * ap * 512)
+    N = N.view(torch.uint8).view(ks, ntr, rg, spk, ap * 256).permute(*pm).reshape(ks * ntr * spk, rg * ap * 256)
     return torch.cat([S, N], 1).contiguous(), hdr, scale
 
 
@@ -31,6 +32,7 @@ SH = [("qkv", "qkv_gate", 2304), ("o", "o", 8192), ("pool", "pooler", 4096), ("u
 only = os.environ.get("SH")
 GRID = int(os.environ.get("GRID", torch.cuda.get_device_properties(0).multi_processor_count))
 Wr = reference.generate_weights(reference.WEIGHTS_SEED)
+TM = int(os.environ.get("TM", 0))  # mode 3: tile-major stage order
 ESCW = bool(os.environ.get("ESCW"))  # adversarial escapes (bench.py test_esc's injection) + spike rows at them, 40 reps
 CE = {}
 if ESCW:
@@ -45,6 +47,7 @@ if ESCW:
             cols = CE[name][torch.randint(0, 32, (len(rows),), device="cuda", generator=g_)]
             t[rows, cols] = vals[torch.randint(0, len(vals), (len(rows),), device="cuda", generator=g_)]
 ctr = torch.zeros(4, dtype=torch.int32, device="cuda")
+ctr3 = torch.zeros(4096, dtype=torch.int32, device="cuda")  # mode 3 tile tickets (never reset)
 e = 0.0 if os.environ.get("PROF") else bench.empty_cost()
 XW = bool(os.environ.get("XWARM"))
 PRED = int(os.environ.get("PRED", -1))  # predecessor kernel: writes x, triggers PDL at start, spins PRED ns
@@ -78,7 +81,20 @@ for nm, layer, n in SH:
                 for j, r_ in enumerate(sp):
                     xp_[r_].zero_(); xp_[r_, CE[layer][j % 32]] = 8.0
             refp = xp_.double() @ W.double().T
+            if MODE == 3:
+                ws3 = torch.zeros(M, n, device="cuda"); ob3 = torch.empty(M, n, dtype=torch.bfloat16, device="cuda")
+                g3 = lambda xin: mod.g19_gemm_bf16(P, hdr, scale, xin, ws3, ob3, ctr3, kc, ap, ns, GRID, min(NPRE, ns), xb_, ts_, rg_, rpw_, TM)
             for rep in range(0 if os.environ.get("SKIPCHK") else 40 if ESCW else 3):
+                if MODE == 3:  # BF16 out: like cuBLAS (FP32 sum rounded once); probes/spikes exact (W * 2^j is BF16)
+                    ob3.fill_(1.0); g3(xp_); torch.cuda.synchronize()
+                    err = ((ob3.double() - refp).norm() / refp.norm()).item()
+                    assert err < 4e-3, (err, nm, m_, kc, ap, ns)
+                    assert torch.count_nonzero(ws3) == 0, "ws not re-zeroed"
+                    ftz = lambda v: torch.where(v.abs() < 2.0 ** -126, torch.zeros_like(v), v).bfloat16()  # red.add.f32 flushes subnormals
+                    assert torch.equal(ob3[M - 1], ftz(W[:, col].float() * 16)), ("probe", nm, col)
+                    for j, r_ in enumerate(sp):
+                        assert torch.equal(ob3[r_], ftz(W[:, CE[layer][j % 32]].float() * 8)), ("spike", nm, r_)
+                    continue
                 out.fill_(1.0)
                 if MODE == 1: mod.g19_zero(out, ctr)
                 mod.g19_gemm(P, hdr, scale, xp_, out, ctr, kc, ap, ns, is_, GRID, tail, MODE, min(NPRE, ns), xb_, ts_, rg_, rpw_); torch.cuda.synchronize()
@@ -119,6 +135,7 @@ for nm, layer, n in SH:
                 torch.cuda.synchronize(); continue
             ob = torch.empty(M, n, dtype=torch.bfloat16, device="cuda")
             CVT = bool(os.environ.get("CVT"))  # + the BF16 copy (PDL)
+            if MODE == 3: dt = bench.time_graph(lambda: (pre(), g3(x))) - e; line += f" | {kc},{ap},{ns},{is_},{tpb},x{xb_},t{ts_},r{rg_},w{rpw_} {dt:6.2f}"; continue
             dt = bench.time_graph(lambda: ((mod.g19_zero(out, ctr) if MODE == 1 and ZG else None), pre(), mod.g19_gemm(P, hdr, scale, x, out, ctr, kc, ap, ns, is_, GRID, tail, MODE, min(NPRE, ns), xb_, ts_, rg_, rpw_), mod.g19_cvt(out, ob) if CVT else None)) - e
             line += f" | {kc},{ap},{ns},{is_},{tpb},x{xb_},t{ts_},r{rg_},w{rpw_} {dt:6.2f}"
         print(line, flush=True)

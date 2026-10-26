@@ -116,6 +116,10 @@ DIAG19 = {}  # s10 diag configs measured (checks 9b09c536/60ddb481/f1319777): se
 # s15: after the escape-fixup rework (gemv19 fixups on the stored partials): the layer's unpool m16 config and AP4 m32
 DIAG19 = {"unpooler": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (32, 1024, 4, 4, 4, 1, 1, 8, 1)],
           "pooler": [(32, 1024, 4, 4, 4, 1, 1, 8, 1)], "qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
+# s15: _diag19q only (print): qkv with BF16 out written by gemv19 itself (mode 3: tile tickets, self-cleaning FP32
+# workspace, tile-major stages), standalone as the layer's first op (no predecessor), vs the picked kernel
+DIAG19Q = {"qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (16, 1024, 8, 3, 3, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1),
+                        (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
 DIAG19_STREAM = []  # (stage bytes, stages): 50 MB bare streams
 _SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _LAYER_K = {"qkv_gate": 8192, "o": 1024, "pooler": 8192, "unpooler": 4096}
@@ -174,10 +178,12 @@ try:
         name="muse_proj_g19a",
         cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
                     "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_cvt(torch::Tensor, torch::Tensor); "
+                    "void g19_gemm_bf16(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, "
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); "
                     "void g19_pred(torch::Tensor, torch::Tensor, int64_t); void g19_stream(torch::Tensor, int64_t, int64_t, torch::Tensor);",
-        cuda_sources="#define G19_ONLY2\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
-            "G19_CASE(%d,%d,%d,%d,1,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in list(BF16_G19.values()) + list(DIAG19.values()) for c in v}))),
-        functions=["g19_gemm", "g19_cvt", "g19_pred", "g19_stream"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+        cuda_sources=("#define G19_ONLY23\n" if DIAG19Q else "#define G19_ONLY2\n") + _G19_SRC.replace("G19_CONFIGS", " ".join(
+            "G19_CASE(%d,%d,%d,%d,1,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in list(BF16_G19.values()) + list(DIAG19.values()) + list(DIAG19Q.values()) for c in v}))),
+        functions=["g19_gemm", "g19_cvt", "g19_pred", "g19_stream", "g19_gemm_bf16"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
 except Exception as _e:  # noqa: BLE001
     print("muse_proj gemv19 build failed:", _e)
     _g19 = None
@@ -312,7 +318,7 @@ def _pack16(w, kc):
     return sw, nw, hdr, scale
 
 
-def _pack19(c, kc, ap, rg=8):
+def _pack19(c, kc, ap, rg=8, tm=0):
     """_compress output -> gemv19 stages: stage (ks, 128-row tile, st) = [8 row groups x ap atoms x 32 lanes x 16 B of
     sign|mantissa][same x 8 B of codes], one contiguous block (one bulk copy)."""
     code, sm, hdr, scale = c
@@ -321,8 +327,9 @@ def _pack19(c, kc, ap, rg=8):
     S = perm(sm).to(torch.uint8).reshape(k // kc, n // 16, kc // 32, 32, 16)
     N = _nib(perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8)).contiguous()
     ks, ntr, spk = k // kc, n // (16 * rg), kc // 32 // ap
-    S = S.view(ks, ntr, rg, spk, ap * 512).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, rg * ap * 512)
-    N = N.view(torch.uint8).view(ks, ntr, rg, spk, ap * 256).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, rg * ap * 256)
+    pm = (1, 0, 3, 2, 4) if tm else (0, 1, 3, 2, 4)  # tm: tile-major stages (tile, ks, st) for mode 3
+    S = S.view(ks, ntr, rg, spk, ap * 512).permute(*pm).reshape(ks * ntr * spk, rg * ap * 512)
+    N = N.view(torch.uint8).view(ks, ntr, rg, spk, ap * 256).permute(*pm).reshape(ks * ntr * spk, rg * ap * 256)
     return torch.cat([S, N], 1).contiguous(), hdr, scale
 
 
@@ -382,6 +389,7 @@ def prepare(weights):
     st["ltws"] = torch.empty(LT_WS_BYTES, dtype=torch.uint8, device=r.device)
     st["pick"] = _tune(st)
     _diag19(st)
+    _diag19q(st)
     _diag20(st)
     _diag19_stream()
     st["rpick"] = _tune_router(st)
@@ -548,6 +556,37 @@ def _diag19(st):
                 med[1] = float("nan")
             print(f"diag19 {layer} m{m} {c}: after a 3 us PDL predecessor ({med[0] * 1e3:.2f}): pick {pick} +{(med[1] - med[0]) * 1e3:.2f} us, "
                   f"g19 FP32 out +{(med[2] - med[0]) * 1e3:.2f} us")
+
+
+def _diag19q(st):
+    """Print only: qkv by gemv19 mode 3 (BF16 out, no predecessor, tm 0/1) vs the picked kernel; plus max abs diff."""
+    if _g19 is None:
+        return
+    g = torch.Generator(device="cuda")
+    g.manual_seed(5)
+    for layer, cfgs in DIAG19Q.items():
+        c_ = _compress(st[layer])
+        if c_ is None:
+            continue
+        w = st[layer]
+        ctr = torch.zeros(4096, dtype=torch.int32, device="cuda")
+        for c in cfgs:
+            m = c[0]
+            x = torch.randn(m, w.shape[1], generator=g, device="cuda").to(torch.bfloat16)
+            out = torch.empty(m, w.shape[0], dtype=torch.bfloat16, device="cuda")
+            ob = torch.empty_like(out)
+            ws = torch.zeros(m, w.shape[0], dtype=torch.float32, device="cuda")
+            pick = st["pick"].get((layer, m))
+            fns = [lambda: _run(st, layer, x, out, pick)]
+            for tm in (0, 1):
+                P, hdr, scale = _pack19(c_, c[1], c[2], c[7], tm)
+                fns.append(lambda P=P, hdr=hdr, scale=scale, tm=tm: _g19.g19_gemm_bf16(P, hdr, scale, x, ws, ob, ctr, c[1], c[2], c[3], _SMS, c[4], *c[5:], tm))
+            med = _graph_medians(fns)
+            fns[0](); fns[2](); torch.cuda.synchronize()
+            d = (ob.float() - out.float()).abs().max().item()
+            print(f"diag19q {layer} m{m} {c}: standalone: pick {pick} {med[0] * 1e3:.2f} us, g19 BF16 out tm0 {med[1] * 1e3:.2f} "
+                  f"tm1 {med[2] * 1e3:.2f} us (max |diff| vs pick {d:.3g}, ws clean {int(torch.count_nonzero(ws)) == 0})")
+            del P
 
 
 def _diag20(st):
