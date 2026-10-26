@@ -1,9 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 19:55Z (s55: no build, one dead oracle; sandbox okc-night4). **main = v91 = v90 (v89 + moe n4s1 NORM_EARLY: post-expert norm runs in twm's
+Updated 2026-10-26 20:25Z (s56: v92 = v91 + pr1 non-bnd x/x32 __ldcg, proj s47 audit request, cache-op only; tests 13/13, replay d1/d16 0/40). Below 'main = v91' read 'main = v92'.
+(s55) **main = v91 = v90 (v89 + moe n4s1 NORM_EARLY: post-expert norm runs in twm's
 drain) + __ldcg ids/tw/inv in moe_norm/moe_norm2 (s54, moe's SASS audit), NOT judge-checked** (layer budget for 10-26 spent: 20/20 checks, 10/10 submits). v90 H100 vs v89: v32 sl -1..2,
 full -3..4 us, v16 tie..-2 (NOTES s53). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x, #10 2.180x.
-NOTE: the first check below is now on v91 (= v90 + a cache-op-only correctness fix) (same plan; v90 differs from v89 only at T=128/256).
+NOTE: the first check below is now on v92 (= v91 + pr1 __ldcg) (= v90 + a cache-op-only correctness fix) (same plan; v90 differs from v89 only at T=128/256).
 
 ## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
 1. `okc check muse_decode_layer/submission.py --json` on main (v89). Compare per shape vs 703d3a7e (d1 69.6/77.8,

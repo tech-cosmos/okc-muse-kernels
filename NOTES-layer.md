@@ -1099,3 +1099,15 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   pooler) and tk2f 95.5 -> 94.4 only. Prefetch efficiency in tk2f is ~10-25% of bytes/BW (oracle 20/40/80 MB -> -2/-3.6/-7
   us): tk2f's own evict_last re-read lines (multi-group experts at T=32) and its 250 MB stream evict most prefetched
   prefixes before their items run. So even the H200 window (router 6 us vs pooler 16-25) would give <= ~1 us: not added.
+
+## s56 (2026-10-26 19:59Z-20:25Z, sandbox okc-night4, session 5): v92 = v91 + pr1 non-bnd x/x32 __ldcg
+- No judge runs (layer 20/20 checks, 10/10 submits until 00:00Z).
+- proj s47 SASS audit request: pr1_src.cu non-bnd path (the live one) read x32 (line 181) and x (line 316) with __ldg
+  after griddepcontrol.wait: safe in today's SASS but fragile (.nc may be hoisted above the wait). Now __ldcg (as r-proj
+  dev/pr1.cu since s13). Cache-op only. bench test 13/13, replay_test 10 x seeds 11,23 d1/d16 0 fails.
+- H100 timeline d32 sliding v91 (tuner on): qkv nvjet 16.8 | nds 17.3-32.5 + combine -35.0 | o nvjet 6.7 | bnd 5.2 |
+  g19 pooler 43.7-72.8 (|| router_split 19.1, routing 20.5, end 72.2) | rmsnorm 1.7 | tk2f 74.4-173.1 (98.7) | norm2
+  -177.1 | g19 unpool -199.5 | bnd -203.6.
+- Reviewed for a new layer-side lever, none found that isn't already measured dead: nds S 4/16 (attn s34), warm KV for
+  nds (s16: -1.5 us at best, attention latency-bound), g19 m32 consumer bound (proj s12-s44), expert L2 prefetch beside
+  the pooler (s55), qkv g19 at T=32 (tuner +2.6 H100). The remaining d32 gaps are tk2f (moe) and g19 m32 (proj).
