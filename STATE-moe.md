@@ -19,6 +19,7 @@ tools/mktl_diag.py = same for a per-CTA globaltimer timeline (diagtl lines). H20
 t = 14.1 + 6.97 * experts + 4.4 * extra 8-token groups (us); 6.97 us/expert = 4.06 TB/s (85% of HBM peak).
 
 ## What's on main (submission.py)
+s21: TK2F_L2H = 4 / TWM_L2H = 1: L2 cache hints on tk2f/twm weight copies (compile-time #defines substituted in _lib()).
 (Older options/kernels still in the file -- GS16, DYN, TK2F 0, moe_tw/moe_big/moe_tb/moe_sk/moe_tk: see NOTES s3-s10.)
 s11: M > 32 now runs **moe_twm** (TWF_MIX = 1): moe_twf with the item shape chosen per expert (RT 2 / 64-token passes,
 packing w*b2, for experts with > 32 tokens; RT 4 / 32-token passes otherwise; stage stride = RT 4 stage). prepare packs b2 too.
@@ -70,6 +71,16 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 21 summary (L2 cache hints on the expert weight streams; NOTES s21)
+- main = b32928b: TK2F_L2H = 4 (tk2f: evict_last on every row of an expert with > 8 tokens, evict_first on the rest)
+  + TWM_L2H = 1 (moe_twm: evict_last if a later pass re-reads, evict_first else). Bitwise unchanged. H100 ncu: tk2f
+  DRAM bytes at d16/d32 = floor (was +12% when an expert's 2nd 8-token group re-read from HBM). Layer harness copy
+  (H100): v1 -4..-6, d16 -3..-4 full, v16 -3..-4, d1 -0.5, d32/v32 0 us. Handoff posted (tools/s21/patch_layer.py 4 1).
+- Dead: the same hints in moe_twq (v16 +7 us). Untested on the H200 (no checks left today).
+- NEXT: judge-verify via the layer's first check (or a moe DIAG check: DIAG_VARIANTS cannot switch compile-time
+  macros; build a DIAG copy with TK2F_L2H 0 vs 4 as two libs if needed). Then: evict_first/evict_last hints elsewhere
+  (layer's own streams, proj GEMVs: Requests), x/inter loads in tk2f (ld.global with L2::evict_last for inter?).
+
 ## Session 20 summary (grid-aware tail split: halves tie, quarters dead; NOTES s20)
 - main = 6f6c487: TWF_SPLIT(_M) 1022/1023 = AUTO halves (split count = item cost mod gridDim, in-kernel; off by
   default). Proxy/layer copy: tie (-0..4 us, noise). Posted to layer as optional TUNE option (tools/s20 diff).
@@ -81,28 +92,9 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - twm items run in lockstep waves; tail loss 16-25 H100-us per v16/v32 (s20: K-split fixes it only partly, tie).
   TWF_SPLIT_M combinable with order/hot (bit 22; light experts only). DEAD: warp-specialized dequant (smem-bound).
 
-## Session 18 summary (no speedup; why twm is slow; NOTES s18)
-- twm consumers never wait on the ring (stage timeline): compute-bound. Microbenchmark (tools/s18/mb_wgmma.py): dq ALU
-  and wgmma do NOT overlap (RS or SS; SS/dequant-to-smem is worse): stage cost ~ dq + MMA. On the H200 light items
-  (RT4 N8/N16) are under the per-SM HBM share, only hot RT2 N64 passes are over it. Big-M gap = scheduling (layer's
-  H200 tuner has the order/tail/twq/twm_hot options). mma.sync m16n8k16 beats wgmma only at N8 (-7%).
-- Dead: TWM_NF (finer N for RT2 passes: twm at its register limit, spills/serializes), my tk2f PDL "PW" (duplicate of
-  layer v62/v63; claim first!), tk2f at v16 (fit +30 us).
+## Session 18 summary: twm items are consumer-compute bound (dq ALU + wgmma never overlap; microbenchmarks); TWM_NF dead (NOTES s18).
 
-## Session 17 summary (moe_twq for T=128; s16's "ring cap" was a bug; see NOTES s17)
-- s16's TWX ablation builds were all the full kernel (macro redefined). Correct ablations: moe_twm items are
-  CONSUMER-bound (ring alone 18 us vs full 34.7 per RT4 N8 item at G16); dq and MMA costs add up (no overlap).
-  ncu: 2 warps/scheduler, issue 43-62%, ALU 59% (RT4 N8) / tensor 55% (RT2 N64); no single stall reason.
-- **moe_twq** (flag TWQ / TWQ_M, off on main): 16 consumer warps x RT 2, 640 threads, 32-token passes, same packing.
-  Proxy G88: v16 -6.5 proxy-us (~-4.7 H200 us), v32 +4.3 (hot experts need 64-token passes: do not fit 96 regs).
-  Handed to layer as a TUNE candidate (COORD Requests s17): the judge's H200 picks per T.
-  Layer patch: r-moe 300bd2c..4db82af diff applies onto r-layer moe_src.py (= 499bde6) with offsets; layer.py needs
-  "moe_twq_launch" in _moe__lib's list + `_moe_TWQ_M` set from _opt(state, m, "twq", 0) + TUNE[128] += {"twq": 4}.
-  (My HEAD also has s15's tk2f FP option text: re-copying the whole file breaks the layer's text anchors.)
-- **moe_twm hot class** (TWM_HOT, off): 65..96-token experts in one pass (1 tile/warp, N 80/96); proxy v32 -3.6..-7.6
-  proxy-us. In the same layer patch as TUNE options at T=256 (twm_hot, twm_hot + order 76 [+ lt:unpool]).
-- Dead: dq IMAD/IMAD.WIDE rebalancing (+6..18%); exhaustive nibble-layout search (nothing beats 7 ALU + 1 IMAD);
-  N48/N64/N96 passes in twq/twm (C7512: whole-kernel wgmma serialization); inline producer in warp 0 (2x slower).
+## Session 17 summary: moe_twq (TWQ_M, layer TUNE option at T=128) and twm hot class (TWM_HOT); dq/nibble searches dead (NOTES s17).
 
 ## Ranked ideas
 -9. (s19) grid-aware twm tail by K-split: DONE s20, tie (halves) / dead (quarters). Tail needs cheaper items, not finer.

@@ -624,3 +624,28 @@
   build (use the .so of THAT file: S._lib().__file__; committed main = 48 LDL/STL, all in the 40-reg producer).
 - Conclusion s20: the big-M tail is NOT cheaply fixable by K-splitting (halves tie, quarters lose). Remaining big-M
   levers: hot experts on their own kernel / SM subset (STATE idea -8), or making items cheaper (dq), not finer.
+
+## Session 21 (2026-10-26 13:52Z - ) -- L2 cache hints on the expert weight streams (tk2f + twm): bitwise-free wins
+- Finding (H100 ncu, tools/ncu_layer.py on the layer's routings): tk2f DRAM read bytes at d16 s7/s13 = 222.7 MB vs
+  floor 198.1 (7 experts x 28.3), d32 s11 337 vs 311, s17 238 vs 226: an expert with > 8 tokens is streamed once per
+  8-token group, the groups' rows (256 rows apart in R) run on other CTAs at other times, and ~half of the re-read
+  came from HBM again. Routings without extra groups sit at the floor (d16 s99 283.3 vs 283.0).
+- TK2F_L2H (compile-time #define, python global substituted in _lib()): tk2f_produce's weight+scale bulk copies use
+  .L2::cache_hint with createpolicy evict_last / evict_first. Modes: 1 = evict_last for rows a LATER group re-reads,
+  evict_first else; 2/3 = halves of that; 4 = evict_last on every row of a multi-group expert (either group's CTA may
+  read a row first: mode 1 marked some first reads evict_first), evict_first else. Mode 4: ncu DRAM = floor at every
+  d16/d32 routing (d16 s7 199.3, d32 s17 233.8 vs floor 226.4).
+- moe-only (tools/layer_ab.py, 5 routings, cold L2, 2 rounds, H100 us): off d1 36.8/37.2, v1 87.0/87.3, d16 89.5/89.0,
+  d32 111.4/112.1; mode 1 36.5, 86.1, 88.1, 108.8; mode 4 36.5, 86.0, 84.3, 109.0.
+- Layer harness copy (/tmp/moe21/L = r-layer 6baba9e + tools/s21/patch_layer.py, ab_files, TUNE = {} appended, 4-8
+  rounds; between-file noise ~+-2 us on d32 sliding (two copies of the same file differ by 1.7)): mode 1 / mode 4 vs off:
+  v1 -3.6..-5/-3.9..-6, d16 -0.5..-2/-3..-4.3, d1 -0.3/-0.5, d32 mode 1 +2..3 / mode 4 tie, T>=128 0.
+  The layer's v1 gain is bigger than the experts' own (~-1): evict_first on the expert stream keeps the layer's own
+  L2-resident data (its W L2 prefetches?) alive. Posted the idea to layer/proj (Requests).
+- TWM_L2H: the same in moe_twm's producer (evict_last if a later pass of the expert re-reads, else evict_first):
+  layer harness v16 -0.8..-3.4 sl / -2.4..-9 full (3 runs), v32 0..+1.7 (noise). In moe_twq: v16 +7 us WORSE (tuner
+  forced twq 4, 6 rounds): not kept (code reverted; twq unchanged).
+- Tests: bitwise = off on the 30 layer routings (x2), bench.py test 15/15 PASS. Commits 59c312e (mode 1), 12d95a9
+  (twm), b32928b (mode 4). Handoff: `python tools/s21/patch_layer.py <r-layer moe_src.py> 4 1`.
+- No judge runs (moe checks 20/20 used today). H200 unverified: L2 is 50 MB on both, HBM 4.8 vs 3.35 TB/s, so the
+  HBM re-read costs less time on the H200 but the same bytes; the layer's first check of the next sandbox will tell.
