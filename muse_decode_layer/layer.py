@@ -607,6 +607,7 @@ G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, w
 # PDL secondary of the boundary (which triggers at start). (u, nv, minb, r, rb, blocks, npf). H100 d1 sliding 95.1 -> 92.5.
 PR1_TOKENS = (1,)
 PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 4)}
+PR1_BND = False  # s11: the boundary fused into pr1 as a per-block prologue (each block re-reads 144 KB: H100 d1 +1.2/+0.3 us even with s/alpha/beta/gain loaded before the wait): off
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
 
 
@@ -790,7 +791,7 @@ def _g10_lib():
             if _GPR1_SRC is not None:
                 src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c[:4] for c in sorted(set(PR1_CFG.values()))))
             else:
-                src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
+                src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
@@ -809,7 +810,7 @@ def _g10_lib():
                             "void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                             "void pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
                             "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                            "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                            "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double);",
                 cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "pj_router3", "g19_gemm", "pr1_launch"],
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
@@ -1430,7 +1431,9 @@ def kernel_fn(data, state):
     npf = (state["router"].numel() * 4) // (512 * 1024) if tokens in ROUTER_L2_PF_TOKENS and fp32_router else 0
     pr1 = (tokens in PR1_TOKENS and pdl and fp32_router and _GPR1_SRC is not None and "pooler" in state.get("g13", {})
            and not npf)
-    _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
+    bnd = pr1 and PR1_BND and a.dtype == torch.bfloat16
+    if not bnd:
+      _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
                                PDL=pdl, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32,
                                TRIG=pr1 or (BOUNDARY_TRIG and ("pooler", tokens) in state.get("g19", {}) and "pooler" in G19_ON), num_warps=16,
@@ -1483,7 +1486,9 @@ def kernel_fn(data, state):
         bucket = None
         _G10["lib"].pr1_launch(pk[0], pk[1], pk[2], h, pooled, pk[3], state["router"], h32, logits, state["pr1_cnt"],
                                state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
-                               ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens], 1)
+                               ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens], 1,
+                               [a, data["stream"], alpha, beta, state["pre_ffn"], stream1, h] if bnd else [],
+                               POST_NORM_EPS, RMS_EPS)
     else:
         side_stream.wait_stream(main_stream)
         with torch.cuda.stream(side_stream):

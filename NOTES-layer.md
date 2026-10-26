@@ -332,3 +332,18 @@
 - New tools: tools/ab_flag.py <file> <filter> <rounds> "<stmt>"... (interleaved A/B of module flags in one process/state),
   tools/scored_test.py (check_implementation on scored shapes x seeds; the test list has no T=32), tools/replay_test.py
   (route_judge-style graph replay on fresh inputs, full output check).
+
+## Session 11 (2026-10-26 04:52-05:35Z)
+- v37 (d411cf4): proj pr1 (r-proj dev/pr1.cu@149d115 -> pr1_src.cu, inlined by build.py as _GPR1_SRC, built in
+  `_g10_lib`): T=1 pooler (gemv13) + FP32 router + routing top-8 in ONE launch, PDL secondary of the first _boundary
+  (TRIG at start); no side stream at T=1. H100 interleaved d1 94.7/117.4 -> 92.3/115.5 us; verify-1 unchanged.
+  + moe_src = r-moe 2466fac (moe_twm, _moe_TWF_MIX 1; H100 v16 +3, v32 -4.5 us). Tests 13/13, route_judge d1 0/240
+  (3 seeds x 40 x 2), replay_test 0/180.
+  Check 7b02fb2c **1.947x** (score 11,618 us): d1 72.5/82.2, d16 145.0/221.1, d32 176.8/328.8, v1 126.0/131.5,
+  v16 271.3/362.5, v32 358.2/534.3. = tie with v36 (1.9566 / 1.9395 runs): pr1 on H200 d1 -0.4/-1.5 us (noise);
+  twm ~ twf (v16 sliding twm 145.8+44.3 vs twf 163+40; v32 224.5+44.8 vs 228-233+40-44). Not submitted.
+- PR1_BND (off): the boundary fused into pr1 as a per-block prologue (each block recomputes h from the o GEMV's BF16 out
+  + FP32 stream in registers, 2 block reductions; block 0 writes stream1/h). H100 d1 +2.0/+1.0 us; with s/alpha/beta/gain
+  loaded before griddepcontrol.wait (BPre, pooler role) +1.2/+0.3. Cause (likely): 132 blocks x 144 KB redundant L2
+  reads beside the W stream, and pr1 loses the boundary's 5 us of free W prefetch. Would need cluster/DSMEM sharing
+  (each block of a 4-cluster computes 1/4 of h) to cut the redundant reads; est. gain <= 2-3 us d1.

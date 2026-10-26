@@ -9463,6 +9463,9 @@ _GPR1_SRC = r'''// pr1: the layer's pooler + router + routing at 1 token in ONE 
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
 namespace pr1 {
+#ifndef BPRE
+#define BPRE 1
+#endif
 #define XI(k) (((k) >> 4) * 20 + ((k) & 15))
 constexpr int ESC = 8, MAXC = 16, E = 256, K = 8192, TOPK = 8;
 __device__ __forceinline__ uint4 ld4(const uint4* p) {
@@ -9509,7 +9512,73 @@ struct Args {
     const uint4* S; const uint2* N; const float2* H; const __nv_bfloat16* x; __nv_bfloat16* out; int n; float scale;
     const float4* rw; const float4* x32; float* logits; int* cnt; const float* bias; const int* ls;
     int* ids; int* lids; float* wts; float mult, reps; int local, npf;
+    // BND (layer s11): the boundary before the FFN fused in as a prologue of every block: from the o GEMV's BF16 out
+    // br and the FP32 stream s: s' = alpha s + beta rmsnorm(br, eps_post) (written by block 0 with h in BF16),
+    // h = rmsnorm(s', eps) gain, computed redundantly per block in registers (8 elements per thread).
+    const __nv_bfloat16* br; const float* s; const float* alpha; const float* beta; const float* gain;
+    float* s_out; __nv_bfloat16* h_out; float eps_post, eps; int bnd;
 };
+
+__device__ __forceinline__ float bsum(float v, float* sm) {  // block sum, 1024 threads, sm >= 32 floats
+#pragma unroll
+    for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+    const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
+    __syncthreads();
+    if (lane == 0) sm[wp] = v;
+    __syncthreads();
+    v = sm[lane];
+#pragma unroll
+    for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+    return v;
+}
+struct BPre { float as[8], be[8], gn[8]; };  // alpha s, beta, gain (independent of the producer: loaded before the wait)
+__device__ __forceinline__ void bpre(const Args& a, int g0, int g1, BPre& p) {
+    const int g[2] = {g0, g1};
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+        const float4 s4 = __ldg(reinterpret_cast<const float4*>(a.s) + g[q]);
+        const float4 al = __ldg(reinterpret_cast<const float4*>(a.alpha) + g[q]);
+        const float4 be = __ldg(reinterpret_cast<const float4*>(a.beta) + g[q]);
+        const float4 gn = __ldg(reinterpret_cast<const float4*>(a.gain) + g[q]);
+        p.as[4 * q] = al.x * s4.x; p.as[4 * q + 1] = al.y * s4.y; p.as[4 * q + 2] = al.z * s4.z; p.as[4 * q + 3] = al.w * s4.w;
+        p.be[4 * q] = be.x; p.be[4 * q + 1] = be.y; p.be[4 * q + 2] = be.z; p.be[4 * q + 3] = be.w;
+        p.gn[4 * q] = gn.x; p.gn[4 * q + 1] = gn.y; p.gn[4 * q + 2] = gn.z; p.gn[4 * q + 3] = gn.w;
+    }
+}
+// h at float4 groups g0, g1 (elements 4 g .. 4 g + 3) -> h[0..7]; call after griddepcontrol.wait, all 1024 threads
+__device__ __forceinline__ void bnd8(const Args& a, int g0, int g1, float* h, float* sm, const BPre* pp = nullptr) {
+    const int g[2] = {g0, g1};
+    BPre p;
+    if (pp) p = *pp; else bpre(a, g0, g1, p);
+    float b[8], sv[8];
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+        const uint2 bv = __ldcg(reinterpret_cast<const uint2*>(a.br) + g[q]);
+        b[4 * q] = __uint_as_float(bv.x << 16); b[4 * q + 1] = __uint_as_float(bv.x & 0xffff0000u);
+        b[4 * q + 2] = __uint_as_float(bv.y << 16); b[4 * q + 3] = __uint_as_float(bv.y & 0xffff0000u);
+    }
+    float ss = 0.f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) ss = fmaf(b[i], b[i], ss);
+    const float rb = rsqrtf(bsum(ss, sm) / K + a.eps_post);
+    float s2 = 0.f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) sv[i] = p.as[i] + p.be[i] * (b[i] * rb);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) s2 = fmaf(sv[i], sv[i], s2);
+    const float rs = rsqrtf(bsum(s2, sm + 32) / K + a.eps);
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+#pragma unroll
+        for (int i = 4 * q; i < 4 * q + 4; ++i) h[i] = sv[i] * rs * p.gn[i];
+        if (blockIdx.x == 0) {
+            reinterpret_cast<float4*>(a.s_out)[g[q]] = make_float4(sv[4 * q], sv[4 * q + 1], sv[4 * q + 2], sv[4 * q + 3]);
+            __nv_bfloat162 h01 = __floats2bfloat162_rn(h[4 * q], h[4 * q + 1]), h23 = __floats2bfloat162_rn(h[4 * q + 2], h[4 * q + 3]);
+            uint2 hv; hv.x = *reinterpret_cast<unsigned*>(&h01); hv.y = *reinterpret_cast<unsigned*>(&h23);
+            reinterpret_cast<uint2*>(a.h_out)[g[q]] = hv;
+        }
+    }
+}
 
 // router role: block rb of RB, groups of R consecutive rows, 1024 threads (2 float4 of each row per thread)
 template <int R, int T>
@@ -9536,8 +9605,16 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
     pf(g + RB);
     asm volatile("griddepcontrol.wait;" ::: "memory");
     float4 xr[J];
+    if (a.bnd) {
+        static_assert(J == 2 && T == 1024, "BND: 1024 threads, 8 elements each");
+        __shared__ float bsm[64];
+        float hh[8];
+        bnd8(a, t, t + T, hh, bsm);
+        xr[0] = make_float4(hh[0], hh[1], hh[2], hh[3]); xr[1] = make_float4(hh[4], hh[5], hh[6], hh[7]);
+    } else {
 #pragma unroll
     for (int j = 0; j < J; ++j) xr[j] = __ldg(a.x32 + t + T * j);
+    }
     int par = 0;
     for (; g < NG; g += RB) {
         float acc[R];
@@ -9654,12 +9731,25 @@ __device__ __forceinline__ void pooler(const Args& a, int pb, int PB) {
                 asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(a.N + (long)ch * (CE / 16)), "r"(CE / 2) : "memory");
             }
         }
+    BPre bp;
+    if (BPRE && a.bnd) bpre(a, 2 * threadIdx.x, 2 * threadIdx.x + 1, bp);
     asm volatile("griddepcontrol.wait;" ::: "memory");
     uint4 xv[XV];
+    if (a.bnd) {
+        static_assert(XV == 1 && NV == 4 && KK == 8192, "BND: 1024 threads, 8 elements each");
+        __shared__ float bsm[64];
+        float hh[8];
+        bnd8(a, 2 * threadIdx.x, 2 * threadIdx.x + 1, hh, bsm, BPRE ? &bp : nullptr);
+        __nv_bfloat162 v0 = __floats2bfloat162_rn(hh[0], hh[1]), v1 = __floats2bfloat162_rn(hh[2], hh[3]),
+                       v2 = __floats2bfloat162_rn(hh[4], hh[5]), v3 = __floats2bfloat162_rn(hh[6], hh[7]);
+        xv[0].x = *reinterpret_cast<unsigned*>(&v0); xv[0].y = *reinterpret_cast<unsigned*>(&v1);
+        xv[0].z = *reinterpret_cast<unsigned*>(&v2); xv[0].w = *reinterpret_cast<unsigned*>(&v3);
+    } else {
 #pragma unroll
     for (int q = 0; q < XV; ++q) {
         const int i = threadIdx.x + q * 256 * NV;
         if (i < KK / 8) xv[q] = __ldg(reinterpret_cast<const uint4*>(a.x) + i);
+    }
     }
 #pragma unroll
     for (int q = 0; q < HV; ++q) {
@@ -9733,7 +9823,9 @@ __global__ void __launch_bounds__(256 * NV, 1) fused(const Args a, int RB) {
 void pr1_launch(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tensor x, torch::Tensor out, double scale,
                 torch::Tensor rw, torch::Tensor x32, torch::Tensor logits, torch::Tensor cnt, torch::Tensor bias,
                 torch::Tensor ls, torch::Tensor ids, torch::Tensor lids, torch::Tensor wts, double mult, double reps,
-                int64_t local, int64_t u, int64_t nv, int64_t pf, int64_t r, int64_t rb, int64_t blocks, int64_t npf, int64_t pdl) {
+                int64_t local, int64_t u, int64_t nv, int64_t pf, int64_t r, int64_t rb, int64_t blocks, int64_t npf, int64_t pdl,
+                std::vector<torch::Tensor> bt, double eps_post, double eps) {
+    // bt = {} or {br bf16 [1, 8192], s fp32, alpha, beta, gain fp32 [8192], s_out fp32, h_out bf16}: fused boundary (BND)
     TORCH_CHECK(x.size(0) == 1 && x.size(1) == 8192 && rw.size(0) == 256 && rw.size(1) == 8192, "pr1: shapes");
     const int n = out.size(1);
     TORCH_CHECK((long)n * 8192 <= (long)pr1::MAXC * (blocks - rb) * nv * u * 4096, "pr1: too many chunks per virtual block");
@@ -9742,6 +9834,13 @@ void pr1_launch(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tenso
                 (const float4*)rw.data_ptr(), (const float4*)x32.data_ptr(), logits.data_ptr<float>(), cnt.data_ptr<int>(),
                 bias.data_ptr<float>(), ls.data_ptr<int>(), ids.data_ptr<int>(), lids.data_ptr<int>(), wts.data_ptr<float>(),
                 (float)mult, (float)reps, (int)local, (int)npf};
+    if (!bt.empty()) {
+        TORCH_CHECK(bt.size() == 7 && bt[0].scalar_type() == at::kBFloat16 && bt[1].scalar_type() == at::kFloat &&
+                    bt[6].scalar_type() == at::kBFloat16 && bt[0].numel() == 8192 && bt[1].numel() == 8192 && nv == 4, "pr1: BND args");
+        a.br = (const __nv_bfloat16*)bt[0].data_ptr(); a.s = bt[1].data_ptr<float>(); a.alpha = bt[2].data_ptr<float>();
+        a.beta = bt[3].data_ptr<float>(); a.gain = bt[4].data_ptr<float>(); a.s_out = bt[5].data_ptr<float>();
+        a.h_out = (__nv_bfloat16*)bt[6].data_ptr(); a.eps_post = (float)eps_post; a.eps = (float)eps; a.bnd = 1;
+    }
     cudaLaunchConfig_t lc = {}; lc.gridDim = blocks; lc.dynamicSmemBytes = 0;
     lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
     la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
@@ -9931,6 +10030,7 @@ G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, w
 # PDL secondary of the boundary (which triggers at start). (u, nv, minb, r, rb, blocks, npf). H100 d1 sliding 95.1 -> 92.5.
 PR1_TOKENS = (1,)
 PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 4)}
+PR1_BND = False  # s11: the boundary fused into pr1 as a per-block prologue (each block re-reads 144 KB: H100 d1 +1.2/+0.3 us even with s/alpha/beta/gain loaded before the wait): off
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
 
 
@@ -10114,7 +10214,7 @@ def _g10_lib():
             if _GPR1_SRC is not None:
                 src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c[:4] for c in sorted(set(PR1_CFG.values()))))
             else:
-                src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
+                src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
@@ -10133,7 +10233,7 @@ def _g10_lib():
                             "void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                             "void pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
                             "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                            "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                            "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double);",
                 cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "pj_router3", "g19_gemm", "pr1_launch"],
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
@@ -10823,7 +10923,9 @@ def kernel_fn(data, state):
     npf = (state["router"].numel() * 4) // (512 * 1024) if tokens in ROUTER_L2_PF_TOKENS and fp32_router else 0
     pr1 = (tokens in PR1_TOKENS and pdl and fp32_router and _GPR1_SRC is not None and "pooler" in state.get("g13", {})
            and not npf)
-    _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
+    bnd = pr1 and PR1_BND and a.dtype == torch.bfloat16
+    if not bnd:
+      _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
                                PDL=pdl, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32,
                                TRIG=pr1 or (BOUNDARY_TRIG and ("pooler", tokens) in state.get("g19", {}) and "pooler" in G19_ON), num_warps=16,
@@ -10876,7 +10978,9 @@ def kernel_fn(data, state):
         bucket = None
         _G10["lib"].pr1_launch(pk[0], pk[1], pk[2], h, pooled, pk[3], state["router"], h32, logits, state["pr1_cnt"],
                                state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
-                               ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens], 1)
+                               ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens], 1,
+                               [a, data["stream"], alpha, beta, state["pre_ffn"], stream1, h] if bnd else [],
+                               POST_NORM_EPS, RMS_EPS)
     else:
         side_stream.wait_stream(main_stream)
         with torch.cuda.stream(side_stream):
