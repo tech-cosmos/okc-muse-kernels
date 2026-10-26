@@ -268,3 +268,18 @@
   v16 273.0/359.5, v32 369.1/543.2 (part of the gain over d3c8c88d is SGLang's reference moving +2-3%). Submitted.
 - submit 3fca3609 (v29): **1.9139x, 11,819 us** (noise: d32 sliding 188.1 vs check 180.8, v1 sliding 128.5 vs 119.8).
   Board best stays be766193 (v26) 1.927x. v29 stays on main (-2.3 us d16/d32 on the H100); don't resubmit it unchanged.
+
+## Session 9 (2026-10-26 02:46Z-)
+- Routing robustness (lead 01:45Z): tools/route_judge.py = judge-like stress: per scored shape, capture kernel_fn once
+  as a CUDA graph, then per fresh input copy it into the captured inputs, flush L2, replay, check_routing vs
+  ref_front; also records the worst pick gap (limit 0.05) and worst "drop-lead" (a dropped reference-top-8 local
+  expert's lead over the 9th; limit 0.03, 0.04 > 256 tokens), and the same for the FP8-query reference's own top 8.
+  v29 (main), router seeds 11/12/13 x 12 shapes x 25 inputs = 900 replays: **0 failures**. Worst drop-lead ours /
+  fp8ref per shape: d1 0.006/0.006, d16 0.021/0.010, d32 0.012/0.012, v1 0.019/0.019, v16 0.020/0.020, v32
+  0.018/0.020. Ours tracks the FP8-query reference almost token for token (often identical maxima): the error
+  upstream of the router is our attention's FP8 queries + FP8 P (allowed; FA3 does the same), not our glue
+  (boundary/h/router precision add nothing visible). So there is no glue numerics to match. Residual risk: the FP8-
+  query reference itself reaches drop-lead 0.020 at v16/v32 with 25 inputs, so a 0.03 tail on a very long run is
+  possible for any FP8-query implementation; d1's f5fdc570 failure (0.0318 at T=1, where the worst seen here is
+  0.006) is 5x outside this distribution: most likely a bug in that old diag build (Marlin-path profile, session 2),
+  not reproducible on current code.

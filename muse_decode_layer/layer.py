@@ -297,11 +297,14 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False):
     dev = h.device
     fp32 = tokens <= ROUTER_FP32_MAX_TOKENS
     lib = _G10.get("lib") if fp32 and tokens in ROUTER3_CFG else None
-    if lib is not None:
+    pr3 = _G10.get("lib") if not fp32 and tokens in PR3_CFG else None
+    if lib is not None or pr3 is not None:
         ks = 1  # no split K: part = the logits
     part = torch.empty((ks, tokens, N_EXPERTS), dtype=torch.float32, device=dev)
     if lib is not None:
         lib.r3_router(state["router"], h32, part, *ROUTER3_CFG[tokens])
+    elif pr3 is not None:
+        pr3.pj_router3(state["router_hl2"], h, part.view(tokens, N_EXPERTS), *PR3_CFG[tokens])
     elif fp32:
         _router_fma[(N_EXPERTS // be, ks)](h32, state["router"], part, tokens, K=HIDDEN, E=N_EXPERTS, BT=bt, BE=be,
                                            BK=bk, KS=ks, num_warps=warps, launch_pdl=router_pdl)
@@ -491,6 +494,7 @@ def prepare(weights):
         "unpool_slice": weights["unpooler"][:UNPOOL_SLICE].contiguous(),
         "unpool": weights["unpooler"].contiguous(),
         "router": router, "router_hi": hi.contiguous(), "router_lo": lo.contiguous(),
+        "router_hl2": torch.stack([hi, lo]).contiguous(),  # [2, 256, k] for pj_router3
         # [pooler; router hi; router lo]: one GEMM of h for both above 8 tokens (FUSED_ROUTER_TOKENS)
         "pool_router": torch.cat([weights["pooler"], hi, lo]).contiguous() if FUSED_ROUTER_TOKENS else None,
         "router_bias": weights["router_bias"].float().contiguous(),
@@ -572,6 +576,7 @@ _G12_SRC = None  # @@G12@@
 # qkv m8 13.9 -> 13.0 us.
 _G13_SRC = None  # @@G13@@
 _G14_SRC = None  # @@G14@@
+_GPR3_SRC = None  # @@GPR3@@
 G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv, minb, pf, blocks), k = 8192
 G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, wg, pf, bk, xp), m = 8
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
@@ -719,6 +724,7 @@ def _g10_lib():
                     assert src13.count(anchor) == 1, anchor
                     src13 = src13.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
             src = src + "\n" + src13 + "\n" + _R3_SRC.replace("R3_CONFIGS", " ".join("R3_CASE(%d,%d,%d)" % c for c in sorted(set(ROUTER3_CFG.values()))))
+            src = src + "\n" + _GPR3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(PR3_CFG.values()))))
             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
@@ -732,9 +738,10 @@ def _g10_lib():
                             "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                             "void r3_router(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
                             "void g17_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t);\n"
+                            "void pj_router3(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                             "void n2u_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                             "int64_t, int64_t, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, std::vector<torch::Tensor>, double, double);",
-                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch"],
+                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "pj_router3"],
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
             print("layer: gemv10/12 build failed, cuBLAS:", e)
@@ -745,6 +752,11 @@ def _g10_lib():
 # blockIdx.y in groups of M so x fits in registers): tokens -> (M, rows per block, threads). H100 cold L2 m8: 8.74 us vs
 # _router_fma 11.52 (+ its 8 split partials); m1 6.91 vs 7.10 (tie: not used).
 ROUTER3_CFG = {8: (4, 2, 512)}
+# Router above 8 tokens = SGLang's BF16 hi/lo split in ONE split-K mma kernel (proj's router3, r-proj a1f0af7 dev/router3.cu
+# = pr3_src.cu): FP32 atomics into its output (zeroed by a tiny PDL-primary kernel). tokens -> (MT, NT, WM, WN, KC, NS).
+# proj H200 standalone: T16 7.38 -> 5.55, T32 8.66 -> 6.36, T128 10.24 -> 9.00 us.
+# Layer H100: T=128 (v16) -4.5 us; T=16/32 +1..3 us (its 72 KB-smem CTAs crowd the pooler bmm beside it): off there.
+PR3_CFG = {128: (128, 64, 4, 4, 256, 4)}
 _R3_SRC = r'''// router3: proj's router2 (no split K, x in registers, W float4 loads issued up front) with FP32 x; tokens split over
 // blockIdx.y in groups of M so that x fits in registers.
 namespace r3 {
@@ -1220,7 +1232,8 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     y32 = torch.empty((TOP_K, D_EXPERT), dtype=torch.float32, device=dev)
     ids = local_ids.contiguous()
     lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"],
-                        x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"], _moe_TK2F)
+                        x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"],
+                        _moe_TK2F + (100000 if _moe_TK2SA and st["sa"] else 0))
     f = torch.empty((1, UNPOOL_SLICE), dtype=torch.bfloat16, device=dev)
     _G10["lib"].n2u_launch(y32, inv, ids, topk_weights.float().contiguous(), st["w1"], st["gs2"], 0, LOCAL_EXPERTS,
                            POST_NORM_EPS, state["unpool_slice"], f, st["cnt"], *N2U_CFG, list(bnd), POST_NORM_EPS, RMS_EPS)
