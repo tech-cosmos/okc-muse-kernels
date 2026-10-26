@@ -642,3 +642,18 @@
   SM100 only), `routergemm`; deep_gemm also has `cublaslt_gemm_nt` and `bf16_mega_moe`/`bf16_mega_gate` (MoE). tinygemm /
   low-latency gemm at m8/m16 vs g14/lt is the only one plausibly worth a diag.
 - DIAG_EXT = {} again (only the import/name print stays). Board 1.3110x unchanged. Budget 10-26: checks 20/20.
+
+## Session 26 (2026-10-26 13:27-13:40Z): flashinfer tinygemm_bf16 (tinygemm2) ported and A/B'd on the H100
+- trtllm_low_latency_gemm (flashinfer 0.7.0) = FP8 + Blackwell only: dead. tinygemm_bf16 = TRT-LLM tinygemm2, SM90 path:
+  `pip download flashinfer-python==0.7.0 --no-deps` (no install), csrc/tinygemm2.cu ported to load_inline in dev/tinygemm2.cu
+  (TVM FFI -> torch binding tg2; needs -lcuda for cuTensorMapEncodeTiled). Design: n/16 blocks x 384 threads (4 mma.sync
+  consumer warps split K, 4 W TMA warps, 4 x TMA warps), STAGES x 4 x (16x64 W + 8x64 x) tiles; stock STAGES 16 = 196 KB smem.
+  PDL mode: only x warps wait (W streams during the predecessor).
+- Standalone H100 (dev/tg2.py, cold L2 graphs, us; current = submission pick): unp1k m8 6.53 vs 7.26 (g17) WIN, m4 6.59 vs
+  8.45; unp1k m1 6.98 vs 5.57; qkv m1/m8 17.8/18.0 vs 13.3/16.0; o 12.8/13.4 (S4 9.1/9.25) vs 8.6/9.0; pool 26.5 vs 20.2/23.5;
+  every m>=16 2-2.3x slower. S4/S8 never beat the current pick standalone.
+- Tuner candidate BF16_TG2 = {"unpooler": [(8,)]} (separate guarded load_inline "muse_proj_tg2a"); local tuner picks it
+  (9.25 vs g17 9.86 tuner us); bench verify-1 unpooler 6.62 us; tests 39/39. Not judge-checked (checks 20/20 today).
+- After a 3 us PDL predecessor (g19_pred; dev/tg2pdl.py, dev/tg2o.py): tg2 PDL unp1k m8 +2.3..2.8 vs g17 +6.0..6.5 / tg2
+  no-PDL +5.2..5.7; o m8 S8 +6.0 vs g14 +7.4..7.7; o m1 S8 +6.4 vs g10 +7.2; unp1k m1 S16 +2.7 vs g17 +4.2. Handoff + layer
+  request posted (COORD proj s26). Layer's own o/unpool paths may already be PDL secondaries / fused n2u: it A/Bs.

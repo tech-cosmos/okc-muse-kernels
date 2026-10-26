@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~13:50 UTC (end of session 25).
+Updated 2026-10-26 ~13:40 UTC (end of session 26).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -145,7 +145,12 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## decode) DEAD in the H100 proxy (+1.5..3.5 us at m32: stream-bound on the extra bytes). NOTES s24.
 ## Session 25: judge-image libs diag (check 5abb71f1): DeepGEMM bf16_gemm_nt ties/loses vs our lt picks at m16-256: DEAD.
 ## Image has flashinfer 0.7.0 (tinygemm_bf16, trtllm_low_latency_gemm), deep_gemm 0.2.1+muse, sgl_kernel 0.4.9 (NOTES s25).
+## Session 26: tinygemm2 (flashinfer tinygemm_bf16 port, dev/tinygemm2.cu): tuner candidate at unpooler m8 (H100 6.53 vs
+## g17 7.26), main 3addab4 (NOT judge-checked yet). After a PDL pred it wins o m1/m8 and unp m1/m8 by 0.8-3.7 us (H100): handoff.
 ## Next (ranked)
+-15. (s26) Tomorrow's first proj check: main as is (tg2 at unpooler m8 in the tuner): read "tune unpooler m8" in the judge log;
+   submit if the check beats 1.3110. Add a PDL-pred diag for tg2 (o m1/m8, unp m1/m8 S8/S16 vs picks) in the same check if
+   the layer has not measured it. Read the layer's verdict on TG2 (COORD Requests/Results).
 -14. (s25) Tomorrow's sandbox (fresh budget): one diag of flashinfer tinygemm_bf16 / trtllm_low_latency_gemm at m8/m16
    (qkv, o, pooler, unpool) vs g14/lt via _diag_ext (signatures unknown: print help() first, guard everything).
    Then read the layer's ~14:30Z check tuner lines (QSS pick at T=32) in NOTES-layer.
