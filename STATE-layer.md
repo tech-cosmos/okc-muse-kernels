@@ -1,23 +1,24 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~03:55Z (end of session 9).
+Updated 2026-10-26 ~05:00Z (end of session 10).
 
 ## Board
-- **Best scored: e5512e00 = v33 (bb6fb77), 1.9459x, 11,624 us/step (2026-10-26 ~04:00Z), overall #52.** Per shape:
-  d1 73.5/82.0, d16 149.9/238.6, d32 187.7/323.8, v1 118.8/131.5, v16 282.8/363.1, v32 361.3/533.9.
-  Board #1 2.360x, #10 2.167x (10-26 04:00Z). Previous best be766193 (v26) 1.927x.
-- main = v33 (bb6fb77) = v29 + moe e8d47eb (SA) + proj router3 at T=128 (v32) + KV_PF (qkv gemv13 L2-prefetches the
-  d1 sliding KV window). Checks: 50cb4a5b (v32) 1.930x; **6aaff5a2 (v33) 1.9377x, 11,674 us**: d1 73.2/85.2,
-  d16 148.1/229.6, d32 177.3/309.3, v1 120.2/131.7, v16 264.6/348.6, v32 357.0/537.2 (H200 us sliding/full).
-- Budget 2026-10-26: submits 81e501e9, ca8f833a, dae762e4, be766193, 3fca3609 e5512e00 (6 of 9); checks 8 used (~04:00Z).
-- SGLang per shape (H200 us sliding/full, moves 2-3% between runs): d1 171/182, d16 257/436, d32 260/618, v1 257/268,
-  v16 502/680, v32 681/1046. Judge noise: identical code moves up to 4% per shape; total ~+-1%.
+- **Best scored: e5512e00 = v33 (bb6fb77), 1.9459x, 11,624 us/step**, overall #56 at 04:50Z (#1 2.360x, #10 2.176x,
+  #50 ~1.953x). v33 contains moe's old tk2f race (lead asked about withdrawing it: see COORD Judge runs line).
+- main = **v36 (4017c16)** = v33 + moe c33acae (race fix) + proj gemv19 at T=16 (pooler AP8 on 108 blocks as PDL
+  dependent of the first boundary, which triggers at start; full unpool). **Best check ee80a8f8 1.9566x**; its submit
+  543b6ca9 scored 1.9395x (noise). Per shape (H200 us ours, ratio): d1 72.1/83.7 (2.369/2.174), d16 150.1/225.4
+  (1.747/1.912), d32 181.1/311.0 (1.443/1.974), v1 121.6/132.8 (2.133/2.043), v16 273.0/359.4, v32 351.8/527.1.
+- Budget 2026-10-26 (resets 00:00Z): submits 8 of 9 used (keep the last as spare unless a check clearly wins);
+  checks 10 of 20 used at 04:50Z.
+- Judge noise: SGLang's own per-shape times move 2-6% between runs; identical code's per-shape ratios spread ~+-1.5%,
+  total ~+-1%: one check cannot resolve <2% changes. Decide on H100 interleaved A/Bs (tools/ab_flag.py), check to confirm.
+- SGLang per shape (H200 us sliding/full): d1 171/183, d16 262-271/431-444, d32 261-268/614-634, v1 259-261/271-280,
+  v16 523-537/700, v32 699-745/1049-1116.
 - Scoring: geomean over 6 loads, each = 46 sliding + 16 full layers: 1 us on d1 sliding = +0.16% total, v1 +0.10%,
   d16 +0.07%, d32 +0.05%, v16 +0.04%, v32 +0.03%.
 - Floors (us): d1 40/44, d16 77/137, d32 85/208, v1 62/66, v16 127/189, v32 144/267.
-- Routing robustness (lead 01:45Z): DONE s9: tools/route_judge.py (judge-like graph replay on fresh inputs) 0/900
-  fails; our margins = the FP8-query reference's own (attention's FP8 queries dominate; glue adds nothing). Details
-  NOTES s9. Rerun it after any change upstream of the router: `python tools/route_judge.py <file> 25 11,12,13 [filter]`.
+- Routing robustness: tools/route_judge.py 0/900 (s9). Output robustness: tools/replay_test.py (s10, 0/90 + 0/60).
 
 ## Code (muse_decode_layer/)
 - `layer.py` = the layer. Inlined by **`python build.py` -> submission.py** (never edit submission.py by hand):
@@ -30,6 +31,10 @@ Updated 2026-10-26 ~03:55Z (end of session 9).
 - Router: T=1 `_router_fma` (Triton FP32), T=8 `r3_router` (CUDA FP32, in `_g10_lib`), T=128 proj `pj_router3` (`pr3_src.cu`,
   PR3_CFG; hi/lo one kernel, atomics), other T>8 `_router_split` (SGLang hi/lo BF16).
 - KV_PF (T=1 sliding): `_linear(..., kv_pf=)` passes page_table[0, -2049:], k/v cache to the text-patched g13 (`_g10_lib`).
+- gemv19 (s10): `g19_src.cu` (proj dev/gemv19.cu @6996d0c, built in `_g10_lib` with G19_ONLY2), `_pack19`,
+  `_g19_prepare` (packs + per-pick F.linear check), `_g19(x, key, state)` -> FP32 [T, n] or None. G19_CFG (key, T),
+  G19_ON, G19_GRID (pooler 108 blocks at T=16: leaves SMs for the side-stream router), BOUNDARY_TRIG. EPOCH COUNTER:
+  one per (pick, grid size) (`e[3]` dict): a counter shared across grid sizes deadlocks.
 - Pipeline: qkv `_linear` (gemv10 T=1, gemv12 T=8, cuBLASLt pick at T=128/256, else cuBLAS) -> attn -> o `_linear` -> `_boundary` -> side stream:
   router + `_routing` || pooler `_linear` -> `_rmsnorm_gain` -> experts (`_moe_kernel_fn`: tk2 at T<=32, route+gather+
   moe_tw at T>32) -> unpool `_linear` (1024-row slice at T<=8; gemv17 `_G17_SRC` at T=1/8) -> `_boundary`.
@@ -54,21 +59,21 @@ Updated 2026-10-26 ~03:55Z (end of session 9).
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
-0. Watch r-moe / r-proj Handoffs (proj gemv18 = compressed m16/m32 in progress; moe tk2f T=16/32); re-copy + rebuild +
-   test (+ tools/tk2f_stress.py, tools/n2u_eq.py, tools/route_judge.py) + interleaved A/B (/tmp-style: two subs in one
-   process, 5 rounds; separate-process bench drifts +-1 us) + check. NOTE: the layer calls moe_tk2f_launch directly at
-   T=1 (`_experts_n2u`, cfg + 100000 for SA) and reimplements moe_norm2 in `_N2U_SRC`: update both when moe changes.
-1. Pooler + router (+ top-8) in ONE kernel at T=1 and T=8 (layer-owned, the best lever left in the glue): today the
-   router's CTAs fill every SM's register file, so the pooler starts 3.4 us (d1) / 5 us (v1) after the boundary and
-   the two run at ~2.5 TB/s instead of ~3.2 (H100). Plan: one grid, blockIdx role split (~110 pooler g13/g14 blocks +
-   ~22 router2-style FP32 blocks, 1 block/SM, one wave), the last router block (atomic ticket) does the top-8 +
-   weights (_routing) while the pooler streams. Estimate d1 -2..3, v1 -3..5 us (+0.5..1%).
-2. d1 tail: n2u/boundary ~-1.4 us if the 8 MB unpool slice were in L2 (needs evict_first on moe's bulk copies +
-   evict_last prefetch in an HBM-idle window): ask moe first.
-3. Experts are 50-60% of every T>=16 shape (moe), cuBLAS GEMMs ~87 us vs ~61 BF16 floor at d32 (proj).
-4. v1: tail tk2f -> norm2 4.7 -> g17 7 -> boundary (~14 us). n2u doesn't scale to 8 tokens (1 MB of y32 per block).
+0. Watch r-moe / r-proj Handoffs; re-copy + rebuild + test (bench.py test, tools/scored_test.py, tools/tk2f_stress.py N,
+   tools/replay_test.py, tools/route_judge.py if upstream of the router changed) + H100 A/B (tools/ab_flag.py) + check.
+   The layer calls moe_tk2f_launch directly at T=1 (`_experts_n2u`, cfg + 100000 for SA) and reimplements moe_norm2 in
+   `_N2U_SRC`: update both when moe changes. proj is working on g19 at m32 for the H200 (its Next 1): when posted,
+   add ("pooler"/"unpool", 32) to G19_CFG and A/B the pooler grid (router starvation knee: H100 T=16 104-112 of 132).
+1. d1 (1 us = +0.16%): H100 timeline (v36): boundary ends 26.6, _router_fma 26.7-31.8 holds the SMs so the g13 pooler
+   starts 30.1 (3.4 late) and takes 19.4 (qkv g13 14.5); _routing (1 CTA) cannot get an SM until the pooler drains
+   (46.9-51.2); tk2f starts 51.3. Fewer pooler blocks: worse (132 95.1, 120 95.8, 96 96.2). Pooler + FP32 router +
+   top-8 in ONE kernel (blockIdx role split; the last router block does the routing) est. d1 -3..5 us, v1 similar.
+2. T=16 o / qkv on g19: proj's H200 diag says o +0.8 worse, qkv has no PDL predecessor (first op): low value.
+3. Experts are 50-60% of every T>=16 shape and 27 us of d1's 72 (moe lane: tk2f ~63% of H200 HBM peak at d1).
 
 ## Dead ends (details in NOTES)
+- s10: g19 at T=32 (H200: proj diag + check 5cf5247d); g19 pooler on all 132 SMs (router starved, +4 us H100); router3
+  at T=16/32 beside g19 (tie); o g19 at T=16 (H100 tie); d1 g13 pooler on fewer blocks (+0.7..1.1 us).
 - s9: router3 at T=16/32 (+1..3 H100, crowds the pooler bmm); ROUTER_L2_PF (1,)/(8,) (noise); T=8 pooler g14 on 64
   fat blocks (+2..6); KV_PF at v1 (vtk barely gains from warm KV).
 - s8: boundary as n2u's last-block epilogue (+2.7); n2u PDL after tk2f (+2..3); moe_norm2 PDL after tk2f (g_pdl 6:
