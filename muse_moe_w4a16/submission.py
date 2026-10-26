@@ -3886,12 +3886,12 @@ TWF_RT = 4  # s11: 2 = moe_twf with RT 2 / 64-token passes (prepare then packs w
 TWF_MIX = 1  # s11: 1 = moe_twm (RT 2 / 64-token passes for experts with > 32 tokens, RT 4 for the rest)
 TWF_RT_M = {}  # s11: per-M override, e.g. {256: 2} for the layer's verify 32 (hot experts with 90+ tokens: 34 vs 24 passes)
 TWM_TAIL = 0  # s14: moe_twm runs the gemm2 of the lightest experts (up to this many RT 4 items) at RT 2 / 32-token passes
-TWM_TAIL_M = {256: 32}  # s14: per-M override of TWM_TAIL
+TWM_TAIL_M = {}  # s14: per-M override of TWM_TAIL
 TWM_TAIL13 = 0  # s14: same for the gemm13 items of the lightest experts (RT 4 gemm13 item budget)
 TWM_TAIL13_M = {}
 TWM_ORDER = 0  # s14: moe_twm item order (bits, see moe_twm): 76 = pass-minor + multi-pass experts' items merged evenly
 #   over both phases (H100 layer v32 248.8 -> 239.9 us without TWM_TAIL (with it: 247), v16 = 0); 2 = timeline stamps
-TWM_ORDER_M = {}  # s14: per-M override
+TWM_ORDER_M = {256: 76}  # s14: per-M override
 TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
 TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
 _CFGS = (10, 11, 22, 118)
