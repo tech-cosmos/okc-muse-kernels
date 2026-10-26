@@ -1,0 +1,98 @@
+diff --git a/muse_decode_layer/layer.py b/muse_decode_layer/layer.py
+index 646e0cb..916a9c3 100644
+--- a/muse_decode_layer/layer.py
++++ b/muse_decode_layer/layer.py
+@@ -960,6 +960,7 @@ def _g10_lib():
+                             "void pj_router3(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                             "void n2u_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                             "int64_t, int64_t, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, std::vector<torch::Tensor>, double, double);\n"
++                            "void xpf_launch(torch::Tensor, torch::Tensor, int64_t, int64_t);\n"
+                             "void nu8_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, double, "
+                             "torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t);\n"
+                             "void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+@@ -969,7 +970,7 @@ def _g10_lib():
+                             + ("void pr8_launch(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
+                                "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                                "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else ""),
+-                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
++                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "xpf_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
+                 + (["pr8_launch"] if _GPR1_SRC is not None and _GPR8_SRC is not None else []),
+                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
+         except Exception as e:  # noqa: BLE001
+@@ -1744,6 +1745,39 @@ void n2u_launch(torch::Tensor y32, torch::Tensor inv, torch::Tensor ids, torch::
+     else TORCH_CHECK(false, "n2u: rows");
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
++// s55 XPF: L2 prefetch (evict_last) of the routed local experts' w13q beside the g19 pooler at T = 16/32 (side stream,
++// after the routing): the first `pre` bytes of every 32 KB row tile (64 k chunks x 512 B, tk2f's A-fragment pack),
++// pre = budget / (distinct experts x row tiles), 1 KB granular; chunk-major so every expert's prefix grows evenly.
++__global__ void __launch_bounds__(256) xpf_k(const int* __restrict__ ids, int n, const char* w, long long es, int nt, long long budget) {
++    __shared__ unsigned sm;
++    if (threadIdx.x == 0) sm = 0;
++    __syncthreads();
++    for (int i = threadIdx.x; i < n; i += blockDim.x) { const int e = __ldcg(ids + i); if (e >= 0 && e < 32) atomicOr(&sm, 1u << e); }
++    __syncthreads();
++    const unsigned m = sm;
++    const int ne = __popc(m);
++    if (ne == 0) return;
++    const long long pre = min(32768LL, budget / ((long long)ne * nt) / 1024 * 1024);
++    const long long total = (pre / 1024) * ne * nt;
++    unsigned long long pol;
++    asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol));
++    for (long long q = blockIdx.x * (long long)blockDim.x + threadIdx.x; q < total; q += (long long)gridDim.x * blockDim.x) {
++        const long long c = q / ((long long)ne * nt);
++        const int r = (int)(q % ((long long)ne * nt));
++        const int u = r / ne, j = r % ne;
++        unsigned mm = m;
++        for (int t = 0; t < j; t++) mm &= mm - 1;
++        const char* a = w + (__ffs(mm) - 1) * es + (long long)u * 32768 + c * 1024;
++        asm volatile("cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], 1024, %1;" :: "l"(a), "l"(pol) : "memory");
++    }
++}
++void xpf_launch(torch::Tensor ids, torch::Tensor w, int64_t budget, int64_t grid) {
++    const long long es = w.stride(0) * w.element_size();
++    TORCH_CHECK(es % 32768 == 0 && ids.dtype() == torch::kInt32, "xpf: shape");
++    xpf_k<<<(int)grid, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const int*)ids.data_ptr(), (int)ids.numel(),
++        (const char*)w.data_ptr(), es, (int)(es / 32768), (long long)budget);
++    C10_CUDA_KERNEL_LAUNCH_CHECK();
++}
+ #ifndef NU8_PF
+ #define NU8_PF 1
+ #endif
+@@ -2141,13 +2175,13 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
+             {"rf_trig": False}, {"g13o": True}),
+         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
+              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
+-             {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}),
++             {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"xpf": 8}, {"xpf": 16}),
+         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
+              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
+              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
+              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
+              {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
+-             {"o_pf": 0}),
++             {"o_pf": 0}, {"xpf": 8}, {"xpf": 16}, {"xpf": 24}),
+         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
+             {"nu8": False}, {"nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
+             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
+@@ -2422,6 +2456,11 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
+ # the unpool slice split over k into NU8_KB-wide FP32 slabs, PDL secondary of moe_tk2f) -> the boundary adds the slabs.
+ # Replaces moe_norm3 + gemv17 (H100 v1 tail tk2f end -> norm3 3.7 -> g17 4.6 -> boundary 3.3 us). TUNE option "nu8".
+ NU8_DEFAULT = False
++# s55 XPF (TUNE option "xpf" = MB budget, T = 16/32): xpf_k L2-prefetches the routed experts' w13q row-tile prefixes on
++# the side stream right after the routing, while the consumer-bound g19 pooler leaves HBM idle (H200: router_split 5.6/6.5
++# us vs pooler ~16/25). H100 oracle: 40 MB -> tk2f -7 us, but there the routing ends with the pooler (no window): H200 only.
++XPF_TOKENS = (16, 32)
++XPF_GRID = 24
+ # s28 QF32 (proj s19 request): at T=16 decode the g19 qkv stays FP32 into attention (csl sliding, _gd_full + merges full),
+ # rounded to BF16 (RN) at each load: bit-identical to the torch cast it drops (H200 ea9421fa: 1.2-1.3 us per layer).
+ QF32 = True
+@@ -2643,6 +2682,8 @@ def kernel_fn(data, state):
+                                         and not _opt(state, tokens, "rg", RG_DEFAULT))
+             rpdl = bkt and _opt(state, tokens, "route_pdl", ROUTE_PDL)
+             topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens, trig=rpdl)
++            if tokens in XPF_TOKENS and _use_moe(tokens) and (xpf := _opt(state, tokens, "xpf", 0)):
++                _G10["lib"].xpf_launch(local_ids, state["moe"]["w13q"], xpf << 20, XPF_GRID)
+             # The experts' bucketing too, off the main stream's path.
+             bucket = _moe_bucket(state, local_ids, rpdl) if bkt else None
+     if pr1:

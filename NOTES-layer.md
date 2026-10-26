@@ -1093,3 +1093,9 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   grid needs: tk2f 153-237 us. Real ids exist only at ~the pooler's end (routing ends 71 vs pooler 72.6 on H100), so
   the 'post' form has no window anyway. Upper bound even with free routing ~-7 us/40 MB (~0.3-0.5% score at d32) and
   it needs SMs nobody has spare. Dead unless the g19 pooler's own producer warps issued it AND routing came early.
+- Real form also built and measured (dev/xpf_s55.patch: xpf_k in the n2u source, side stream after _route, TUNE option
+  xpf = MB budget, 1 KB per row tile chunks): H100 ab_flag 3 rounds xpf 16 / 8 vs off: d16 +2.8/+2.6 sl, +2.6/+2.4 full;
+  d32 +2.4/+1.2 sl, +3.0/+1.1 full. Timeline d32 sl xpf 16: xpf_k 7.3 us (16 MB, after the routing which ends ~with the
+  pooler) and tk2f 95.5 -> 94.4 only. Prefetch efficiency in tk2f is ~10-25% of bytes/BW (oracle 20/40/80 MB -> -2/-3.6/-7
+  us): tk2f's own evict_last re-read lines (multi-group experts at T=32) and its 250 MB stream evict most prefetched
+  prefixes before their items run. So even the H200 window (router 6 us vs pooler 16-25) would give <= ~1 us: not added.
