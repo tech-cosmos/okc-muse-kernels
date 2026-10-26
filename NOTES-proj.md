@@ -423,7 +423,7 @@
   consumer run end ~0.1 us; (b) cap npre so x is not queued behind W when the predecessor is short; (c) x-arrival
   2.6 us cold: 132 blocks hit the same 7 x chunks at once (L2 hot spot?): try TMA multicast over clusters of 2.
 
-## Session 15 (2026-10-26 07:40 - UTC): gemv19 escape fixups off the register path (s14 Next (a))
+## Session 15 (2026-10-26 07:40 - 08:35 UTC): gemv19 escape fixups off the register path (s14 Next (a))
 - Real escape density (pack16, KC 1024): qkv 1.15/row, pooler 1.11, unpooler 0.40, o 0.10 -> per 128-row tile per
   1024-k chunk ~13-18 escapes; per consumer warp per run ~2-3.
 - Tried (a) as planned: consumers push a compacted escape list per warp (ballot + popc, cheap), the finisher applies
