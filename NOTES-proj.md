@@ -290,3 +290,33 @@
   1.3296, f13197773 (cfd1faf) 1.3146. H200 after a 3 us PDL predecessor (g19 vs best pick): m16 pooler (1024,8,3,xb1)
   15.8 vs 18.9, unp 16.5 vs 17.5, qkv (1024,4,4,xb2) 11.2 vs 13.2 [AP8 12.4], o +0.7 worse; m32 all worse (+0.8..2.8).
   Bare TMA stream 50 MB: H200 13.7, H100 18.3 us. Budget 10-26 at session end: checks 9/20, scored 4/10.
+
+## Session 11 (2026-10-26 04:24 - ~05:45 UTC): fused pooler + router + routing for the layer at T=1 / T=8
+- Lane: lead 01:45Z (layer's GEMMs as they run in the layer). Layer's own Next 1 (pooler+router+top-8 in one kernel at
+  T=1/8); I claimed it (COORD Requests 04:30Z), layer acknowledged (r-layer 24aac63) and stays on g19 at d16.
+- Measured in a COPY of r-layer (/tmp/pj11/layer, layer.py patched, `python build.py`, `python bench.py test`,
+  tools/timeline.py, tools/route_judge.py, dev/layer_ab.py = interleaved one-process A/B of module-attribute variants).
+- pr1 (dev/pr1.cu, test dev/pr1.py): T=1. Blocks [0, rb) = FP32 router (4 rows per group, x32 in registers, next group
+  bulk-prefetched to L2, W of the first group loaded before griddepcontrol.wait), blocks [rb, 132) = gemv13 pooler body
+  (W prologue + escape headers before the wait, x after). Last router block (atomic ticket) does the routing in one warp
+  (sigmoid via expf, top-8 of score + bias, lowest index on ties, weights, local ids). Launch = PDL secondary of
+  _boundary, which must trigger at its start (without the trigger: +2 us vs today's side-stream router).
+  H100 layer (5-round A/B): d1 sliding 95.1 -> 92.2-92.7, full 117.4 -> 114.7-115.4. rb 22-30, npf 0-8, R 2/4, PF 2: flat.
+  Timeline: pr1 runs ~21 us after the boundary end for 58 MB (pooler 50 + router 8) = HBM-bound; old: router 5.3 us
+  delayed the pooler start by 3.3 us.
+- pr8 (dev/pr8.cu, test dev/pr8.py, TIME=1 / TRACE=1 = globaltimer per block): T=8. gemv14 pooler config is S=1 with
+  128 x 1024-thread blocks (one per SM), so no SMs for a router role: every block also does one router item (16 rows x
+  1024 k of the FP32 router; W in registers before the wait; x32 slice cp.async'd to smem first), partial logits
+  [8 slices][8][256] to scratch, red.release.gpu counter; an EXTRA finisher block (blockIdx 128) spins (ld.acquire +
+  nanosleep), sums the slices in order (deterministic), routes the 8 tokens (warp = token), resets the counter.
+  * Lesson: dependent memory round trips while HBM is saturated cost ~3-4 us EACH. First version had per-row-group and
+    global tickets inside the pooler blocks: the global-last block took 17.7 us for its ticket chain + routing (+12 us
+    to the kernel). Moved to the finisher block: full = no-ticket time.
+  * H100 layer: v1 sliding 158.1 -> 157.0, full 172.4 -> 171.0 (small: 58 MB at ~2.4 TB/s; the boundary also slows,
+    its latency-bound loads queue behind pr8's pre-wait traffic; router loads after the wait: same; no trigger: worse).
+- Both: tests 13/13 (identical errors to before: outputs unchanged), route_judge 25 x 3 seeds 0 fails at d1 and v1.
+  Handoff in COORD (proj s11 05:15Z), wiring = dev/pr1_layer.patch (vs r-layer 8ac162e).
+- gemv13 VT (virtual-block threads 256/512): qkv m1 has 2304 rows = 4.36 rounds of 528 vbs -> 5 (13% tail); VT 512 =
+  half-size rounds (9 of 8.73). H100 13.7 -> 13.1 us, but H200 (check 6b50e844, 1.3064x, diag) 14.21 vs 14.14: no gain.
+  Kept as a tuner candidate (g13 call takes vt now).
+- Checks 10-26: 10/20 used (6b50e844). Scored 4/10.

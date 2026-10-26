@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~04:40 UTC (session 10).
+Updated 2026-10-26 ~05:45 UTC (session 11).
 
 ## Board
 - **Best: submit 71145e34fe424844 = a1f0af7, 1.307x (3,695.6 us), proj rank 196** (router3 at router m9-128; its check
@@ -8,7 +8,8 @@ Updated 2026-10-26 ~04:40 UTC (session 10).
 - Before: 6d0fc4d4 (405439e) 1.2742x; d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 9/20, scored 4/10 (cap 9). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146 (diag only).
+- Budget 10-26 used: checks 10/20, scored 4/10 (cap 9). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
+  1.3064 (diag only).
 - H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
@@ -89,7 +90,26 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   equivalent, the losses are x arrival (~2 us before the first stage completes) + ~1 us per segment flush + tail.
   Dead: deeper rings, x first, interleaved layout, dynamic tail, per-SM calibration (not stable), ts 2, rpw 2, rg 16.
 
+## Session 11: pr1/pr8 (layer T=1/T=8 pooler + FP32 router + routing, one launch each). Handoff posted (COORD proj s11
+## 05:15Z), wiring dev/pr1_layer.patch. H100 layer: d1 -2.5/-2.7 us, v1 -1.1/-1.4 us. Await the layer's H200 check.
+- Lesson: under saturated HBM each dependent memory round trip costs ~3-4 us: keep ticket/last-block chains OFF the
+  streaming blocks (extra finisher block spinning on an acquire counter).
+
 ## Next (ranked)
+0. **wgmma consumers for g19 (the layer's T=16/32 GEMMs, also a path to T=128/256).** On H200 g19 at m32 is issue-bound
+   (mma.sync + ldmatrix per token tile; HBM needs only ~10.4 us for 50 MB). Plan: consumer warps 0-7 = 2 warpgroups of 4
+   row groups (64 rows); A = dec8 output in registers (same fragment layout as mma.sync m16n8k16 A: warp i of the WG =
+   rows 16i..16i+15), B = x chunk in smem as K-major SW128 ([N tokens][64 k] blocks, N*128 B apart, desc LBO 1, SBO 64,
+   swizzle 1 like r-moe moe_tw sw128_desc; +32 B per k16), x by TMA tensor map (cuTensorMapEncodeTiled via
+   cudaGetDriverEntryPointByVersion, encode at every launch: the judge clones state) or a swizzled manual copy.
+   wgmma m64nNk16 (N = 16/32) per atom per k16, double-buffered A registers + fence_r (moe tw_item pattern), wg_wait
+   before releasing a ring slot / x buffer and before a run-end flush. Escape fixups: x address = base + (k/64)*N*128 +
+   tok*128 + (((k%64)*2) ^ ((tok&7)<<4)). Accumulator layout = mma.sync C layout per n8 tile (epilogue unchanged).
+   Est: d32 pooler/unpool/qkv -4..6 us each on H200 (layer d32 1 us = +0.05%, d16 +0.07%).
+1. If the layer reports pr1/pr8 H200 numbers: tune rb/npf (pr1) on the judge via the layer's checks (layer owns them).
+2. m32 g19 fixed costs (flush, x arrival) after 0.
+
+Older list (s10):
 0. Check 3 (f1319777) done: H200 m16 pooler 15.8 vs 18.9, unp 16.5 vs 17.5, qkv (AP4) 11.2 vs 13.2; m32 + o lose. Handoff
    updated. Next: ask layer whether g19 is wired at d16; measure in a copy of r-layer harness (tools/timeline.py).
 1. m32 on H200: cut the fixed costs: flush (escape fixups loop 2 x 8 slots x shfl per run end; move them to the
