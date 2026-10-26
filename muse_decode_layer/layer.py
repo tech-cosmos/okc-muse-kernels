@@ -475,6 +475,12 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
         _moe_TWM_TAIL_M.clear()
         if _opt(state, m, "twm_tail", 0):  # moe s14: H200 diag 20d0b9c5 tail 32: v32 -3 us (clashes with order 76)
             _moe_TWM_TAIL_M[m] = _opt(state, m, "twm_tail", 0)
+        _moe_TWQ_M.clear()
+        if _opt(state, m, "twq", 0):  # moe s17: moe_twq (16 consumer warps x RT 2) instead of moe_twm; proxy v16 -4.7 H200 us
+            _moe_TWQ_M[m] = _opt(state, m, "twq", 0)
+        _moe_TWM_HOT_M.clear()
+        if _opt(state, m, "twm_hot", 0):  # moe s17: moe_twm one-pass class for 65..96-token experts; proxy v32 -3..5 H200 us
+            _moe_TWM_HOT_M[m] = 1
         out = _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                               "config": {"local_start": 0, "local_count": LOCAL_EXPERTS}}, st)
         if upf:
@@ -1198,7 +1204,7 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
         h = hashlib.sha256(_moe_CUDA_SRC.encode()).hexdigest()[:12]
         _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=_moe_CUDA_SRC,
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
-                                           "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch",
+                                           "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
                                            "moe_set_upf", "moe_set_ss"],
                                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
@@ -1811,7 +1817,7 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}),
@@ -1825,10 +1831,11 @@ TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": True}, {"nu8": True, "nu8x": False}, {"nu8": True, "g14alt:qkv_gate": 1}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
-              {"twm_order": 76}),
+              {"twm_order": 76}, {"twq": 4}, {"twq": 12}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
-              {"twm_order": 4}, {"twm_tail": 32})}
+              {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
+              {"twm_hot": 1, "twm_order": 76, "lt:unpool": True})}
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
