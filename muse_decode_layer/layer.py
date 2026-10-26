@@ -452,9 +452,15 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
         return out
     if (m <= TK2_MAX_TOKENS and _moe_TK2_NSTG) or (m > 32 and _moe_TW_CFG and bucket is None):
         upf = UPF3.get(m) if m <= TK2_MAX_TOKENS else None
-        if upf:
+        if upf and upf[0] == "unpool":  # the first upf[1] bytes of every row of the BF16 unpooler (cuBLAS reads k ascending)
             u = state["unpool"]
-            lib.moe_set_upf(u.data_ptr(), u.shape[0], u.shape[1] * u.element_size(), upf)
+            lib.moe_set_upf(u.data_ptr(), u.shape[0], u.shape[1] * u.element_size(), upf[1])
+        elif upf:  # "g19": the first upf[1] bytes of gemv19's stage-major unpool pack (k slab outermost)
+            e = state.get("g19", {}).get(("unpool", m))
+            if e is None:
+                upf = None
+            else:
+                lib.moe_set_upf(e[0].data_ptr(), min(upf[1], e[0].numel()) >> 16, 1 << 16, 1 << 16)
         out = _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                               "config": {"local_start": 0, "local_count": LOCAL_EXPERTS}}, st)
         if upf:
@@ -692,7 +698,7 @@ def _pack14(w, kc):
 G10_CFG = {"qkv_gate": (8192, 4, 4, 1, 1, 132), "pooler": (8192, 4, 4, 1, 1, 132), "o": (1024, 2, 4, 2, 1, 264),
            "unpool_slice": (4096, 2, 4, 1, 1, 132)}
 _G10 = {}
-G10_PFL2 = {}  # s15: {sliding: keys} whose gemv10 (PDL secondary) bulk-prefetches its W into L2 before griddepcontrol.wait. H100 d1 {True: ("o",), False: ("o",)}: +1.8/+1.8 us (csl slowed); H200 untested
+G10_PFL2 = {True: ("o",)}  # s15: {sliding: keys} whose gemv10 (PDL secondary) bulk-prefetches its W into L2 before griddepcontrol.wait. H100 d1 {True: ("o",), False: ("o",)}: +1.8/+1.8 us (csl slowed); H200 untested
 
 
 # (kcu, wg, pf, bk) per weight, m = 8 (verify 1): the proj agent's gemv12 (g12_src.cu = r-proj e71d015), its H100 picks
@@ -1055,7 +1061,7 @@ if TK2F_LATE_TRIG:
 # rows of the full unpooler W into L2 after its last gemm2 row (the cuBLAS unpool after moe_norm2/3 then starts with
 # that part in L2; HBM is mostly idle in the CTA drain + norm). Pointer via moe_set_upf() before the launch (a host
 # static read at launch/capture time; reset to null after).
-UPF3 = {}  # s15: {T: bytes per row}, e.g. {32: 3072}; H100 d32: AT 0 tie (unpool -4, tk2f +7.8), AT 1 +1..2, AT 2 +1..2 (H200 untested)
+UPF3 = {32: ("unpool", 3072), 16: ("g19", 16 << 20)}  # s15: {T: ("unpool", bytes per row) or ("g19", bytes)}, e.g. {32: ("unpool", 3072), 16: ("g19", 16 << 20)}; H100 d32: AT 0 tie (unpool -4, tk2f +7.8), AT 1 +1..2, AT 2 +1..2 (H200 untested)
 UPF3_AT = 0  # 0: tk2f CTA end (H100 d32: unpool -4 us but tk2f +7.8: the stragglers lose bandwidth), 1: moe_norm2/3 after its wait
 _a = "int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }"
 assert _moe_CUDA_SRC.count(_a) == 1
