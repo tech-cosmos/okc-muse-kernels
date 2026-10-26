@@ -1,7 +1,9 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 19:30Z (s52, sandbox okc-night4: v89 = v88 + RG at T=256 as TUNE option). **main = v89 (v88 + moe RG/gathern fused, T=256 TUNE), NOT judge-checked** (layer budget for 10-26 spent:
-20/20 checks, 10/10 submits). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x (9,505 us/step), #10 2.180x.
+Updated 2026-10-26 19:40Z (s53, sandbox okc-night4). **main = v90 (v89 + moe n4s1 NORM_EARLY: post-expert norm runs in twm's
+drain), NOT judge-checked** (layer budget for 10-26 spent: 20/20 checks, 10/10 submits). v90 H100 vs v89: v32 sl -1..2,
+full -3..4 us, v16 tie..-2 (NOTES s53). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x, #10 2.180x.
+NOTE: the first check below is now on v90 (same plan; v90 differs from v89 only at T=128/256).
 
 ## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
 1. `okc check muse_decode_layer/submission.py --json` on main (v89). Compare per shape vs 703d3a7e (d1 69.6/77.8,

@@ -1051,3 +1051,16 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   => rg wins only together with twf_split: -4.6..5.5 sl, -7..8 full (~+0.2% score if the H200 agrees).
   T=128: rg (RG_DEFAULT) +1.8 us v16 (bucketing is hidden on the side stream there): no T=128 option.
 - TUNE[256] += {rg}, {rg, twf_split 1022}, {rg, twf_split 66}. H100 tuner picked {rg, twf_split 1022} for both layer types.
+
+## s53 (2026-10-26 19:25Z-, sandbox okc-night4, session 2): v90 = v89 + moe n4s1 NORM_EARLY
+- moe 9898def's diff applied to moe_src.py with `patch` (11/16 hunks clean; failed hunks = moe-only context: the
+  #define block, moe's routegather (layer has its own routegathern), moe's _lib/flags). By hand: `#define NORM_EARLY 1`
+  in moe_src (layer's _moe__lib loads _moe_CUDA_SRC directly), python NORM_EARLY = 1, moe_norme_launch in the
+  functions list, routegathern zeroes meta[100 + tid], every layer meta alloc 100 -> 132 ints (moe_route writes
+  meta[100..131] now: a 100-int meta would be written out of bounds).
+- Tests: bench test 13/13, scored_test verify x3 seeds 0 bad, replay_test verify 16/32 x2 seeds 0/40 each.
+  files_eq v89 vs v90 (tuner off): v32 bitwise identical (3 seeds); v1/v16 diffs also appear in the v89-vs-v89
+  control (known FP32-atomics nondeterminism: pr3 at T=128, T=8 path).
+- H100 ab_files tuner off (variants/v89_nt, v90_nt: TUNE = {}, TUNE_BASE T=256 {hot 32, rg, twf_split 1022}, T=128 sl
+  {twf_split 1022}), 3 runs x 8-12 rounds, both orders, v90 - v89 us: v32 sl -1.0/-1.3/-2.0, full -3.0/-3.8/-3.9;
+  v16 sl +3.1/-2.1/-2.0 (position-sensitive), full -3.2/+0.4/+0.2; v1 tie (unchanged path). => main v90.

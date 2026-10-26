@@ -462,7 +462,7 @@ def _moe_bucket(state, local_ids, pdl=False):
     """moe_src's route kernel: this GPU's routes bucketed by expert (meta, sorted route ids). pdl (s39 ROUTE_PDL): as a
     PDL secondary of the routing kernel just before it (which triggers at its start)."""
     dev = local_ids.device
-    meta = torch.empty(100, dtype=torch.int32, device=dev)
+    meta = torch.empty(132, dtype=torch.int32, device=dev)
     sroutes = torch.empty(local_ids.numel(), dtype=torch.int32, device=dev)
     (state["moe"]["lib"].moe_route_pdl_launch if pdl else state["moe"]["lib"].moe_route_launch)(local_ids, 0, LOCAL_EXPERTS, meta, sroutes)
     return meta, sroutes
@@ -1427,6 +1427,7 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
       meta[33 + tid] = b;
       if (tid == 31) { meta[65] = incl; meta[66] = 0; meta[67] = 0; }
       meta[68 + tid] = 0;
+      meta[100 + tid] = 0;  // moe n4s1 NORM_EARLY gemm2 flags
       int rank = 0;
       for (int j = 0; j < 32; ++j) {
         const int cj = __shfl_sync(0xffffffffu, c, j);
@@ -1514,7 +1515,7 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
         from torch.utils.cpp_extension import load_inline
         h = hashlib.sha256(_moe_CUDA_SRC.encode()).hexdigest()[:12]
         _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=_moe_CUDA_SRC,
-                                functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
+                                functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
                                            "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch", "moe_routegathern_launch",
@@ -2401,7 +2402,7 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     st = state["moe"]
     lib = st["lib"]
     dev = x.device
-    meta = torch.empty(100, dtype=torch.int32, device=dev)
+    meta = torch.empty(132, dtype=torch.int32, device=dev)
     sroutes = torch.empty(TOP_K, dtype=torch.int32, device=dev)
     inter = torch.empty((TOP_K, _moe_I), dtype=torch.bfloat16, device=dev)
     inv = torch.empty(TOP_K, dtype=torch.int32, device=dev)
@@ -2457,7 +2458,7 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
     st = state["moe"]
     lib = st["lib"]
     dev = x.device
-    meta = torch.empty(100, dtype=torch.int32, device=dev)
+    meta = torch.empty(132, dtype=torch.int32, device=dev)
     sroutes = torch.empty(8 * TOP_K, dtype=torch.int32, device=dev)
     inter = torch.empty((8 * TOP_K, _moe_I), dtype=torch.bfloat16, device=dev)
     inv = torch.empty(8 * TOP_K, dtype=torch.int32, device=dev)

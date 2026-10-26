@@ -4353,6 +4353,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
 #define TK2F_L2H 1       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
+#define NORM_EARLY 1     // n4s1 (layer s53: set here, layer has its own _lib): twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them
 #define TK2_EXP 0        // s12: tk2h (TK2H/PSC) and weighted-split (TK2W) instantiations: H200 diags, no gain (off: compile time)
 
 __device__ __forceinline__ uint32_t bmul(uint32_t a, uint32_t b) {
@@ -4551,6 +4552,9 @@ __global__ void __launch_bounds__(1024) moe_route(const int* __restrict__ ids, i
     meta[33 + tid] = incl - c;
     if (tid == 31) { meta[65] = incl; meta[66] = 0; meta[67] = 0; }
     meta[68 + tid] = 0;  // moe_twf: gemm13 items done per expert
+#if NORM_EARLY
+    meta[100 + tid] = 0;  // moe_twm/moe_hot: gemm2 items done per expert (+ 1 << 20 when all are)
+#endif
     // rank among active experts: heavier first, ties by id
     int rank = 0;
     for (int j = 0; j < 32; ++j) {
@@ -4573,7 +4577,8 @@ __global__ void __launch_bounds__(1024) moe_route(const int* __restrict__ ids, i
 // One CTA (512 threads x 8 values) per token.
 __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict__ Y, const int* __restrict__ ids,
                                                 const float* __restrict__ tw, const float* __restrict__ w1,
-                                                int start, int count, float eps, __nv_bfloat16* __restrict__ out) {
+                                                int start, int count, float eps, __nv_bfloat16* __restrict__ out,
+                                                const int* rdy) {
   const int tok = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   __shared__ float ssum[16][8];
   float wv[8];
@@ -4582,7 +4587,24 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     float4 a = wp[0], b = wp[1];
     wv[0] = a.x; wv[1] = a.y; wv[2] = a.z; wv[3] = a.w; wv[4] = b.x; wv[5] = b.y; wv[6] = b.z; wv[7] = b.w;
   }
-  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
+  if (rdy) {
+    // n4s1 (NORM_EARLY): wait only for the experts of this token's routes (flagged by moe_twm / moe_hot after their
+    // last gemm2 item of the expert): CTAs run on the SMs twm's drain frees. Y then read through L2 (ld.cg).
+    if (tid < 8) {
+      const int e = ids[tok * 8 + tid] - start;
+      if (e >= 0 && e < count) {
+        int fv;
+        for (;;) {
+          asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(fv) : "l"(rdy + e) : "memory");
+          if (fv >= (1 << 20)) break;
+          __nanosleep(256);
+        }
+      }
+    }
+    __syncthreads();
+  } else {
+    asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
+  }
   float v[8][8], ss[8];
   bool loc[8];
 #pragma unroll
@@ -4591,7 +4613,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     loc[s] = e >= 0 && e < count;
     ss[s] = 0.f;
     if (loc[s]) {
-      uint4 raw = *reinterpret_cast<const uint4*>(Y + ((size_t)(tok * 8 + s)) * NOUT + tid * 8);
+      uint4 raw = __ldcg(reinterpret_cast<const uint4*>(Y + ((size_t)(tok * 8 + s)) * NOUT + tid * 8));
       const __nv_bfloat162* p = reinterpret_cast<const __nv_bfloat162*>(&raw);
 #pragma unroll
       for (int k = 0; k < 4; ++k) {
@@ -6280,7 +6302,16 @@ int64_t moe_norm_launch(torch::Tensor y, torch::Tensor ids, torch::Tensor tw, to
   const int M = (int)out.size(0);
   return launch_k(moe_norm, M, 512, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const __nv_bfloat16*)y.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
-      (const float*)w1.data_ptr(), (int)start, (int)count, (float)eps, (__nv_bfloat16*)out.data_ptr());
+      (const float*)w1.data_ptr(), (int)start, (int)count, (float)eps, (__nv_bfloat16*)out.data_ptr(), (const int*)nullptr);
+}
+// n4s1: moe_norm after moe_twm (+ moe_hot) built with NORM_EARLY 1: per-token readiness from meta[100 + e]
+int64_t moe_norme_launch(torch::Tensor y, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1, int64_t start,
+                         int64_t count, double eps, torch::Tensor out, torch::Tensor meta) {
+  const int M = (int)out.size(0);
+  return launch_k(moe_norm, M, 512, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+      (const __nv_bfloat16*)y.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(),
+      (const float*)w1.data_ptr(), (int)start, (int)count, (float)eps, (__nv_bfloat16*)out.data_ptr(),
+      (const int*)meta.data_ptr() + 100);
 }
 int64_t moe_tb_launch(int64_t gated, int64_t cfg, torch::Tensor wb_, torch::Tensor sb_, torch::Tensor gs_,
                       torch::Tensor lut_, torch::Tensor x_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor out_) {
@@ -6767,6 +6798,13 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
       if (s_cum[1][a] >= n2 - nsplit) n2f = s_cum[1][a];
     }
   const int ns = n2 - n2f, nitems = n13 + n2f + 2 * ns;
+#if NORM_EARLY
+  __shared__ int s_nd2[32];
+  if (tid < 32) {
+    const int c0 = s_cum[1][tid], c1 = s_cum[1][tid + 1];
+    s_nd2[tid] = (c1 - c0) + max(0, c1 - max(c0, n2f));  // gemm2 item ends of slot tid (K halves count twice)
+  }
+#endif
   if (tid == 0) {
     int nbig = 0;
     while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
@@ -6923,6 +6961,15 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
         atomicAdd(done + e, 1);
       }
     }
+#if NORM_EARLY
+    else {  // n4s1: Y rows of expert e complete after its last gemm2 item (a K-split's 2nd half writes Y before it counts)
+      asm volatile("bar.sync 1, 256;" ::: "memory");
+      if (tid == 0) {
+        __threadfence();
+        if (atomicAdd(done + 32 + e, 1) == s_nd2[a] - 1) atomicAdd(done + 32 + e, 1 << 20);
+      }
+    }
+#endif
 #if TWM_TL
     if (tl && tid == 0 && ntl < 20) tl[3 + 3 * ntl] = gtimer();
     ++ntl;
@@ -7035,6 +7082,15 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
         atomicAdd(done + e, 1);
       }
     }
+#if NORM_EARLY
+    else {
+      asm volatile("bar.sync 1, 256;" ::: "memory");
+      if (tid == 0) {
+        __threadfence();
+        if (atomicAdd(done + 32 + e, 1) == HN::NRB - 1) atomicAdd(done + 32 + e, 1 << 20);
+      }
+    }
+#endif
   }
 #if HOT_EMU
   asm volatile("bar.sync 1, 256;" ::: "memory");
@@ -8519,6 +8575,7 @@ _moe__CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::T
         "int64_t moe_gemm2(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_route_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor);"
+        "int64_t moe_norme_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, double, torch::Tensor, torch::Tensor);"
         "int64_t moe_norm_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, double, "
         "torch::Tensor);"
         "int64_t moe_sk_launch(int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
@@ -8755,6 +8812,7 @@ _moe_TK2G_MIN = 17  # s10: GS16 only from this M (H100: GS16 is slower on the la
 _moe_TK2G = 0  # s10: 1 = 16-token segments in moe_tk2f (2 token groups share each dequantized weight fragment): judge bs32 +7 us (check b25182e8), H100 layer routings +6..18 us: off
 _moe_TWF_DBG = 0
 _moe_TWF_SPLIT_M = {}  # s11 per-M override of TWF_SPLIT; judge c1659443 {128: 132, 256: 66}: tie (tail -12 us, twf +10 us)
+_moe_NORM_EARLY = 1  # n4s1: moe_norm after moe_twm waits per token on its experts' gemm2 flags (needs #define NORM_EARLY 1)
 _moe_TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K halves (FP32 partials, ticket): shorter tail
 _moe_TK2F = 204  # decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 _moe_TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
@@ -8928,7 +8986,7 @@ def _moe_kernel_fn(data, st):
     tw = data["topk_weights"].float().contiguous()
     M = x.shape[0]
     dev = x.device
-    meta = torch.empty(100, dtype=torch.int32, device=dev)
+    meta = torch.empty(132, dtype=torch.int32, device=dev)  # [100, 132): NORM_EARLY gemm2 flags
     sroutes = torch.empty(M * _moe_TOP_K, dtype=torch.int32, device=dev)
     inter = torch.empty((M * _moe_TOP_K, _moe_I), dtype=torch.bfloat16, device=dev)
     y = torch.empty((M * _moe_TOP_K, _moe_H), dtype=torch.bfloat16, device=dev)
@@ -9014,6 +9072,9 @@ def _moe_kernel_fn(data, st):
                 lib.moe_twm_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["w13b2"],
                                    st["w13sb2"], st["w2b2"], st["w2sb2"], st["lut"], xg, meta, sroutes, inter, y, st["tk"],
                                    part, ns)
+                if _moe_NORM_EARLY:
+                    lib.moe_norme_launch(y, ids, tw, st["w1"], st["start"], st["count"], _moe_POST_NORM_EPS, out, meta)
+                    return out
             else:
               lib.moe_twf_launch(st[f"w13b{trt}"], st[f"w13sb{trt}"], st["gs13"], st[f"w2b{trt}"], st[f"w2sb{trt}"], st["gs2"], st["lut"], xg,
                                meta, sroutes, inter, y, st["tk"], part, ns)
@@ -9457,7 +9518,7 @@ def _moe_bucket(state, local_ids, pdl=False):
     """moe_src's route kernel: this GPU's routes bucketed by expert (meta, sorted route ids). pdl (s39 ROUTE_PDL): as a
     PDL secondary of the routing kernel just before it (which triggers at its start)."""
     dev = local_ids.device
-    meta = torch.empty(100, dtype=torch.int32, device=dev)
+    meta = torch.empty(132, dtype=torch.int32, device=dev)
     sroutes = torch.empty(local_ids.numel(), dtype=torch.int32, device=dev)
     (state["moe"]["lib"].moe_route_pdl_launch if pdl else state["moe"]["lib"].moe_route_launch)(local_ids, 0, LOCAL_EXPERTS, meta, sroutes)
     return meta, sroutes
@@ -12540,6 +12601,7 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
       meta[33 + tid] = b;
       if (tid == 31) { meta[65] = incl; meta[66] = 0; meta[67] = 0; }
       meta[68 + tid] = 0;
+      meta[100 + tid] = 0;  // moe n4s1 NORM_EARLY gemm2 flags
       int rank = 0;
       for (int j = 0; j < 32; ++j) {
         const int cj = __shfl_sync(0xffffffffu, c, j);
@@ -12627,7 +12689,7 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
         from torch.utils.cpp_extension import load_inline
         h = hashlib.sha256(_moe_CUDA_SRC.encode()).hexdigest()[:12]
         _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=_moe_CUDA_SRC,
-                                functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
+                                functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
                                            "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch", "moe_routegathern_launch",
@@ -13934,7 +13996,7 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     st = state["moe"]
     lib = st["lib"]
     dev = x.device
-    meta = torch.empty(100, dtype=torch.int32, device=dev)
+    meta = torch.empty(132, dtype=torch.int32, device=dev)
     sroutes = torch.empty(TOP_K, dtype=torch.int32, device=dev)
     inter = torch.empty((TOP_K, _moe_I), dtype=torch.bfloat16, device=dev)
     inv = torch.empty(TOP_K, dtype=torch.int32, device=dev)
@@ -13990,7 +14052,7 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
     st = state["moe"]
     lib = st["lib"]
     dev = x.device
-    meta = torch.empty(100, dtype=torch.int32, device=dev)
+    meta = torch.empty(132, dtype=torch.int32, device=dev)
     sroutes = torch.empty(8 * TOP_K, dtype=torch.int32, device=dev)
     inter = torch.empty((8 * TOP_K, _moe_I), dtype=torch.bfloat16, device=dev)
     inv = torch.empty(8 * TOP_K, dtype=torch.int32, device=dev)
