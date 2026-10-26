@@ -1,17 +1,17 @@
 # STATE-moe (muse_moe_w4a16)
 
 ## Board
-- Best submit: 52169da1ba624f00 @fa39ed7, **2.061x** (2026-10-25 23:00Z; check cb18fe27 of the same code 2.061x).
-  Previous: 4f0ae2c7 2.033x @a0531b2, 1561eff8 1.985x @c39a176. Top of board 2.55x (#10 2.37x).
-  Used 2026-10-25: checks 17 of 20, submits 9 of 10 (lead cap 9: none left until 00:00Z).
-  | load | bs | SGLang | ours | x | floor | s5 (c39a176) |
+- Best submit: ee945887cdb34d17 @60d4a66, **2.131x** (2026-10-26 00:20Z; check 68739792 same code 2.140x).
+  Previous: 52169da1 2.061x @fa39ed7, 4f0ae2c7 2.033x @a0531b2. Top of board 2.55x (#10 2.37x).
+  Used 2026-10-26: checks 1 of 20, submits 1 (lead cap 9).
+  | load | bs | SGLang | ours | x | floor | s6 (fa39ed7) |
   |---|---|---|---|---|---|---|
-  | decode 1 | 1 | 76.6 | 30.6 | 2.51 | 11.4 | 30.8 |
-  | decode 16 | 16 | 188.7 | 103.4 | 1.83 | 52.5 | 99.7 |
-  | decode 32 | 32 | 208.1 | 139.7 | 1.49 | 70.8 | 137.2 |
-  | verify 1 | 8 | 142.7 | 72.9 | 1.96 | 37.3 | 77.0 |
-  | verify 16 | 128 | 460.5 | 198.0 | 2.33 | 101.3 | 238.7 |
-  | verify 32 | 256 | 623.0 | 252.2 | 2.47 | 108.9 | 280.5 |
+  | decode 1 | 1 | 80.0 | 29.6 | 2.70 | 11.4 | 30.6 |
+  | decode 16 | 16 | 189.5 | 99.9 | 1.90 | 52.5 | 103.4 |
+  | decode 32 | 32 | 204.4 | 135.2 | 1.51 | 70.8 | 139.7 |
+  | verify 1 | 8 | 143.6 | 70.1 | 2.05 | 37.3 | 72.9 |
+  | verify 16 | 128 | 463.9 | 199.5 | 2.32 | 101.3 | 198.0 |
+  | verify 32 | 256 | 619.9 | 244.1 | 2.54 | 108.9 | 252.2 |
   Decode shapes vary +-4% between identical-code checks (bs16 99.8-107.2): A/B decode changes against 2-3 checks.
 - One expert = 18.9 MB w13 + 9.4 MB w2 (incl. scales).
 - **H200 proxy**: ncu kernel durations x 0.72 works for DECODE (moe_tk2). For big-M it does NOT rank changes:
@@ -21,7 +21,14 @@
   (tensor maps!) in the state. bench.py test runs a cloned state now.
 
 ## What's on main (submission.py)
-M <= 32 (decode, bs8): 3 launches, `moe_tk2<NRT, NC=8, NSTG=8, GATED>` x2 + `moe_norm2`:
+M <= 32 (decode, bs8), TK2F = 1 (s7, 60d4a66): 2 launches, `moe_tk2f<8, 8>` (gemm13 rows then gemm2 rows in ONE
+persistent launch: one routing prologue, the ring continues, so the producer streams w2 while gemm13 drains) + moe_norm2.
+gemm13 consumers add their finished rows to cnt[0] (bar.sync 2 + thread-0 threadfence + atomicAdd); gemm2 consumers
+spin (ld.acquire) until cnt[0] == n13, then load inter with __ldg. cnt = st["cnt"] (int32[160], zeroed in prepare,
+re-zeroed by moe_norm2 after each call: no memset node). DO NOT go back to per-segment counters or ld.global.cg
+inter loads without a many-routing sweep (tools/sweep_routings.py, also with +64 KB dyn smem): see NOTES s7 race.
+TK2F = 0 = the old 3-launch path below (moe_tk2 x2 + norm2), kept as reference (tools/race_ab.py compares bitwise).
+Old 3-launch decode: `moe_tk2<NRT, NC=8, NSTG=8, GATED>` x2 + `moe_norm2`:
 - 1 CTA/SM, 8 consumer warps + 1 producer lane. Work = (active expert, 8-token group, row-tile pair rp)
   "rows" R; CTA b takes rows [nrp*b/grid, nrp*(b+1)/grid). Per rp the producer streams 8 blocks; block q =
   8 units (k chunks q*8..q*8+7) = 3 cp.async.bulk copies (gate tile 4 KB, up tile 4 KB, scales 1 KB) into an
@@ -65,6 +72,10 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 7 summary
+- 2.061x -> see Board: decode gemm13+gemm2 fused into one launch (moe_tk2f); found + worked around a race
+  in it (NOTES s7). Tools added: sweep_routings.py, race_ab.py, ab_decode.py, readbound.py.
+
 ## Session 6 summary
 - 1.985x -> 2.061x: big-M RT=4 (32-token passes, a0531b2: 2.033x), then gemm13+gemm2 fused into one persistent
   launch (moe_twf, fa39ed7: 2.061x; bs128 239 -> 198, bs256 281 -> 252 us). Decode unchanged.
@@ -75,6 +86,10 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   (TK2_MAX knob) locally +11% at bs32, +13% at bs16: not checked.
 
 ## Ranked ideas
+0. (s7) 16-token segments in moe_tk2f (2 token groups share each dequantized A fragment, 2nd group's x in smem):
+   draft tools/tk2f_gs16_draft.cu (166 regs, no spill), apply on top of 60d4a66's wait/__ldg scheme; sweep-test
+   at GS 16 with tools/sweep_routings.py. bs32 has 10% (up to 40%) extra-group rows: expect bs32 -5..8%.
+   Root-cause the s7 race (ld.global.cg first-row-after-reload errors) if time allows: it may hide elsewhere.
 1. Decode bs32 (1.49x) / bs16 (1.83x) are now the weakest. s6 SASS (tk2<512,8,8,true>): 130 instr per stage
    = 104 dq+mma + ~22 overhead (6 mbarrier wait/branch/sync, 4 LDS weights/scales + arrive, ~16 scale-LUT
    extract/add/LDS). NSTG 8 is special: = blocks per rp, so ptxas constant-folds the stage index (6/12 don't). H100 ncu bs32 gemm13: DRAM 84%, issue 51%, 18.8 instr per
@@ -91,6 +106,8 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 4. Clean-up: remove moe_sk / moe_tk / moe_gemm / route2 / act / moe_tb / moe_big / RT 2 moe_tw (~55 s compile).
 
 ## Dead ends
+- (s7) norm fused into moe_tk2f behind a grid barrier (worse, bs1 +3 us); L2 bulk prefetch of next rows in tk2f
+  (much worse); memset node for counters (+2.6 us; keep counters in state, zeroed by norm2).
 - (s6) moe_tw with 16 consumer warps x RT 1 (cfg 1118): 115M vs 78M instr, local +10%. Decode NSTG 6/12 (judge -5%).
 - (s5) decode PDL (gemm2 secondary + routing recompute) and tk2_map blk 2 row order: judge worse (checks 52e5359f, 9acf8e84, 715085cb).
 - (s5) tw2 L2 prefetch of first item before griddepcontrol.wait: no local gain.
