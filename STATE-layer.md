@@ -1,8 +1,12 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 09:40Z (end of session 17).
+Updated 2026-10-26 ~09:50Z (session 18).
 
-**ACTION: 1 scored run left for the sandbox (ends ~19:10Z): submit the best CHECKED code before ~17:30Z. Now: v44
+**s18: main = v45 (2dddb88) = v44 + prepare() g19 pooler-grid tuner (H200 picks 108 = v44 compute). Check ea9421fa
+1.9634x. NOW 1 CHECK + 1 SUBMIT LEFT. G19_GRID 120 is DEAD (H200 tuner: +8/+11 us). Submit v45 (main, checked
+1.9634x) by 17:30Z unless a gemv22 bundle check beats it.**
+
+**ACTION (s17, partly superseded): 1 scored run left for the sandbox (ends ~19:10Z): submit the best CHECKED code before ~17:30Z. Now: v44
 (de763eb) check c6a00da7 1.9608x > board 1.9558 = eligible (`okc submit muse_decode_layer/submission.py --json` on main
 if nothing better got checked). 2 checks left (20/20 used at 00:00Z reset = after the sandbox). Plan: integrate proj/moe
 handoffs posted by ~16:00Z (proj: g19 mode 3 BF16-out qkv T=16/32 and maybe M=8; moe: big-M via its H200 proxy), H100
@@ -82,7 +86,7 @@ Next -4); (c) by 17:30Z submit the best checked code that beat 1.9558 (v44 c6a00
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
--4. (s16) QUEUED bundle candidate (judge-only, H100 cannot judge it): pooler G19_GRID 108 -> 120 at T=16 (and 116..120
+-4. (s18: DEAD on H200, tuner in check ea9421fa: 120 +8/+11 us) (s16) bundle candidate (judge-only, H100 cannot judge it): pooler G19_GRID 108 -> 120 at T=16 (and 116..120
    at T=32). Why: in the v44 H200 profile (c6a00da7) the side-stream _router_split takes 5.6/6.5 us (d16/d32) vs 18-19
    on H100, so on the H200 its 24 SMs idle for ~14 us of the ~21 us pooler. H100 loses (+7/+13 us, expected). Tested
    correct (tests 13/13, scored decode x2, replay decode 0/60): `variants/sub_v45g.py` = sed of submission.py line

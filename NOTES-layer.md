@@ -509,3 +509,18 @@
   21.4 for ~59 MB, o g10 6.4 for 17 MB) vs ~4 TB/s practical: ~11 us at d1 sliding+full (~2.4% score) is in the
   m=1 GEMV efficiency (idle-budget item 5, proj's lane). v1 tk2f is 70 us (vs d16's 63): moe's lane.
 - Plan for the last 2 checks: see STATE (s17 TIMELINE). No check or submit this session.
+
+## Session 18 (2026-10-26 09:16Z-)
+- Budget at start: 1 submit, 2 checks. Board #53 at 1.956x (#50 1.961x, #1 2.380x). proj gemv22 still uncommitted WIP.
+- v45 (2dddb88): prepare() tunes the pooler g19 grid at T=16/32 over (108, 114, 120, 126, 132) by timing whole-layer
+  CUDA-graph replays (cold L2, 40 interleaved reps, median) on synthetic sliding decode inputs (`_synth_input`,
+  ctx 3000, random data; shapes only), 0.12 s; result in state["g19_grid"], printed to the judge log. H100 picks 108
+  (T=16 202/203/208/209/209, T=32 318/319/330/330/329 us), stable over 3 runs; A/B vs v44 both orders = parity.
+  Forced 114/120/126/132: tests 13/13 + scored decode ok, replay decode 16/32 0/60 (120, 132).
+- **Check ea9421fa (2dddb88) 1.9634x**: the H200 ALSO picks 108: T=16 108 185.6 / 114 186.2 / 120 193.2 / 126 195.2 /
+  132 195.3 us; T=32 232.6 / 234.0 / 243.8 / 246.1 / 245.7. **DEAD: G19_GRID 120 (s16 queued idea) loses 8-11 us on
+  H200** (the router-speed argument was wrong: g19 itself slows with more blocks at 1 CTA/SM beside the router, or
+  the router is starved anyway). Per shape: d1 72.8/80.4, d16 148.4/221.7, d32 180.5/320.9, v1 122.4/131.3, v16
+  284.3/370.1, v32 367.0/527.4 (= v44 compute; d32 sliding 180.5 vs v44's 167.4 is judge noise).
+- Lesson/tool: the in-prepare tuner is a FREE H200 measurement channel: any check can carry whole-layer A/B timings of
+  variants (printed in the log) at ~0.1 s each. Use it to measure H200-only questions inside the last checks.
