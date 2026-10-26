@@ -684,3 +684,21 @@
   times / 132 + wave tail (~20 us, s19/s20). Without a cheaper dq (exhausted s11/s17/s22) big-M has no lever left;
   a separate N128 hot kernel saves ~5% of hot-pass time only (dq 377/2 + MMA 512 vs 737 cycles per 64 tokens).
 - No judge runs (moe checks 20/20 used today; sandbox ends ~19:10Z before the reset).
+
+## Session 24 (2026-10-26 15:14Z - 15:45Z) -- two consumer-latency ideas for tk2f, both dead (no judge runs, 0 checks left)
+- Premise (s16 proxy): on the H200 tk2f/twm run like an H100 with ~88 SMs (per-SM rate bound at d32/big-M; d1/d16 much
+  less: G88 vs G132 d1 +2%, d16 +4%, d32 +14%). Consumers issue ~50% with 2 warps/SMSP, so tried more latency hiding.
+- PF & 32 = stage-ahead LDS: tk2f_consume loads stage q+1's weights/scales into registers (after its full wait)
+  before stage q's dq/mma, within a row (cfg 95204 = 84204 + it, 98204 = 204 + it). H200 proxy (G88, layer routings,
+  2 rounds, H100 us): d1 37.7 -> 40.1, d16 90.3 -> 94.2, d32 122.7 -> 126.7, v1 89.6 -> 93.9. DEAD (the earlier
+  full-wait serializes the consumer behind the producer; same verdict as s14's tw_item LDS prefetch).
+- TK2F_OCC 2 = 2 CTAs/SM (launch_bounds(288, 2), grid 2 x nsm, ring 74 KB per CTA): warm-L2 1 expert T=8/16/32
+  19.6/22.9/34.1 -> 26.7/32.6/45.7; proxy d1 37.5 -> 46.6, d16 90.1 -> 107.5, d32 121.7 -> 145.0. DEAD (113-register cap:
+  xf alone is 64 registers; s4 found moe_tk2 at 116-121 regs).
+- Paper checks (no code): (a) phase-2's "12% slower per byte" (s12 timeline) is mostly accounting: phase 2 is timed to the
+  median CTA end incl. the last row's unoverlapped epilogue and the 13-vs-14-row quantization (~+8% of it); the rest is
+  ~1.5 us at d32 = ~0.1% layer score: not worth a check. (b) The phase barrier is already covered by the producer's
+  1-row w2 prefetch (~2.4 us of HBM per CTA = the measured ~2.5 us skew). (c) A barrier-free d1 (gemm2 split-K over
+  each CTA's own inter slice, FP32 partials/atomics) could save ~1.5 us at d1 (~0.3% score) at the cost of
+  nondeterministic sums and a tk2f rewrite: parked. (d) f16-format dq (byte-local mask 0x8E008E00) has no 4-translate
+  tiling either (same proof as the bf16 search), and would need x in f16: dead.
