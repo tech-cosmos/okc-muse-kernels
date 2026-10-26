@@ -398,3 +398,47 @@
   phase barrier): d1 +1.3, v1/d16 +9, d32 +14 us standalone (as s7's row prefetch). cp.async.bulk.prefetch.L2 hurts here.
 - H100 tk2f stamps (hot ids/x, cold weights): routed 1.45-1.5 us after start (producer 0.5 us prologue, ids 0.16, the
   32-step rank loop 0.45 (unroll: no change), scan 0.2), consumer ready ~2.8, first weight data ~4.2-4.3 us.
+
+## Session 16 (2026-10-26 07:33Z - ) -- H200 proxy for the expert kernels; big-M item cost re-characterized
+- No moe checks left (sandbox ends ~19:10Z before the reset). All work H100-only.
+- **H200 PROXY** (/tmp/moe16: sub_g.py = submission.py with `grid = getenv("MOE_GRID") ? atoi(...) : nsm` in every
+  persistent launcher; layer_ab.py routings; proxy.py interleaves python-global variants): H100 with the expert kernels'
+  grid capped at **88 CTAs, times x 0.73, reproduces the H200 diag numbers** on the layer routings:
+  t0 v16 229.6 -> 167.6 (H200 167.1), v32 293.7 -> 214.4 (215.3); d16 93.1 -> 68.0 (68.0); v1 91.0 -> 66.4 (66.1);
+  d32 127.0 -> 92.7 (87.7); d1 38.3 -> 28.0 (30.4). It also orders the H200-measured TWM_TAIL variants right
+  (G88 v16 t0/t32/t64/t128 229.6/228.6/235.0/241.3 vs H200 167.1/167.3/168.3/171.1; v32 293.7/293.4/299.0/304.9 vs
+  215.3/212.0/213.5/216.4), where full-grid H100 gets them backwards (v16 205.1/201.5/202.0/200.8).
+  Grid sweep (main, layer routings; G132/G96/G88): d1 36.8/37.8/38.3, v1 87.1/89.4/91.0, d16 89.1/91.2/93.1,
+  d32 111.6/121.5/127.0, v16 206.7/222.2/228.8, v32 238.5/277.0/298.3. Reading: the H200 runs these kernels like an
+  H100 with ~88-96 SMs (same per-SM rate or ~8% slower, 1.43x the HBM): per-SM bound, as s15 suspected.
+- Proxy verdicts: TWM_ORDER_M {256: 76} (main since 499bde6, layer v43) LOSES at v32: o0 293.6 vs o76 298.5 (3 rounds),
+  v16 +1; o4 (pass-minor only) v32 -1 / v16 +1; o12 +4.5; o1 = o0. Told layer (COORD Requests) to drop o76.
+  TWF_SPLIT (K-split tail, o0) 32: -1 both (noise), 64: +1, 128: +5.
+- Dead (proxy): tw_item KG 2 (v32 +62 us) and KG 4 (5x: spills); TW_NB 4 = 4 A-fragment buffers + wait_group 3 per k16
+  step (+100 us: ptxas turns every wait into DEPBAR.LE gsb0 0x0 and spills: the wgmma pipeline gets serialized).
+  x tile by plain bulk copy instead of the tensor-map TMA: -0.2..2 us per item, and no x copy at all the same: the x
+  copy is NOT a cost (s15's 'no x TMA 25.9' was cumulative with other ablations).
+- Proxy timeline (sub_tlg = TL build + grid env, tlrun.py; G88): v32 starts at ~0.6-1.1 'TB/s' for 40-60 us (all CTAs on
+  the hot experts' 64-token RT2 items, MMA-heavy), then ~2.6, drain ~30 us; o76 flattens the start but lowers the middle.
+- **Per-SM item cost is intrinsic**: warm (L2-resident weights) at G16 (no L2 saturation): RT4 N8 item 34.4 us (1.09 MB:
+  31.7 GB/s per SM = the H200's HBM share per SM, 4.2 TB/s over 132 SMs), N32 48.0, RT2 N64 31.7 (0.55 MB). Same at G132
+  (36.5/50.3/32.5). So s15's 'ring floor 21.6 us' was aggregate L2 bandwidth (132 SMs on 3 experts), not per SM.
+- Ablations at G16, warm mix (sub_y<n> = sub_tlg + mkx2.py; us per item RT4 N8 / N32 / RT2 N64): TWX 1 (no dq)
+  34.6/48.7/31.6, 2 (no MMA) 34.7/48.1/31.6, 7 (no dq/MMA/weight LDS) 34.7/47.6/31.7, 15 (+ no x copy) 34.6/47.9/31.7;
+  full 34.4/48.0/31.7. (TWX 32/47 builds are INVALID: mkx2's no-x patch hit moe_twf, and twm kept mkx.py's 'TWX & 32
+  = bulk x' branch with a reduced expect_tx.) => at low concurrency the item time does NOT depend on the consumer at
+  all: **twm's own ring delivers only ~31.5 GB/s per SM** (64 stages of W 16K + S 2K in 34.6 us = 540 ns/stage).
+- **cp.async.bulk ring microbenchmark** (tools/s16/ring.py, ring3.py; 1 producer thread, 256 consumer threads that
+  wait full / read 4 B / arrive empty (count 256), 1 CTA per SM): cost is per STAGE, ~270-320 ns whatever the size:
+  4 KB 268 ns (15 GB/s/SM), 8 KB 275 (30), 16 KB 295 (55), 32 KB 322 (101 GB/s/SM); depth 8 = 12; L2 or HBM source
+  the same at G16; +~43 ns per extra copy in a stage; empty count 8 (lane-0 arrive) = 256; producer that never waits on
+  'empty' still ~256 ns/stage. twm-shaped stage (W 16K + S 2K + x 1K from 3 streams, mode 16): 297 ns/stage at G16,
+  335 at G132 => ~19 us per N8 item vs twm's 34.6. THE GAP (~15 us/item, ~45%) IS UNEXPLAINED and is the lead for
+  the next session: bisect microbench -> twm (384 threads + setmaxnreg, consumer arrive one stage late, per-item
+  counter atomics/decode, epilogue + bar.sync, scale LDS, wgmma fence/commit/wait without MMAs, 1024-aligned stage
+  stride 26 KB, tensor-map x). tk2f's H200 fit (6.97 us/expert = 30.8 GB/s/SM over 132 SMs) is suspiciously the same
+  per-SM rate: check whether tk2f's ring has the same cap. If the cap is lifted, the experts can become HBM-bound on
+  the H200 (v16/v32 maybe -30..50 us, decode several us/expert).
+- Dead (proxy, bitwise = main on 50 big-M outputs): TWM_KPS 2 = 2 k chunks per moe_twm ring stage ([x0 x1|W0 W1|S0 S1],
+  NSTG 4, 4 copies per 2 chunks instead of 6): G88 v32 294/296 vs 294.5, v16 231 vs 228; G16 warm items unchanged (34.2).
+  Reverted (code not kept).

@@ -83,29 +83,28 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
-## Session 15 summary (no speedup; no moe checks left; see NOTES s15)
-- Big-M on the H200 is per-SM-rate bound (H200 only 12% faster than H100): per-item intrinsic cost RT4 N8 36 us, N32 49,
-  RT2 N64 32.5 (H100, L2-warm, alone) vs a 36 us fair HBM share; ~17-25 us/item floor from the ring (64 stages/item),
-  dq +8-15, MMA +2-15. Next big-M lever: fewer, bigger stages (W+S in one bulk copy, 2 kc per stage, 3D x tensor map),
-  then measure items with /tmp/moe15/warm2.py-style runs (1 item per CTA) before any judge use.
-- tk2f FP option (producer routes itself, x-first gate; cfg 96204/97204) = standalone -0.2..0.8 us but layer harness
-  +0.2..1.8 us: OFF. Always A/B decode changes in a copy of the layer harness (NOTES s15 recipe).
-- Main = 300bd2c: same kernels/defaults as 499bde6 (FP code added, off).
+## Session 16 summary (no speedup; H200 PROXY found; big-M per-SM ingest cap found; see NOTES s16)
+- **H200 proxy for the expert kernels**: H100 with the persistent kernels' grid capped at 88 CTAs (MOE_GRID env in a
+  /tmp copy, tools/s16/README), times x 0.73 = H200 diag numbers (v16/v32/d16/v1 within 0.5%, d1/d32 ~5-8%), and it
+  orders TWM_TAIL variants like the H200 (full-grid H100 does not). USE IT for every big-M/decode A/B (no checks needed).
+- Proxy: TWM_ORDER_M {256: 76} (main, layer v43) loses ~5 proxy-us at v32 (~3.6 H200 us): told layer to set it {}.
+  Not changed on main yet (layer owns its copy; flip main's default next session if layer agrees / no H200 contradiction).
+- twm item cost is per-SM intrinsic and NOT consumer work: at G16 with no dq/MMA/LDS/x an RT4 item still takes 34.6 us
+  (31.5 GB/s/SM); a bare cp.async.bulk ring with the same stage shape does it in ~19 us (tools/s16/ring3.py).
+  => NEXT: bisect that gap (ranked idea -6). Dead: KG 2/4, 4 fragment buffers + wait_group 3 (ptxas serializes),
+  KPS 2 stages, x by bulk copy, TWF_SPLIT on the proxy.
 
-## Session 14 summary (big-M twm for the layer's v16/v32; NO moe checks left in this sandbox)
-- MAIN 499bde6: TWM_ORDER_M = {256: 76}: moe_twm items pass-minor + the multi-pass (> 64 token) experts' items merged
-  evenly over each phase (keeps HBM busy in the first ~40 us, which heaviest-first wasted). H100 in r-layer harness:
-  v32 sliding 407.6 -> 401.7, full 664.6 -> 655.5 us (vs the tail-32 setting; vs layer's current copy ~-13). v16 0.
-  Waiting for an H200 verdict from a layer check (COORD Requests). TWM_TAIL (H200 -3 us at v32) clashes with the merge:
-  off. If the layer check says o76 loses: set TWM_ORDER_M = {}, TWM_TAIL_M = {256: 32} (H200-measured -3).
-- H200 diag/timeline tool for twm ready: `sh tools/mkdiag14.sh /tmp/x` (DIAG variants of orders + diagtl lines).
-- twm is co-bound (dq ~4 us + MMA 0.134 us/token per expert-pass vs 8.4 us HBM per expert on H100); see NOTES s14.
-- Dead: next-stage LDS prefetch in tw_item (+8..9.5 us), TWM_TAIL13, alternate-expert order, merge in gemm13 only.
-
+## Session 15 summary: big-M item-cost ablations (s16 corrected them: the 'ring floor' was L2 saturation; at low
+   concurrency the ring alone is the cost); tk2f FP option (producer routes itself) off: layer harness +0.2..1.8 us.
+## Session 14 summary: twm item orders (TWM_ORDER bits), TWM_TAIL class, H200 timeline tool (tools/mkdiag14.sh); main o76 at
+   M=256 (H100 win, proxy s16 says H200 loss). Dead: tw_item next-stage LDS prefetch, TWM_TAIL13, TWM_TAIL + merge.
 ## Session 13: tk2f norm3 (slot-ordered y32, TK2F_DYN 84204) -0.5..0.75 us d16/d32; consumer has no single limiter (NOTES).
 ## Sessions 8-12: see NOTES (s10 race fix + layer harness, s11 twm/K-split).
 
 ## Ranked ideas
+-6. (s16) Find why moe_twm's ring ingests only ~31.5 GB/s per SM (ring-only, G16) when a bare bulk ring of the same
+   stage shape does ~60 (NOTES s16 bisect list), then check tk2f for the same cap (its H200 rate is also ~31 GB/s/SM).
+   Measure with tools/s16 (G16 warm items for the cap, G88 proxy for the H200 effect).
 -5. (s14) Drain of twm is still ~20-30 us (items ~40 us). Half-size tail items (TWM_TAIL) clash with the merge order;
    try tail class only for the LAST B items after the merge window, or K-split of the last wave. And: fewer dq per token
    for hot experts (128-token passes need N 128: registers).

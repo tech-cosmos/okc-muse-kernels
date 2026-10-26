@@ -1,0 +1,10 @@
+s16 H200 proxy + ring microbenchmarks (see NOTES-moe.md session 16). Scripts expect /tmp/moe16 as working dir with:
+  layer_ab.py (copy of ../layer_ab.py), bench.py/reference.py/nvfp4.py/checks.py (copies from the problem dir),
+  sub_g.py = submission.py with every persistent launcher's `grid = nsm;` replaced by
+    `grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;`  and  submission.py -> sub_g.py symlink.
+proxy.py: MOE_GRID=88 ROUNDS=2 SUB=sub_g python proxy.py "verify 32,verify 16" 'name={"GLOBAL": value}' ...
+  (x 0.73 = H200 us). tlrun.py: per-CTA moe_twm timeline (needs a TWM_TL 1 build with the NG patch, see NOTES).
+outdump.py: SUB=<module> python outdump.py -> /tmp/moe16/out_<SUB>.pt (50 big-M outputs) for bitwise A/B.
+mkx2.py: TWX ablation builds of moe_twm (1 no dq, 2 no MMA, 4 no weight LDS, 8 no x TMA, 32 no wgmma fence/commit/wait).
+ring.py / ring3.py: standalone cp.async.bulk ring microbenchmark (per-stage cost; twm-like 3-stream stages = mode 16).
+  NOTE ring.py prints 'TB/s' and 'GB/s/SM' 1000x too high (bytes/us/1e3 is GB/s): read them as GB/s and MB/s.
