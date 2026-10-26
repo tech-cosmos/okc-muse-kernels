@@ -1,12 +1,18 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 09:45Z (end of session 16).
+Updated 2026-10-26 09:40Z (end of session 17).
 
 **ACTION: 1 scored run left for the sandbox (ends ~19:10Z): submit the best CHECKED code before ~17:30Z. Now: v44
 (de763eb) check c6a00da7 1.9608x > board 1.9558 = eligible (`okc submit muse_decode_layer/submission.py --json` on main
 if nothing better got checked). 2 checks left (20/20 used at 00:00Z reset = after the sandbox). Plan: integrate proj/moe
 handoffs posted by ~16:00Z (proj: g19 mode 3 BF16-out qkv T=16/32 and maybe M=8; moe: big-M via its H200 proxy), H100
 A/B in tools/ab_files.py, ONE bundle check, then submit whichever checked code is best.**
+
+**s17 TIMELINE for the last 2 checks + 1 submit (main = v44 = checked code, keep it that way until a bundle wins):**
+(a) when proj commits gemv22 (T=128/256 12-bit wgmma, v16/v32; r-proj dev/gemv22.cu was WIP at 09:30Z), wire it in,
+H100 A/B, and run ONE bundle check = gemv22 (v16/v32) + G19_GRID 120 (d16/d32; disjoint shapes, read per shape);
+(b) if gemv22 is not in by ~15:00Z, check v44 + G19_GRID 120 alone (`variants/sub_v45g.py`, regenerate by the sed in
+Next -4); (c) by 17:30Z submit the best checked code that beat 1.9558 (v44 c6a00da7 1.9608x if nothing better).
 
 ## Board
 - **Best scored: 371a17ee = v42 (cfd3bc5), 1.9558x, 11,566 us/step, overall #49** at 07:10Z 10-26 (#1 2.368x, #10 2.176x,
@@ -100,6 +106,7 @@ A/B in tools/ab_files.py, ONE bundle check, then submit whichever checked code i
    program); qkv/o g19 at T=32; csl overlapped with g13; T=8 norm3+unpool cluster fusion.
 
 ## Dead ends (details in NOTES)
+- s17: PR1 npf (pooler chunks L2-prefetched before the wait) 0/2/4: H100 d1 tie (91.5-91.6 us, 10 rounds); no H200 case.
 - s15: n2u8 (T=8 norm3+unpool on clusters), bndc (cluster boundary), CUDA 1-CTA boundary, BND_ROWS, UPF3 (unpool
   W L2 prefetch at tk2f end / in norm; H200 diag b1ee542c d32 -4%), G10_PFL2 (o W prefetch during csl), pr1 npf 6-12,
   qkv/o g19 at T=32 (8 rounds H100 +2.6..3.4), qkv g19 at T=8 (m=8 unsupported). Patches: dev/n2u8_s15.patch, dev/bndc_s15.patch.

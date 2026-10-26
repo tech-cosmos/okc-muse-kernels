@@ -495,3 +495,17 @@
   (H100-tuned) likely leaves SMs idle on the H200. Candidate 120 (variants/sub_v45g.py): correct (tests 13/13, scored
   decode 2 seeds, replay decode 0/60), H100 loses as expected (d16 212.5 -> 219.3, d32 204.6 -> 217.4). Queued for the
   bundle check (STATE Next -4); not on main.
+
+## Session 17 (2026-10-26 09:09Z-)
+- Budget at start: 1 submit, 2 checks (`okc problems`). Board: #53 at 1.956x (#1 2.380x, #50 ~1.961x). No new
+  proj/moe commits since 08:36Z (proj gemv22 for T=128/256 is uncommitted WIP in r-proj dev/).
+- H100 timeline d1 sliding (v44): the first boundary ends 5.3 us after the o GEMV, the second 2.4 after n2u. Checked:
+  _boundary's Triton SASS keeps all 18 weight/stream LDGs before ACQBULK (only the branch loads after); pr1's SASS: W
+  loads (LDG.CONSTANT) before ACQBULK, x read after it: no hoisting hazard. Hypothesis "pr1's L2 prefetch flood slows
+  the boundary": npf 0 does end the boundary 1.3 us earlier (timeline), but pr1 ends at the same time (it is
+  HBM-bound from its start); ab_flag 10 rounds npf 4/0/2: d1 sliding 91.53/91.60/91.51, full 113.19/113.20/113.06 =
+  tie. DEAD on H100; not worth a judge slot.
+- H200 v44 profile (c6a00da7) notes: the m=1 GEMVs run at ~2.5-3.2 TB/s on the H200 (qkv g13 11.0 us for 28 MB, pr1
+  21.4 for ~59 MB, o g10 6.4 for 17 MB) vs ~4 TB/s practical: ~11 us at d1 sliding+full (~2.4% score) is in the
+  m=1 GEMV efficiency (idle-budget item 5, proj's lane). v1 tk2f is 70 us (vs d16's 63): moe's lane.
+- Plan for the last 2 checks: see STATE (s17 TIMELINE). No check or submit this session.
