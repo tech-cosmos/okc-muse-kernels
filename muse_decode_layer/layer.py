@@ -698,7 +698,7 @@ def _pack14(w, kc):
 G10_CFG = {"qkv_gate": (8192, 4, 4, 1, 1, 132), "pooler": (8192, 4, 4, 1, 1, 132), "o": (1024, 2, 4, 2, 1, 264),
            "unpool_slice": (4096, 2, 4, 1, 1, 132)}
 _G10 = {}
-G10_PFL2 = {True: ("o",)}  # s15: {sliding: keys} whose gemv10 (PDL secondary) bulk-prefetches its W into L2 before griddepcontrol.wait. H100 d1 {True: ("o",), False: ("o",)}: +1.8/+1.8 us (csl slowed); H200 untested
+G10_PFL2 = {}  # DEAD on H200 too (diag b1ee542c: d1 sliding no gain); s15: {sliding: keys} whose gemv10 (PDL secondary) bulk-prefetches its W into L2 before griddepcontrol.wait. H100 d1 {True: ("o",), False: ("o",)}: +1.8/+1.8 us (csl slowed); H200 untested
 
 
 # (kcu, wg, pf, bk) per weight, m = 8 (verify 1): the proj agent's gemv12 (g12_src.cu = r-proj e71d015), its H100 picks
@@ -1061,7 +1061,7 @@ if TK2F_LATE_TRIG:
 # rows of the full unpooler W into L2 after its last gemm2 row (the cuBLAS unpool after moe_norm2/3 then starts with
 # that part in L2; HBM is mostly idle in the CTA drain + norm). Pointer via moe_set_upf() before the launch (a host
 # static read at launch/capture time; reset to null after).
-UPF3 = {32: ("unpool", 3072), 16: ("g19", 16 << 20)}  # s15: {T: ("unpool", bytes per row) or ("g19", bytes)}, e.g. {32: ("unpool", 3072), 16: ("g19", 16 << 20)}; H100 d32: AT 0 tie (unpool -4, tk2f +7.8), AT 1 +1..2, AT 2 +1..2 (H200 untested)
+UPF3 = {}  # DEAD on H200 too (diag b1ee542c: d32 -4%, d16 -1.5%); s15: {T: ("unpool", bytes per row) or ("g19", bytes)}, e.g. {32: ("unpool", 3072), 16: ("g19", 16 << 20)}; H100 d32: AT 0 tie (unpool -4, tk2f +7.8), AT 1 +1..2, AT 2 +1..2 (H200 untested)
 UPF3_AT = 0  # 0: tk2f CTA end (H100 d32: unpool -4 us but tk2f +7.8: the stragglers lose bandwidth), 1: moe_norm2/3 after its wait
 _a = "int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }"
 assert _moe_CUDA_SRC.count(_a) == 1

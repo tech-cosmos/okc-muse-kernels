@@ -451,3 +451,15 @@
   vs 8.4, T=32 9.4 vs 8.8, T=256 27.9 vs 15.7. In the layer worse everywhere (d1 +0.8, v1 +0.8, d32 +4.6, v32 +30):
   the first boundary ends 6.3 us after the o GEMV (Triton 5.0), the second 3.4 after n2u (Triton 2.2).
   Cluster size 16 needs cudaFuncAttributeNonPortableClusterSizeAllowed (launch error otherwise).
+- DEAD qkv on g19 at T=16 (+ .to(bf16)): H100 (16,1024,4,4,2,2) tie (16.9 + 1.3 cast vs cuBLAS 17.1 + 1.8 splitK
+  reduce), (8,3,3,1) +4 us. No first-op penalty exists (H100 micro: the same cuBLAS qkv as the 2nd GEMM in a graph
+  17.3 vs 18.1 us first): cuBLAS m16 qkv is just 2.1 TB/s on H100 (H200 12.6 + 1.8 us). Asked proj (Requests).
+- DEAD pr1 npf (pooler chunks L2-prefetched before its wait) 6/8/12 vs 4: H100 d1 tie..+0.6.
+- DEAD csl overlapped with the qkv GEMV (attention starting on q/k/v rows before the gate rows): g13 fills the
+  register file at 1 CTA/SM, so csl's 16-CTA clusters cannot co-reside without taking GPCs from the GEMV.
+- DEAD (H100 and H200) UPF3: L2 prefetch of the unpool W for the T=32 cuBLAS unpool / T=16 g19 unpool. H100 d32: at
+  tk2f CTA end unpool 26.5 -> 22.5 but tk2f +7.8 (stragglers lose bandwidth); in moe_norm2/3 after its wait (bulk:
+  the CTA retires only when its bulk prefetches complete, norm +5.6; per-line prefetch.global.L2: same) +1..2 us.
+  G10_PFL2 (gemv10 o W bulk L2 prefetch before its wait, d1): H100 +1.8 (csl slowed). DIAG check b1ee542c (174fdf1)
+  1.9476x: d32 ratio 1.460 -> 1.407 / 1.915 -> 1.830 (-4%), d16 -1.5%, d1 sliding 2.347 -> 2.333; controls flat.
+  So the "spare HBM during issue-bound tk2f on H200" does not exist for prefetches (or L2 thrash). Flags kept, off.
