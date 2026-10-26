@@ -1371,7 +1371,15 @@ void n2u_launch(torch::Tensor y32, torch::Tensor inv, torch::Tensor ids, torch::
 # router (side stream) in the layer it is 60.7 vs F.linear 49.2 us (H100, verify 32 sliding).
 # Judge check f8e06892 (pooler m16/m32 too): d16 +0.7%, d32 -2.6% vs v15 (noise ~2%): m16/m32 not used.
 LT_CFG = {("pooler", 128): (66, 143, 35, 1, 0, 0, 0, 2),
-          ("qkv_gate", 128): (66, 92, 35, 1, 0, 0, 0, 5), ("qkv_gate", 256): (66, 124, 35, 1, 0, 0, 0, 2)}
+          ("qkv_gate", 128): (66, 92, 35, 1, 0, 0, 0, 5), ("qkv_gate", 256): (66, 124, 35, 1, 0, 0, 0, 2),
+          # s23: proj's H200 tuner winners (r-proj judge logs, median of 30: us F.linear -> lt, standalone incl. launch):
+          # qkv m16 17.48 -> 16.83, m32 17.82 -> 17.25, o m16 10.04 -> 9.77, m32 10.30 -> 9.98, m128 10.94 -> 10.73,
+          # m256 12.80 -> 12.54, unpooler m128 23.21 -> 22.96. Used only where TUNE picks them (LT_DEFAULT_OFF).
+          ("qkv_gate", 16): (66, 394, 35, 3, 2, 0, 5, 4), ("qkv_gate", 32): (66, 16, 35, 3, 2, 0, 7, 4),
+          ("o", 16): (66, 394, 35, 1, 0, 0, 7, 4), ("o", 32): (66, 16, 35, 1, 0, 0, 5, 4),
+          ("o", 128): (66, 17, 35, 1, 0, 0, 4, 2), ("o", 256): (66, 20, 35, 1, 0, 0, 5, 2),
+          ("unpool", 128): (66, 18, 35, 1, 0, 0, 6, 5)}
+LT_DEFAULT_OFF = {("qkv_gate", 16), ("qkv_gate", 32), ("o", 16), ("o", 32), ("o", 128), ("o", 256), ("unpool", 128)}
 _LT_SRC = None  # @@LT@@
 _LT = {}
 
@@ -1395,7 +1403,7 @@ def _lt_prepare(state):
     lib = _LT["lib"]
     if lib is None:
         return
-    w = state["dense"]
+    w = {**state["dense"], "unpool": state["unpool"]}
     dev = w["pooler"].device
     state["lt_ws"] = torch.empty(4 << 20, dtype=torch.uint8, device=dev)
     g = torch.Generator(device=dev)
@@ -1560,10 +1568,13 @@ def _g19_prepare(state):
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}),
-        16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}),
-        32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}),
+        16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
+             {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}),
+        32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
+             {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3}),
-        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}), 256: ({}, {"lt:qkv_gate": False})}
+        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True}),
+        256: ({}, {"lt:qkv_gate": False}, {"lt:o": True})}
 TUNE_REPS = 40
 TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}  # T -> (batch, q_len)
 
@@ -1733,7 +1744,7 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
                      *G12_CFG[key], *pdl)
         return out
     cfg = state.get("lt_ok", {}).get((key, x.shape[0])) if state is not None else None
-    if cfg is not None and _opt(state, x.shape[0], "lt:" + key, True):
+    if cfg is not None and _opt(state, x.shape[0], "lt:" + key, (key, x.shape[0]) not in LT_DEFAULT_OFF):
         out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
         _LT["lib"].lt_gemm(w, x.contiguous(), out, state["lt_ws"], list(cfg))
         return out
@@ -1770,7 +1781,7 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None):
     if f is None:
         f = _linear(moe, state["unpool_slice"], "unpool_slice", state) if sliced else _g19(moe, "unpool", state)
         if f is None:
-            f = F.linear(moe, state["unpool"])  # all-gather: identity (zeros)
+            f = _linear(moe, state["unpool"], "unpool", state)  # all-gather: identity (zeros)
     stream2 = torch.empty_like(stream1)
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]
