@@ -71,6 +71,10 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 33 (no judge runs): RG = 1 on main: moe_routegather (route + gather in one launch, stable order, bitwise =
+old, 15/15). H100 layer_ab v16 -1.1 us, v32 tie. Handoff for layer's moe_gathern at T=128 (NOTES s33). Next sandbox:
+first moe check = the queued moe_hot DIAG (s30), add RG 0/1 to DIAG_VARIANTS if cheap.
+
 ## Session 30 (no judge runs): DIAG_VARIANTS on main = moe_hot H200 queue (off/h24/h32/h40/h32o76/o76); local run v32
 off 253.3 -> h32 236.7 us (H100 full grid), bitwise. Proxy: with hot on, o76/o4/split66 tie, tail32 +2.6. Layer v87 has hot 32.
 NEXT (new sandbox): FIRST moe check = this DIAG (sed DIAG = 1 into a /tmp copy; NOTES s30). Then: no moe-local idea is left

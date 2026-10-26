@@ -1987,6 +1987,85 @@ __global__ void __launch_bounds__(256) moe_gather(const uint32_t* __restrict__ X
   }
 }
 
+// s33 RG: moe_route + moe_gather in ONE launch, one CTA per token. Every CTA counts all routes per local expert
+// (and those of earlier tokens) itself, so a route's sorted position is stable (expert, route index) order with no
+// cross-CTA communication: pos = base[e] + #earlier routes to e. CTA 0 publishes meta; each CTA writes sroutes for
+// its own routes and copies its x row (K-permuted as moe_gather) to each of them.
+__global__ void __launch_bounds__(256) moe_routegather(const int* __restrict__ ids, int nroutes, int start, int count,
+    const uint32_t* __restrict__ X, int* __restrict__ meta, int* __restrict__ sroutes, uint32_t* __restrict__ XG) {
+  __shared__ int cnt[32], pre[32], s_pos[8];
+  const int tid = threadIdx.x, tok = blockIdx.x;
+  if (tid < 32) { cnt[tid] = 0; pre[tid] = 0; }
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  __syncthreads();
+  const int lim = tok * 8;
+  for (int i = tid; i < ((nroutes + 255) & ~255); i += 256) {  // uniform trip count: __match_any_sync below
+    const int e = i < nroutes ? ids[i] - start : -1;
+    const bool v = e >= 0 && e < count;
+    // warp-aggregated: one smem atomic per distinct expert per warp
+    const unsigned m = __match_any_sync(0xffffffffu, v ? e : -1);
+    const unsigned mp = __match_any_sync(0xffffffffu, (v && i < lim) ? e : -1);
+    const int lane = tid & 31;
+    if (v && (__ffs(m) - 1) == lane) atomicAdd(&cnt[e], __popc(m));
+    if (v && i < lim && (__ffs(mp) - 1) == lane) atomicAdd(&pre[e], __popc(mp));
+  }
+  __syncthreads();
+  if (tid < 32) {
+    const int c = cnt[tid];
+    int incl = c;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+      const int v = __shfl_up_sync(0xffffffffu, incl, o);
+      if (tid >= o) incl += v;
+    }
+    const int b = incl - c;
+    pre[tid] += b;  // first sorted position of this token's route to expert tid (topk ids are distinct per token)
+    if (tok == 0) {
+      meta[33 + tid] = b;
+      if (tid == 31) { meta[65] = incl; meta[66] = 0; meta[67] = 0; }
+      meta[68 + tid] = 0;
+      int rank = 0;
+      for (int j = 0; j < 32; ++j) {
+        const int cj = __shfl_sync(0xffffffffu, c, j);
+        rank += (cj > c) || (cj == c && j < tid);
+      }
+      const int na = __popc(__ballot_sync(0xffffffffu, c > 0));
+      if (tid == 0) meta[0] = na;
+      if (tid >= na) meta[1 + tid] = 0;
+      __syncwarp();
+      if (c > 0) meta[1 + rank] = tid;
+    }
+  }
+  __syncthreads();
+  if (tid < 8) {
+    const int e = ids[lim + tid] - start;
+    int pos = -1;
+    if (e >= 0 && e < count) {
+      pos = pre[e];
+      for (int j = 0; j < tid; ++j) pos += ids[lim + j] - start == e;  // repeated ids in a token (not from topk)
+      sroutes[pos] = lim + tid;
+    }
+    s_pos[tid] = pos;
+  }
+  const uint32_t* src = X + (size_t)tok * (KD / 2);
+  uint32_t v[KD / 2 / 256];
+#pragma unroll
+  for (int i = 0; i < KD / 2 / 256; ++i) {
+    const int o = tid + 256 * i, w = o & 31, t = w & 3, jh = w >> 2;
+    v[i] = src[(o & ~31) | (8 * t + jh)];
+  }
+  __syncthreads();
+#pragma unroll
+  for (int s = 0; s < 8; ++s) {
+    const int pos = s_pos[s];
+    if (pos < 0) continue;
+    uint32_t* dst = XG + (size_t)pos * (KD / 2);
+#pragma unroll
+    for (int i = 0; i < KD / 2 / 256; ++i) dst[tid + 256 * i] = v[i];
+  }
+}
+
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
@@ -2051,6 +2130,12 @@ static void tw_maps(TMaps& maps, void* ptr, int64_t rows) {
                           CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
     TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled failed ", (int)r);
   }
+}
+int64_t moe_routegather_launch(torch::Tensor ids, int64_t start, int64_t count, torch::Tensor x, torch::Tensor meta,
+                               torch::Tensor sroutes, torch::Tensor xg) {
+  return launch_k(moe_routegather, (int)(ids.numel() / 8), 256, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+      (const int*)ids.data_ptr(), (int)ids.numel(), (int)start, (int)count, (const uint32_t*)x.data_ptr(),
+      (int*)meta.data_ptr(), (int*)sroutes.data_ptr(), (uint32_t*)xg.data_ptr());
 }
 int64_t moe_gather_launch(torch::Tensor x, torch::Tensor meta, torch::Tensor sroutes, torch::Tensor xg) {
   return launch_k(moe_gather, (int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
@@ -4368,6 +4453,7 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "int64_t moe_tb_launch(int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_gather_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
+        "int64_t moe_routegather_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_twf_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, int64_t);"
@@ -4410,7 +4496,7 @@ def _lib():
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=src,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
-                                      "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
+                                      "moe_gather_launch", "moe_routegather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_hot", "moe_hot_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
@@ -4577,6 +4663,7 @@ TWM_TAIL13_M = {}
 TWM_ORDER = 0  # s14: moe_twm item order (bits, see moe_twm): 76 = pass-minor + multi-pass experts' items merged evenly
 #   over both phases (H100 layer v32 248.8 -> 239.9 us without TWM_TAIL (with it: 247), v16 = 0); 2 = timeline stamps
 TWM_ORDER_M = {256: 76}  # s14: per-M override
+RG = 1  # s33: moe_routegather (route + gather fused, one CTA per token) for M > 32
 HOT_M = {}  # s29: {M: grid}: moe_hot (65..128-token experts, one N 128 pass) on that many CTAs before moe_twm
 TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
 TWM_HOT_M = {}  # s17: per-M override
@@ -4816,12 +4903,18 @@ def kernel_fn(data, st):
         return out
     p13, p2 = PLAN_OVERRIDE(M) if PLAN_OVERRIDE else _plan(M)
     assert p13 in _CFGS and p2 in _CFGS, (p13, p2)
-    lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
     if TW_CFG:
         # inter here holds gemm2's B in the K-permuted order (see moe_tw)
         rt = 2 if TW_CFG >= 1000 else TW_CFG // 100
         xg = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
-        lib.moe_gather_launch(x, meta, sroutes, xg)
+        if RG:  # s33: route + gather in one launch (stable route order)
+            lib.moe_routegather_launch(ids, st["start"], st["count"], x, meta, sroutes, xg)
+        else:
+            lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
+            lib.moe_gather_launch(x, meta, sroutes, xg)
+    else:
+        lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
+    if TW_CFG:
         if TWF and rt == 4:
             trt = TWF_RT_M.get(M, TWF_RT)
             trt = trt if f"w2b{trt}" in st else 4

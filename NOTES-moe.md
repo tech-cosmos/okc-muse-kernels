@@ -838,3 +838,19 @@
 - Judge layer profile 703d3a7e (v70): tk2f d1 sl 28.7 (incl. PDL wait) / full 21.2, d16 sl 69.7 / full 44.1 us;
   moe_norm2 d16 7.9 us = mostly its PDL wait on tk2f's tail.
 - Nothing changed in code. Next sandbox: first moe check = the queued moe_hot DIAG (session 30), unchanged.
+
+## Session 33 (2026-10-26 17:24Z - 18:15Z) -- RG: moe_route + moe_gather fused (no judge runs: moe checks 20/20)
+- moe_routegather (submission.py, before the torch includes; RG = 1, M > 32 only): one 256-thread CTA per token. Each CTA
+  counts all routes per local expert (+ those of earlier tokens) itself with warp-aggregated smem atomics
+  (__match_any_sync), so sorted position = base[e] + #earlier routes to e: STABLE (expert, route index) order, no
+  cross-CTA sync. CTA 0 writes meta (same fields as moe_route); every CTA writes sroutes for its routes and copies its x
+  row (moe_gather's K permutation) to each of them. PDL: wait at entry, trigger after (like moe_gather). -1 launch.
+- Bug found on the way: the count loop must have a uniform trip count (round nroutes up to 256), else
+  __match_any_sync(full mask) hangs the GPU when T*8 % 32 != 0 (T=33). Fixed; also handles repeated ids in a token.
+- Outputs bitwise = RG 0 (tools/s33/rg_bitwise.py: layer v16/v32 routings + 24 skewed T=33..256, HOT_M {} and {256: 32}:
+  0 of 68 differ; per-column FP32 order does not depend on route order). bench.py test 15/15.
+- H100 layer_ab (cold L2, 5 routings, 2 rounds ABBA): verify 16 199.0/200.2 vs 200.6/200.8 (-1.1 us), verify 32
+  242.6/242.9 vs 242.7/242.8 (tie: at T=256 each CTA scans 2048 ids, eating the saved launch). Layer profile 703d3a7e
+  had moe_route 2.1 us serial before moe_gathern on the H200: expected H200 gain ~1-2 us at T=128, ~0..1 at T=256.
+- Layer would need its moe_gathern (pre-expert rmsnorm, strided FP32 pooler rows) merged with this routing prologue:
+  handoff posted as a T=128 tuner candidate (small: ~0.3% on 2 of 12 shapes).
