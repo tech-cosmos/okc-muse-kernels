@@ -1,6 +1,12 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~10:00Z (session 19).
+Updated 2026-10-26 09:50Z (session 20; real clock: earlier sessions' stamps ran ~30 min ahead, use `date -u`).
+
+**s20: main = v49 (b564697) = v48 + proj gemv22 as TUNE options at T=128 (qkv/pooler/unpool; H100 keeps default).
+NOT CHECKED. 1 CHECK + 1 SUBMIT LEFT. Plan: ~14:30-15:00Z (real UTC) run the last check on main (v49 + anything moe/proj
+post by then, each as a TUNE option or H100-verified win), read the "layer tune" lines in profiles/submission.<job>.log
+(H200 A/B of every option: write them into NOTES). Submit by 17:30Z: that code if its check >= 1.9558 (board best)
+(ties ok), else v45 (`git show 2dddb88:muse_decode_layer/submission.py > /tmp/v45.py`, check ea9421fa 1.9634x).**
 
 **s19: main = v48 (d36e095) = v45 + a GENERIC prepare() tuner (`TUNE` in layer.py): per (T, sliding/full) it times
 whole-layer CUDA-graph replays of option sets on synthetic inputs (shapes only; full layers at ctx 80000) and keeps the

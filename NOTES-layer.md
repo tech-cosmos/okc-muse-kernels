@@ -540,3 +540,18 @@
   mis-measured; all current options are GEMM/glue choices. Synthetic T=1 sliding 114 us vs real d1 91: local
   expert count differs; only the relative timings matter.
 - No check/submit this session (holding the last check for the gemv22 bundle; see STATE).
+
+## Session 20 (2026-10-26 09:38Z-)
+- Budget at start: 1 submit, 1 check (`okc problems`). (Note: earlier sessions' clock stamps ran ahead: s19 "10:05Z" was
+  really ~09:35Z. Use `date -u`.)
+- v49 (b564697): proj gemv22 (r-proj a17318c dev/gemv22.cu -> g22_src.cu, inlined by build.py; own load_inline, +30 s
+  build) as TUNE options at T=128: g22:qkv_gate / g22:pooler / g22:unpool / all three, cfg (128, 4, 3, 32), FP32 out
+  (consumers already round FP32: qkv .to(bf16), pooler rmsnorm ROUND, unpool boundary RB). `_pack22` (proj's) + `_pack19(tm=1)`;
+  `_g22_prepare` checks each pack vs F.linear. Dispatch inside `_g19()` (checked first, only if TUNE picked it).
+  H100 standalone (proj's dev/g22.py, cold L2): qkv m128 21.9 vs cuBLAS 21.1, o 14.9/10.2, pooler 30.9/27.5, unpool
+  28.8/27.3; m256 all +10..12 us (compute side: not built). H100 in-layer tuner: T=128 sliding default 433.1, g22 qkv
+  434.8, pooler 437.2, unpool 433.6, all 443.2 -> keeps default (full the same). Forced all-g22 at verify 16: scored 6/6
+  ok, replay 0/30 sliding + 0/30 full. Tests 13/13.
+- Why it may win on the H200: v45 profile verify 16 sliding: the T=128 GEMMs (nvjet 128x64 x2 27.5, 88x64 22.8, 48x64
+  16.9) ~67 us vs ~35 us floor for 12-bit bytes at 4 TB/s; H100 TMA streams only ~2.9 TB/s (proj).
+- No check yet: holding the last check so moe/proj handoffs posted by ~14:30Z can ride along (see STATE).
