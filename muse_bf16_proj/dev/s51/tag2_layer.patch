@@ -1,0 +1,52 @@
+--- a/muse_decode_layer/g19_src.cu	2026-10-26 21:28:37.378790314 +0000
++++ b/muse_decode_layer/g19_src.cu	2026-10-26 21:28:37.379790314 +0000
+@@ -91,13 +91,14 @@
+                                                          float scale, const __nv_bfloat16* __restrict__ x,
+                                                          float* __restrict__ out, int* __restrict__ ctr, int n, int k, int tail, int npre) {
+     constexpr int NT = M / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * 768, XS = KC * 2 + 16, PBF = NWC * 16 * M;
+-    static_assert(NA % AP == 0 && SPK % IS == 0, "config");
++    static_assert(SPK <= 32 && NA % AP == 0 && SPK % IS == 0, "config");
+     extern __shared__ __align__(128) unsigned char smem[];
+     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
+     float* pbuf = (float*)(smem + NS * SB + XB * M * XS);
+     const unsigned bars = (unsigned)__cvta_generic_to_shared(pbuf + 2 * PBF);
+     int* tag = (int*)(pbuf + 2 * PBF) + 2 * (2 * NS + 8);  // after the barriers. per slot: u | xb << 29 | last x use << 30 | run end << 31 (-1: no more work)
+     int* ptag = tag + NS;                                 // per pbuf: tile (-1: consumers done)
++    int* tag2 = ptag + 2;  // proj s51 TAG2: per slot ks | st << 8 | tr << 13, written by the producer (no runtime div/mod in the consumers)
+     // full[NS], empty[NS], xfull[2], xempty[2], pfull[2], pempty[2]
+     const unsigned xfull = bars + 16 * NS, xempty = xfull + 16, pfull = xfull + 32, pempty = xfull + 48;
+     // s57 (layer): npre bit 16 = trigger the PDL dependent at start (the boundary after the unpool: its pre-wait loads
+@@ -129,6 +130,7 @@
+                     const int st = ra % SPK;
+                     const bool xl = ra + 1 == rb || (ra + 1) / (ntr * SPK) != ks0;
+                     tag[i] = ra | (xl ? 1 << 30 : 0) | (ra + 1 == rb || st + 1 == SPK ? 1 << 31 : 0);  // x buffer 0
++                    tag2[i] = ks0 | st << 8 | ((ra % (ntr * SPK)) / SPK) << 13;
+                     bar_expect(bars + 8 * i, SB);
+                     bulk(ring + i * SB, WP + (long)ra * SB, SB, bars + 8 * i);
+                 }
+@@ -162,6 +164,7 @@
+                     const bool xl = u + 1 == rb || (u + 1) / (ntr * SPK) != ks;
+                     if (xl) xks[xb] = -1;  // released by the consumers after this stage: reload even if the next run has this ks
+                     tag[slot] = u | xb << 29 | (xl ? 1 << 30 : 0) | (end ? 1 << 31 : 0);
++                    tag2[slot] = ks | st << 8 | ((u % (ntr * SPK)) / SPK) << 13;
+                     const unsigned full = bars + 8 * slot;
+                     bar_expect(full, SB);
+                     bulk(ring + slot * SB, WP + (long)u * SB, SB, full);
+@@ -231,7 +234,7 @@
+         if (tg == -1) break;
+         const int u = tg & 0x1FFFFFFF, xb = (tg >> 29) & 1;
+         const bool end = tg < 0, xl = (tg >> 30) & 1;
+-        const int ks = u / (ntr * SPK), r = u % (ntr * SPK), tr = r / SPK, st = r % SPK;
++        const int t2 = tag2[slot], ks = t2 & 0xFF, st = (t2 >> 8) & 31, tr = t2 >> 13;
+         if (prev_xl) {  // first stage of an x use: wait for it
+             bar_wait(xfull + 8 * xb, xph[xb]);
+             xph[xb] ^= 1;
+@@ -469,7 +472,7 @@
+ void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out, torch::Tensor ctr,
+               int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode, int64_t npre, int64_t xb) {
+     const int m = x.size(0), k = x.size(1), n = out.size(1);
+-    const int sm = ns * g19::NWC * ap * 768 + xb * m * (kc * 2 + 16) + 2 * g19::NWC * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
++    const int sm = ns * g19::NWC * ap * 768 + xb * m * (kc * 2 + 16) + 2 * g19::NWC * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8 + 4 * ns;
+     TORCH_CHECK(n % (16 * g19::NWC) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0) && (npre & 0xffff) <= ns, "g19: shape");
+     auto stream = c10::cuda::getCurrentCUDAStream();
+     if (!mode) g19::zero<<<32, 256, 0, stream>>>((float4*)out.data_ptr(), m * n / 4, ctr.data_ptr<int>());

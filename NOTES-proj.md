@@ -1080,3 +1080,10 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   wins >= ~0.3 us at m16 or m32, hand it to layer (small patch on its g19_src.cu: tag2 after ptag, cbuf shifted, +4*ns smem).
 - Also in diag19 (main) at 00:00Z: o m16 g19 vs lt (H100 now 5.79 vs 7.52; H200 lost +0.8 before s15/DEC3): if g19 wins
   now on the H200, that is a layer TUNE option at T=16 o.
+- Layer copy (s51 later): dev/s51/tag2_layer.patch = TAG2 on r-layer's g19_src.cu (088d8d7; no tm there, single producer
+  lane). dev/s51/g19ab_layer.py = g19ab for the layer's g19 interface (6-arg G19_CASE), prints max|A-B| vs max|A-A'|
+  (split-K red.add order is nondeterministic: equal = same math). H100 H200-proxy, medians B-A us: G72 R8 pool m32 -0.94,
+  m16 -0.06, unp m32 -0.53, m16 -0.48; G72 R10 -0.85/-0.52/-0.46/-0.11; G88 R10 -0.62/+0.09/-0.38/-0.09 (non-overlapping
+  ranges at m32). qkv/o m16/m32 tie. In a /tmp clone of r-layer 088d8d7: bench.py test 13/13 PASS; tools/ab_files.py
+  6 rounds A B B A (tuner on): all 12 scored shapes tie (d32 full 414.66/414.05 vs 413.97/414.79; d16 sl 196.92/196.62
+  vs 196.71/196.74). Handoff posted, conditional on the 00:00Z diag19d (H200) or a layer A/B check.

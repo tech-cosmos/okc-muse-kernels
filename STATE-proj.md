@@ -139,7 +139,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## NOTM; full kernel tie on H100 (W-bound). Loop top 0.30 -> 0.14 kcyc/stage (clock64). NOTES s51.
 ## Next (00:00Z check, ranked):
 ## 0. In the 00:00Z check log: diag19d 'NOTM' vs 'NOTM TAG2' (H200): >= 0.3 us win at m16/m32 -> TAG2 patch for layer's
-##    g19_src.cu (Handoff). diag19 'o m16' g19 vs pick: if g19 wins now -> layer TUNE option at T=16 o.
+##    g19_src.cu: patch READY dev/s51/tag2_layer.patch (handoff posted 21:50Z; layer H100 tie, tests 13/13): post the H200
+##    numbers under Handoffs/Requests. diag19 'o m16' g19 vs pick: if g19 wins now -> layer TUNE option at T=16 o.
 ## a. First proj check after 00:00Z = main (carries _diag19d): read 'diag19d' lines. main-NOW = W-stream share on H200;
 ##    NOW-NOMMA = decode+mma; NOMMA = skeleton. Copy into NOTES. Submit only if > 1.3110 (diag adds nothing to timing).
 ## b. (done s51: TAG2, see above)
