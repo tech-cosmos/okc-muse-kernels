@@ -1078,3 +1078,18 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   shares SMs with csl and o's prologue) and o ends ~24 vs 23.4. ab_files tuner off, 8 rounds A B C A: base 86.32/86.22,
   gate 240 blocks (2,2,2,1) 86.82, (2,1,4,1,480) 87.61 us. Wait-before-x version (pdl 1): +4 us. The qkv->o window is
   ramp/latency-bound GEMVs at ~2 TB/s, not idle HBM: moving bytes into it doesn't pay (same lesson as s34/s38).
+
+## s55 (2026-10-26 19:46Z-19:55Z, sandbox okc-night4, session 4): expert-weight L2 prefetch beside the d32 pooler = DEAD
+- No judge runs (layer 20/20 checks, 10/10 submits until 00:00Z). main = v91 unchanged.
+- Idea: g19 m32 pooler is consumer-bound (H100 30 us for 50 MB = 1.7 TB/s), so prefetch the routed experts' w13q into
+  L2 (evict_last) beside it; tk2f (~HBM-bound) then reads part of its bytes from L2. Oracle: tools/expf_oracle.py +
+  dev/expf_s55.patch (an _EXPF hook before/after _route on the side stream), prefetch kernel on its OWN stream joined at
+  the end of kernel_fn (on the router's side stream it serializes the router: +13 us). Specs pre (oracle ids recorded
+  untimed, launched at the fork) / post (real ids after the routing); unit 0 = expert prefix, 32768 = per row tile.
+- H100 d32 sliding (tuner off, base 197.5 us): 16 x 128-thread prefetch blocks: pre 2 MB/expert 208.1, per-tile 8 KB
+  208.2, 16 KB 213.5, post 219.8. Timelines: 40 MB prefetched -> tk2f 97.8 -> 90.8 us (20 MB -> -2..3.6), BUT the
+  prefetch blocks sit on the ~24 SMs the pooler leaves to router_split (20.9 -> 33.6 us): routing ends 12-16 us later.
+  With 2 blocks: issue-limited (bulk prefetch ~50 GB/s per SM), kernel runs 105-171 us and holds 2 SMs that tk2f's
+  grid needs: tk2f 153-237 us. Real ids exist only at ~the pooler's end (routing ends 71 vs pooler 72.6 on H100), so
+  the 'post' form has no window anyway. Upper bound even with free routing ~-7 us/40 MB (~0.3-0.5% score at d32) and
+  it needs SMs nobody has spare. Dead unless the g19 pooler's own producer warps issued it AND routing came early.

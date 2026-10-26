@@ -1,6 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 20:20Z (s54, sandbox okc-night4). **main = v91 = v90 (v89 + moe n4s1 NORM_EARLY: post-expert norm runs in twm's
+Updated 2026-10-26 19:55Z (s55: no build, one dead oracle; sandbox okc-night4). **main = v91 = v90 (v89 + moe n4s1 NORM_EARLY: post-expert norm runs in twm's
 drain) + __ldcg ids/tw/inv in moe_norm/moe_norm2 (s54, moe's SASS audit), NOT judge-checked** (layer budget for 10-26 spent: 20/20 checks, 10/10 submits). v90 H100 vs v89: v32 sl -1..2,
 full -3..4 us, v16 tie..-2 (NOTES s53). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x, #10 2.180x.
 NOTE: the first check below is now on v91 (= v90 + a cache-op-only correctness fix) (same plan; v90 differs from v89 only at T=128/256).
@@ -118,7 +118,9 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
    anchors in layer.py still match: asserts at import; layer overrides _moe_TWM_ORDER_M and _moe__lib (adds moe_set_upf));
    proj g19 patches: `git apply -p1` on r-layer. Then bench.py test, tools/scored_test.py, tools/replay_test.py,
    tools/tk2f_stress.py if tk2f changed, tools/ab_files.py old/new, check.
-1. s54 DEAD: d1 qkv/gate split with the gate GEMV beside csl (oracle +0.5..1.3 us, NOTES s54).
+1. s55 DEAD: L2 prefetch of the routed experts' w13q beside the d32 g19 pooler (H100 tk2f -7 us/40 MB, but the prefetch
+   blocks take the router's free SMs: routing +12..16 us; real ids only exist at the pooler's end). NOTES s55.
+   s54 DEAD: d1 qkv/gate split with the gate GEMV beside csl (oracle +0.5..1.3 us, NOTES s54).
    Dead this session (don't retry without a new idea): every L2 prefetch of a next weight (unpool during tk2f/norm,
    o during csl, more pooler chunks in pr1) on H100 AND H200; boundary variants (cluster, CUDA 1-CTA, 2-4 rows per
    program); qkv/o g19 at T=32; csl overlapped with g13; T=8 norm3+unpool cluster fusion.

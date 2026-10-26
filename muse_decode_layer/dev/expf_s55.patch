@@ -1,0 +1,24 @@
+diff --git a/muse_decode_layer/layer.py b/muse_decode_layer/layer.py
+index 646e0cb..fcc7fe7 100644
+--- a/muse_decode_layer/layer.py
++++ b/muse_decode_layer/layer.py
+@@ -2422,6 +2422,7 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
+ # the unpool slice split over k into NU8_KB-wide FP32 slabs, PDL secondary of moe_tk2f) -> the boundary adds the slabs.
+ # Replaces moe_norm3 + gemv17 (H100 v1 tail tk2f end -> norm3 3.7 -> g17 4.6 -> boundary 3.3 us). TUNE option "nu8".
+ NU8_DEFAULT = False
++_EXPF = None  # s55 oracle hook (tools/expf_oracle.py): expert-weight L2 prefetch on the side stream
+ # s28 QF32 (proj s19 request): at T=16 decode the g19 qkv stays FP32 into attention (csl sliding, _gd_full + merges full),
+ # rounded to BF16 (RN) at each load: bit-identical to the torch cast it drops (H200 ea9421fa: 1.2-1.3 us per layer).
+ QF32 = True
+@@ -2642,7 +2643,11 @@ def kernel_fn(data, state):
+                                         or tokens > 32 and _moe_TW_CFG and _opt(state, tokens, "bkt", BKT_DEFAULT)
+                                         and not _opt(state, tokens, "rg", RG_DEFAULT))
+             rpdl = bkt and _opt(state, tokens, "route_pdl", ROUTE_PDL)
++            if _EXPF is not None:
++                _EXPF(state, tokens, None)
+             topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens, trig=rpdl)
++            if _EXPF is not None:
++                _EXPF(state, tokens, local_ids)
+             # The experts' bucketing too, off the main stream's path.
+             bucket = _moe_bucket(state, local_ids, rpdl) if bkt else None
+     if pr1:
