@@ -24,7 +24,8 @@ the experts (tk2f d32 82.6 = 42%) / g19 m32 (d32 2 calls 50.2): moe's and proj's
 below were measured dead; a new layer gain needs a structural change, > 1 session: e.g. at T=1 launch pr1 earlier (PDL
 secondary of csl) and land part of the 48 MB pooler W in SMEM (up to ~200 KB x 132 SMs) during the latency-bound csl/o/bnd
 windows (~15 us at < 50% HBM); L2 prefetch for the same purpose was zero-sum (s2, s15, s34), SMEM residency is untested
-(risk: o GEMV and bnd then lack SMs).
+(risk: o GEMV and bnd then lack SMs). Only worth it with pr1 launched BEFORE o/bnd (megakernel o + grid barrier + bnd +
+pooler/router at T=1): in today's bnd-only window pr1 already loads its first chunk to registers and deeper npf lost on H200.
 **s32: v70 (909010f)** = proj QSS + moe twm AUTO K-split: check 0f065691 1.9754x; **submit 703d3a7e 1.9954x = board best**.
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of

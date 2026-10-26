@@ -990,3 +990,9 @@
 - STATE condensed to <= 150 lines with a concrete first-check plan for the next sandbox (check v87, read tune lines).
 - Idea queued (STATE s45): T=1 pooler W partly SMEM-resident in early-launched pr1 CTAs during the latency-bound
   csl/o/bnd windows (L2 prefetch was zero-sum; SMEM residency untested).
+- Checked the cheap form of the SMEM idea: pr1's pre-wait window is only the boundary (~3-4 us); pr1 already loads its
+  first chunk (PF 1, U 2, NV 4 = ~6 MB over the grid) into registers there, and deeper prefetch in that window (npf 4/8)
+  LOST on the H200 tuner (-0.8/-2.3 us for npf 0): it delays the boundary. So the idea needs pr1 to start during csl/o,
+  i.e. a T=1 megakernel (o GEMV -> grid barrier -> bnd -> pooler/router, pooler W preloaded into SMEM during the o phase).
+  Est. upper bound: ~20-28 MB of spare HBM in the csl/o/bnd window (~13.7 us H100) = -5..7 us d1 sl/full (~+1% layer
+  score) minus the grid-barrier cost (~1-2 us). Multi-session build; not started.
