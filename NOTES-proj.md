@@ -578,3 +578,24 @@
   vs best split-K (66,27 or 16,35,3,2,...) incl. splitKreduce 16.96-17.54. H100 s20: FP32-out splitK=1 = BF16-out
   splitK=1 (17.70 vs 17.54). So lt32f = +1.0-1.5 us at d32: told the layer (Requests s21) not to wire it.
 - No judge runs. Checks 10-26: 17/20, scored 5/10. Board best unchanged 3810db09 1.3110x.
+
+## Session 22 (2026-10-26 12:46 - UTC): QSS = the layer's d32 qkv as 2 FP32 bmm slabs, attention sums them at load
+- Idea: the layer's d32 qkv is cuBLASLt split-K + splitKreduce (H200 12.7 + 2.0 us), and attention already reads FP32
+  qkv at T=32 (layer v68 QF32_NDS). One strided batched GEMM over k-halves (torch.bmm out_dtype FP32, the layer's
+  pooler-slab trick) has 2x the CTAs of splitK=1 and needs no reduce kernel; attention adds the 2 slabs in FP32 and
+  rounds to BF16 at each load (= cuBLAS split-K reduce + BF16 output, just a different k split).
+- H100 standalone (graph, cold L2; /tmp/pj/s22/slab.py): qkv m32 bmm2 24.9 vs every lt config 26.6-27.3 us; o: loses.
+- **H200 diag check ccf41026 (4762be7, 1.3162x, print-only `_diag_slab`; not submitted, no pick changes)**, tuner us
+  incl. ~4.6 graph: qkv m32 lt pick 17.50, mm FP32-out 18.11, bmm2 16.03, bmm4 16.16, bmm8 16.19; qkv m16 lt 17.22,
+  bmm2 15.90 / bmm8 15.84 (layer d16 uses g19 instead); o m32 lt 10.24 vs bmm2 10.66; pooler m32 22.59 vs bmm4 22.27.
+- Layer patch muse_bf16_proj/dev/qss_layer.patch (vs r-layer 20b864e; `git apply --check` passes on its working
+  tree): attn_src.py nds tag type qs2 (qld8/qld4 add the slabs; new int qss arg, module renamed muse_nds_a2s10q2),
+  Gluon _gd_full(_body) and Triton _combine/_combine_hb/_combine_bal/_red_fin get QSS constexpr (_qld/_gqld/_gqldm
+  helpers); kernel_fn falls back to slabs.sum(0) on every other path (csl/vtk/nvs/verify/generic). layer.py: QSS_NS 2,
+  QSS_DEFAULT {32: True}, TUNE[32] += {"qss": False}, {"qss": False, "lt:qkv_gate": True}; data["qkv_ss"/"qkv_slabs"].
+  New tools/qss_eq.py: attention on slabs == attention on their FP32 sum, bit-exact (cache + out; full layers nondeterministic at ctrl level): bad 0.
+- H100 layer A/B (tools/ab_files.py, 12 rounds, TUNE = {} in both so the per-prepare tuner can't pick differently):
+  d32 sliding 204.98 -> 203.44, full 433.95 -> 432.42 us (-1.5 each). With the tuner on, A/B is dominated by tuner
+  pick noise (one run said sliding +2.3): pin options for A/Bs. Timeline (tools/timeline.py): attention ends 1.9 us
+  earlier; attention itself +0.3 (nds/combine) .. +0.9 (full) us for the 2nd slab loads.
+- Tests on the patched build: bench.py test 13/13, replay_test decode 32 x 20 inputs x 3 router seeds: 0 fails.
