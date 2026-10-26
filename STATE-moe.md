@@ -2,7 +2,7 @@
 
 ## Board
 - Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z). Board is a TEST BED only (lead 01:45Z): the layer counts.
-  Used 2026-10-26: checks 20 of 20 (all DIAG since s12, never submit those), submits 3. s15: none left. Sandbox ends ~19:10Z (no reset). s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
+  Used 2026-10-26: checks 20 of 20 (all DIAG since s12, never submit those), submits 3. s15-s17: none left. Sandbox ends ~19:10Z (no reset). s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
   worse), d4909e24 2.170 (twm mixed: neutral). Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
   bs128 196-207, bs256 243-251 (judge noise +-4%).
 - **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.
@@ -19,6 +19,7 @@ tools/mktl_diag.py = same for a per-CTA globaltimer timeline (diagtl lines). H20
 t = 14.1 + 6.97 * experts + 4.4 * extra 8-token groups (us); 6.97 us/expert = 4.06 TB/s (85% of HBM peak).
 
 ## What's on main (submission.py)
+(Older options/kernels still in the file -- GS16, DYN, TK2F 0, moe_tw/moe_big/moe_tb/moe_sk/moe_tk: see NOTES s3-s10.)
 s11: M > 32 now runs **moe_twm** (TWF_MIX = 1): moe_twf with the item shape chosen per expert (RT 2 / 64-token passes,
 packing w*b2, for experts with > 32 tokens; RT 4 / 32-token passes otherwise; stage stride = RT 4 stage). prepare packs b2 too.
 Options (off): TWF_SPLIT / TWF_SPLIT_M (K-split tail items, FP32 partial + ticket/flag in st["tk"], split starts at an
@@ -27,8 +28,6 @@ nondeterministically: any per-pass treatment difference makes outputs nondetermi
 s10 (c33acae): RACE FIX in tk2f_consume: a consumer arrives on empty[stage] only AFTER the stage's dq/mma (was: right
 after issuing the LDS -> the producer could overwrite the stage before the LDS read it; = the s7 race). Never move the
 arrive back up. moe_tk / moe_tk2 / tk2d (DYN) still have the early arrive (not default paths): fix before using them.
-GS16 option (TK2G=0 off): tk2g_row/tk2g_consume, cfg +10000 (+ digit w: weighted split tk2g_split), 2nd token group's x
-in smem (+64 KB dyn), s_red x2. Correct (tools/gs_ab.py), slower (see Session 10).
 s9: TK2SA = TWSA = 1: e4m3 block scales decoded arithmetically (sca<K>(w) = __byte_perm(w,0,0x4K4K)*16 + 0x77007700)
 in tk2f_consume and tw_item (moe_twf) when prepare() found every scale positive normal (st["sa"]); else the smem LUT.
 moe_twf's choice is a host flag (moe_set_sa, set in kernel_fn). TK2FN = 0: fused norm (moe_tk2fn_launch) kept, dead.
@@ -38,18 +37,10 @@ prologue, the ring continues, so the producer streams w2 while gemm13 drains) + 
   Launch cfg = (D+1)*1000 + KPS*100 + NSTG (tk2f_go dispatch in moe_tk2f_launch). Defaults: TK2F = TK2F_DYN = 204 (static, all M:
   the submitted code); DYN = cfg 5402 (judge: no gain, check b890d69b). KPS 2/4 cut per-stage overhead: H200 -3..4% at bs8-32 (check 74a049c0);
   locally the H100 is DRAM-bound (ncu dram 83%) and shows nothing: use smsp__inst_executed (tools/ncu_tk2f.sh) as proxy.
-- DYN: CTA b takes static rows [b*S, (b+1)*S) of each phase (S = rows/grid - D), then single rows from the tail
-  [grid*S, N) via cnt[1] (gemm13) / cnt[2] (gemm2) atomics, pulled by the producer one row ahead; row ids reach the
-  consumers via s_rid[4] (written before the row's first full-barrier arrive). Phase-1 end = soft marker (-1, no
-  stage), phase-2 end = an empty stage. Per-CTA phase ends spread ~10% of the phase (per-SM speed, not row counts):
-  DYN fixes that on the H100 (bs8-32 -3..4%) but NOT on the H200 (consumer-bound: SMs already even). Row ids use
-  arrive-only mbarriers ridb[4] (a phase-end wait on a data stage cost an HBM latency at bs1).
 gemm13 consumers add their finished rows to cnt[0] (bar.sync 2 + thread-0 threadfence + atomicAdd); gemm2 consumers
 spin (ld.acquire) until cnt[0] == n13, then load inter with __ldg. cnt = st["cnt"] (int32[128], zeroed in prepare,
 re-zeroed by moe_norm2 after each call: no memset node). DO NOT go back to per-segment counters or ld.global.cg
 inter loads without a many-routing sweep (tools/sweep_routings.py, also with +64 KB dyn smem): see NOTES s7 race.
-TK2F = 0 = the old 3-launch path below (moe_tk2 x2 + norm2), kept as reference (tools/race_ab.py compares bitwise).
-Old 3-launch decode (moe_tk2 x2 + norm2, TK2F = 0): see NOTES s3-s6.
 M > 32 (TW_CFG = 418, TWF = 1): route -> moe_gather -> moe_twf (gemm13 AND gemm2, one persistent launch) -> moe_norm.
 - moe_twf<RT=4, NSTG=8> (s6): 384 threads = 2 consumer WGs + producer warp (setmaxnreg 40/232), 1 CTA/SM. Work
   counter meta[66] hands out all gemm13 items, then all gemm2 items (heaviest experts first). Item = (expert,
@@ -64,14 +55,10 @@ M > 32 (TW_CFG = 418, TWF = 1): route -> moe_gather -> moe_twf (gemm13 AND gemm2
 - Stage (1 k-chunk of 64) = TMA tensor-map copy of the x tile (box 64 k x {8,16,32} rows by nv, SW128) + bulk copy
   of the item's weights (prepare: _tb_pack(rt=4) -> w13b4/w2b4 [e][rb][kc][warp][RT][lane]) + 1 of scales.
   Consumers: dq() into registers = wgmma RS A fragment, wgmma m64nNk16 (N = 8*ceil(nv/8)), ring of 2, wait_group 1.
-- Older big-M kernels still in the file: moe_tw (TWF = 0; TW_CFG 218 = RT 2 / 64-token passes; 1118 = 16 consumer
-  warps x RT 1), moe_big (TW_CFG = 0), moe_tb.
 - moe_gather: xg[pos] = x[sroutes[pos]>>3] with each 64-chunk permuted to the _pack_weight K order. xg / inter
   are per-call torch.empty; tensor maps are encoded inside moe_tw_launch from the passed buffer.
 - dequant dq(): o0 = q&M, o1/o2 = rotl(q,10/13)&M, o3 = ((q&0x001B001B)*16648)&M, M=0x81C081C0; 4 x
   bf16x2 mul with LUT scale. 12 instr per 8 weights. (_POS in prepare must match.)
-- Also in the file (not used by default): moe_sk (register-ring stream-K + atomics, SK_CFG path when
-  TK2_NSTG=0), moe_tk (TMA + atomics), moe_gemm (old decode), route2/act. Clean up when convenient.
 
 ## Local harness
 Tools in muse_moe_w4a16/tools/ (copies of the /tmp scripts): ncu_t.sh (H200 proxy), seeds.py (200 routings), cmp.py, moe_regs.sh,
@@ -82,6 +69,19 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 `muse_moe_w4a16/bench.py test|bench|sweep`. Local H100 big-M of main (moe_tw): bs128 244, bs256 304 us.
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
+
+## Session 17 summary (moe_twq for T=128; s16's "ring cap" was a bug; see NOTES s17)
+- s16's TWX ablation builds were all the full kernel (macro redefined). Correct ablations: moe_twm items are
+  CONSUMER-bound (ring alone 18 us vs full 34.7 per RT4 N8 item at G16); dq and MMA costs add up (no overlap).
+  ncu: 2 warps/scheduler, issue 43-62%, ALU 59% (RT4 N8) / tensor 55% (RT2 N64); no single stall reason.
+- **moe_twq** (flag TWQ / TWQ_M, off on main): 16 consumer warps x RT 2, 640 threads, 32-token passes, same packing.
+  Proxy G88: v16 -6.5 proxy-us (~-4.7 H200 us), v32 +4.3 (hot experts need 64-token passes: do not fit 96 regs).
+  Handed to layer as a TUNE candidate (COORD Requests s17): the judge's H200 picks per T.
+  Layer patch: r-moe 300bd2c..4db82af diff applies onto r-layer moe_src.py (= 499bde6) with offsets; layer.py needs
+  "moe_twq_launch" in _moe__lib's list + `_moe_TWQ_M` set from _opt(state, m, "twq", 0) + TUNE[128] += {"twq": 4}.
+  (My HEAD also has s15's tk2f FP option text: re-copying the whole file breaks the layer's text anchors.)
+- Dead: dq IMAD/IMAD.WIDE rebalancing (+6..18%); exhaustive nibble-layout search (nothing beats 7 ALU + 1 IMAD);
+  N48/N64/N96 passes in twq/twm (C7512: whole-kernel wgmma serialization); inline producer in warp 0 (2x slower).
 
 ## Session 16 summary (no speedup; H200 PROXY found; big-M per-SM ingest cap found; see NOTES s16)
 - **H200 proxy for the expert kernels**: H100 with the persistent kernels' grid capped at 88 CTAs (MOE_GRID env in a
@@ -96,12 +96,16 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
 ## Session 15 summary: big-M item-cost ablations (s16 corrected them: the 'ring floor' was L2 saturation; at low
    concurrency the ring alone is the cost); tk2f FP option (producer routes itself) off: layer harness +0.2..1.8 us.
-## Session 14 summary: twm item orders (TWM_ORDER bits), TWM_TAIL class, H200 timeline tool (tools/mkdiag14.sh); main o76 at
-   M=256 (H100 win, proxy s16 says H200 loss). Dead: tw_item next-stage LDS prefetch, TWM_TAIL13, TWM_TAIL + merge.
-## Session 13: tk2f norm3 (slot-ordered y32, TK2F_DYN 84204) -0.5..0.75 us d16/d32; consumer has no single limiter (NOTES).
-## Sessions 8-12: see NOTES (s10 race fix + layer harness, s11 twm/K-split).
+## Session 14 summary: twm item orders / TWM_TAIL / H200 timeline tool (NOTES s14).
 
 ## Ranked ideas
+-8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
+   all their tokens needs N 96-128 accumulators = a SEPARATE kernel (ptxas sizes registers for the whole function).
+   E.g. hot experts on their own launch on a subset of SMs concurrently with twm/twq for the rest (2 streams or one
+   kernel with blockIdx-split roles: the dependency counters already work across CTAs). Est. v32 -20 H200 us.
+-7. (s17) tk2f d1 fixed cost (H200 timeline s12: routed 1.5, first data 3.6, ph1 end 11-13, cnt ok 14.1, end 16-19):
+   overlap gemm2 with gemm1's drain by I-chunk readiness (per-chunk counters, gemm2 K split by inter chunk), or start
+   streaming the routed experts' w13 before griddepcontrol.wait if the layer can publish ids earlier. d1 weight .161.
 -6. (s16) Find why moe_twm's ring ingests only ~31.5 GB/s per SM (ring-only, G16) when a bare bulk ring of the same
    stage shape does ~60 (NOTES s16 bisect list), then check tk2f for the same cap (its H200 rate is also ~31 GB/s/SM).
    Measure with tools/s16 (G16 warm items for the cap, G88 proxy for the H200 effect).
@@ -143,7 +147,3 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - (s7) norm fused into moe_tk2f behind a grid barrier (worse, bs1 +3 us); L2 bulk prefetch of next rows in tk2f
   (much worse); memset node for counters (+2.6 us; keep counters in state, zeroed by norm2).
 - (s6) moe_tw with 16 consumer warps x RT 1 (cfg 1118): 115M vs 78M instr, local +10%. Decode NSTG 6/12 (judge -5%).
-- (s5) decode PDL (gemm2 secondary + routing recompute) and tk2_map blk 2 row order: judge worse (checks 52e5359f, 9acf8e84, 715085cb).
-- (s5) tw2 L2 prefetch of first item before griddepcontrol.wait: no local gain.
-- (s3-s4) older dead ends (moe_tw K-split tail, moe_tb, RT4/KG2 at 384 threads, 16-token tk2 groups, register-ring
-  stream-K, moe_stream): NOTES-moe.md sessions 3-4.

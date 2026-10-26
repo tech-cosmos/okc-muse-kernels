@@ -478,3 +478,9 @@
   (lane-0-only pump with __syncwarp around warpgroup MMAs: warp 0 never reached its first k chunk; fixed by running
   the producer control flow warp-uniformly), then 2x SLOWER (v16 445 vs 228, v32 600 vs 297): warp 0's polling/pump
   steals issue slots and delays WG0's MMAs, and every ring slot waits for all 16 warps. Code: /tmp/moe17/twq_inline.patch.
+- Layer harness copy (/tmp/layer17 = r-layer working tree 10:51Z + tools/s17/twq_layer.patch: the s17 diff applied
+  to moe_src.py (= 499bde6), "moe_twq_launch" in _moe__lib, `twq` TUNE option at T=128/256): tests 13/13. The H100
+  prepare-time tuner PICKS twq at T=128 full: 469.2 default vs 454.2 twq (confirm 467.3 vs 455.5: -11.8 us full
+  layer); T=256 sliding twq 426.0 vs default 433.5 but order 76 (+unpool lt) 417.7 wins. (ab_flag "_moe_TWQ = 0/4"
+  shows no difference because the tuner's pick sets _moe_TWQ_M per call.) `git apply --check` OK on r-layer's tree.
+- N48 single pass in twq for 33..48-token experts: C7512 too (dead).
