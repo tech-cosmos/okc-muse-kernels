@@ -355,7 +355,7 @@
   tk2f full 55.4 -> 57.2), v16 279.7/367.3, v32 361.0/529.5. Unresolved by one check; kept on main (H100 says win).
   Not submitted (needs > 1.9459). Budget 2026-10-26 at 05:55Z: checks 12/20, submits 8/9.
 
-## Session 12 (2026-10-26 05:19-06:10Z)
+## Session 12 (2026-10-26 05:19-05:55Z)
 - H200 idle budget (lead 05:00Z ask), posted under COORD Requests "layer -> all (s12 05:30Z)". Per-shape gap to the
   judge floor x score weight (%/us sliding|full: d1 .161|.056, d16 .072|.025, d32 .056|.020, v1 .096|.033,
   v16 .041|.014, v32 .031|.011): every load is 8.0-9.4% of score from its floor (sum ~50%). Top items: (1) moe big-M
