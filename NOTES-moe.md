@@ -860,3 +860,24 @@
 - Added ("h32rg0", RG 0) / ("h32rg1", RG 1) (both HOT_M {256: 32}) to DIAG_VARIANTS["big"]: RG is a module global read
   in kernel_fn at call time, so the DIAG override works. py_compile OK; DIAG = 0 on main (board code = s33).
 - Next sandbox: first moe check = DIAG run (STATE s30/s34 sections); grep "diag12 MEAN" in the job log.
+
+## Night4 session 1 (2026-10-26 19:15Z - 20:10Z) -- NORM_EARLY: post-expert norm inside twm's drain (no judge runs)
+- New sandbox okc-night4: bench test 15/15; DIAG copy (DIAG = 1) runs locally, v32 off 247.7 | h32 231.0 | h32rg1 230.5 us.
+- Measured the serial cost of moe_norm after moe_twm (H100, graph with vs without the norm launch, 5 seeds):
+  T=128 239.3 vs 235.9 (3.4 us), T=256 274.4 vs 267.1 (7.3 us). ncu (base clock) moe_norm alone 7.0 / 10.6 us.
+- NORM_EARLY (submission.py, #define substituted in _lib(); python NORM_EARLY picks moe_norme_launch for the twm path):
+  * moe_twm: s_nd2[a] = gemm2 item ends of slot a = (cum1[a+1]-cum1[a]) + max(0, cum1[a+1]-max(cum1[a], n2f)) (K-split
+    halves count twice: the 2nd half writes Y before its count). gemm2 item end: bar.sync 1,256; thread 0 threadfence,
+    atomicAdd(meta[100+e]) and + 1 << 20 when it was the last. moe_hot: same with HN::NRB items per expert.
+  * moe_route / moe_routegather zero meta[100..131] (meta now 132 ints).
+  * moe_norm got a `rdy` param (nullptr = the old griddepcontrol.wait). rdy set: threads 0-7 spin (ld.acquire.gpu,
+    nanosleep 256) on the token's local experts' flags, __syncthreads, Y loads via __ldcg. Safe vs PDL: the norm grid
+    launches only after every twm CTA has run its trigger (after its own wait / moe_hot's), so ids/tw are visible
+    and no norm CTA can take an SM a not-yet-resident twm CTA needs.
+- H100 layer routings (tools/layer_ab.py, same build, ENV=NORM_EARLY): hot off v16 195.1/195.1, v32 238.7 -> 233.6;
+  hot 32 (2 runs) v32 229.8/230.5 -> 226.4/227.0, v16 tie. vs HEAD build (hot 32, ABAB): v32 231.2/230.5 -> 227.0/228.0,
+  v16 195.8/199.4 -> 193.8/196.4 (noisy). => v32 -3.3, v16 0..-2 us.
+- Correctness: tools/n4s1/ne_bitwise.py 0 of 640 differ (layer routings + 30 skewed T=33..257, HOT_M off/on,
+  TWF_SPLIT_M off/on, 20 back-to-back graph replays each); seeds_big 0 bad (hot off and on); bench test 15/15.
+- DIAG_VARIANTS big += ("h32ne0", hot 32 NE 0), ("offne0", NE 0): the 00:00Z DIAG check A/Bs it on the H200 too.
+- Why v16 gains little: probably most tokens have a route to one of the last-finishing experts; not investigated.

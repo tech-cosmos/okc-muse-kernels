@@ -2,7 +2,7 @@
 
 ## Board
 - Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z). Board is a TEST BED only (lead 01:45Z): the layer counts.
-  Used 2026-10-26: checks 20 of 20 (all DIAG since s12, never submit those), submits 3. s15-s18: none left. Sandbox ends ~19:10Z (no reset). s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
+  Used 2026-10-26: checks 20 of 20 (all DIAG since s12, never submit those), submits 3. Budget resets 00:00Z (sandbox okc-night4). s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
   worse), d4909e24 2.170 (twm mixed: neutral). Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
   bs128 196-207, bs256 243-251 (judge noise +-4%).
 - **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.
@@ -71,6 +71,19 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 1 (19:15-20:10Z, no judge runs: moe checks 20/20 until 00:00Z) -- NORM_EARLY on main (9898def)
+- Sandbox okc-night4 verified: bench test 15/15, DIAG copy runs (v32 off 247.7 / h32 231.0 / h32rg1 230.5 us H100).
+- NORM_EARLY = 1 (compile-time #define, python global picks the launcher): moe_twm / moe_hot bump meta[100 + e] per gemm2
+  item end (+ 1 << 20 at the expert's last item; K-split halves both count); moe_norme_launch = moe_norm with rdy =
+  meta + 100: 8 threads spin (ld.acquire) on the token's experts, then Y via ld.cg, NO griddepcontrol.wait, so norm CTAs
+  run on the SMs twm's drain frees. meta is now 132 ints (route kernels zero [100, 132) when NORM_EARLY).
+  Why: moe_norm costs 3.4 (T=128) / 7.3 (T=256) us serial after twm (H100, graph with vs without it).
+  H100 layer routings: v32 -3.3 us (hot 32: 230.2 -> 226.7) / -5.1 (hot off), v16 tie..-2. Bitwise = NE 0
+  (tools/n4s1/ne_bitwise.py: 640 replays, hot off/on, K-split on/off), seeds_big 0 bad (hot off/on).
+- DIAG_VARIANTS big += h32ne0 / offne0 (NE 0 in the same build; others run NE 1). FIRST check at 00:00Z = this DIAG.
+- Handoff to layer posted (COORD): its route kernels (moe_route/moe_routegather/moe_gathern prologue) must zero
+  meta[100 + e], its meta allocations must be >= 132 ints, then call moe_norme_launch after twm at T = 128/256.
+
 ## Session 34 (18:25Z, no judge runs; sandbox ends ~19:10Z): DIAG_VARIANTS "big" += h32rg0 / h32rg1 (RG 0/1 with hot 32),
 so the next sandbox's FIRST moe check (sed DIAG = 1 into a /tmp copy) A/Bs moe_hot G AND RG on the H200 in one run.
 Board code unchanged (DIAG = 0). Then report the winners to layer under Requests.
@@ -79,27 +92,12 @@ Board code unchanged (DIAG = 0). Then report the winners to layer under Requests
 old, 15/15). H100 layer_ab v16 -1.1 us, v32 tie. Handoff for layer's moe_gathern at T=128 (NOTES s33). Next sandbox:
 first moe check = the queued moe_hot DIAG (s30), add RG 0/1 to DIAG_VARIANTS if cheap.
 
-## Session 30 (no judge runs): DIAG_VARIANTS on main = moe_hot H200 queue (off/h24/h32/h40/h32o76/o76); local run v32
-off 253.3 -> h32 236.7 us (H100 full grid), bitwise. Proxy: with hot on, o76/o4/split66 tie, tail32 +2.6. Layer v87 has hot 32.
-NEXT (new sandbox): FIRST moe check = this DIAG (sed DIAG = 1 into a /tmp copy; NOTES s30). Then: no moe-local idea is left
-with size on the H100 (NOTES s30); ask lead/layer for an overlap item (expert stream during attention/routing) to own.
-
 ## Session 29 (no judge runs): moe_hot BUILT (r-moe main, HOT_M default {} = board unchanged). Layer: _moe_HOT_M = {256: 32}
 + 2 function names (tools/s29/README, hot_moe_src.diff). Bitwise = off; 48 skewed routings 0 bad. Layer copy H100: v32 sliding
 395.2 -> 387.4, full 646.3 -> 644.0 us; H200 proxy (HOT_EMU queued-CTA emulation) -18 proxy-us (~-13 H200 us). NOTES s29.
 NEXT: H200 DIAG (moe check) of HOT_M {256: 24/32/40} on the layer routings (DIAG_VARIANTS = python globals: works), or let
 the layer's tuner pick it as a T=256 option. Then: same idea at the 33..64-token experts (N64 RT2 passes already single)?
 no: those are one pass already. Next lever: the twm drain at v16/v32 (STATE idea -5).
-
-## Session 32 (17:10Z): review only; expert-stream overlap with earlier phases re-checked dead (layer s38 oracle, s41 timeline). NOTES s32.
-
-## Session 31 (16:50Z, no judge runs): housekeeping for the NEW sandbox (/tmp is lost at ~19:10Z)
-- Layer routings now in the repo: tools/data/routes.pt (+ dump_routes.py); tools/layer_ab.py loads it from there
-  (was /tmp/moe10). tools/mktl_diag.py creates /tmp/moe12 itself. H100 layer_ab v16 = 200.7 us (= s30).
-- Re-checked the N40/N48 class idea against the routings: v16/v32 have only 0-2 experts of 33-48 tokens per call
-  (v16 max 36-49 tokens, v32 hot 73-98 + one 32-50): <0.5 us, stays dead (also s18: twm register limit).
-- Session 25's list (a = moe_hot: DONE s29; b = barrier-free d1 <0.15%) is closed. Next sandbox order: (1) the queued
-  moe_hot DIAG (s30 section), (2) if hot G != 32 wins by > 1 us, tell layer (Requests) which G / tuner candidates.
 
 ## Session 21 summary (L2 cache hints on the expert weight streams; NOTES s21)
 - main = b32928b: TK2F_L2H = 4 (tk2f: evict_last on every row of an expert with > 8 tokens, evict_first on the rest)
