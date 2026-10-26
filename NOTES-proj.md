@@ -657,3 +657,20 @@
 - After a 3 us PDL predecessor (g19_pred; dev/tg2pdl.py, dev/tg2o.py): tg2 PDL unp1k m8 +2.3..2.8 vs g17 +6.0..6.5 / tg2
   no-PDL +5.2..5.7; o m8 S8 +6.0 vs g14 +7.4..7.7; o m1 S8 +6.4 vs g10 +7.2; unp1k m1 S16 +2.7 vs g17 +4.2. Handoff + layer
   request posted (COORD proj s26). Layer's own o/unpool paths may already be PDL secondaries / fused n2u: it A/Bs.
+
+## Session 27 (2026-10-26 13:34-14:05Z): TG2 for the layer's o at T=1/T=8: DEAD in the layer harness (H100)
+- No judge runs (proj checks 20/20 today; layer budget spent too). Layer had not tried TG2, so I did it in a /tmp copy of
+  r-layer v70 (909010f): built submission.py, then patched it: after `_g19(o, "o")`, if TG2_O[(T, sliding)] = S:
+  tg2s(o, W_o, out, use_pdl=True, S) (W warps stream before griddepcontrol.wait, x after). bench.py test 13/13 with
+  TG2 on at T=1 and T=8 (sliding + full).
+- tools/ab_flag.py, 5 interleaved rounds, medians us (layer's pick = gemv10 PDL after csl at T=1; g12/g14 at T=8):
+    shape              current   tg2 S4   S8      S16
+    decode 1 sliding    90.42    92.67   93.81   94.45
+    decode 1 full      112.58   113.79  115.57  116.00
+    verify 1 sliding   152.29   153.47  153.90  155.71
+    verify 1 full      167.34   168.03  169.12  171.01
+  Loses +0.7..4 us everywhere: in the layer the predecessor is attention (busy SMs + smem), so tg2's 50-200 KB/block
+  can't become resident early; my 3 us PDL predecessor (32 tiny blocks) was too kind. Unpool slice at T=1/8 is already
+  fused (n2u / nu8 with W in smem before the wait), which is the same overlap idea: not tried. TG2 stays only as the
+  proj-board tuner candidate at unpooler m8 (3addab4, not judge-checked).
+- Lesson: PDL-overlap microbenchmarks must use a predecessor that occupies SMs/smem like the real one (csl/nds/tk2f).
