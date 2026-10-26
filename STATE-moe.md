@@ -99,12 +99,7 @@ NEXT: H200 DIAG (moe check) of HOT_M {256: 24/32/40} on the layer routings (DIAG
 the layer's tuner pick it as a T=256 option. Then: same idea at the 33..64-token experts (N64 RT2 passes already single)?
 no: those are one pass already. Next lever: the twm drain at v16/v32 (STATE idea -5).
 
-## Session 21 summary (L2 cache hints on the expert weight streams; NOTES s21)
-- main = b32928b: TK2F_L2H = 4 (tk2f: evict_last on every row of an expert with > 8 tokens, evict_first on the rest)
-  + TWM_L2H = 1 (moe_twm: evict_last if a later pass re-reads, evict_first else). Bitwise unchanged. H100 ncu: tk2f
-  DRAM bytes at d16/d32 = floor (was +12% when an expert's 2nd 8-token group re-read from HBM). Layer harness copy
-  (H100): v1 -4..-6, d16 -3..-4 full, v16 -3..-4, d1 -0.5, d32/v32 0 us. Handoff posted (tools/s21/patch_layer.py 4 1).
-- Dead: the same hints in moe_twq (v16 +7 us). Untested on the H200 (no checks left today).
+## Session 21: L2 hints TK2F_L2H = 4 / TWM_L2H = 1 on main (NOTES s21).
 
 ## Ranked ideas
 -9. (s19) grid-aware twm tail by K-split: DONE s20, tie (halves) / dead (quarters). Tail needs cheaper items, not finer.
