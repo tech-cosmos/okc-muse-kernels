@@ -629,3 +629,16 @@
   RAW consumers are ~2.5-3.6 us faster but the stream then binds (27.3 vs its NOW 21.5): loses 1.5-3.5 us. DEAD.
   Also: even the RAW consumer-only time (21.5) is far above the bare stream (~18.3 H100 / 13.7 H200 for 50 MB): the
   per-stage fixed skeleton is the floor of the g19 design at m32, not decode alone.
+
+## Session 25 (2026-10-26 13:20-13:50Z): judge-image GEMM libraries, H200 diag (check 5abb71f1a9c74bed, bf4689c, 1.3040x)
+- `_diag_ext` (prepare, print only) lists the image's GEMM entry points and times DeepGEMM `bf16_gemm_nt(x, w, out)` vs
+  our tuner pick (graph replay, cold L2, us incl. ~4.6 graph cost). Versions: deep_gemm 0.2.1.post1+muse.cbe1727,
+  flashinfer 0.7.0.post1, sgl_kernel 0.4.9.
+- pick / deep_gemm: qkv m16 16.70/17.66, m32 18.02/17.98, m128 18.98/20.51, m256 20.70/22.94; o m128 10.72/10.53,
+  m256 12.45/12.42; pooler m32 22.18/24.80, m128 25.44/28.70, m256 28.35/33.89; unpool m128 22.88/23.01. DEAD (ties at
+  best, -0.2 us on o; not worth a layer option). First call 0.0 s (no JIT visible).
+- Untested candidates seen (for tomorrow's budget): flashinfer `tinygemm_bf16`, `trtllm_low_latency_gemm` (+
+  `prepare_low_latency_gemm_weights`), `mm_M1_16_K7168_N*_bf16` (fixed shapes, not ours), `mm_bf16`/`bmm_bf16` (likely
+  SM100 only), `routergemm`; deep_gemm also has `cublaslt_gemm_nt` and `bf16_mega_moe`/`bf16_mega_gate` (MoE). tinygemm /
+  low-latency gemm at m8/m16 vs g14/lt is the only one plausibly worth a diag.
+- DIAG_EXT = {} again (only the import/name print stays). Board 1.3110x unchanged. Budget 10-26: checks 20/20.
