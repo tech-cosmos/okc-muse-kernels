@@ -1,11 +1,14 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~14:25Z (session 35: main = v75, NOT judge-checked; budget for 10-26 spent).
+Updated 2026-10-26 (session 36: main = v76, NOT judge-checked; budget for 10-26 spent).
+
+**s36: main = v76 (5c5329d)** = v75 + moe s21 TWM_L2H (twm L2 hints, T>32 only): H100 tuner-off A/B v16 full -3.2,
+v16/v32 sl -0.4/-1.3 us, v32 full tie. Tests 13/13, scored verify x3 0 bad, replay verify 0/20. FIRST CHECK = main (v76).
 
 **s35: main = v75 (482a3b6)** = v72 + moe s21 TK2F_L2H (v73: H100 d16 -3.2/-4.6, v1 -3.6/-6.3 us) + pr1_npf default 0
 at T=1 (v74: H200 tuners picked it twice) + TUNE_BASE (v75: per-(T, sliding) defaults = picks both H200 tuner logs agreed on:
 T=8 nu8 (+ g14alt 1 full), T=16 sl g19:o). Tests 13/13 (v73), scored all 0 bad, replay 0/20.
-FIRST CHECK OF THE NEXT SANDBOX: main (v75) as-is; compare per shape vs 703d3a7e (d1 69.6/77.8, d16 143.3/227.7,
+FIRST CHECK OF THE NEXT SANDBOX: main (now v76) as-is; compare per shape vs 703d3a7e (d1 69.6/77.8, d16 143.3/227.7,
 d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5); read the "layer tune" lines in the log (tuner
 picks swing d1 by ~1.5 us between identical files). Submit if it beats 1.9954x.
 

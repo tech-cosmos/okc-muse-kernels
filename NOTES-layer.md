@@ -823,3 +823,11 @@
   between the two H200 runs (not in base): T=32 sl lt:o vs lt:unpool, T=128/256 (twf_split 1022 -12 us in one run, twm_tail
   32 / default in the other): the synthetic T=256 timings vary ~3% between runs.
 - Tests v75: scored_test all x2 0 bad; replay verify 1/16, decode 16 0/20 (seed 12).
+
+## s36 (2026-10-26 14:21Z-): v76 (no judge runs: today's layer budget 20/20 checks, 10/10 submits is spent)
+- v76 (5c5329d) = v75 + moe s21 TWM_L2H (r-moe 12d95a9): only the twm half of tools/s21/patch_layer.py applies
+  (tk2f half is already in since v73; script used: /tmp/twm_l2h.py = the `if twm:` rep of patch_layer.py). moe_twm's
+  weight bulk copies get evict_last when a later 64/128-token pass of the same expert re-reads them, else evict_first.
+  Runs only at T>32. H100 ab_files with TUNE = {} in both files (variants/v75_nt.py, v76_nt.py; avoids tuner noise),
+  4 rounds: v16 sl 308.32 -> 307.95, full 457.53 -> 454.30, v32 sl 411.57 -> 410.27, full 662.10 -> 662.57; T<=32 rows
+  are the same code (spread +-1.4 us = noise floor of this A/B). Tests 13/13, scored verify x3 0 bad, replay verify 0/20.
