@@ -20,13 +20,15 @@ def build(cfgs):
     src = open(os.path.join(D, "pr8.cu")).read().replace(
         "PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4]) for c in sorted(set(cfgs))))
     return load_inline(name="pj_pr8_" + hashlib.md5(src.encode()).hexdigest()[:10],
-                       cpp_sources=PR8_DECL, cuda_sources=src, functions=["pr8_launch"],
-                       extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-Xptxas=-v"] + (["-DPR8_TRACE"] if os.environ.get("TRACE") else []))
+                       cpp_sources=PR8_DECL, cuda_sources=src, functions=["pr8_launch", "pr8_pred"],
+                       extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-Xptxas=-v"] + (["-DPR8_TRACE"] if os.environ.get("TRACE") else [])
+                       + ["-D" + d for d in os.environ.get("DEFS", "").split()])
 
 
 PR8_DECL = ("void pr8_launch(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
             "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-            "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);")
+            "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);"
+            " void pr8_pred(torch::Tensor, torch::Tensor, int64_t);")
 
 
 def routing_ref(logits, bias, ls):
@@ -85,11 +87,15 @@ if __name__ == "__main__":
         import bench
         e = bench.empty_cost()
         bench._SINK = torch.zeros((), dtype=torch.int64, device="cuda")
+        PRED = int(os.environ.get("PRED", -1))  # s36: PDL predecessor (writes h, triggers at start, spins PRED ns)
+        hsrc = h.clone()
+        pre = (lambda: mod.pr8_pred(hsrc, h, PRED)) if PRED >= 0 else (lambda: None)
+        if PRED >= 0: e = bench.time_graph(pre)
         for c in cfgs:
-            for npf in (c[5], -1, -2):
+            for npf in ((c[5],) if PRED >= 0 else (c[5], -1, -2)):
                 cc = c[:5] + (npf,)
-                t = bench.time_graph(lambda: mod.pr8_launch(pk[0], pk[1], pk[2], pk[3], h, out, Wr, h32, part, logits, cnt, bias, ls,
-                                                            ids, lids, wts, MULT, REPS, LOCAL, *cc, 0)) - e
+                t = bench.time_graph(lambda: (pre(), mod.pr8_launch(pk[0], pk[1], pk[2], pk[3], h, out, Wr, h32, part, logits, cnt, bias, ls,
+                                                            ids, lids, wts, MULT, REPS, LOCAL, *cc, int(PRED >= 0)))) - e
                 print("time", cc, f"{t:.2f} us", flush=True)
     if os.environ.get("TRACE"):
         import bench
@@ -97,8 +103,10 @@ if __name__ == "__main__":
         for npf in (cfgs[0][5], -2):
             for _ in range(3):
                 torch.sum(bench._FLUSH.view(torch.int64), 0, out=bench._SINK)
+                PRED = int(os.environ.get("PRED", -1))
+                if PRED >= 0: mod.pr8_pred(h.clone(), h, PRED)
                 mod.pr8_launch(pk[0], pk[1], pk[2], pk[3], h, out, Wr, h32, part, logits, cnt, bias, ls, ids, lids, wts,
-                               MULT, REPS, LOCAL, *(cfgs[0][:5] + (npf,)), 0)
+                               MULT, REPS, LOCAL, *(cfgs[0][:5] + (npf,)), int(PRED >= 0))
             torch.cuda.synchronize()
             tr = part[8 * 8 * 256:].view(torch.int64).view(128, 8)[:, :6].double()
             tr = (tr - tr[:, 0].min()) / 1000
