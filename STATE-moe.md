@@ -1,9 +1,11 @@
 # STATE-moe (muse_moe_w4a16)
 
 ## Board
-- Best submit: ee945887cdb34d17 @128b11a, **2.131x** (2026-10-26 00:20Z; check 68739792 same code 2.140x).
-  Previous: 52169da1 2.061x @fa39ed7, 4f0ae2c7 2.033x @a0531b2. Top of board 2.55x (#10 2.37x).
-  Used 2026-10-26: checks 1 of 20, submits 1 (lead cap 9).
+- Best submit: 9a73c24a84054989 @9aa37e0, **2.176x** (2026-10-26 01:05Z; check 74a049c0 same code 2.180x), #46.
+  Previous: ee945887 2.131x @128b11a. Top of board 2.55x (#10 2.37x, #20 2.31x).
+  Used 2026-10-26: checks 4 of 20, submits 2 (lead cap 9). Per-shape (submit 9a73c24a / check 74a049c0):
+  bs1 28.0/28.9, bs16 94.5/96.4, bs32 134.1/129.4, bs8 72.2/67.5, bs128 202.1/195.6, bs256 250.0/247.0.
+  Table below = s7 (ee945887) for reference.
   | load | bs | SGLang | ours | x | floor | s6 (fa39ed7) |
   |---|---|---|---|---|---|---|
   | decode 1 | 1 | 80.0 | 29.6 | 2.70 | 11.4 | 30.6 |
@@ -24,15 +26,15 @@
 M <= 32 (decode, bs8): 2 launches, moe_tk2f (gemm13 rows then gemm2 rows in ONE persistent launch: one routing
 prologue, the ring continues, so the producer streams w2 while gemm13 drains) + moe_norm2.
 - s8: template <NC, NSTG, KPS, DYN>; KPS = k chunks per consumer warp per ring stage (stage = NC*KPS*1152 B).
-  Launch cfg = (D+1)*1000 + KPS*100 + NSTG (tk2f_go dispatch in moe_tk2f_launch). M == 1: TK2F = 402 (static rows);
-  M > 1: TK2F_DYN = 5402 (DYN, D = 4). KPS 2/4 cut per-stage overhead: H200 -3..4% at bs8-32 (check 74a049c0);
+  Launch cfg = (D+1)*1000 + KPS*100 + NSTG (tk2f_go dispatch in moe_tk2f_launch). Defaults: TK2F = TK2F_DYN = 204 (static, all M:
+  the submitted code); DYN = cfg 5402 (judge: no gain, check b890d69b). KPS 2/4 cut per-stage overhead: H200 -3..4% at bs8-32 (check 74a049c0);
   locally the H100 is DRAM-bound (ncu dram 83%) and shows nothing: use smsp__inst_executed (tools/ncu_tk2f.sh) as proxy.
 - DYN: CTA b takes static rows [b*S, (b+1)*S) of each phase (S = rows/grid - D), then single rows from the tail
   [grid*S, N) via cnt[1] (gemm13) / cnt[2] (gemm2) atomics, pulled by the producer one row ahead; row ids reach the
   consumers via s_rid[4] (written before the row's first full-barrier arrive). Phase-1 end = soft marker (-1, no
   stage), phase-2 end = an empty stage. Per-CTA phase ends spread ~10% of the phase (per-SM speed, not row counts):
-  DYN fixes that (H100 bs8-32 -3..4%); at bs1 it costs +1.4..3 us (tail rows switch segment; an L1 prefetch of the
-  next segment's x did not help), so M = 1 stays static.
+  DYN fixes that on the H100 (bs8-32 -3..4%) but NOT on the H200 (consumer-bound: SMs already even). Row ids use
+  arrive-only mbarriers ridb[4] (a phase-end wait on a data stage cost an HBM latency at bs1).
 gemm13 consumers add their finished rows to cnt[0] (bar.sync 2 + thread-0 threadfence + atomicAdd); gemm2 consumers
 spin (ld.acquire) until cnt[0] == n13, then load inter with __ldg. cnt = st["cnt"] (int32[128], zeroed in prepare,
 re-zeroed by moe_norm2 after each call: no memset node). DO NOT go back to per-segment counters or ld.global.cg
@@ -82,20 +84,23 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 8 summary
+- 2.131x -> 2.176x: tk2f stages of KPS = 2 k chunks per warp (NSTG 4, same 72 KB ring): fewer per-stage ops
+  (-5% instructions), H200 bs8-32 -3..4%. KPS 4 (402): -6.5% instr but judge tie (2.157x). DYN row tail: H100 win,
+  judge no gain. Tools: tools/ncu_tk2f.sh <bs> <cfg..> (duration, instructions, issue, dram), ab_decode.py VS=<cfgs>
+  (sets TK2F and TK2F_DYN), /tmp/moe8/mkdbg2.py + td.py (per-CTA %globaltimer timeline; recreate from NOTES if lost).
+- LESSON: the local H100 is DRAM-bound for decode (ncu dram 83%), the H200 is consumer-issue-bound: rank decode
+  changes by smsp__inst_executed and stalls, not by H100 time; then a judge check.
+
 ## Session 7 summary
 - 2.061x -> see Board: decode gemm13+gemm2 fused into one launch (moe_tk2f); found + worked around a race
   in it (NOTES s7). Tools added: sweep_routings.py, race_ab.py, ab_decode.py, readbound.py.
 
-## Session 6 summary
-- 1.985x -> 2.061x: big-M RT=4 (32-token passes, a0531b2: 2.033x), then gemm13+gemm2 fused into one persistent
-  launch (moe_twf, fa39ed7: 2.061x; bs128 239 -> 198, bs256 281 -> 252 us). Decode unchanged.
-- Big-M is instruction-bound (ncu: ~170 instr per k-chunk per warp, 96 of them dequant; issue ~57%). More warps
-  (NW=16 x RT=1) = more instructions = worse. Amortizing per-k-chunk overhead (RT=4) and killing the gemm13 tail
-  (fusion) is what worked. ncu (seed 7) still shows SM active cycles spread min/max ~0.84 (gemm2 tail).
-- Decode on the judge: tk2 ring NSTG 12 and 6 both ~5% worse than 8 on every decode shape. moe_twf for decode
-  (TK2_MAX knob) locally +11% at bs32, +13% at bs16: not checked.
-
 ## Ranked ideas
+0'. (s8) Cut consumer instructions further (that is what moved the H200): 16-token segments (idea 0 below, now
+   on top of the KPS loop: tk2f_consume), fewer scale-LUT ops (4 LDS + extracts per kc), per-row reduce.
+   bs1 (28 us vs 11.4 floor): 2-3 experts only, 2.1 TB/s locally; long_scoreboard stalls highest there: look at the
+   routing prologue (1.8 us) and the per-row epilogue; norm2 ~4 us is a PDL secondary already.
 0. (s7) 16-token segments in moe_tk2f (2 token groups share each dequantized A fragment, 2nd group's x in smem):
    draft tools/tk2f_gs16_draft.cu (166 regs, no spill), apply on top of 128b11a's wait/__ldg scheme; sweep-test
    at GS 16 with tools/sweep_routings.py. bs32 has 10% (up to 40%) extra-group rows: expect bs32 -5..8%.
