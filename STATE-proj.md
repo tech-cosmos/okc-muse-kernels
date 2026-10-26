@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~18:00 UTC (session 39).
+Updated 2026-10-26 ~18:05 UTC (session 40).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -141,9 +141,10 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## kernels) by ~its whole duration when it queues its whole range at once (zero-sum); with ONE 32 KB TMA in flight per SM it
 ## streams at ~95% rate and dilates 40-60% less (16 KB: -75%, 8 KB: ~0 but half rate). NOTES s39 table.
 ## Next (ranked)
--26. (s39) Throttled-prologue test: g19/pr1/pr8 stream W stages before griddepcontrol.wait; with a MEMORY-touching PRED
-   (not a spin) compare deep vs 1-2 stages in flight per SM (pred time + ours). If the pred dilates less, hand off. Also the
-   layer s45 SMEM-resident pooler at T=1 is worth <= ~4-6 us/d1 only with a shallow filler (see NOTES s39).
+-26. (s40) DONE, dead: throttled g19 prologue (npre 1-2) beside a memory-touching pred (g19.py PRED=-8: pointer chase)
+   does not beat deep npre (pool m16 npre 2 vs 3 -0.1..0.4 us = noise; unp deepest best). Pre-wait W streaming still saves
+   ~1.1-1.5 us beside a memory pred (3.2 beside a spin). NOTES s40. Open: layer s45 SMEM-resident pooler at T=1 only with a
+   shallow side filler (NOTES s39).
 -25. (s36/s37) Layer should bundle pr8 npf 212 (and DEC3) into its next-sandbox first check (it is in layer v88). Remaining pr8 room
    (H100 ~24.4 us after pred vs ~18 us bytes): random block-finish tail ~3 us (s37: dynamic K-half stealing, design in NOTES s37)
    and the router-math phase (fewer, fatter router items). s38: the tail fix needs K split + combines, worth <= ~0.1% layer: low.

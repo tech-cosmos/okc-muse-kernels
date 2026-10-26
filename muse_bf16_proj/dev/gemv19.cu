@@ -657,9 +657,17 @@ __global__ void zero(float4* __restrict__ p, int n4, int* __restrict__ ctr) {
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += gridDim.x * blockDim.x) p[i] = make_float4(0.f, 0.f, 0.f, 0.f);
 }
 // test predecessor: lets its dependent launch, then writes x = src (n8 uint4) and spins ~ns_ nanoseconds
-__global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int n8, int ns_) {
+// ns_ < 0 (s40 probe): instead of spinning, -ns_ dependent __ldcg loads per thread through a 256 MB random index table
+// (a latency-bound, memory-touching predecessor like the layer's glue)
+__global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int n8, int ns_, const int* chase) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n8; i += gridDim.x * blockDim.x) dst[i] = src[i];
+    if (ns_ < 0) {
+        int idx = (int)((blockIdx.x * blockDim.x + threadIdx.x) * 7919u & ((64u << 20) - 1));
+        for (int i = 0; i < -ns_; ++i) idx = __ldcg(chase + idx);
+        if (idx == -1) dst[0] = src[0];
+        return;
+    }
     unsigned long long t0, t1;
     asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t0));
     do { asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t1)); } while (t1 - t0 < (unsigned long long)ns_);
@@ -722,7 +730,10 @@ void g19_stream(torch::Tensor w, int64_t sb, int64_t ns, torch::Tensor out) {
     g19::stream<<<132, 288, sm, c10::cuda::getCurrentCUDAStream()>>>((const unsigned char*)w.data_ptr(), w.numel(), sb, ns, out.data_ptr<float>());
 }
 void g19_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
-    g19::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_);
+    static torch::Tensor chase;
+    if (ns_ < 0 && !chase.defined()) chase = torch::randint(0, 64 << 20, {64 << 20}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    g19::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_,
+                                                                 ns_ < 0 ? chase.data_ptr<int>() : nullptr);
 }
 void g19_zero(torch::Tensor out, torch::Tensor ctr) {
     g19::zero<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((float4*)out.data_ptr(), out.numel() / 4, ctr.data_ptr<int>());

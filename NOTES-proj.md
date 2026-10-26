@@ -917,3 +917,17 @@ of 60 replays minus the flush-only graph. Env: PB bytes/SM, NB blocks, CH chunk 
   256-KB-kernel column or worse. Also the same rule for our own PDL prologues (W stages BEFORE griddepcontrol.wait in g19/pr1/
   pr8/g13): a shallow throttle there might help the predecessor more than it hurts us: untested, cheap to test in g19.py
   MODE=2 PRED=3000 (the PRED kernel is a spin, not memory-latency-bound: use a memory-touching PRED for that test).
+
+## Session 40 (2026-10-26 17:50-18:05Z): throttled g19 PDL prologue vs a MEMORY-touching predecessor (STATE Next 26): DEAD
+No judge runs (checks 20/20). dev/gemv19.cu `pred` now takes PRED < -1 = -N dependent __ldcg loads per thread (32x256
+threads) through a 256 MB random index table (latency-bound, memory-touching, like the layer's glue); g19.py prints the
+pred's own graph time. H100, MODE=2, numbers = graph(pred + g19) - graph(pred) in us (2 rounds for pool, within ~0.2):
+  pool m16 (16,1024,8,3,1,0,1)  npre 3 / 2 / 1 / 0:  chase-8 22.0 / 21.8 / 22.4 / 23.2   chase-24 22.3 / 21.9 / 22.6 / 23.5
+                                                    spin 3us 19.8 / 19.3 / 21.1 / 23.0
+  unp  m16 (16,1024,4,4,2,0)    npre 4 / 3 / 2 / 1 / 0:  chase-8 22.1 / 22.1 / 22.7 / 22.7 / 23.2
+                                                    spin 3us 19.9 / 20.2 / 21.4 / 22.0 / 23.0
+- Beside a memory-touching pred the pre-wait W stream still pays, but only ~1.1-1.5 us (vs ~3.2 us beside a spin pred):
+  the chase pred is dilated by the stream (as s39 predicted). Shallower prologues do NOT dilate it less enough to win:
+  npre 1 is worse than deep everywhere; npre 2 vs 3 at pool m16 -0.1..-0.4 us (noise-level; the layer's pooler m16 cfg uses
+  npre 3: a cheap A/B for the layer at most). Unpool: deepest best. Throttling our PDL prologues: dead. The s39 "one 32 KB
+  in flight" rule matters for SIDE streams that run long beside a chain, not for g19's few-stage prologue.

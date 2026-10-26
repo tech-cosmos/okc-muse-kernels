@@ -73,10 +73,10 @@ for nm, layer, n in SH:
     for M in sorted({c[0] for c in cfgs}):
         x = torch.randn(M, k, device="cuda").bfloat16()
         xsrc = x.clone()
-        pre = (lambda: mod.g19_pred(xsrc, x, PRED)) if PRED >= 0 else (lambda: x.mul_(1)) if XW else (lambda: None)
-        if (XW or PRED >= 0) and not os.environ.get("PROF"): e = bench.time_graph(pre)
+        pre = (lambda: mod.g19_pred(xsrc, x, PRED)) if PRED != -1 else (lambda: x.mul_(1)) if XW else (lambda: None)
+        if (XW or PRED != -1) and not os.environ.get("PROF"): e = bench.time_graph(pre)
         tc = 0.0 if os.environ.get("PROF") else bench.time_graph(lambda: (pre(), F.linear(x, W))) - e
-        line = f"{nm:5s} m{M}: cublas {tc:6.2f}"
+        line = f"{nm:5s} m{M}: pred {e:6.2f} cublas {tc:6.2f}"
         out = torch.empty(M, n, device="cuda")
         for (m_, kc, ap, ns, is_, tpb, xb_, ts_, rg_, rpw_) in cfgs:
             if m_ != M or k % kc: continue
