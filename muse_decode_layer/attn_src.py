@@ -1703,12 +1703,30 @@ __device__ __forceinline__ uint2 qld4(const float* p) {
     const float4 a = *reinterpret_cast<const float4*>(p);
     return make_uint2(qpk(a.x, a.y), qpk(a.z, a.w));
 }
+// proj s22 (QSS): qkv as 2 FP32 split-K slabs qss elements apart (one batched GEMM, no split-K reduce kernel): the
+// two partials are added in FP32 and rounded to BF16 (RN) at the load, as cuBLAS's splitKreduce + BF16 output does.
+struct qs2 { float v; };
+__device__ __forceinline__ uint4 qld8(const __nv_bfloat16* p, int) { return qld8(p); }
+__device__ __forceinline__ uint4 qld8(const float* p, int) { return qld8(p); }
+__device__ __forceinline__ uint4 qld8(const qs2* q, int qss) {
+    const float* p = reinterpret_cast<const float*>(q);
+    const float4 a = reinterpret_cast<const float4*>(p)[0], b = reinterpret_cast<const float4*>(p)[1];
+    const float4 c = reinterpret_cast<const float4*>(p + qss)[0], d = reinterpret_cast<const float4*>(p + qss)[1];
+    return make_uint4(qpk(a.x + c.x, a.y + c.y), qpk(a.z + c.z, a.w + c.w), qpk(b.x + d.x, b.y + d.y), qpk(b.z + d.z, b.w + d.w));
+}
+__device__ __forceinline__ uint2 qld4(const __nv_bfloat16* p, int) { return qld4(p); }
+__device__ __forceinline__ uint2 qld4(const float* p, int) { return qld4(p); }
+__device__ __forceinline__ uint2 qld4(const qs2* q, int qss) {
+    const float* p = reinterpret_cast<const float*>(q);
+    const float4 a = *reinterpret_cast<const float4*>(p), c = *reinterpret_cast<const float4*>(p + qss);
+    return make_uint2(qpk(a.x + c.x, a.y + c.y), qpk(a.z + c.z, a.w + c.w));
+}
 template <int NS, typename QT>
 __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ qkv,
                                           const float* __restrict__ cs, Range rg, int split, int S, int qkv_w,
                                           float scale, int win, float* __restrict__ pacc, float* __restrict__ pml,
                                           uint8_t* __restrict__ kc, uint8_t* __restrict__ vc,
-                                          const long long* __restrict__ loc, float ksv, float vsv, __nv_bfloat16* __restrict__ out) {
+                                          const long long* __restrict__ loc, float ksv, float vsv, __nv_bfloat16* __restrict__ out, int qss) {
     const int tid = threadIdx.x & 127, lane = tid & 31, w = tid >> 5;
     uint8_t* qd = &sm.q[0][0];  // [64 rows][128 B] SW128
     const uint32_t qa = smem_u32(qd);
@@ -1734,7 +1752,7 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
         const QT* src = qkv + (long long)b * qkv_w + r * HD + half * 32;
         uint4 raw[4];
 #pragma unroll
-        for (int j = 0; j < 4; ++j) raw[j] = qld8(src + 8 * j);
+        for (int j = 0; j < 4; ++j) raw[j] = qld8(src + 8 * j, qss);
         float4 cv[4], sv[4];
         const float4* cp = reinterpret_cast<const float4*>(cs + (long long)pos * HD + half * 16);
 #pragma unroll
@@ -1773,7 +1791,7 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
             // _new), stored into the cache and into the new-token K row 0 / V^T key slot 0.
             const int hh = lane >> 4, d0 = (lane & 15) * 4, npos = rg.seq;
             const QT* kp = qkv + (long long)b * qkv_w + (16 + hh) * HD + d0;
-            const uint2 kr = qld4(kp), vr = qld4(kp + 2 * HD);
+            const uint2 kr = qld4(kp, qss), vr = qld4(kp + 2 * HD, qss);
             const float2 c2 = *reinterpret_cast<const float2*>(cs + (long long)npos * HD + d0 / 2);
             const float2 s2 = *reinterpret_cast<const float2*>(cs + (long long)npos * HD + 32 + d0 / 2);
             const long long slot = loc[b];
@@ -1901,7 +1919,7 @@ const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               const long long* __restrict__ loc, const int* __restrict__ pt,
                                               const int* __restrict__ seq, float* __restrict__ pacc,
                                               float* __restrict__ pml, float qk_scale, int S, int ch, int maxp,
-                                              int qkv_w, int win, __nv_bfloat16* __restrict__ out) {
+                                              int qkv_w, int win, __nv_bfloat16* __restrict__ out, int qss) {
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
@@ -1918,7 +1936,7 @@ const QT* __restrict__ qkv, const float* __restrict__ cs,
         producer<NS>(sm, kc, vc, pt, rg, maxp);
     } else {
         asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(NV_CREGS));
-        dconsumer<NS, QT>(sm, qkv, cs, rg, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc, loc, ks[0], vsc[0], out);
+        dconsumer<NS, QT>(sm, qkv, cs, rg, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc, loc, ks[0], vsc[0], out, qss);
     }
 }
 }  // namespace nv
@@ -1926,7 +1944,7 @@ const QT* __restrict__ qkv, const float* __restrict__ cs,
 void nds(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor ks, torch::Tensor vsc,
          torch::Tensor loc, torch::Tensor pt,
          torch::Tensor seq, torch::Tensor pacc, torch::Tensor pml, torch::Tensor out, double qk_scale, int64_t S, int64_t ch,
-         int64_t win) {
+         int64_t win, int64_t qss) {
     const int smem = (int)sizeof(nv::Smem<NV_NS>) + 1024;
     const int B = (int)seq.size(0);
 #define NDS_LAUNCH(QT) { \
@@ -1939,18 +1957,19 @@ void nds(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
         (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(), \
         (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(), \
         (const int*)seq.data_ptr(), (float*)pacc.data_ptr(), (float*)pml.data_ptr(), (float)qk_scale, (int)S, (int)ch, \
-        (int)pt.size(1), (int)qkv.size(-1), (int)win, (__nv_bfloat16*)out.data_ptr()
-    if (qkv.scalar_type() == at::kFloat) NDS_LAUNCH(float) else NDS_LAUNCH(__nv_bfloat16)
+        (int)pt.size(1), (int)qkv.size(-1), (int)win, (__nv_bfloat16*)out.data_ptr(), (int)qss
+    if (qss) { TORCH_CHECK(qkv.scalar_type() == at::kFloat); NDS_LAUNCH(nv::qs2) }
+    else if (qkv.scalar_type() == at::kFloat) NDS_LAUNCH(float) else NDS_LAUNCH(__nv_bfloat16)
 #undef NDS_LAUNCH
 #undef NDS_ARGS
 }
 '''
 try:
     _NDS = _load_inline(
-        name="muse_nds_a2s10q",
+        name="muse_nds_a2s10q2",
         cpp_sources="void nds(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
-                    "int64_t, int64_t, int64_t);",
+                    "int64_t, int64_t, int64_t, int64_t);",
         cuda_sources=_NDS_SRC, functions=["nds"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
@@ -2499,6 +2518,21 @@ if HAVE_GLUON:
     # less work per key (H100, all reads from L2: decode 16/32 full 84/157 -> 69/132 us), which pays where
     # per-SM bandwidth is higher (tools/emu.py: 137/261 -> 132/249 us; H100 itself: a tie).
     @gluon.jit
+    def _gqld(p, QSS: gl.constexpr):
+        # proj s22 (QSS): qkv as 2 FP32 split-K slabs QSS elements apart: add them in FP32 (then the caller rounds to BF16)
+        x = gl.load(p)
+        if QSS != 0:
+            x = x + gl.load(p + QSS)
+        return x
+
+    @gluon.jit
+    def _gqldm(p, m, QSS: gl.constexpr):
+        x = gl.load(p, mask=m, other=0.0)
+        if QSS != 0:
+            x = x + gl.load(p + QSS, mask=m, other=0.0)
+        return x
+
+    @gluon.jit
     def _gd_full_body(seq_in, SEQ_IN: gl.constexpr, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale,
                  cs_ptr, HQ: gl.constexpr, HKV: gl.constexpr, G: gl.constexpr, D: gl.constexpr, PAGE: gl.constexpr,
                  MAX_PAGES: gl.constexpr, S: gl.constexpr, BN: gl.constexpr, NS: gl.constexpr,
@@ -2506,7 +2540,7 @@ if HAVE_GLUON:
                  SEP: gl.constexpr = False, Q16: gl.constexpr = True, KST: gl.constexpr = True,
                  BAL: gl.constexpr = False, B: gl.constexpr = 1, B_PAD: gl.constexpr = 32, NP: gl.constexpr = 1,
                  NID: gl.constexpr = 1, RED: gl.constexpr = False, red_ptr=None, rcnt_ptr=None, out_ptr=None,
-                 NR: gl.constexpr = 4, epi=True, RCW: gl.constexpr = 0):
+                 NR: gl.constexpr = 4, epi=True, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0):
         h = gl.program_id(2) * 2
         if BAL:
             # Length-proportional splits (plan dbal, full layers): the NP programs of a KV head pair go to the
@@ -2591,14 +2625,14 @@ if HAVE_GLUON:
         r = gl.arange(0, M, layout=gl.SliceLayout(1, BL))
         hp = r // G
         q_ok = (c_g // D)[None, :] == hp[:, None]
-        x = gl.load(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], mask=q_ok,
-                    other=0.0).to(gl.bfloat16).to(gl.float32)
+        x = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], q_ok,
+                   QSS).to(gl.bfloat16).to(gl.float32)
         x = gl.where(q_ok, x, 0.0)
         rs = gl.rsqrt(gl.sum(x * x, 1) / D + 1e-5)[:, None]
         if ROPE:
             # Interleaved RoPE at position seq (the norm commutes with the rotation).
-            xp = gl.load(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + ((c_g % D) ^ 1)[None, :],
-                         mask=q_ok, other=0.0).to(gl.bfloat16).to(gl.float32)
+            xp = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + ((c_g % D) ^ 1)[None, :],
+                        q_ok, QSS).to(gl.bfloat16).to(gl.float32)
             cs_off = seq * D + (c_g % D) // 2
             cos = gl.load(cs_ptr + cs_off)[None, :]
             sin = (gl.load(cs_ptr + cs_off + D // 2) * gl.where(c_g % 2 == 0, -1.0, 1.0))[None, :]
@@ -2731,14 +2765,14 @@ if HAVE_GLUON:
             # each head's block), and write its one-key partial (max = its score, sum = 1, acc = V) to slot S.
             loc = gl.load(loc_ptr + b)
             zero = gl.zeros([M, C], gl.float32, BL)
-            kx = gl.where(q_ok, gl.load(qkv_ptr + b * QKV_W + (HQ + h) * D + c_g)[None, :].to(gl.bfloat16).to(gl.float32) + zero, 0.0)
+            kx = gl.where(q_ok, _gqld(qkv_ptr + b * QKV_W + (HQ + h) * D + c_g, QSS)[None, :].to(gl.bfloat16).to(gl.float32) + zero, 0.0)
             krs = gl.rsqrt(gl.sum(kx * kx, 1) / D + 1e-5)[:, None]
             if ROPE:
-                kxp = gl.where(q_ok, gl.load(qkv_ptr + b * QKV_W + (HQ + h) * D + (c_g ^ 1))[None, :].to(gl.bfloat16).to(gl.float32)
+                kxp = gl.where(q_ok, _gqld(qkv_ptr + b * QKV_W + (HQ + h) * D + (c_g ^ 1), QSS)[None, :].to(gl.bfloat16).to(gl.float32)
                                + zero, 0.0)
                 kx = kx * cos + kxp * sin
             kq = (kx * krs / k_scale).to(gl.float8e4nv)
-            vx = gl.load(qkv_ptr + b * QKV_W + (HQ + HKV + h) * D + c_g)[None, :].to(gl.bfloat16).to(gl.float32) + zero
+            vx = _gqld(qkv_ptr + b * QKV_W + (HQ + HKV + h) * D + c_g, QSS)[None, :].to(gl.bfloat16).to(gl.float32) + zero
             vq = (gl.where(q_ok, vx, 0.0) / gl.load(vs_ptr)).to(gl.float8e4nv)
             first = q_ok & ((r % G) == 0)[:, None]
             dst = (loc.to(gl.int64) * ROW_W + h * D + c_g)[None, :] + gl.zeros([M, C], gl.int64, BL)
@@ -2800,16 +2834,16 @@ if HAVE_GLUON:
                  SEP: gl.constexpr = False, Q16: gl.constexpr = True, KST: gl.constexpr = True,
                  BAL: gl.constexpr = False, B: gl.constexpr = 1, B_PAD: gl.constexpr = 32, NP: gl.constexpr = 1,
                  NID: gl.constexpr = 1, SPEC: gl.constexpr = 0, RED: gl.constexpr = False, red_ptr=None,
-                 rcnt_ptr=None, out_ptr=None, NR: gl.constexpr = 4, RCW: gl.constexpr = 0):
+                 rcnt_ptr=None, out_ptr=None, NR: gl.constexpr = 4, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0):
         # SPEC > 0 (batch 1, page 1): seq = table width - 1 known from the shape (SGLang slices the page table to the
         # batch's longest length); start on it, redo with the real length if it differs (as in _attn_split).
         if SPEC > 0:
             real = gl.load(seq_ptr + gl.program_id(1))
-            _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW)
+            _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW, QSS)
             if real != SPEC:
-                _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW)
+                _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS)
         else:
-            _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW)
+            _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS)
 
     @gluon.jit
     def _gw_verify(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale,
@@ -3355,18 +3389,27 @@ def _norm_gate_store(o, qkv_ptr, out_ptr, tok, head, c, ok, HQ: tl.constexpr, HK
 
 
 @triton.jit
+def _qld(p, QSS: tl.constexpr):
+    # proj s22 (QSS): qkv as 2 FP32 split-K slabs QSS elements apart: add them in FP32 (then the caller rounds to BF16)
+    x = tl.load(p)
+    if QSS != 0:
+        x = x + tl.load(p + QSS)
+    return x
+
+
+@triton.jit
 def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
              HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, M: tl.constexpr,
              D: tl.constexpr, S: tl.constexpr, S_PAD: tl.constexpr, SB: tl.constexpr, PDL: tl.constexpr, ONE: tl.constexpr = True,
              REDO: tl.constexpr = False, seq_ptr=None, kc_ptr=None, vc_ptr=None, ks_ptr=None, pt_ptr=None, qk_scale=1.0,
-             MAX_PAGES: tl.constexpr = 1, PAGE: tl.constexpr = 1, CHUNK: tl.constexpr = 1):
+             MAX_PAGES: tl.constexpr = 1, PAGE: tl.constexpr = 1, CHUNK: tl.constexpr = 1, QSS: tl.constexpr = 0):
     tok = tl.program_id(0)
     head = tl.program_id(1)
     b = tok // L
     h = head // G
     QKV_W: tl.constexpr = (2 * HQ + 2 * HKV) * D
     d = tl.arange(0, D)
-    gate = tl.load(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + head * D + d).to(tl.bfloat16).to(tl.float32)
+    gate = _qld(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + head * D + d, QSS).to(tl.bfloat16).to(tl.float32)
     if PDL:
         # Launched early (programmatic dependent launch): wait here for _attn_split's partials.
         gdc_wait()
@@ -3401,7 +3444,7 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
             # new tokens' slot (tsep) is exact and never flagged.
             ROW_W: tl.constexpr = HKV * D
             BK: tl.constexpr = 8
-            x = tl.load(qkv_ptr + tok * QKV_W + head * D + d).to(tl.bfloat16).to(tl.float32)
+            x = _qld(qkv_ptr + tok * QKV_W + head * D + d, QSS).to(tl.bfloat16).to(tl.float32)
             q8 = (x * tl.rsqrt(tl.sum(x * x, 0) / D + 1e-5)).to(tl.float8e4nv).to(tl.float32)
             scale = qk_scale * tl.load(ks_ptr)
             seq = tl.load(seq_ptr + b)
@@ -3447,7 +3490,7 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
 def _combine_hb(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
                 HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, M: tl.constexpr,
                 D: tl.constexpr, S: tl.constexpr, S_PAD: tl.constexpr, SB: tl.constexpr, HB: tl.constexpr,
-                PDL: tl.constexpr, ONE: tl.constexpr = True):
+                PDL: tl.constexpr, ONE: tl.constexpr = True, QSS: tl.constexpr = 0):
     """_combine for HB adjacent query heads of one KV head per program: their partial rows are
     contiguous in every split, so each split's [HB, D] block is one contiguous read. Faster on
     sliding layers (fewer, fuller programs); full layers keep _combine."""
@@ -3459,7 +3502,7 @@ def _combine_hb(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     d = tl.arange(0, D)
     hb = tl.arange(0, HB)
     col = (head0 + hb)[:, None] * D + d[None, :]
-    gate = tl.load(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + col).to(tl.bfloat16).to(tl.float32)
+    gate = _qld(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + col, QSS).to(tl.bfloat16).to(tl.float32)
     if PDL:
         gdc_wait()
     row = (b * HKV + h) * S * M + (tok % L) * G + head0 % G + hb  # [HB] rows in split 0
@@ -3497,7 +3540,7 @@ def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
                  D: tl.constexpr, B: tl.constexpr, B_PAD: tl.constexpr, P: tl.constexpr, NID: tl.constexpr,
                  BN: tl.constexpr, SB: tl.constexpr, HB: tl.constexpr, ONE: tl.constexpr = True,
                  PROP: tl.constexpr = False, REDO: tl.constexpr = False, kc_ptr=None, vc_ptr=None, ks_ptr=None,
-                 pt_ptr=None, qk_scale=1.0, MAX_PAGES: tl.constexpr = 1, PAGE: tl.constexpr = 1):
+                 pt_ptr=None, qk_scale=1.0, MAX_PAGES: tl.constexpr = 1, PAGE: tl.constexpr = 1, QSS: tl.constexpr = 0):
     """_combine_hb for balanced splits (_gw_bal): request b's partials are at ids p + b for the programs p whose
     tile range meets b's tiles, and its new tokens at P + B + b."""
     tok = tl.program_id(0)
@@ -3508,7 +3551,7 @@ def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     d = tl.arange(0, D)
     hb = tl.arange(0, HB)
     col = (head0 + hb)[:, None] * D + d[None, :]
-    gate = tl.load(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + col).to(tl.bfloat16).to(tl.float32)
+    gate = _qld(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + col, QSS).to(tl.bfloat16).to(tl.float32)
     idx = tl.arange(0, B_PAD)
     tiles = (tl.load(seq_ptr + idx, mask=idx < B, other=0).to(tl.int32) + (BN - 1)) // BN
     tt = tl.maximum(tl.sum(tiles, 0), 1)
@@ -3583,7 +3626,7 @@ def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
             # request's cached keys exactly (same FP8 queries and scale, FP32 P), then add the new tokens' partial.
             ROW_W: tl.constexpr = HKV * D
             BK: tl.constexpr = 8  # (small: wider tiles cost this kernel registers on the hot path)
-            x = tl.load(qkv_ptr + tok * QKV_W + col).to(tl.bfloat16).to(tl.float32)
+            x = _qld(qkv_ptr + tok * QKV_W + col, QSS).to(tl.bfloat16).to(tl.float32)
             q8 = (x * tl.rsqrt(tl.sum(x * x, 1) / D + 1e-5)[:, None]).to(tl.float8e4nv).to(tl.float32)
             scale = qk_scale * tl.load(ks_ptr)
             seq = tl.load(seq_ptr + b)
@@ -3746,7 +3789,8 @@ def _plan(cfg, max_pages, device):
 @triton.jit
 def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ: tl.constexpr, HKV: tl.constexpr,
              G: tl.constexpr, D: tl.constexpr, M: tl.constexpr, S: tl.constexpr, NR: tl.constexpr,
-             SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False, TRIG: tl.constexpr = False):
+             SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False, TRIG: tl.constexpr = False,
+             QSS: tl.constexpr = 0):
     """plan red's merge (one KV head pair, M = 2 G rows = query heads; program b = request b): the NR replicas of
     the sums at reference max 0, merged exactly with any listed out-of-range partials (slot ids in rcnt[2:]); then
     RMSNorm and sigmoid(gate). Leaves the sums and the list count zeroed for the next call. Batched (s103): request
@@ -3761,7 +3805,7 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
     r = tl.arange(0, M)
     d = tl.arange(0, D)
     col = r[:, None] * D + d[None, :]
-    gate = tl.load(qkv_ptr + (HQ + 2 * HKV) * D + col).to(tl.bfloat16).to(tl.float32)
+    gate = _qld(qkv_ptr + (HQ + 2 * HKV) * D + col, QSS).to(tl.bfloat16).to(tl.float32)
     vs = tl.load(vs_ptr)
     gdc_wait()
     if TRIG:  # layer s27 RF_TRIG: the o GEMV (PDL secondary, W preload before its wait) launches only now
@@ -3836,11 +3880,11 @@ def _decode_nds(data, cfg):
     out = torch.empty((batch, 1, hq * d), dtype=torch.bfloat16, device=device)
     _NDS.nds(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], data["k_scale"],
              data["v_scale"], data["cache_loc"], data["page_table"], data["seq_lens"], pacc, pml, out,
-             cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"])
+             cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], data.get("qkv_ss", 0))
     _combine_hb[(batch, hq // 2)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=rows, L=1, M=rows, D=d, S=S, S_PAD=S, SB=S, HB=2,
-        ONE=MERGE1, PDL=USE_PDL, num_warps=1, launch_pdl=USE_PDL)
+        ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL)
     return out
 
 
@@ -3853,6 +3897,9 @@ def kernel_fn(data: Inputs) -> torch.Tensor:
     device = qkv.device
     page_table = data["page_table"]
     max_pages = page_table.shape[1]
+    if data.get("qkv_ss", 0) and not (length == 1 and batch >= NDS_MIN_BATCH):  # proj s22: csl/vtk/nvs: summed slabs
+        qkv = data["qkv_slabs"].sum(0).view(qkv.shape)
+        data = {**data, "qkv": qkv, "qkv_ss": 0}
     if _CSL is not None and cfg["window"] == 2048 and length == 1 and batch <= CSL_MAX_BATCH and hq == 16 \
             and hkv == 2 and d == 64 and cfg["page_size"] in (1, 64) and cfg["rope_theta"]:
         out = torch.empty((batch, 1, hq * d), dtype=torch.bfloat16, device=device)
@@ -3874,6 +3921,9 @@ def kernel_fn(data: Inputs) -> torch.Tensor:
             and hkv == 2 and d == 64 and cfg["page_size"] == 1 and cfg["rope_theta"]:
         return _decode_nds(data, cfg)
     plan = _plan(cfg, max_pages, device)
+    if data.get("qkv_ss", 0) and not (plan.get("gdec") and not plan.get("gluon")):  # proj s22: paths without QSS loads
+        qkv = data["qkv_slabs"].sum(0).view(qkv.shape)
+        data = {**data, "qkv": qkv, "qkv_ss": 0}
     if plan.get("gluon"):
         return _verify_gluon(data, cfg, plan)
     if plan.get("gdec"):
@@ -4057,13 +4107,14 @@ def _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, sl,
     red, rcnt, rcw = _red_bufs(batch, group, d, sl, qkv.device)
     _red_fin[(batch,)](qkv, red, rcnt, pacc, pml, data["v_scale"], out, HQ=hq, HKV=hkv, G=group, D=d, M=2 * group,
                        S=splits, NR=4 if batch == 1 else BNR, SL=0 if batch == 1 else sl, RCW=rcw, BAL=bal, num_warps=RF_NW1 if batch == 1 else RF_NW, launch_pdl=True,
-                       TRIG=RF_TRIG and batch == 1)
+                       TRIG=RF_TRIG and batch == 1, QSS=data.get("qkv_ss", 0))
 
 
 def _decode_gluon(data, cfg, plan):
     batch, hq, hkv, d = cfg["batch"], cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     group = hq // hkv
     qkv = data["qkv"]
+    qss = data.get("qkv_ss", 0)
     device = qkv.device
     page_table = data["page_table"]
     splits = plan["splits"]
@@ -4085,7 +4136,7 @@ def _decode_gluon(data, cfg, plan):
             HQ=hq, HKV=hkv, G=group, D=d, PAGE=cfg["page_size"], MAX_PAGES=page_table.shape[1], S=splits,
             BN=plan["block_n"], NS=plan["stages"], WINDOW=cfg["window"], ROPE=bool(cfg["rope_theta"]),
             Q16=plan.get("q16", True), KST=plan.get("kst", True), BAL=True, B=batch, B_PAD=b_pad, NP=progs, NID=nid,
-            **(_red_args(batch, group, d, nid, device, out) if red else {}), num_warps=1)
+            **(_red_args(batch, group, d, nid, device, out) if red else {}), QSS=qss, num_warps=1)
         if red:
             _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, nid, True)
             return out
@@ -4094,7 +4145,7 @@ def _decode_gluon(data, cfg, plan):
             qkv, data["seq_lens"], pacc, pml, data["v_scale"], out,
             HQ=hq, HKV=hkv, G=group, L=1, M=group, D=d, B=batch, B_PAD=b_pad, P=progs, NID=nid,
             BN=plan["block_n"], SB=plan.get("sb", min(128, triton.next_power_of_2(2 * progs // batch + 1))), HB=hb,
-            ONE=MERGE1, PROP=True, num_warps=plan.get("cw", 1), launch_pdl=USE_PDL)
+            ONE=MERGE1, PROP=True, QSS=qss, num_warps=plan.get("cw", 1), launch_pdl=USE_PDL)
         return out
     pacc = torch.empty((batch, hkv, s, group, d), dtype=_PDT[plan.get("pdt", "f32")], device=device)
     pml = torch.empty((batch, hkv, s, group, 2), dtype=torch.float32, device=device)
@@ -4109,7 +4160,7 @@ def _decode_gluon(data, cfg, plan):
         ROPE=bool(cfg["rope_theta"]), SEP=sep, Q16=plan.get("q16", True),
         KST=plan.get("kst", True),
         SPEC=page_table.shape[1] - 1 if plan.get("spec") and batch == 1 and cfg["page_size"] == 1 else 0,
-        **(_red_args(batch, group, d, s, device, out) if red else {}), num_warps=1)
+        **(_red_args(batch, group, d, s, device, out) if red else {}), QSS=qss, num_warps=1)
     if red:
         _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, s, False)
         return out
@@ -4119,11 +4170,11 @@ def _decode_gluon(data, cfg, plan):
             qkv, pacc, pml, data["v_scale"], out,
             HQ=hq, HKV=hkv, G=group, L=1, M=group, D=d, S=s, S_PAD=triton.next_power_of_2(s),
             SB=triton.next_power_of_2(s), HB=hb,
-            ONE=MERGE1, PDL=USE_PDL, num_warps=plan.get("cw", 1), launch_pdl=USE_PDL)
+            ONE=MERGE1, PDL=USE_PDL, QSS=qss, num_warps=plan.get("cw", 1), launch_pdl=USE_PDL)
         return out
     _combine[(batch, hq)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=group, L=1, M=group, D=d, S=s, S_PAD=triton.next_power_of_2(s),
         SB=plan.get("csb", min(128, triton.next_power_of_2(s))), ONE=MERGE1, PDL=USE_PDL,
-        num_warps=plan.get("cw", 4 if s > 32 else 2), launch_pdl=USE_PDL)
+        QSS=qss, num_warps=plan.get("cw", 4 if s > 32 else 2), launch_pdl=USE_PDL)
     return out
