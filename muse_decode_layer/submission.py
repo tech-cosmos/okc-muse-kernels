@@ -7053,8 +7053,9 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
 
 @triton.jit
 def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr,
-                  TRIG: tl.constexpr):
-    """One row: rmsnorm(x) (1 + w), BF16 in and out. TRIG: let the dependent (moe_tk2 gemm13) launch now."""
+                  TRIG: tl.constexpr, XS: tl.constexpr = 0, ROUND: tl.constexpr = False):
+    """One row: rmsnorm(x) (1 + w), BF16 in and out. TRIG: let the dependent (moe_tk2 gemm13) launch now.
+    XS: x row stride (0: N). ROUND: x is FP32, rounded to BF16 first (the pooler's output dtype)."""
     if TRIG:
         gdc_launch_dependents()
     row = tl.program_id(0).to(tl.int64)
@@ -7062,7 +7063,10 @@ def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, 
     gain = tl.load(gain_ptr + cols)
     if PDL:
         gdc_wait()
-    x = tl.load(x_ptr + row * N + cols).to(tl.float32)
+    x = tl.load(x_ptr + row * (XS if XS else N) + cols)
+    if ROUND:
+        x = x.to(tl.bfloat16)
+    x = x.to(tl.float32)
     r = tl.rsqrt(tl.sum(x * x, 0) / N + EPS)
     tl.store(out_ptr + row * N + cols, (x * r * gain).to(tl.bfloat16))
 
@@ -7116,14 +7120,18 @@ def _router_fma(h_ptr, w_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr, BT:
 
 @triton.jit
 def _routing(part_ptr, bias_ptr, ls_ptr, ids_ptr, lids_ptr, wts_ptr, T, E: tl.constexpr, KS: tl.constexpr,
-             TOPK: tl.constexpr, LOCAL: tl.constexpr, MULT: tl.constexpr, REPS: tl.constexpr):
+             TOPK: tl.constexpr, LOCAL: tl.constexpr, MULT: tl.constexpr, REPS: tl.constexpr,
+             SKS: tl.constexpr = 0, ST: tl.constexpr = 0):
     """One token: scores = sigmoid(MULT logits); the top TOPK of scores + bias (lowest index on ties);
     weights = picked scores / (their sum + REPS); local ids = (id - local_start) mod E, -1 off this GPU."""
     t = tl.program_id(0)
     e = tl.arange(0, E)
     logit = tl.zeros((E,), dtype=tl.float32)
     for ks in tl.static_range(KS):
-        logit += tl.load(part_ptr + (ks * T + t) * E + e)
+        if ST:  # partial ks of token t at ks * SKS + t * ST (the fused pooler/router GEMM's FP32 output)
+            logit += tl.load(part_ptr + ks * SKS + t * ST + e)
+        else:
+            logit += tl.load(part_ptr + (ks * T + t) * E + e)
     score = 1.0 / (1.0 + tl.exp(-logit * MULT))
     key = score + tl.load(bias_ptr + e)
     j = tl.arange(0, TOPK)
@@ -7348,6 +7356,8 @@ def prepare(weights):
         "unpool_slice": weights["unpooler"][:UNPOOL_SLICE].contiguous(),
         "unpool": weights["unpooler"].contiguous(),
         "router": router, "router_hi": hi.contiguous(), "router_lo": lo.contiguous(),
+        # [pooler; router hi; router lo]: one GEMM of h for both above 8 tokens (FUSED_ROUTER_TOKENS)
+        "pool_router": torch.cat([weights["pooler"], hi, lo]).contiguous() if FUSED_ROUTER_TOKENS else None,
         "router_bias": weights["router_bias"].float().contiguous(),
         "res1": _residual(weights["attn_residual_gate"]), "res2": _residual(weights["ffn_residual_gate"]),
         "pre_ffn": gain("pre_ffn_norm"), "post_ffn": gain("post_ffn_norm"), "next_pre_attn": gain("next_pre_attn_norm"),
@@ -7495,6 +7505,10 @@ POOLER_HI_PRIORITY = ()  # s5 dead: pooler first, but the router starves beside 
 # boundary 1 L2-prefetches the FP32 router weight (8 MB) from extra programs at these token counts
 ROUTER_L2_PF_TOKENS = ()  # judge f8e06892: d1 -2% (noise?); off. Was (1,): H100: d1 -0.8 us; T=8 +0.9 (the T=8 router is issue-bound, not HBM)
 ROUTER_AFTER_POOLER = ()  # s5: tie/worse (router starved beside the pooler); token counts: pooler first, router its PDL secondary (see kernel_fn)
+# above 8 tokens: pooler + SGLang's hi/lo BF16 router in one cuBLAS GEMM (FP32 out), no side stream. s7 H100: tie
+# (d32 GEMM 30.8 + splitK reduce 2.1 + routing 3.4 vs pooler || router 38.3 us; v32 -2..-10, v16 full +5): the fused
+# GEMM is the pooler + 3 us (router bytes at HBM rate), same as the overlap. Needs a better GEMM config to win (lt FP32 out).
+FUSED_ROUTER_TOKENS = ()
 TK2_PDL13 = False  # s5: H100 tie (d1 +1, v1 -1, d32 -1 us): rmsnorm is only 1.7 us and the safe join loses its own PDL
 TK2_PDL2 = False
 if TK2_PDL13 or TK2_PDL2:
@@ -8433,6 +8447,23 @@ def kernel_fn(data, state):
                 t.record_stream(side_stream)
         moe = _experts_moe(p, topk_weights, local_ids, state)
         return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
+    if tokens in FUSED_ROUTER_TOKENS and not fp32_router:
+        # SGLang's router above 8 tokens = BF16 h against the BF16 hi/lo split of the FP32 weight (FP32 accumulation):
+        # the same h as the pooler, so one GEMM [pooler; hi; lo] with FP32 output; the routing sums the hi/lo logits,
+        # the rmsnorm rounds the pooler part to BF16 (what the BF16-out pooler GEMM returns). No side stream.
+        pr = torch.mm(h, state["pool_router"].t(), out_dtype=torch.float32)
+        ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
+        lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
+        wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
+        _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
+                            E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
+                            SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, num_warps=2)
+        p = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
+        _rmsnorm_gain[(tokens,)](pr, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=False, TRIG=False,
+                                 XS=D_EXPERT + 2 * N_EXPERTS, ROUND=True, num_warps=8)
+        moe = _experts_moe(p, wts, lids, state) if _use_moe(tokens) else (
+            _experts_marlin if HAVE_SGL else _experts_local)(p, wts, lids, state)
+        return _tail(moe, stream1, h, tokens, state, pdl) + (ids,)
     side_stream.wait_stream(main_stream)
     with torch.cuda.stream(side_stream):
         topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
