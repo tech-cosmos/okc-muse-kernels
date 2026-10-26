@@ -899,7 +899,7 @@
   g19 pooler; unexplained), so 2 warps there. First ab_files run said v16 sliding -4.7 us; later runs showed that was
   noise (v16 sliding moves +-3 us between ab_files runs: twm's own replay spread).
 - v82 (f970e18): T=128 _routing as a PDL secondary of pr3::router (pr3 triggers before its atomics' wait; _routing PDL
-  waits first). H100 timeline v16 sl: router end -> twm start 7.9 (v80) -> 6.5 (v81) -> 5.7 us; tools via /tmp/l39/tlm.py
+  waits first). H100 timeline v16 sl: router end -> twm start 7.9 (v80) -> 6.5 (v81) -> 5.7 us; tools/tlm.py
   (N cold profiled replays per file, median twm start / layer end; ONE file per process: several modules in one process
   share the .so statics and crash with an illegal address (harness artifact; one module with 12 captured graphs
   replayed interleaved is fine: /tmp/l39/multi.py)): twm start -1..2 us vs v80.
