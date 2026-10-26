@@ -11753,12 +11753,13 @@ def _g19_prepare(state):
 # (CUDA graph replays, cold L2, interleaved, median) on synthetic sliding decode inputs (shapes only, random data) with
 # each candidate option set; the fastest set per T is kept in state["tune"][T]. Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T. A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T; lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}),
-        8: ({}, {"pr1": False})}
+        8: ({}, {"pr1": False}),
+        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}), 256: ({}, {"lt:qkv_gate": False})}
 TUNE_REPS = 40
 TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}  # T -> (batch, q_len)
 
@@ -11912,7 +11913,7 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
                      *G12_CFG[key], *pdl)
         return out
     cfg = state.get("lt_ok", {}).get((key, x.shape[0])) if state is not None else None
-    if cfg is not None:
+    if cfg is not None and _opt(state, x.shape[0], "lt:" + key, True):
         out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
         _LT["lib"].lt_gemm(w, x.contiguous(), out, state["lt_ws"], list(cfg))
         return out
