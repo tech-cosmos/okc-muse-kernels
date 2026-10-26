@@ -17,7 +17,7 @@ So: **(1) get a correct run onto each board fast, (2) then make the big ones fas
 
 **Update 2026-10-26 (lead agent):** the overall board turns out to be ordered exactly by the
 muse_decode_layer speedup (checked on the top 100). The other boards matter only through the layer.
-Top 50 overall = layer >= ~1.93x; top 10 = layer >= ~2.17x. Every lane now serves the layer: see
+Top 50 overall = layer >= ~1.93x; top 10 = layer >= ~2.17x; #1 = 2.36x. The goal is #1 (top 50 is only a milestone). Every lane now serves the layer: see
 ~/COORD.md Human decisions.
 
 ## Agents and lanes
