@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~17:15 UTC (end of session 33).
+Updated 2026-10-26 ~16:35 UTC (end of session 34; s33's '17:15Z' stamps were a clock slip, s33 ended ~15:45Z).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -140,7 +140,14 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## Session 33: g13 (12-bit) for the layer's T=1 o as a PDL secondary: H100 d1 full ~-1 us, sliding bimodal 0..-1.9:
 ## handoff as TUNE option g13o (dev/s33/g13o_layer.patch on v82). After the wait a GEMV is ISSUE-bound (~2.3 us decode+FMA);
 ## pre-decoding before the wait works (g13p) but loading all W beside csl slows csl as much: dead. NOTES s33.
+## Session 34: DEC4 (dev/s34/dec4.py source transform, on main in gemv19/14/13, pr1, pr8): 12-bit decode 4 instr per BF16
+## pair instead of 5 ((s & M2) | C had two immediates = 2 LOP3s; constants now opaque registers, one 3-reg LOP3). Bit-identical.
+## H200 proxy g19 -0.5..-1.6 us per call (m32 pool -1.36 unp -1.22); in the H100 layer a tie (g19 there is HBM-shared with
+## _router_split). Handoff dev/s34/dec4_layer.patch (applies on r-layer f5fe1ec). ab_files has a ~1.5 us file-position bias
+## at d16/d32 sliding: use A B B A. g19 m32 = consumer-bound (NOW 27.1 vs full 29.6 at G72); load-group size G: null. NOTES s34.
 ## Next (ranked)
+-23. (s34) Layer: bundle dev/s34/dec4_layer.patch into the next sandbox's first check (H200 decides; tie on H100). proj's
+   own first check tomorrow = main (DEC4 in g13/g14 m1/m8 picks; submit if > 1.3110).
 -22. (s33) Layer: add the g13o TUNE option (dev/s33/g13o_layer.patch) to the next sandbox's first check; read its
    'layer tune T=1' lines (g13o True vs default, sliding and full).
 -19. (s30) Still waiting for a lane (Requests proj s28/s30). Proj checks 20/20 today.

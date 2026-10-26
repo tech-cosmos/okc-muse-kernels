@@ -772,3 +772,34 @@
 - Handoff: dev/s33/g13o_layer.patch (on r-layer f970e18 = v82): TUNE option {"g13o": True} at T=1 (default off; packs o
   with _pack13, +12.6 MB). Forced on: bench test 13/13, scored d1 x3 0 bad, replay d1 0/20 + 0/20; o output = the
   BF16 rounding of the float64 product (dev/s33/chk_o.py, 5 seeds). Est. H200: full d1 ~-1 us x 0.056%/us = ~+0.05%.
+
+## Session 34 (2026-10-26 15:50-~17:00Z): DEC4 = 12-bit decode in 4 instead of 5 instructions per BF16 pair: WIN (H200 proxy)
+- No judge runs (proj checks 20/20 for 10-26; sandbox ends ~19:10Z). Layer's ask (Requests layer s38): g19 at M=32 on H200.
+- H200 proxy (H100 GRID 72, MODE 2, PRED 3000, NPRE 2) pool m32 (1024,8,2,xb1) = 29.6 us; configs AP4/NS4, KC512/NS3,
+  AP4/NS3, AP2/NS8, RG16/AP4, TS2, RPW2: all tie or lose (as s16). Decomposition: consumer-only (G19_NOW) 27.1, NOW+NOMMA
+  13.8, NOW+NOX 19.65 => consumers bound it; decode +5.9, mma+ldmatrix +7.5 us on top, ADDITIVE.
+- ncu (pool m32 G72): issue slots 39% busy (2.8 warps/scheduler), stalls per issue: long_scoreboard 1.7, wait 1.5,
+  short_sb 0.7, math throttle 0.5; ~29% of stall samples in mbarrier-wait branches. SASS mix per HMMA: LOP3 3.3, IMAD 1.3,
+  PRMT 1.0, SHF 0.7. Each decoded word was SHF/IMAD.SHL + LOP3(& 0x07800780) + LOP3(| 0x38003800) + PRMT + LOP3(& | ):
+  ptxas cannot put two immediates in one LOP3, so (s & M2) | C took two.
+- DEC4 (dev/s34/dec4.py, a source transform, applied to gemv19/14/13.cu, pr1.cu, pr8.cu): both constants in registers made
+  opaque by `>> (gridDim.y >> 16)` (always 0, any launch shape), one 3-register lop3 (s & m2) | cc, and the final combine
+  as an explicit lop3. Bit-identical decode. H100 H200-proxy interleaved A/B (dev/g19ab.py, now SRC_A/SRC_B, 7 rounds,
+  non-overlapping ranges), B-A us: pool m32 -1.36, unp m32 -1.22, qkv m32 -0.58; pool m16 (8,3) -0.85 / (4,4) -1.60,
+  unp m16 -0.69 / -1.63, qkv m16 -0.50 / -0.93. (x0.73 ~ H200: ~-0.4..-1.2 us per call.) ESCW (adversarial escapes x40)
+  ok on qkv/o/pool/unp m16/m32; proj bench.py test + esc pass; proj submission.py rebuilt (g13/g14 picks carry DEC4).
+- Layer (/tmp copy of r-layer 61fe6fe, TUNE = {} in both, dec4.py on g13/g14/g19/pr1/pr8 _src.cu + build.py): bench.py
+  test 13/13. tools/ab_files.py has a FILE-POSITION BIAS of ~1.3-1.9 us at d16/d32 sliding (A,B order: B +1.3/+1.3;
+  B,A order: B -1.3/-1.9): order A B B A to cancel it. Run 1 (A,B, 5 rounds): d1 sl/full +0.1/-0.2, d16 full -1.4,
+  d32 full -1.1, v1 sl/full -0.1/-1.1. H100 timeline d32 sliding: g19 pooler 30.5 vs 30.6 us (shares HBM with
+  _router_split on the H100: bandwidth-bound there, not consumer-bound), so the H100 layer under-reports the H200 gain.
+- Run 2 (B,A order, "sliding", 7 rounds): B-A d1 -0.1, d16 -1.3, d32 -1.9, v1 -0.1, v16 +0.7, v32 -0.2. Run 3 (A B B A,
+  "decode", 4 rounds; mean of the two positions, B-A): d1 sl 0.0 full +0.2, d16 sl +0.5 full -1.0, d32 sl +1.3 full -0.5.
+  => in the H100 layer DEC4 is within noise (+-1.5 at d16/d32 sliding); H200 decides (bit-identical, strictly fewer
+  instructions: safe to bundle).
+- Layer correctness (B copy): bench.py test 13/13, tools/scored_test.py all 12 shapes x 2 seeds 24 PASS 0 bad,
+  replay_test decode 0/20 on all 6, files_eq A vs B decode 1 full x3 seeds bitwise identical (one earlier A-B d1 full
+  seed-1 diff 1.6e-4 did not reproduce: run-to-run nondeterminism of the base path).
+- Dead: G19_G (atoms per load group 1/4 vs default 2): +-0.2 us (s18 again: issue order is not the bound).
+- moe's dq() has no two-immediate logic op (already 1 imm each): nothing to hand to moe from this trick.
+- Handoff: dev/s34/dec4_layer.patch (g13/g14/g19/pr1/pr8 _src.cu; then build.py), applies on r-layer f5fe1ec.
