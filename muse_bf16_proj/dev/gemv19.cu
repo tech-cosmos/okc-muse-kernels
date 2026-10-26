@@ -458,6 +458,9 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         }
 #endif
         prev_end = end;
+#ifdef G19_TR2
+        if (t == 0 && i == 2) TR(6);
+#endif
         const unsigned xbase = xs + xb * M * XS + xrow;
         const unsigned sb = ring + slot * SB + wr * AP * 512 + lane * 16, nb = ring + slot * SB + NWC * AP * 512 + wr * AP * 256 + lane * 8;
 #if defined(G19_OLDLOOP) || defined(G19_NOMMA) || defined(G19_NOX)
@@ -543,11 +546,18 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         }
 #endif
 #ifdef G19_TRACE
+#ifdef G19_TR2  // s50: stage 2 of warp 0: 16+2 got | 6 after tag/x/header | 7 after the atom loop | 8 after the empty arrive
+        if (t == 0 && i == 2) TR(7);
+#else
         if (t == 0 && i == 0) { TR(6); volatile float z_ = hd0[0].x + hd1[0].y; TR(7); }
         if (t == 0 && i == 1) TR(8);
 #endif
+#endif
         __syncwarp();
         if (lane == 0) bar_arrive(bars + 8 * (NS + slot));
+#ifdef G19_TR2
+        if (t == 0 && i == 2) TR(8);
+#endif
         if (!end) continue;  // (a last x use always ends a run: released below, after the escape fixups read x)
         // run end: rows rg*16 + g (+8), tokens jj*8 + 2c (+1), k in [klo, khi)
         if (t == 0 && q == 0) TR(11);

@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~20:30 UTC (s49: 'fewer bytes at m=1' bounded: exponent entropy 2.54 bits -> 10.54-bit floor, no fixed-rate format < 12 bits; closed; lane request to lead. s48: g19 m32 header/fixup cost measured, FIX2/HPF dead; s47, sandbox okc-night4: PDL .nc-hoist SASS audit of proj kernels in layer v91 = no live hazard; unpool T=32 grid tie; checks 20/20 until 00:00Z; main unchanged).
+Updated 2026-10-26 ~21:20 UTC (s50: _diag19d = H200 g19 m32/m16 decomposition queued for the 00:00Z check; gemv23 BF16 wgmma at m16/m32 DEAD; H100 trace: ~0.35 us/stage of g19's consumer time is outside the decode/mma loop, unexplained. s49: 'fewer bytes at m=1' bounded: exponent entropy 2.54 bits -> 10.54-bit floor, no fixed-rate format < 12 bits; closed; lane request to lead. s48: g19 m32 header/fixup cost measured, FIX2/HPF dead; s47, sandbox okc-night4: PDL .nc-hoist SASS audit of proj kernels in layer v91 = no live hazard; unpool T=32 grid tie; checks 20/20 until 00:00Z; main unchanged).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -143,6 +143,14 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## only pr1's non-bnd x/x32 __ldg (layer copy) is fragile -> Request to layer. unpool T=32 G19_GRID 96-132 = tie (H100).
 ## s48: g19 m32 escape fixups ~0.5-1.2 us/call proxy, header-load stall ~0.2-0.5; pipelined fixups (G19_FIX2) and
 ## one-run-ahead header prefetch (G19_HPF) both DEAD (NOTES s48). Diag switches G19_NOHDR/NOFIXB in gemv19.cu (off).
+## s50: _diag19d (print only) in submission: g19 pool m32/m16, unp m32 x {main, NOW, NOW+NOMMA, NOW+NOX, NOFIX} x G132/108
+## after a 3 us PDL pred (+~1-2 min compile). gemv23 at m16/m32 (BF16, no decode) = W-stream-bound, ties/loses cuBLAS: DEAD.
+## H100 G19_TR2 trace: per consumer stage ~0.35 us outside the atom loop (loop top tag/int math 0.23, arrive->got 0.13).
+## Next (before the 00:00Z check, ranked):
+## a. First proj check after 00:00Z = main (carries _diag19d): read 'diag19d' lines. main-NOW = W-stream share on H200;
+##    NOW-NOMMA = decode+mma; NOMMA = skeleton. Copy into NOTES. Submit only if > 1.3110 (diag adds nothing to timing).
+## b. Explain the 0.35 us/stage (clock64 stamps vs globaltimer; ncu source view of NOW). If real and H200 consumer-bound,
+##    restructure the consumer loop top (precomputed per-slot ks/tr/st in the tag, no div/mod) = cheap, bit-identical.
 ## Next sandbox (ranked; sandbox okc-night3 expired ~19:10Z 10-26 with proj checks 20/20, scored 5/10)
 1. proj's first check = main as is (DEC3 in g13/g14 m1/m8 picks; tg2 unpooler m8 candidate): read the 'tune' lines in the
    judge log (profiles/*.log); submit if > 1.3110. Layer's first check = its main v88 (carries DEC3, pr8 npf 212, g19 s15).

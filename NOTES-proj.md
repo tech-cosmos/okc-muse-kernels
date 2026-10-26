@@ -1031,7 +1031,7 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   rows, NaN/Inf) only add escapes -> per-layer BF16 fallback, so correctness on reviewers' weights is not at risk.
 - With this, every proj-lane item on the list is measured or bounded below ~0.3% layer. Request to lead for a new lane.
 
-## s50 (2026-10-26 20:27-21:15Z, sandbox okc-night4, session 7): BF16 wgmma at m16/m32 DEAD; H200 g19 decomposition DIAG queued
+## s50 (2026-10-26 20:27-21:20Z, sandbox okc-night4, session 7): BF16 wgmma at m16/m32 DEAD; H200 g19 decomposition DIAG queued
 - No judge runs (proj checks 20/20 for 10-26, reset 00:00Z). Lead 20:16Z: the layer's T>=16 GEMMs are what count.
 - (a) gemv23 (BF16 SS-wgmma swap-AB, plain BF16 W by bulk TMA, no decode) instantiated at M = 16/32 (wgss<16>/<32> added
   to dev/gemv23.cu). H100 standalone graph, cold L2, us (cuBLAS F.linear | best g23): qkv m16 17.46 | 16.94, m32 17.70 |
@@ -1046,3 +1046,13 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   10.02 | 11.20 | 21.70. bench.py test all PASS (3:56 incl. builds).
   Reading it at 00:00Z: if H200 main ~= NOW, consumers bound it (then the skeleton NOMMA share says whether barrier/run
   structure or decode+mma is the target); if main >> NOW, it is the W stream (then nothing kernel-side is left).
+- (c) H100 timelines (dev/g19.py STAGES=1, MODE 2 PRED 3000 G132, pool m32 (1024,8,2,xb1)), new diag G19_TR2 (stamps
+  stage 2 of warp 0: slot 6 after tag/x/header, 7 after the atom loop, 8 after the empty arrive; default build unchanged):
+  skeleton (NOW+NOMMA): pred ends 4.9, x0 7.2 (2.2 us x staging, known), then ~0.5 us per stage although every stage is
+  ready: got -> slot 6 0.23 us (only a tag lds + integer div/mod!), atom loop 0.16, arrive -> next got 0.13. NOW (decode +
+  mma, no W): got -> 6 0.22, loop 0.67, arrive -> got 0.13 => ~1/3 of a consumer stage is OUTSIDE the decode/mma loop.
+  G19_SPIN (test_wait) changes nothing (not try_wait suspension). Kernel has a 16 B stack frame (xph/xpc[xb] runtime-
+  indexed: LDL/STL once per x use, not per stage: minor). Unexplained 0.35 us/stage: next step = clock64 stamps (rule
+  out globaltimer cost) and an ncu source view of NOW mode around the loop top. If real, the target is ~1/3 of the
+  consumer time at m32 (H200: g19 consumer-bound) = up to ~-3..5 us/call; the H200 _diag19d at 00:00Z says how much
+  of main is consumer time there.
