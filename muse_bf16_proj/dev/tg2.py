@@ -7,8 +7,8 @@ import bench, reference
 
 L = {"qkv": "qkv_gate", "o": "o", "pool": "pooler", "unp1k": "unpooler", "unp": "unpooler"}
 src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "tinygemm2.cu")).read()
-mod = load_inline(name="pj_tg2", cpp_sources="void tg2(torch::Tensor, torch::Tensor, torch::Tensor, bool);",
-                  cuda_sources=src, functions=["tg2"], extra_ldflags=["-lcuda"],
+mod = load_inline(name="pj_tg2s", cpp_sources="void tg2s(torch::Tensor, torch::Tensor, torch::Tensor, bool, int64_t);",
+                  cuda_sources="#define TG2_STAGES\n" + src, functions=["tg2s"], extra_ldflags=["-lcuda"],
                   extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
 w, st = bench.state()
 e = bench.empty_cost()
@@ -20,7 +20,9 @@ for a in sys.argv[1:]:
     ref = x.double() @ W.double().t()
     t0 = bench.time_graph(lambda: bench.submission.kernel_fn(data, st)) - e
     out = torch.empty(m, n, dtype=torch.bfloat16, device="cuda")
-    mod.tg2(x, W, out, False); torch.cuda.synchronize()
-    err = ((out.double() - ref).norm() / ref.norm()).item()
-    t = bench.time_graph(lambda: mod.tg2(x, W, out, False)) - e
-    print(f"{nm} m={m} n={n}: current {t0:.2f} us  tinygemm2 {t:.2f} us err {err:.2e}", flush=True)
+    r = []
+    for S in (4, 8, 16):
+        mod.tg2s(x, W, out, False, S); torch.cuda.synchronize()
+        err = ((out.double() - ref).norm() / ref.norm()).item()
+        r.append(f"S{S} {bench.time_graph(lambda: mod.tg2s(x, W, out, False, S)) - e:.2f} (err {err:.1e})")
+    print(f"{nm} m={m} n={n}: current {t0:.2f} us  tinygemm2 " + "  ".join(r), flush=True)

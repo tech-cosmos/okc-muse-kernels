@@ -553,9 +553,18 @@ void launch_tinygemm2(__nv_bfloat16* gA, __nv_bfloat16* gB, __nv_bfloat16* gC, _
 }  // namespace flashinfer
 
 // proj port (s26): flashinfer 0.7.0 csrc/tinygemm2.cu (Apache-2.0), torch binding for H100 A/B only.
+#define TG2_ARGS reinterpret_cast<__nv_bfloat16*>(x.data_ptr()), reinterpret_cast<__nv_bfloat16*>(w.data_ptr()), \
+    reinterpret_cast<__nv_bfloat16*>(out.data_ptr()), nullptr, (int)x.size(0), (int)w.size(0), (int)x.size(1), stream, use_pdl
 void tg2(torch::Tensor x, torch::Tensor w, torch::Tensor out, bool use_pdl) {
   auto stream = c10::cuda::getCurrentCUDAStream().stream();
-  flashinfer::tinygemm2::launch_tinygemm2<false>(
-      reinterpret_cast<__nv_bfloat16*>(x.data_ptr()), reinterpret_cast<__nv_bfloat16*>(w.data_ptr()),
-      reinterpret_cast<__nv_bfloat16*>(out.data_ptr()), nullptr, x.size(0), w.size(0), x.size(1), stream, use_pdl);
+  flashinfer::tinygemm2::launch_tinygemm2<false>(TG2_ARGS);
 }
+#ifdef TG2_STAGES
+// s26 sweep: explicit ring depth (STAGES x 12 KB smem; 16 = the stock choice on sm90)
+void tg2s(torch::Tensor x, torch::Tensor w, torch::Tensor out, bool use_pdl, int64_t stages) {
+  auto stream = c10::cuda::getCurrentCUDAStream().stream();
+  if (stages == 4) flashinfer::tinygemm2::launch_tinygemm2_impl<4, false>(TG2_ARGS);
+  else if (stages == 8) flashinfer::tinygemm2::launch_tinygemm2_impl<8, false>(TG2_ARGS);
+  else flashinfer::tinygemm2::launch_tinygemm2_impl<16, false>(TG2_ARGS);
+}
+#endif
