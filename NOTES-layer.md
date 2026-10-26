@@ -1319,3 +1319,24 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   combine -> 33.3 | o nvjet 6.8 | bnd | g19 pooler 40.9-70.4 (router/routing beside) | tk2f 71.1-169.9 | norm2 | g19
   unpool -> 196.0 | bnd -> 198.6. v16 sl 304.9: glue router end 82.3 -> twm start 88.5 (_routing 3.8, moe_route 4.1,
   moe_gathern 5.9; RG option exists only in TUNE[256]); v1 sl 145.4.
+
+## s65 (2026-10-26 22:19Z-, sandbox okc-night4): v101 = v100 + proj s53 gemv24 (thanks proj) as default at T=16/32
+- No judge runs (budget resets 00:00Z). `git apply ~/r-proj/muse_bf16_proj/dev/s53/g24_layer.patch` (r-proj 3f24c15):
+  applied clean on 71be355 (g24_src.cu, build.py "24", G24_CFG, _pack24/_g24_prepare (own load_inline, per-pick
+  F.linear check; falls back to g19/cuBLAS if the build or a pick fails), _g19() takes g24:<key> first).
+- H100 ab_flag (variants/s65_nt.py = TUNE {}), 4 rounds A,B,C,A x SEEDS 7,11,99, us:
+  d16 sl  161.3/157.3/194.0 -> pool+unp 159.4/155.4/192.4 -> all4 158.4/154.0/191.5  (all4 -2.9)
+  d16 full 280.0/303.9/294.8 -> 278.6/301.7/292.9 -> 276.9/300.3/291.3             (all4 -3.0)
+  d32 sl  203.8/212.4/195.8 -> pool+unp 202.2/210.3/194.6 -> all4 204.8/212.6/196.0 (pool+unp -1.5)
+  d32 full 422.9/422.6/414.4 -> 420.7/420.5/413.3 -> 420.2/420.6/412.4             (-1.8..-2.0)
+  T=32 split on top of pool+unp: +o sl +2.3/+2.4/+1.2 full -0.6..-0.3; +qkv sl +1.8/-0.2/+0.2, full -1.6/-1.6/-1.8.
+- Defaults (TUNE_BASE): T=16 sl+full all four GEMMs on g24 (_G24_ALL); T=32 pooler+unpool. TUNE[16] off-options
+  (all / pool+unp / o / qkv), TUNE[32] off (pool+unp, pool, unp) + on (qkv, o). H100 tuner (cold run) keeps g24 defaults
+  everywhere (off = +1.5..2 us).
+- Tests: forced all4 at T=16/32: bench test 13/13, scored_test decode x3 18/18, replay d16/d32 x seeds 11,23 0/160.
+  main: cold compile+prepare+test (fresh TORCH_EXTENSIONS_DIR/TRITON_CACHE_DIR) 5:05 total, 13/13; replay decode 0/240;
+  route_judge decode 0/240.
+- g24 PDL: W prologue before griddepcontrol.wait reads only prepared weights; x bulk-loaded after the wait; out zeroed
+  in-kernel + epoch barrier (one counter per grid, as g19). cslpw at d16 sliding: csl is now the PDL secondary of the g24
+  qkv (still the graph's first kernel, so s63's audit holds: csl's pre-wait loads read only inputs).
+- FIRST CHECK AFTER 00:00Z = main v101: read 'layer tune T=16/32' g24 lines (H200 picks) besides the s64 list.

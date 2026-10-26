@@ -715,6 +715,7 @@ _G12_SRC = None  # @@G12@@
 _G13_SRC = None  # @@G13@@
 _G14_SRC = None  # @@G14@@
 _G19_SRC = None  # @@G19@@
+_G24_SRC = None  # @@G24@@
 _GPR1_SRC = None  # @@GPR1@@
 _GPR8_SRC = None  # @@GPR8@@
 # proj's gemv19 (g19_src.cu = r-proj dev/gemv19.cu @6996d0c): m = 16/32 GEMM over the 12-bit weights, FP32 out zeroed
@@ -733,6 +734,15 @@ G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4,
 # (+1.5..5): m32 stays on cuBLAS / the bmm pooler. Was (H100 picks, s10 v35): pooler m16 (16, 1024, 4, 4, 2, 2),
 # m32 (32, 1024, 4, 4, 2, 1), unpool the same, o m16 (16, 512, 4, 3, 2, 2).
 G19_BUILD = [(16, 1024, 4, 4, 2, 2)]  # also compiled (A/B)
+# proj s53 gemv24 (g24_src.cu = r-proj dev/s53/gemv24.cu): g19's interface (FP32 out zeroed in the kernel, epoch counter,
+# PDL dependent streaming W before its wait, npre bit 16 = trigger at start) with per-warp TMA rings (no producer warp /
+# stage barriers). TUNE option g24:<key> (replaces g19 / cuBLAS at that call site). (m, kc, ap, ns, wpb, xb, r).
+# proj H200 proxy (H100 G72, after a 3 us pred; g24 | g19): m32 pool 24.8|26.6, unp 23.9|24.7, o 8.7|9.9, qkv 16.1|16.4.
+G24_CFG = {("pooler", 16): (16, 1024, 2, 4, 16, 2, 1), ("unpool", 16): (16, 1024, 2, 4, 16, 2, 1),
+           ("qkv_gate", 16): (16, 1024, 2, 4, 16, 2, 1), ("o", 16): (16, 512, 2, 4, 16, 2, 1),
+           ("pooler", 32): (32, 512, 4, 3, 12, 2, 1), ("unpool", 32): (32, 512, 4, 3, 12, 2, 1),
+           ("qkv_gate", 32): (32, 512, 4, 3, 12, 2, 1), ("o", 32): (32, 512, 4, 3, 12, 2, 1)}
+_G24 = {}
 BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
 G19_ON = {"pooler", "unpool", "qkv_gate", "o"}  # o: H100 tie (cuBLAS after attention)
 G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32), ("qkv_gate", 8), ("o", 8), ("pooler", 8)}  # prepared, used only if TUNE picks them (H100: tie/+3 us)
@@ -2256,7 +2266,69 @@ def _g19_prepare(state):
             state["g19"][(key, m)] = e
         else:
             print("layer gemv19 config dropped:", key, m, c)
+    _g24_prepare(state, w, comp, g)
     del comp
+
+
+def _pack24(c, kc, ap):
+    """gemv24 stages (pack19 with one 16-row group per stage): stage (ks, row group, st) = [ap atoms x 32 lanes x 16 B
+    sign|mantissa][ap x 32 x 8 B codes], DEC3."""
+    code, sm, hdr, scale = c
+    n, k = code.shape
+    perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()  # noqa: E731
+    S, N = _dec3(perm(sm).reshape(k // kc, n // 16, kc // 32, 32, 2, 8), perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8))
+    U = (k // kc) * (n // 16) * (kc // 32 // ap)
+    S = S.reshape(U, ap * 512)
+    N = N.contiguous().view(torch.uint8).reshape(U, ap * 256)
+    return torch.cat([S, N], 1).contiguous()
+
+
+def _g24_prepare(state, w, comp, g):
+    state["g24"] = {}
+    if not G24_CFG or _G24_SRC is None:
+        return
+    if "lib" not in _G24:
+        try:
+            import hashlib
+            from torch.utils.cpp_extension import load_inline
+            _G24["lib"] = load_inline(
+                name="layer_g24_" + hashlib.sha256(_G24_SRC.encode()).hexdigest()[:10] + "_" + str(len(G24_CFG)),
+                cpp_sources="void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
+                            "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources=_G24_SRC.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(G24_CFG.values())))),
+                functions=["g24_gemm"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
+        except Exception as ex:  # noqa: BLE001
+            print("layer gemv24 build failed:", ex)
+            _G24["lib"] = None
+    lib = _G24["lib"]
+    if lib is None:
+        return
+    dev = state["unpool"].device
+    packs = {}
+    for (key, m), c in G24_CFG.items():
+        if key not in comp:
+            comp[key] = _compress(w[key])
+        if comp[key] is None:
+            continue
+        pk = packs.get((key, c[1], c[2]))
+        if pk is None:
+            pk = packs[(key, c[1], c[2])] = _pack24(comp[key], c[1], c[2])
+        grid = G19_GRID.get((key, m), _G19_SMS)
+        e = (pk, comp[key][2], comp[key][3], {grid: torch.zeros(2, dtype=torch.int32, device=dev)}, c)
+        x = torch.randn((m, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
+        out = torch.full((m, w[key].shape[0]), float("nan"), dtype=torch.float32, device=dev)
+        try:
+            lib.g24_gemm(e[0], e[1], e[2], x, out, e[3][grid], c[1], c[2], c[3], c[4], c[5], grid, c[3], c[6])
+            torch.cuda.synchronize()
+            ref = F.linear(x, w[key]).float()
+            ok = ((out.bfloat16().float() - ref).norm() / ref.norm()).item() < 1e-2
+        except Exception as ex:  # noqa: BLE001
+            print("layer gemv24 failed:", key, m, ex)
+            ok = False
+        if ok:
+            state["g24"][(key, m)] = e
+        else:
+            print("layer gemv24 config dropped:", key, m, c)
 
 
 # (s18/s19) Choices where the H100 and the judge's H200 may disagree, tuned in prepare(): the whole layer is timed
@@ -2272,13 +2344,16 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
-             {"tk2h": 3}, {"tk2h": 4}, {"bal": True}, {"bal": False}, {"cslpw": False}, {"cslcarve": True}),
+             {"tk2h": 3}, {"tk2h": 4}, {"bal": True}, {"bal": False}, {"cslpw": False}, {"cslcarve": True},
+             {"g24:pooler": False, "g24:unpool": False, "g24:o": False, "g24:qkv_gate": False}, {"g24:pooler": False, "g24:unpool": False},
+             {"g24:o": False}, {"g24:qkv_gate": False}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
              {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
-             {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True}),
+             {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
+             {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
@@ -2298,8 +2373,12 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 # s35: per-(T, sliding) defaults under the tuner (the tune pick overrides them; {} = these): the picks both logged H200
 # tuners of 909010f (0f065691, 703d3a7e) agreed on, so a noisy judge tuner can't fall back to the slower setting.
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
-TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True, "bal": True},
-             (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s61: T=16 sliding moe n8 BAL (H100 real routings 4 seeds -2.6 us mean); s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
+_G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
+TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True, "bal": True, **_G24_ALL},
+             (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True}, (32, False): {"g24:pooler": True, "g24:unpool": True},
+             (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
+# H100 ab_flag 4 rounds x 3 seeds, TUNE {}: d16 sl/full -2.9/-3.0 us, d32 sl/full -1.5/-1.8 (o on g24 at T=32 sl +2.3; qkv tie/-1)
+# s61: T=16 sliding moe n8 BAL (H100 real routings 4 seeds -2.6 us mean); s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
 # s62: tokens where decode sliding csl is a PDL secondary of the qkv GEMM (TUNE option cslpw). H100 ab_flag 5-6 rounds x
 # 3 seeds: d16 sliding -0.7..-1.0 us (csl CTAs still wait for g19's SMs: launch + prologue overlap only); d1 +1.3..1.7 (off);
 # T=8 (vtk after g14, TUNE[8] option): v1 sliding -0.3..+0.0 (6 rounds x 3 seeds).
@@ -2456,6 +2535,16 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
         c = e[3]
         out = torch.empty((m, e[2]), dtype=torch.float32, device=x.device)
         _G22["lib"].g22_gemm(e[0], e[1], x.contiguous(), out, c[1], c[2], c[3], _G19_SMS, 0, c[2])
+        return out
+    e = state.get("g24", {}).get((key, m)) if _opt(state, m, "g24:" + key, False) else None
+    if e is not None:  # proj s53: gemv24, where TUNE picks it
+        c = e[4]
+        out = torch.empty((m, e[1].shape[0]), dtype=torch.float32, device=x.device)
+        grid = G19_GRID.get((key, m), _G19_SMS)
+        ctr = e[3].get(grid)
+        if ctr is None:
+            ctr = e[3][grid] = torch.zeros(2, dtype=torch.int32, device=x.device)
+        _G24["lib"].g24_gemm(e[0], e[1], e[2], x.contiguous(), out, ctr, c[1], c[2], c[3], c[4], c[5], grid, c[3] | ((int(trig) & 1) << 16), c[6])
         return out
     on = key in G19_ON and _opt(state, m, "g19:" + key, (key, m) not in G19_DEFAULT_OFF)
     e = state.get("g19", {}).get((key, m)) if on else None
