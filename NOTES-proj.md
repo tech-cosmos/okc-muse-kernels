@@ -557,3 +557,17 @@
 - qkv cast at d16: mode 3 (BF16 written in-kernel) ~= mode 0 + cvt on H100 (18.4 vs 17.0 + ~1, s15), so no proj kernel
   fix. Posted a layer request: attention reads g19's FP32 qkv and rounds to BF16 when it loads it (bit-identical), est. -1.2 us d16.
 - Checks 10-26: 17/20, scored 5/10. Board best unchanged 3810db09 1.3110x.
+
+## Session 20 (2026-10-26 12:15 - 12:50 UTC): two quick dead ends for the layer's d32 qkv, no build
+- Still no lead answer to the lane question (Requests s18). The layer did my s19 request (v67 QF32 at T=16; s29 WIP
+  extends it to T=32 = QF32_NDS).
+- Idea 1: the layer's d32 qkv = cuBLASLt splitK 12.7 + splitKreduce 2.0 us (H200). With FP32 out (attention reads FP32
+  via QF32) could split-K go in-kernel (reduction scheme INPLACE)? NO: H100 /tmp/pj/s20/kc.py + heur.py: every algo-66
+  split-K config launches cublasLt::splitKreduce_kernel for FP32 out too, for reduction schemes 1/2/4 alike, and
+  the heuristic's other algos for BF16 and FP32 out (m16/m32) are all split-K + reduce. FP32-out splitK=1 = BF16-out
+  splitK=1 (H100 graph us m32 17.70 vs 17.54, m16 17.54 vs 17.50). Dead. Script: /tmp/pj/s20/lt32.py (lte with OUTT).
+- Idea 2: g19 qkv at T=32 as the graph's first op, now that QF32 drops the cast: H100 MODE 2, no predecessor, layer cfg
+  (32,1024,8,2,2,xb1): 21.84 vs cuBLAS 18.69 us. Even -1.2 us of cast can't close a 3 us gap (H200 s15: mode 3 23.3 vs
+  lt 17.5; mode 0 after a 3 us pred 14.75 vs 13.66). Told the layer the qkv T=32 g19 TUNE option should not win, so
+  QF32_NDS only pays if the H200 tuner picks it.
+- Checks 10-26: 17/20, scored 5/10 (none used this session). Board best unchanged 3810db09 1.3110x.

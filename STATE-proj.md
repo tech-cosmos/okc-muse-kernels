@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~12:25 UTC (end of session 19).
+Updated 2026-10-26 ~12:50 UTC (end of session 20).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -136,7 +136,10 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## re-estimated at ~3-7% bytes net (~0.2-0.3%): not worth it. Router FP32 weights have full mantissas.
 ## Session 19: review only. Every proj option for the layer's T=16/32/128 GEMMs is already a layer H200 TUNE option;
 ## posted a layer request (attention reads g19's FP32 qkv, drops the 1.3 us cast at d16). Lane question to the lead stands.
+## Session 20: dead: FP32-out cuBLASLt split-K (always + splitKreduce kernel); g19 qkv T=32 as first op (H100 21.8 vs
+## cuBLAS 18.7 us, so no gain even without the cast). NOTES s20.
 ## Next (ranked)
+-9. (s20) Same as -8: proj has no item above ~0.3% layer score left; wait for the lead's lane pick. Don't rebuild dead items.
 -8. (s19) First read COORD Human decisions for the lead's lane pick (a/b/c in Requests s18) and the layer's 14:30Z
    check tuner lines (which g19/lt options the H200 picked at T=16/32). With no answer, do not rebuild dead items (see NOTES s12-s19).
 -7. (s18) Read COORD Human decisions for the lead's answer to proj's lane question (s16/s17). Without one, there is no
