@@ -100,7 +100,8 @@ BF16_G19 = {"qkv_gate": [(16, 1024, 8, 3, 2, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1,
 # variant a = 1 block/SM (grid #SMs), b = 2 blocks/SM (grid 2 x #SMs, single-buffered A fragments, 1 partial buffer).
 # (m, kc, ap, ns) per layer; npre = ns, xb 1.
 DIAG20 = {"a": [(16, 1024, 4, 4), (16, 1024, 8, 3), (32, 1024, 4, 4), (32, 1024, 8, 2)],
-          "b": [(16, 1024, 4, 2), (16, 512, 4, 2), (32, 512, 4, 2), (32, 512, 2, 3)]}
+          "b": [(16, 1024, 4, 2), (16, 512, 4, 2), (32, 512, 4, 2), (32, 512, 2, 3)],
+          "c": [(16, 1024, 4, 2), (16, 512, 4, 2), (32, 512, 4, 2), (32, 512, 2, 3)]}  # c = gemv19 (mma.sync), 2 blocks/SM
 # _diag19 only (print, no picks): H200 behaviour of other configs in the layer case
 DIAG19 = {}  # s10 diag configs measured (checks 9b09c536/60ddb481/f1319777): see NOTES-proj
 DIAG19_STREAM = []  # (stage bytes, stages): 50 MB bare streams
@@ -167,8 +168,18 @@ except Exception as _e:  # noqa: BLE001
     _g19 = None
 
 _g20 = {}
-for _v, _defs in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_SB\n#define G20_NPB 1\n")):
+for _v, _defs in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_SB\n#define G20_NPB 1\n"), ("c", "")):
     try:
+        if _v == "c":  # gemv19 with 2 blocks per SM, exposed as g20_gemm
+            _g20[_v] = load_inline(
+                name="muse_proj_g19c",
+                cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
+                            "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources="#define G19_ONLY2\n#define G19_MINB 2\n#define G19_NPB 1\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
+                    "G19_CASE(%d,%d,%d,%d,1,1,1,8,1)" % c for c in sorted(set(DIAG20[_v])))),
+                functions=["g19_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+            _g20[_v].g20_gemm = _g20[_v].g19_gemm
+            continue
         _g20[_v] = load_inline(
             name="muse_proj_g20" + _v,
             cpp_sources="void g20_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
@@ -538,7 +549,7 @@ def _diag20(st):
             for v, cfgs in DIAG20.items():
                 if v not in _g20:
                     continue
-                grid = _SMS * (2 if v == "b" else 1)
+                grid = _SMS * (2 if v in "bc" else 1)
                 ctr = st.setdefault(("ctr20", v), torch.zeros(2, dtype=torch.int32, device="cuda"))
                 for c in cfgs:
                     if c[0] != m or ("g19", layer, c[1], c[2], 8) not in st:

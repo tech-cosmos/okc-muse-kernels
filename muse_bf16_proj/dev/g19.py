@@ -11,7 +11,7 @@ exec(_g18[_g18.index("def pack16"):_g18.index("SH = [")].replace('"G18_ILV" in',
 cfgs = [tuple(map(int, c.split(","))) for c in sys.argv[1].split(";")]
 cfgs = [c + (2, 1, 8, 1)[len(c) - 6:] for c in cfgs]  # XB (x buffers) 2, TS 1, RG 8, RPW 1 by default
 src = open(os.path.join(d, "gemv19.cu")).read()
-src = "".join("#define %s\n" % d_ for d_ in os.environ.get("DEFS", "").split(",") if d_) + src
+src = "".join("#define %s\n" % d_.replace("=", " ") for d_ in os.environ.get("DEFS", "").split(",") if d_) + src
 src = src.replace("G19_CONFIGS", " ".join("G19_CASE(%d,%d,%d,%d,%d,%d,%d,%d,%d)" % (c[:5] + c[6:]) for c in sorted(set(cfgs))))
 fns = ["g19_gemm", "g19_pred", "g19_zero", "g19_cvt"] + (["g19_trace"] if "G19_TRACE" in os.environ.get("DEFS", "") else [])
 mod = load_inline(name="pj_g19_" + hashlib.md5(src.encode()).hexdigest()[:10],

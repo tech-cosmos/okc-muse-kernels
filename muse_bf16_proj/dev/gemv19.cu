@@ -63,8 +63,15 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 // M tokens (16/32), KC k per chunk, AP atoms (32 k) per warp per stage, NS ring stages, IS stages per tail item.
 // out FP32 [M, n] (zeroed by the primary), ctr int (zeroed by the primary). tail: stages left for dynamic items.
 // smem: ring [NS][SB] | x [2][M][XS] | pbuf [2][128 rows][M] f32 | barriers | tag [NS] int | ptag [2] int
+#ifndef G19_NPB
+#define G19_NPB 2
+#endif
+constexpr int NPB = G19_NPB;  // partial buffers (1: less smem, for 2 blocks per SM)
+#ifndef G19_MINB
+#define G19_MINB 1
+#endif
 template <int M, int KC, int AP, int NS, int IS, int PRE, int XB, int TS, int RG, int RPW>
-__global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H,
+__global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H,
                                                          float scale, const __nv_bfloat16* __restrict__ x,
                                                          float* __restrict__ out, int* __restrict__ ctr, int n, int k, int tail, int npre) {
     constexpr int NWC = RG;  // 16-row groups per tile (one stage covers RG x AP atoms)
@@ -74,8 +81,8 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsign
     extern __shared__ __align__(128) unsigned char smem[];
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
     float* pbuf = (float*)(smem + NS * SB + XB * M * XS);
-    const unsigned bars = (unsigned)__cvta_generic_to_shared(pbuf + 2 * PBF);
-    int* tag = (int*)(pbuf + 2 * PBF) + 2 * (2 * NS + 8);  // after the barriers. per slot: u | xb << 29 | last x use << 30 | run end << 31 (-1: no more work)
+    const unsigned bars = (unsigned)__cvta_generic_to_shared(pbuf + NPB * PBF);
+    int* tag = (int*)(pbuf + NPB * PBF) + 2 * (2 * NS + 8);  // after the barriers. per slot: u | xb << 29 | last x use << 30 | run end << 31 (-1: no more work)
     int* ptag = tag + NS;                                 // per pbuf: tile (-1: consumers done)
     // full[NS], empty[NS], xfull[2], xempty[2], pfull[2], pempty[2]
     const unsigned xfull = bars + 16 * NS, xempty = xfull + 16, pfull = xfull + 32, pempty = xfull + 48;
@@ -170,8 +177,8 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsign
             }
         }
         for (int q = 0;; ++q) {
-            const int pb = q & 1;
-            bar_wait(pfull + 8 * pb, (q >> 1) & 1);
+            const int pb = q % NPB;
+            bar_wait(pfull + 8 * pb, (q / NPB) & 1);
             const int tr = ptag[pb];
             if (tr < 0) break;
             if (PRE == 2 && q == 0) {  // every block has zeroed its slice
@@ -350,8 +357,8 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsign
                         out[(long)(th * MT + jj * 8 + 2 * c + (e & 1)) * n + (tr * NWC + wr + rr) * 16 + g + 8 * (e >> 1)] = v[rr][jj][e] * scale;
             continue;
         }
-        const int pb = q & 1;  // hand the partials to the finisher: pbuf[pb][row group * 16 + row16][tok]
-        if (q >= 2) bar_wait(pempty + 8 * pb, ((q >> 1) - 1) & 1);
+        const int pb = q % NPB;  // hand the partials to the finisher: pbuf[pb][row group * 16 + row16][tok]
+        if (q >= NPB) bar_wait(pempty + 8 * pb, ((q / NPB) - 1) & 1);
 #pragma unroll
         for (int rr = 0; rr < RPW; ++rr) {
             float* pw = pbuf + pb * PBF + ((wr + rr) * 16 + g) * M + th * MT + 2 * c;
@@ -366,8 +373,8 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsign
         ++q;
     }
     {  // done: tell the finisher
-        const int pb = q & 1;
-        if (q >= 2) bar_wait(pempty + 8 * pb, ((q >> 1) - 1) & 1);
+        const int pb = q % NPB;
+        if (q >= NPB) bar_wait(pempty + 8 * pb, ((q / NPB) - 1) & 1);
         if (t == 0) ptag[pb] = -1;
         __syncwarp();
         if (lane == 0) bar_arrive(pfull + 8 * pb);
@@ -471,7 +478,7 @@ torch::Tensor g19_trace() {
 void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out, torch::Tensor ctr,
               int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode, int64_t npre, int64_t xb, int64_t ts, int64_t rg, int64_t rpw) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
-    const int sm = ns * rg * ap * 768 + xb * m * (kc * 2 + 16) + 2 * rg * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
+    const int sm = ns * rg * ap * 768 + xb * m * (kc * 2 + 16) + g19::NPB * rg * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
     TORCH_CHECK(n % (16 * rg) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0) && npre <= ns, "g19: shape");
     auto stream = c10::cuda::getCurrentCUDAStream();
     if (!mode) g19::zero<<<32, 256, 0, stream>>>((float4*)out.data_ptr(), m * n / 4, ctr.data_ptr<int>());
@@ -485,6 +492,10 @@ void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
     if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && is == IS_ && xb == XB_ && ts == TS_ && rg == RG_ && rpw == RPW_) { \
         auto kern = G19_KERN(M_, KC_, AP_, NS_, IS_, XB_, TS_, RG_, RPW_); \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        if (G19_MINB > 1) { cudaFuncSetAttribute(kern, cudaFuncAttributePreferredSharedMemoryCarveout, 100); \
+          int nb_ = 0, nsm_ = 0; cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb_, kern, (RG_ * TS_ / RPW_ + 2) * 32, sm); \
+          cudaDeviceGetAttribute(&nsm_, cudaDevAttrMultiProcessorCount, 0); \
+          TORCH_CHECK(mode < 2 || nb_ * nsm_ >= grid, "g19: grid not co-resident (grid barrier would hang): ", nb_, " blocks/SM"); } \
         cudaLaunchConfig_t cfg = {}; \
         cfg.gridDim = dim3(grid); cfg.blockDim = dim3((RG_ * TS_ / RPW_ + 2) * 32); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
         cudaLaunchAttribute attr[1]; \

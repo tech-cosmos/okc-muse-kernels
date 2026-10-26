@@ -1502,8 +1502,15 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 // M tokens (16/32), KC k per chunk, AP atoms (32 k) per warp per stage, NS ring stages, IS stages per tail item.
 // out FP32 [M, n] (zeroed by the primary), ctr int (zeroed by the primary). tail: stages left for dynamic items.
 // smem: ring [NS][SB] | x [2][M][XS] | pbuf [2][128 rows][M] f32 | barriers | tag [NS] int | ptag [2] int
+#ifndef G19_NPB
+#define G19_NPB 2
+#endif
+constexpr int NPB = G19_NPB;  // partial buffers (1: less smem, for 2 blocks per SM)
+#ifndef G19_MINB
+#define G19_MINB 1
+#endif
 template <int M, int KC, int AP, int NS, int IS, int PRE, int XB, int TS, int RG, int RPW>
-__global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H,
+__global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H,
                                                          float scale, const __nv_bfloat16* __restrict__ x,
                                                          float* __restrict__ out, int* __restrict__ ctr, int n, int k, int tail, int npre) {
     constexpr int NWC = RG;  // 16-row groups per tile (one stage covers RG x AP atoms)
@@ -1513,8 +1520,8 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsign
     extern __shared__ __align__(128) unsigned char smem[];
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
     float* pbuf = (float*)(smem + NS * SB + XB * M * XS);
-    const unsigned bars = (unsigned)__cvta_generic_to_shared(pbuf + 2 * PBF);
-    int* tag = (int*)(pbuf + 2 * PBF) + 2 * (2 * NS + 8);  // after the barriers. per slot: u | xb << 29 | last x use << 30 | run end << 31 (-1: no more work)
+    const unsigned bars = (unsigned)__cvta_generic_to_shared(pbuf + NPB * PBF);
+    int* tag = (int*)(pbuf + NPB * PBF) + 2 * (2 * NS + 8);  // after the barriers. per slot: u | xb << 29 | last x use << 30 | run end << 31 (-1: no more work)
     int* ptag = tag + NS;                                 // per pbuf: tile (-1: consumers done)
     // full[NS], empty[NS], xfull[2], xempty[2], pfull[2], pempty[2]
     const unsigned xfull = bars + 16 * NS, xempty = xfull + 16, pfull = xfull + 32, pempty = xfull + 48;
@@ -1609,8 +1616,8 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsign
             }
         }
         for (int q = 0;; ++q) {
-            const int pb = q & 1;
-            bar_wait(pfull + 8 * pb, (q >> 1) & 1);
+            const int pb = q % NPB;
+            bar_wait(pfull + 8 * pb, (q / NPB) & 1);
             const int tr = ptag[pb];
             if (tr < 0) break;
             if (PRE == 2 && q == 0) {  // every block has zeroed its slice
@@ -1789,8 +1796,8 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsign
                         out[(long)(th * MT + jj * 8 + 2 * c + (e & 1)) * n + (tr * NWC + wr + rr) * 16 + g + 8 * (e >> 1)] = v[rr][jj][e] * scale;
             continue;
         }
-        const int pb = q & 1;  // hand the partials to the finisher: pbuf[pb][row group * 16 + row16][tok]
-        if (q >= 2) bar_wait(pempty + 8 * pb, ((q >> 1) - 1) & 1);
+        const int pb = q % NPB;  // hand the partials to the finisher: pbuf[pb][row group * 16 + row16][tok]
+        if (q >= NPB) bar_wait(pempty + 8 * pb, ((q / NPB) - 1) & 1);
 #pragma unroll
         for (int rr = 0; rr < RPW; ++rr) {
             float* pw = pbuf + pb * PBF + ((wr + rr) * 16 + g) * M + th * MT + 2 * c;
@@ -1805,8 +1812,8 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsign
         ++q;
     }
     {  // done: tell the finisher
-        const int pb = q & 1;
-        if (q >= 2) bar_wait(pempty + 8 * pb, ((q >> 1) - 1) & 1);
+        const int pb = q % NPB;
+        if (q >= NPB) bar_wait(pempty + 8 * pb, ((q / NPB) - 1) & 1);
         if (t == 0) ptag[pb] = -1;
         __syncwarp();
         if (lane == 0) bar_arrive(pfull + 8 * pb);
@@ -1910,7 +1917,7 @@ torch::Tensor g19_trace() {
 void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out, torch::Tensor ctr,
               int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode, int64_t npre, int64_t xb, int64_t ts, int64_t rg, int64_t rpw) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
-    const int sm = ns * rg * ap * 768 + xb * m * (kc * 2 + 16) + 2 * rg * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
+    const int sm = ns * rg * ap * 768 + xb * m * (kc * 2 + 16) + g19::NPB * rg * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
     TORCH_CHECK(n % (16 * rg) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0) && npre <= ns, "g19: shape");
     auto stream = c10::cuda::getCurrentCUDAStream();
     if (!mode) g19::zero<<<32, 256, 0, stream>>>((float4*)out.data_ptr(), m * n / 4, ctr.data_ptr<int>());
@@ -1924,6 +1931,10 @@ void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
     if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && is == IS_ && xb == XB_ && ts == TS_ && rg == RG_ && rpw == RPW_) { \
         auto kern = G19_KERN(M_, KC_, AP_, NS_, IS_, XB_, TS_, RG_, RPW_); \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        if (G19_MINB > 1) { cudaFuncSetAttribute(kern, cudaFuncAttributePreferredSharedMemoryCarveout, 100); \
+          int nb_ = 0, nsm_ = 0; cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb_, kern, (RG_ * TS_ / RPW_ + 2) * 32, sm); \
+          cudaDeviceGetAttribute(&nsm_, cudaDevAttrMultiProcessorCount, 0); \
+          TORCH_CHECK(mode < 2 || nb_ * nsm_ >= grid, "g19: grid not co-resident (grid barrier would hang): ", nb_, " blocks/SM"); } \
         cudaLaunchConfig_t cfg = {}; \
         cfg.gridDim = dim3(grid); cfg.blockDim = dim3((RG_ * TS_ / RPW_ + 2) * 32); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
         cudaLaunchAttribute attr[1]; \
@@ -2861,7 +2872,8 @@ BF16_G19 = {"qkv_gate": [(16, 1024, 8, 3, 2, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1,
 # variant a = 1 block/SM (grid #SMs), b = 2 blocks/SM (grid 2 x #SMs, single-buffered A fragments, 1 partial buffer).
 # (m, kc, ap, ns) per layer; npre = ns, xb 1.
 DIAG20 = {"a": [(16, 1024, 4, 4), (16, 1024, 8, 3), (32, 1024, 4, 4), (32, 1024, 8, 2)],
-          "b": [(16, 1024, 4, 2), (16, 512, 4, 2), (32, 512, 4, 2), (32, 512, 2, 3)]}
+          "b": [(16, 1024, 4, 2), (16, 512, 4, 2), (32, 512, 4, 2), (32, 512, 2, 3)],
+          "c": [(16, 1024, 4, 2), (16, 512, 4, 2), (32, 512, 4, 2), (32, 512, 2, 3)]}  # c = gemv19 (mma.sync), 2 blocks/SM
 # _diag19 only (print, no picks): H200 behaviour of other configs in the layer case
 DIAG19 = {}  # s10 diag configs measured (checks 9b09c536/60ddb481/f1319777): see NOTES-proj
 DIAG19_STREAM = []  # (stage bytes, stages): 50 MB bare streams
@@ -2947,8 +2959,18 @@ except Exception as _e:  # noqa: BLE001
     _g19 = None
 
 _g20 = {}
-for _v, _defs in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_SB\n#define G20_NPB 1\n")):
+for _v, _defs in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_SB\n#define G20_NPB 1\n"), ("c", "")):
     try:
+        if _v == "c":  # gemv19 with 2 blocks per SM, exposed as g20_gemm
+            _g20[_v] = load_inline(
+                name="muse_proj_g19c",
+                cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
+                            "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources="#define G19_ONLY2\n#define G19_MINB 2\n#define G19_NPB 1\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
+                    "G19_CASE(%d,%d,%d,%d,1,1,1,8,1)" % c for c in sorted(set(DIAG20[_v])))),
+                functions=["g19_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+            _g20[_v].g20_gemm = _g20[_v].g19_gemm
+            continue
         _g20[_v] = load_inline(
             name="muse_proj_g20" + _v,
             cpp_sources="void g20_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
@@ -3318,7 +3340,7 @@ def _diag20(st):
             for v, cfgs in DIAG20.items():
                 if v not in _g20:
                     continue
-                grid = _SMS * (2 if v == "b" else 1)
+                grid = _SMS * (2 if v in "bc" else 1)
                 ctr = st.setdefault(("ctr20", v), torch.zeros(2, dtype=torch.int32, device="cuda"))
                 for c in cfgs:
                     if c[0] != m or ("g19", layer, c[1], c[2], 8) not in st:
