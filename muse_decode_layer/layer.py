@@ -451,8 +451,15 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
         lib.moe_norm_launch(y, local_ids, topk_weights, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, out)
         return out
     if (m <= TK2_MAX_TOKENS and _moe_TK2_NSTG) or (m > 32 and _moe_TW_CFG and bucket is None):
-        return _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
-                               "config": {"local_start": 0, "local_count": LOCAL_EXPERTS}}, st)
+        upf = UPF3.get(m) if m <= TK2_MAX_TOKENS else None
+        if upf:
+            u = state["unpool"]
+            lib.moe_set_upf(u.data_ptr(), u.shape[0], u.shape[1] * u.element_size(), upf)
+        out = _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
+                              "config": {"local_start": 0, "local_count": LOCAL_EXPERTS}}, st)
+        if upf:
+            lib.moe_set_upf(0, 0, 0, 0)
+        return out
     dev = x.device
     inter = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=dev)
     y = torch.empty((m * TOP_K, D_EXPERT), dtype=torch.bfloat16, device=dev)
@@ -685,6 +692,7 @@ def _pack14(w, kc):
 G10_CFG = {"qkv_gate": (8192, 4, 4, 1, 1, 132), "pooler": (8192, 4, 4, 1, 1, 132), "o": (1024, 2, 4, 2, 1, 264),
            "unpool_slice": (4096, 2, 4, 1, 1, 132)}
 _G10 = {}
+G10_PFL2 = {}  # s15: {sliding: keys} whose gemv10 (PDL secondary) bulk-prefetches its W into L2 before griddepcontrol.wait. H100 d1 {True: ("o",), False: ("o",)}: +1.8/+1.8 us (csl slowed); H200 untested
 
 
 # (kcu, wg, pf, bk) per weight, m = 8 (verify 1): the proj agent's gemv12 (g12_src.cu = r-proj e71d015), its H100 picks
@@ -714,14 +722,22 @@ def _g10_lib():
                 sig = "int64_t blocks) {"
                 for x_ in (anchor, launch, sig):
                     assert src.count(x_) == 1, x_
-                src = src.replace(anchor, '    asm volatile("griddepcontrol.wait;" ::: "memory");\n' + anchor)
+                # s15: pdl == 2: first bulk-prefetch this thread group's W chunks into L2 (ptxas sinks the register W
+                # loads above below the wait: SASS showed only the first stage before ACQBULK); x by __ldcg (no .nc)
+                src = src.replace(anchor, '    if (pfl2)\n'
+                                  '        for (long j = t; c + j * G < nch; j += 256)\n'
+                                  '            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(W + (c + j * G) * (CE / 8)), "r"(CE * 2) : "memory");\n'
+                                  '    asm volatile("griddepcontrol.wait;" ::: "memory");\n' + anchor.replace("__ldg(", "__ldcg("))
+                gsig = "__nv_bfloat16* __restrict__ out, int n) {"
+                assert src.count(gsig) == 1
+                src = src.replace(gsig, "__nv_bfloat16* __restrict__ out, int n, int pfl2) {")
                 src = src.replace(sig, "int64_t blocks, int64_t pdl) {")
                 src = src.replace(launch, (
                     "        cudaLaunchConfig_t lc = {}; lc.gridDim = blocks; lc.blockDim = 256 * V_; lc.dynamicSmemBytes = sm; \\\n"
                     "        lc.stream = s; cudaLaunchAttribute la[1]; la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; \\\n"
                     "        la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0; \\\n"
                     "        cudaLaunchKernelEx(&lc, g10::gemv<M_, U_, V_, B_, K_, P_>, (const uint4*)w.data_ptr(), \\\n"
-                    "                           (const uint4*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), (int)n); return; }"))
+                    "                           (const uint4*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), (int)n, (int)(pdl >= 2)); return; }"))
             if UNPOOL_PDL:  # gemv12 too: as a PDL secondary it L2-prefetches its W slice, then griddepcontrol.wait
                 reps = [
                     ("int* __restrict__ cnt, int n, int nrg_all, int k, int bk) {",
@@ -1035,6 +1051,71 @@ if TK2F_LATE_TRIG:
         _a = "static int g_pdl = 4,"
         assert _moe_CUDA_SRC.count(_a) == 1
         _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "static int g_pdl = 6,")
+# s15 UPF3: at T in UPF3, every moe_tk2f CTA bulk-prefetches (default L2 policy) the first UPF3[T] bytes of each of its
+# rows of the full unpooler W into L2 after its last gemm2 row (the cuBLAS unpool after moe_norm2/3 then starts with
+# that part in L2; HBM is mostly idle in the CTA drain + norm). Pointer via moe_set_upf() before the launch (a host
+# static read at launch/capture time; reset to null after).
+UPF3 = {}  # s15: {T: bytes per row}, e.g. {32: 3072}; H100 d32: AT 0 tie (unpool -4, tk2f +7.8), AT 1 +1..2, AT 2 +1..2 (H200 untested)
+UPF3_AT = 0  # 0: tk2f CTA end (H100 d32: unpool -4 us but tk2f +7.8: the stragglers lose bandwidth), 1: moe_norm2/3 after its wait
+_a = "int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a + "\nstatic const char* g_upf = nullptr;\nstatic int g_upf_rows = 0, g_upf_rb = 0, g_upf_seg = 0;\n"
+                                      "int64_t moe_set_upf(int64_t p, int64_t rows, int64_t rb, int64_t seg) {\n"
+                                      "  g_upf = (const char*)p; g_upf_rows = (int)rows; g_upf_rb = (int)rb; g_upf_seg = (int)seg; return 0;\n}")
+_a = "    const float* __restrict__ w1, __nv_bfloat16* __restrict__ out, int M, float eps) {\n  static_assert(NC % 8 == 0, \"routing uses warps 0..7 x 32 ids\");"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("int M, float eps) {", "int M, float eps,\n    const char* upf, int upf_rows, int upf_rb, int upf_seg) {"))
+_a = "      (__nv_bfloat16*)out, nr / 8, eps);\n}"
+assert _moe_CUDA_SRC.count(_a) == 1, _moe_CUDA_SRC.count(_a)
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "      (__nv_bfloat16*)out, nr / 8, eps, g_upf, g_upf_rows, g_upf_rb, g_upf_seg);\n}")
+_a = ("  tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, "
+      "s_red, smem, full,\n                                     empty, st, ph, rb);\n")
+assert _moe_CUDA_SRC.count(_a) == 1
+if UPF3_AT == 0:
+    _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a + "  if (upf != nullptr && tid < 32)\n"
+                                          "    for (int r = blockIdx.x + gridDim.x * tid; r < upf_rows; r += gridDim.x * 32)\n"
+                                          "      asm volatile(\"cp.async.bulk.prefetch.L2.global [%0], %1;\" :: \"l\"(upf + (long)r * upf_rb), \"r\"(upf_seg) : \"memory\");\n")
+else:  # in moe_norm2/3 right after its griddepcontrol.wait (moe_tk2f complete: no competition with its stream)
+    _i = _moe_CUDA_SRC.index("__global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y")
+    _a = "int count, float eps, __nv_bfloat16* __restrict__ out, int* zc) {"
+    _j = _moe_CUDA_SRC.index(_a, _i)
+    _moe_CUDA_SRC = (_moe_CUDA_SRC[:_j] + _a.replace("int* zc) {", "int* zc,\n    const char* upf = nullptr, int upf_rows = 0, int upf_rb = 0, int upf_seg = 0) {")
+                     + _moe_CUDA_SRC[_j + len(_a):])
+    _a = "  asm volatile(\"griddepcontrol.wait;\" ::: \"memory\");  // PDL secondary of gemm2\n"
+    _j = _moe_CUDA_SRC.index(_a, _i)
+    assert _j - _i < 2000
+    if UPF3_AT == 1:  # bulk (the CTA retires only after its bulk prefetches complete: H100 norm +5.6, unpool -4)
+        _pf = ("  if (upf != nullptr)\n"
+               "    for (int r = blockIdx.x + gridDim.x * tid; r < upf_rows; r += gridDim.x * 512)\n"
+               "      asm volatile(\"cp.async.bulk.prefetch.L2.global [%0], %1;\" :: \"l\"(upf + (long)r * upf_rb), \"r\"(upf_seg) : \"memory\");\n")
+    else:  # 2: per-line prefetch.global.L2 (fire and forget), lines spread over the grid
+        _pf = ("  if (upf != nullptr) {\n"
+               "    const int lpr = upf_seg >> 7, nl = upf_rows * lpr;\n"
+               "    for (int l = blockIdx.x * 512 + tid; l < nl; l += gridDim.x * 512)\n"
+               "      asm volatile(\"prefetch.global.L2 [%0];\" :: \"l\"(upf + (long)(l / lpr) * upf_rb + (l % lpr) * 128));\n"
+               "  }\n")
+    _moe_CUDA_SRC = _moe_CUDA_SRC[:_j + len(_a)] + _pf + _moe_CUDA_SRC[_j + len(_a):]
+    _a = "      (__nv_bfloat16*)out.data_ptr(), (int*)zc.data_ptr());\n}"
+    assert _moe_CUDA_SRC.count(_a) == 2, _moe_CUDA_SRC.count(_a)
+    _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "      (__nv_bfloat16*)out.data_ptr(), (int*)zc.data_ptr(), g_upf, g_upf_rows, g_upf_rb, g_upf_seg);\n}")
+_moe__CPP = _moe__CPP + "int64_t moe_set_upf(int64_t, int64_t, int64_t, int64_t);"
+
+
+def _moe__lib():  # = moe_src's _lib() + moe_set_upf
+    global _moe__LIB
+    if _moe__LIB is None:
+        from torch.utils.cpp_extension import load_inline
+        h = hashlib.sha256(_moe_CUDA_SRC.encode()).hexdigest()[:12]
+        _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=_moe_CUDA_SRC,
+                                functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
+                                           "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch",
+                                           "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
+                                           "moe_set_upf"],
+                                extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
+                                extra_cflags=["-O3"], verbose=False)
+    return _moe__LIB
+
+
 _N2U_SRC = r'''namespace n2u {
 // SLOT (s14, moe_tk2f PF & 4): y32 row = route slot s, pre-scaled by gs2 * 256 (no inv / gs loads); the routing (ids, tw:
 // pr1's, complete before tk2f passed its own griddepcontrol.wait) is read before griddepcontrol.wait, so only the y32
@@ -1410,7 +1491,7 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
         return out
     if x.shape[0] == 1 and lib is not None and key in G10_CFG and x.shape[1] == G10_CFG[key][0]:
         out = torch.empty((1, w.shape[0]), dtype=torch.bfloat16, device=x.device)
-        pdl = (int(key in GEMV_PDL_SECONDARY.get((1, sliding), ())),) if UNPOOL_PDL else ()
+        pdl = ((key in GEMV_PDL_SECONDARY.get((1, sliding), ())) * (1 + (key in G10_PFL2.get(sliding, ()))),) if UNPOOL_PDL else ()
         lib.g10_gemv(w, x.contiguous(), out, *G10_CFG[key][1:], *pdl)
         return out
     if x.shape[0] == G12_TOKENS and state is not None and "g12" in state and key in G12_CFG:
