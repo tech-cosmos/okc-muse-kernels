@@ -83,6 +83,8 @@ NEXT: H200 DIAG (moe check) of HOT_M {256: 24/32/40} on the layer routings (DIAG
 the layer's tuner pick it as a T=256 option. Then: same idea at the 33..64-token experts (N64 RT2 passes already single)?
 no: those are one pass already. Next lever: the twm drain at v16/v32 (STATE idea -5).
 
+## Session 32 (17:10Z): review only; expert-stream overlap with earlier phases re-checked dead (layer s38 oracle, s41 timeline). NOTES s32.
+
 ## Session 31 (16:50Z, no judge runs): housekeeping for the NEW sandbox (/tmp is lost at ~19:10Z)
 - Layer routings now in the repo: tools/data/routes.pt (+ dump_routes.py); tools/layer_ab.py loads it from there
   (was /tmp/moe10). tools/mktl_diag.py creates /tmp/moe12 itself. H100 layer_ab v16 = 200.7 us (= s30).

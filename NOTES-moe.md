@@ -828,3 +828,13 @@
   per call, 49-64 0-1; v32 18-21 experts, 2 hot (73-98), 33-48: 0-2. => an N40/N48 pass class (separate launch, s18 said
   twm itself cannot hold another N) would touch ~1 expert per call: < 0.5 us. Dead.
 - Nothing else is H100-testable with size (s30 review). Next sandbox: first moe check = the queued moe_hot DIAG.
+
+## Session 32 (2026-10-26 17:07Z - 17:20Z) -- review only (no judge runs: moe checks 20/20; sandbox ends ~19:10Z)
+- Re-read the lead's "think big" item (overlap the expert weight stream with latency-bound phases) against r-layer's notes:
+  layer s38 measured the upper bound (oracle side-stream L2 prefetch of the KNOWN routed experts during the d1 pooler):
+  dead, HBM already saturated there; layer s41's v1 H100 timeline shows no idle-HBM interval > 4 us before the experts;
+  moe s27 RFLAG (tk2f starting 14 us earlier) gave -0.1..0.4 us. A speculative (routing-blind) prefetch of all 32 local
+  experts' first rows would waste ~50% of its bytes at d16 (13-19 of 32 experts touched) on top of that: not built.
+- Judge layer profile 703d3a7e (v70): tk2f d1 sl 28.7 (incl. PDL wait) / full 21.2, d16 sl 69.7 / full 44.1 us;
+  moe_norm2 d16 7.9 us = mostly its PDL wait on tk2f's tail.
+- Nothing changed in code. Next sandbox: first moe check = the queued moe_hot DIAG (session 30), unchanged.
