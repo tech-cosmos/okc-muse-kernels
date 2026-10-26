@@ -422,3 +422,16 @@
   finisher applies the same two fmas to pbuf before its red pass; x lifetime: finisher arrives on xempty too) ->
   consumer run end ~0.1 us; (b) cap npre so x is not queued behind W when the predecessor is short; (c) x-arrival
   2.6 us cold: 132 blocks hit the same 7 x chunks at once (L2 hot spot?): try TMA multicast over clusters of 2.
+
+## Session 15 (2026-10-26 07:40 - UTC): gemv19 escape fixups off the register path (s14 Next (a))
+- Real escape density (pack16, KC 1024): qkv 1.15/row, pooler 1.11, unpooler 0.40, o 0.10 -> per 128-row tile per
+  1024-k chunk ~13-18 escapes; per consumer warp per run ~2-3.
+- Tried (a) as planned: consumers push a compacted escape list per warp (ballot + popc, cheap), the finisher applies
+  them on pbuf before its red pass and releases x (mbarrier arrive count NCW). Correct (ESCW, ECAP=2 overflow
+  fallback) but SLOWER by 1-3 us (H100 MODE 2 PRED 3000): bisected (G19_NOLIST / G19_NOAPPLY): the finisher's
+  serial apply loop (~18 entries per tile, one warp, LDS->fma->STS chain ~150 cycles each) sits on the kernel's
+  critical path (x release + last run). Unrolled/prefetched loads: no change. Kept as /tmp only (dead).
+- Tried (b): each lane RMWs its own escapes in pbuf over all M tokens (8 rounds by slot): 3.7 us per run end
+  (trace): one lane walks 32 tokens serially and the compiler can't overlap the RMWs (pointer aliasing). Dead.
+- (c) = kept: after the pbuf store, per warp, escapes walked one at a time (ballot per (rr, h, slot parity), ffs
+  loop, shfl col/hy from the owner) with lane = token: one parallel RMW per escape. G19_RFIX = s14 register path.

@@ -77,7 +77,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     constexpr int NWC = RG;  // 16-row groups per tile (one stage covers RG x AP atoms)
     static_assert(RPW == 1 || TS == 1, "config");
     constexpr int NCW = NWC * TS / RPW, MT = M / TS, NT = MT / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * 768, XS = KC * 2 + 16, PBF = NWC * 16 * M;
-    static_assert(NA % AP == 0 && SPK % IS == 0 && NT % 2 == 0, "config");  // NT even: x B fragments by ldmatrix.x4
+    static_assert(NA % AP == 0 && SPK % IS == 0 && NT % 2 == 0 && M <= 32, "config");  // NT even: x B fragments by ldmatrix.x4
     extern __shared__ __align__(128) unsigned char smem[];
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
     float* pbuf = (float*)(smem + NS * SB + XB * M * XS);
@@ -321,6 +321,11 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         if (t == 0 && q == 0) TR(11);
         const int nat = (st - st0 + 1) * AP;
         const int klo = ks * KC + st0 * AP * 32, khi = ks * KC + (st + 1) * AP * 32;
+#if defined(G19_OLDFIX) || defined(G19_RFIX)
+        constexpr bool sfix = false;
+#else
+        const bool sfix = !(nat == KA && PRE != 2);  // pbuf path: escape fixups applied in smem after the store (below)
+#endif
         float v[RPW][NT][4];
 #pragma unroll
         for (int rr = 0; rr < RPW; ++rr)
@@ -332,6 +337,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         for (int rr = 0; rr < RPW; ++rr)
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
+                if (sfix) break;
                 const float4 hq = h ? hd1[rr] : hd0[rr];
 #ifndef G19_OLDFIX
                 // which slots any lane of the warp needs (owner lanes test their own 2 slots; OR over the 8 row lanes g):
@@ -366,7 +372,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                 }
             }
         if (t == 0 && q == 0) TR(12);
-        if (xl) {  // done with this x buffer (the fixups above were its last reads)
+        if (xl && !sfix) {  // done with this x buffer (the fixups above were its last reads)
             __syncwarp();
             if (lane == 0) bar_arrive(xempty + 8 * xb);
         }
@@ -391,6 +397,40 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
 #pragma unroll
                 for (int h = 0; h < 2; ++h) *(float2*)(pw + 8 * h * M + jj * 8) = make_float2(v[rr][jj][2 * h], v[rr][jj][2 * h + 1]);
         }
+#if !defined(G19_OLDFIX) && !defined(G19_RFIX)
+        // escape fixups on the stored partials, one escape at a time over the warp (lane = token): the in-range slots
+        // (lane c holds slots 2c, 2c + 1 of rows g, g + 8) are found by ballots and walked in lane order, warp-uniformly
+        {
+            __syncwarp();
+            const unsigned char* xt = smem + NS * SB + xb * M * XS + (th * MT + lane) * XS - ks * KC * 2;
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr)
+#pragma unroll
+                for (int h = 0; h < 2; ++h)
+#pragma unroll
+                    for (int pr = 0; pr < 2; ++pr) {
+                        const float4 hq = h ? hd1[rr] : hd0[rr];
+                        const float hx = pr ? hq.z : hq.x, hy = pr ? hq.w : hq.y;
+                        unsigned b = __ballot_sync(0xffffffffu, hy != 0x1p-15f && __float_as_int(hx) >= klo && __float_as_int(hx) < khi);
+                        while (b) {
+                            const int src = __ffs(b) - 1;
+                            b &= b - 1;
+                            const int col = __float_as_int(__shfl_sync(0xffffffffu, hx, src));
+                            const float hv = __shfl_sync(0xffffffffu, hy, src);
+                            if (lane < MT) {
+                                float* pp = pbuf + pb * PBF + ((wr + rr) * 16 + (src >> 2) + 8 * h) * M + th * MT + lane;
+                                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xt + col * 2));
+                                *pp = fmaf(xv, hv, fmaf(xv, -0x1p-15f, *pp));
+                            }
+                        }
+                    }
+            __syncwarp();
+        }
+        if (xl) {  // done with this x buffer (the fixups above were its last reads)
+            __syncwarp();
+            if (lane == 0) bar_arrive(xempty + 8 * xb);
+        }
+#endif
         if (t == 0) ptag[pb] = tr;
         __syncwarp();
         if (lane == 0) bar_arrive(pfull + 8 * pb);
