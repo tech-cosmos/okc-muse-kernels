@@ -359,9 +359,15 @@ void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
     TORCH_CHECK(n % (16 * g19::NWC) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0) && npre <= ns, "g19: shape");
     auto stream = c10::cuda::getCurrentCUDAStream();
     if (!mode) g19::zero<<<32, 256, 0, stream>>>((float4*)out.data_ptr(), m * n / 4, ctr.data_ptr<int>());
+#ifdef G19_ONLY2
+    TORCH_CHECK(mode == 2, "g19: built for mode 2 only");
+#define G19_KERN(M_, KC_, AP_, NS_, IS_) g19::gemm<M_, KC_, AP_, NS_, IS_, 2>
+#else
+#define G19_KERN(M_, KC_, AP_, NS_, IS_) (mode == 2 ? g19::gemm<M_, KC_, AP_, NS_, IS_, 2> : mode ? g19::gemm<M_, KC_, AP_, NS_, IS_, 1> : g19::gemm<M_, KC_, AP_, NS_, IS_, 0>)
+#endif
 #define G19_CASE(M_, KC_, AP_, NS_, IS_) \
     if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && is == IS_) { \
-        auto kern = mode == 2 ? g19::gemm<M_, KC_, AP_, NS_, IS_, 2> : mode ? g19::gemm<M_, KC_, AP_, NS_, IS_, 1> : g19::gemm<M_, KC_, AP_, NS_, IS_, 0>; \
+        auto kern = G19_KERN(M_, KC_, AP_, NS_, IS_); \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
         cudaLaunchConfig_t cfg = {}; \
         cfg.gridDim = dim3(grid); cfg.blockDim = dim3((g19::NWC + 2) * 32); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
