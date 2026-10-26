@@ -599,3 +599,4 @@
   pick noise (one run said sliding +2.3): pin options for A/Bs. Timeline (tools/timeline.py): attention ends 1.9 us
   earlier; attention itself +0.3 (nds/combine) .. +0.9 (full) us for the 2nd slab loads.
 - Tests on the patched build: bench.py test 13/13, replay_test decode 32 x 20 inputs x 3 router seeds: 0 fails.
+- Session 22 end: checks 10-26 18/20, scored 5/10. Board best unchanged 3810db09 1.3110x. DIAG_SLAB off again (c5cf31c).
