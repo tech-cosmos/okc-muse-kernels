@@ -831,3 +831,26 @@
   Runs only at T>32. H100 ab_files with TUNE = {} in both files (variants/v75_nt.py, v76_nt.py; avoids tuner noise),
   4 rounds: v16 sl 308.32 -> 307.95, full 457.53 -> 454.30, v32 sl 411.57 -> 410.27, full 662.10 -> 662.57; T<=32 rows
   are the same code (spread +-1.4 us = noise floor of this A/B). Tests 13/13, scored verify x3 0 bad, replay verify 0/20.
+
+## s37 (2026-10-26 14:40Z-): v77 fused pooler+router GEMM at T=256 (no judge runs: budget spent)
+- H100 timelines of v76 (idle GPU): v32 sliding: qkv nvjet 21.6 | nvs+combine -> 39.8 | o 10.7 | boundary 8.9 | pooler
+  nvjet 128x64 61.9-110.8 (48.9 us: 67 MB at T=256 is ~compute/tile-bound, shares SMs with router_split 12.7 + routing
+  16.0 + moe_route 4.4 on the other stream) | gathern 4.4 | twm 254 | moe_norm tail ~10 | unpool 31 | boundary 9.
+  v16 sliding: pooler 88x64 33.7 || pr3 router 30.8; twm 178. d16/d32: routing ends ~with the g19 pooler (no gain there).
+- v77 (b66a869): FUSED_ROUTER_TOKENS (256,) (the s7 path: ONE torch.mm of h against [pooler; router hi; lo], FP32 out,
+  routing sums the hi/lo columns) + now GNORM in that path: moe_gathern takes a row stride (x.stride(0)/2) and reads the
+  strided FP32 pooler columns (rounded to BF16 first = the BF16-out pooler), moe_route right after the routing, all on
+  one stream; build.py patches moe_src kernel_fn to skip .contiguous() when gather_norm is set. TUNE option "fr" at
+  T=128/256 (FR_TUNE builds state["pool_router"], +75 MB): T=128 candidates {fr}, {fr, twf_split 66}; T=256 {fr: False}
+  (+ twm_order 76 / lt:unpool combos). H100 fused GEMM (80x128 4x2 cluster) 39.7 us vs pooler 48.9 in parallel with the
+  router; twm starts ~5 us earlier. ab_files tuner off (variants/*_nt.py): v32 sl 412.6 -> 406.4, full 663.3 -> 661.4
+  (6 rounds); 1st run -2.4/-2.5; without the gnorm part -5.4/-4.4. Tuner (H100) at T=256: fr vs not -2.6 sliding,
+  -2.3 full with twm_order 76 too. T=128: +3.5/0 and +8 (v16 loses; timeline twm itself +6 us there, unexplained): off.
+  Tests: bench test 13/13 with fr forced at EVERY T>8 (variants/s37frall_nt.py) and on main; scored verify x3 0 bad;
+  replay v32 0/20; route_judge v32 2 seeds x 50: 0 fails, gaps like the FP8 reference's. prepare() 6 s on H100.
+- DEAD fr mode 2 (router hi/lo GEMM [T,512] first, then the pooler alone while routing + bucketing run beside it):
+  router GEMM 8.4 + splitKreduce 2.1 us and the pooler ALONE is 38.8 us (= the fused 4608-col GEMM 39.7): v32 +6/+7,
+  v16 +8 us. At T=256 the extra 512 router columns are ~free in the fused GEMM. Code not kept.
+- Next ideas from this session's timelines: T=256 glue after the fused GEMM is routing 3.7 + moe_route 2.4 + gathern
+  6.2 us H100 (serial, small grids: a PDL chain could save ~1 us); qkv at T=128/256 is 2x its bytes floor but proj
+  closed that lane (s16/s28: own GEMMs lose to cuBLASLt).

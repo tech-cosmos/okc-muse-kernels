@@ -1,9 +1,13 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 (session 36: main = v76, NOT judge-checked; budget for 10-26 spent).
+Updated 2026-10-26 (session 37: main = v77, NOT judge-checked; budget for 10-26 spent).
 
-**s36: main = v76 (5c5329d)** = v75 + moe s21 TWM_L2H (twm L2 hints, T>32 only): H100 tuner-off A/B v16 full -3.2,
-v16/v32 sl -0.4/-1.3 us, v32 full tie. Tests 13/13, scored verify x3 0 bad, replay verify 0/20. FIRST CHECK = main (v76).
+**s37: main = v77 (b66a869)** = v76 + fused pooler+router GEMM at T=256 (FUSED_ROUTER_TOKENS (256,), moe_gathern
+reads its strided FP32 pooler rows; TUNE option fr at T=128/256): H100 tuner-off v32 sl -6.2/-2.4, full -1.9/-2.5 us
+(2 runs); T=128 loses (tuner candidate only). Tests 13/13 (also fr forced at all T>8), scored verify x3, replay, route_judge
+0 bad. FIRST CHECK OF THE NEXT SANDBOX = main (v77); read the T=256 "layer tune" lines (fr False should lose).
+
+**s36: v76 (5c5329d)** = v75 + moe s21 TWM_L2H (T>32): H100 v16 full -3.2, v32 sl -1.3 us.
 
 **s35: main = v75 (482a3b6)** = v72 + moe s21 TK2F_L2H (v73: H100 d16 -3.2/-4.6, v1 -3.6/-6.3 us) + pr1_npf default 0
 at T=1 (v74: H200 tuners picked it twice) + TUNE_BASE (v75: per-(T, sliding) defaults = picks both H200 tuner logs agreed on:
