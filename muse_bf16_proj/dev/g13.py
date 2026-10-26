@@ -45,7 +45,8 @@ def pack13(w):
 
 
 if __name__ == "__main__":
-    cfgs = [tuple(map(int, c.split(","))) for c in sys.argv[1].split(";")]
+    cfgs = [tuple(map(int, c.split(","))) + (256,) for c in sys.argv[1].split(";")]
+    cfgs = [c[:5] for c in cfgs]  # (u, nv, minb, pf, vt): vt defaults to 256
     grids = [int(g) for g in (sys.argv[2:] or ["132"])]
     SH = [("qkv", 2304, 8192), ("o", 8192, 1024), ("pool", 4096, 8192), ("unp1k", 1024, 4096), ("unp", 8192, 4096)]
     only = os.environ.get("SH")
@@ -53,9 +54,9 @@ if __name__ == "__main__":
     ks = sorted({k for _, _, k in SH})
     d = os.path.dirname(os.path.abspath(__file__))
     src = open(os.path.join(d, "gemv13.cu")).read()
-    src = src.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d)" % (k, u, v, b, p) for (u, v, b, p) in cfgs for k in ks if (u * 4096) % k == 0))
+    src = src.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d,%d)" % (k, u, v, b, p, vt) for (u, v, b, p, vt) in cfgs for k in ks if (u * vt * 16) % k == 0))
     mod = load_inline(name="pj_g13_" + hashlib.md5(src.encode()).hexdigest()[:10],
-                      cpp_sources="void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                      cpp_sources="void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
                       cuda_sources=src, functions=["g13_gemv"], extra_cuda_cflags=os.environ.get("XF", "").split() + ["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"])
     Wr = reference.generate_weights(reference.WEIGHTS_SEED)
     names = {"qkv": "qkv_gate", "o": "o", "pool": "pooler", "unp1k": "unpooler", "unp": "unpooler"}
@@ -73,19 +74,19 @@ if __name__ == "__main__":
         # exactness: x = single power of two picks a column, incl. escaped columns
         er = (hdr[:, :, 1] != 2.0 ** -15).nonzero()
         probe_cols = [0, 5] + ([int(hdr[er[0, 0], er[0, 1], 0].view(torch.int32))] if len(er) else [])
-        for (u, nv, mb, pf) in cfgs:
-            if (u * 4096) % k: continue
+        for (u, nv, mb, pf, vt) in cfgs:
+            if (u * vt * 16) % k: continue
             for b in grids:
                 out = torch.empty(1, n, dtype=torch.bfloat16, device="cuda")
-                mod.g13_gemv(sm, nib, hdr, x, out, scale, u, nv, mb, pf, b); torch.cuda.synchronize()
+                mod.g13_gemv(sm, nib, hdr, x, out, scale, u, nv, mb, pf, b, vt); torch.cuda.synchronize()
                 err = ((out.double() - ref).norm() / ref.norm()).item()
-                assert err < 5e-3, (err, nm, u, nv, mb, pf, b)
+                assert err < 5e-3, (err, nm, u, nv, mb, pf, b, vt)
                 for col in probe_cols:
                     xp = torch.zeros(1, k, device="cuda", dtype=torch.bfloat16); xp[0, col] = 32.0
                     op = torch.empty(1, n, dtype=torch.bfloat16, device="cuda")
-                    mod.g13_gemv(sm, nib, hdr, xp, op, scale, u, nv, mb, pf, b)
+                    mod.g13_gemv(sm, nib, hdr, xp, op, scale, u, nv, mb, pf, b, vt)
                     exp = (W[:, col].double() * 32).bfloat16()
                     assert os.environ.get("XF") or torch.equal(op[0], exp), (nm, col, (op[0].double() - exp.double()).abs().max().item())
-                dt = bench.time_graph(lambda: mod.g13_gemv(sm, nib, hdr, x, out, scale, u, nv, mb, pf, b)) - e
-                line += f" | U{u}V{nv}B{mb}P{pf} g{b} {dt:6.2f}"
+                dt = bench.time_graph(lambda: mod.g13_gemv(sm, nib, hdr, x, out, scale, u, nv, mb, pf, b, vt)) - e
+                line += f" | U{u}V{nv}B{mb}P{pf}T{vt} g{b} {dt:6.2f}"
         print(line, flush=True)

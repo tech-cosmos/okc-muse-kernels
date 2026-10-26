@@ -64,10 +64,11 @@ ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
 BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4, 1, 1, 132)],
             "o": [(1, 1024, 2, 4, 2, 1, 264)], "unpooler": [(1, 4096, 2, 4, 1, 1, 132)]}
 # BF16 m=1 GEMV over losslessly compressed weights (dev/gemv13.cu: 12 bits per weight), (m, k, u, nv, minb, pf,
-# blocks), chosen on the H100 (dev/g13.py); prepare() times them against gemv10 and F.linear and keeps the fastest.
-BF16_G13 = {"qkv_gate": [(1, 8192, 2, 4, 1, 1, 132), (1, 8192, 2, 2, 1, 2, 132)],
-            "pooler": [(1, 8192, 2, 4, 1, 1, 132), (1, 8192, 2, 2, 1, 2, 132)],
-            "unpooler": [(1, 4096, 2, 4, 1, 2, 132)]}
+# blocks, vt), chosen on the H100 (dev/g13.py); prepare() times them against gemv10 and F.linear and keeps the fastest.
+# vt 512 (512-thread virtual blocks, half the rows per round): qkv H100 13.7 -> 13.1 us (2304 rows: smaller tail).
+BF16_G13 = {"qkv_gate": [(1, 8192, 2, 4, 1, 1, 132, 256), (1, 8192, 2, 2, 1, 2, 132, 256), (1, 8192, 1, 2, 1, 1, 132, 512)],
+            "pooler": [(1, 8192, 2, 4, 1, 1, 132, 256), (1, 8192, 2, 2, 1, 2, 132, 256)],
+            "unpooler": [(1, 4096, 2, 4, 1, 2, 132, 256)]}
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
 # BF16 tensor-core streaming GEMM over the same compressed weights (dev/gemv14.cu = gemv12 + decode), (m, kcu, wg, pf,
 # bk, xp), chosen on the H100 (dev/g14.py); tuned in prepare() like the others.
@@ -114,7 +115,7 @@ _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
         _G10_SRC.replace("G10_CONFIGS", " ".join("G10_CASE(%d,%d,%d,%d,%d,%d)" % c[:6] for v in BF16_G10.values() for c in v)) + "\n" +
         _G12_SRC.replace("G12_CONFIGS", " ".join("G12_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted({c[:4] + c[5:] for v in BF16_G12.values() for c in v}))) + "\n" +
-        _G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d)" % c[1:6] for c in sorted({c for v in BF16_G13.values() for c in v}))) + "\n" +
+        _G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d,%d)" % (c[1:6] + c[7:8]) for c in sorted({c for v in BF16_G13.values() for c in v}))) + "\n" +
         _G14_SRC.replace("G14_CONFIGS", " ".join("G14_CASE(%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G14.values() for c in v}))) + "\n" +
         _G15_SRC.replace("G15_CONFIGS", " ".join("G15_CASE(%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G15.values() for c in v}))) + "\n" +
         _G16_SRC.replace("G16_CONFIGS", " ".join("G16_CASE(%d,%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G16.values() for c in v}))) + "\n" +
@@ -131,7 +132,7 @@ try:
                     "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                     "void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t);\n"
+                    "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                     "void g14_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                     "void g15_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "

@@ -55,18 +55,20 @@ __device__ __forceinline__ float dot16(const uint4& s, const uint2& nb, const fl
     return a0 + a1;
 }
 
-template <int U, int NV, int MINB, int KK, int PF>
-__global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__ S, const uint2* __restrict__ N,
+// VT: threads per virtual block (256 or 512): a chunk is U * VT * 16 weights. 512 halves the rows per round of a
+// 2304-row qkv (4.36 -> 5 rounds of whole rows at 528 vbs: a 13% tail; 8.73 -> 9 half-size rounds at 264 vbs: 3%).
+template <int U, int NV, int MINB, int KK, int PF, int VT = 256>
+__global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ S, const uint2* __restrict__ N,
                                                        const float2* __restrict__ H, const __nv_bfloat16* __restrict__ x,
                                                        __nv_bfloat16* __restrict__ out, int n, float scale) {
-    constexpr int CE = U * 4096, RPC = CE / KK;
-    static_assert(CE % KK == 0 && KK % 512 == 0, "chunk must hold whole rows");
-    const int t = threadIdx.x & 255, vg = threadIdx.x >> 8, lane = t & 31, wp = t >> 5;
+    constexpr int CE = U * VT * 16, RPC = CE / KK, WV = VT / 32;
+    static_assert(CE % KK == 0 && KK % 512 == 0 && (VT == 256 || VT == 512), "chunk must hold whole rows");
+    const int t = threadIdx.x % VT, vg = threadIdx.x / VT, lane = t & 31, wp = t >> 5;
     const int nch = n / RPC;
-    __shared__ float red_[NV][2][U * 8];
+    __shared__ float red_[NV][2][U * WV];
     __shared__ __align__(16) float xs[KK / 16 * 20];  // 16-float groups padded to 20: no bank conflicts
     __shared__ float2 hs_[NV][MAXC * RPC * ESC];  // this vb's escape headers: chunk j = j-th of c, c + G, ...
-    float (*red)[U * 8] = red_[vg];
+    float (*red)[U * WV] = red_[vg];
     const int G = gridDim.x * NV;
     int c = blockIdx.x * NV + vg;
     uint4 s[PF][U];
@@ -75,23 +77,23 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
     auto load = [&](int p, int ch) {
 #pragma unroll
         for (int u = 0; u < U; ++u) {
-            const long i = (long)ch * (CE / 16) + u * 256 + t;
+            const long i = (long)ch * (CE / 16) + u * VT + t;
             s[p][u] = ld4(S + i);
             nb[p][u] = ld2(N + i);
         }
     };
     // x and the escape headers first: they must not queue behind the W prologue
-    constexpr int XV = (KK / 8 + 256 * NV - 1) / (256 * NV), HV = (MAXC * RPC * ESC + 255) / 256;
+    constexpr int XV = (KK / 8 + VT * NV - 1) / (VT * NV), HV = (MAXC * RPC * ESC + VT - 1) / VT;
     uint4 xv[XV];
     float2 hv[HV];
 #pragma unroll
     for (int q = 0; q < XV; ++q) {
-        const int i = threadIdx.x + q * 256 * NV;
+        const int i = threadIdx.x + q * VT * NV;
         if (i < KK / 8) xv[q] = __ldg(reinterpret_cast<const uint4*>(x) + i);
     }
 #pragma unroll
     for (int q = 0; q < HV; ++q) {
-        const int i = t + q * 256, ch = c + (i / (RPC * ESC)) * G;
+        const int i = t + q * VT, ch = c + (i / (RPC * ESC)) * G;
         if (i < MAXC * RPC * ESC && ch < nch) hv[q] = __ldg(H + (long)ch * RPC * ESC + i % (RPC * ESC));
     }
 #pragma unroll
@@ -99,12 +101,12 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
         if (c + p * G < nch) load(p, c + p * G);
 #pragma unroll
     for (int q = 0; q < HV; ++q) {
-        const int i = t + q * 256, ch = c + (i / (RPC * ESC)) * G;
+        const int i = t + q * VT, ch = c + (i / (RPC * ESC)) * G;
         if (i < MAXC * RPC * ESC && ch < nch) hs_[vg][i] = hv[q];
     }
 #pragma unroll
     for (int q = 0; q < XV; ++q) {
-        const int i = threadIdx.x + q * 256 * NV;
+        const int i = threadIdx.x + q * VT * NV;
         if (i < KK / 8) {
             const unsigned v[4] = {xv[q].x, xv[q].y, xv[q].z, xv[q].w};
 #pragma unroll
@@ -121,7 +123,7 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
                 float acc[U];
 #pragma unroll
                 for (int u = 0; u < U; ++u) {
-                    acc[u] = dot16(s[p][u], nb[p][u], xs + XI((u * 4096 + t * 16) % KK));
+                    acc[u] = dot16(s[p][u], nb[p][u], xs + XI((u * VT * 16 + t * 16) % KK));
                 }
                 const int cn = cc + PF * G;
                 if (cn < nch) load(p, cn);
@@ -130,16 +132,16 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
                     float v = acc[u];
 #pragma unroll
                     for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-                    if (lane == 0) red[par][u * 8 + wp] = v;
+                    if (lane == 0) red[par][u * WV + wp] = v;
                 }
-                asm volatile("bar.sync %0, 256;" :: "r"(vg + 1));
+                asm volatile("bar.sync %0, %1;" :: "r"(vg + 1), "n"(VT));
                 if (t < RPC) {
                     float sum = 0.f;
 #pragma unroll
                     for (int u = 0; u < U; ++u)
 #pragma unroll
-                        for (int w = 0; w < 8; ++w)
-                            if ((u * 4096 + w * 512) / KK == t) sum += red[par][u * 8 + w];
+                        for (int w = 0; w < WV; ++w)
+                            if ((u * VT * 16 + w * 512) / KK == t) sum += red[par][u * WV + w];
 #ifndef NOESC
                     // escapes on the row's full sum, two fmas each: exact when the row holds only that weight (probes)
                     const float2* he = hs_[vg] + ((j + p) * RPC + t) * ESC;
@@ -161,14 +163,14 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
 }  // namespace g13
 
 void g13_gemv(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tensor x, torch::Tensor out, double scale,
-              int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks) {
+              int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks, int64_t vt) {
     const int k = x.size(1), n = out.size(1);
     auto st = c10::cuda::getCurrentCUDAStream();
     TORCH_CHECK(x.size(0) == 1, "g13: m == 1");
-    TORCH_CHECK((long)n * k <= (long)g13::MAXC * blocks * nv * u * 4096, "g13: too many chunks per virtual block");
-#define G13_CASE(K_, U_, V_, B_, P_) \
-    if (k == K_ && u == U_ && nv == V_ && minb == B_ && pf == P_) { \
-        g13::gemv<U_, V_, B_, K_, P_><<<blocks, 256 * V_, 0, st>>>((const uint4*)s.data_ptr(), (const uint2*)nb.data_ptr(), \
+    TORCH_CHECK((long)n * k <= (long)g13::MAXC * blocks * nv * u * vt * 16, "g13: too many chunks per virtual block");
+#define G13_CASE(K_, U_, V_, B_, P_, VT_) \
+    if (k == K_ && u == U_ && nv == V_ && minb == B_ && pf == P_ && vt == VT_) { \
+        g13::gemv<U_, V_, B_, K_, P_, VT_><<<blocks, VT_ * V_, 0, st>>>((const uint4*)s.data_ptr(), (const uint2*)nb.data_ptr(), \
         (const float2*)h.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, (float)scale); return; }
     G13_CONFIGS
     TORCH_CHECK(false, "g13: no config");
