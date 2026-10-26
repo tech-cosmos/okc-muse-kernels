@@ -740,3 +740,36 @@
   normal CTA's gemm13 rows. d1 sliding: W 150 +3.0, 200 +6.9, 300 +10.5, 50 +3.2, 80 +1.4 us vs uniform. DEAD: any
   imbalance costs; tk2f is HBM-bound globally and the phase barrier waits for the slowest CTA.
 - No judge runs (moe checks 20/20 used on 10-26; sandbox ends ~19:10Z).
+
+## Session 28 (2026-10-26 16:12Z - 16:45Z real UTC) -- hot-expert single pass: feasibility microbenchmarks (H100, no judge runs)
+- Question: STATE idea a / -8 (hot experts at v32 in ONE pass instead of 64-token RT2 passes). s17's twm_hot (1 tile/warp,
+  N80/96) tied/lost in the layer's H200 tuner (v70: T=256 sliding 343.9 vs 336.6 default, full 521.2 vs 520.5): its x tile
+  (N x 128 B per k chunk) streamed from L2 at 3x the weight bytes. RT2 N128 halves that ratio but needs 128 acc regs.
+- tools/s28/mb_n.py (s18 harness, no memory traffic, cycles per RT-stage): dq hides UNDER the wgmma once N >= ~96:
+  RT2 N64 737 | N96 821 | N104 867 | N128 1024 (= MMA only 1024 = H100 peak BF16 per SM); RT1 N128 561 per 4 KB.
+- tools/s28/mb_mc.py (real streams: 8 KB W + 1 KB S per stage from HBM, distinct per CTA; N x 128 B x tile from a 2 MB
+  L2-resident buffer; producer lane + 2 consumer WGs with twm's dq + RS wgmma; NSTG 6; best of 5): cycles per 8 KB stage
+    G132: N8 702 (HBM-bound: ring floor 388 ns = 3.1 TB/s) N16 705 N32 718 N40 731 N64 823 N72 896 N96 997 N104 1017 N128 1143
+    G88 (H200 proxy grid): N8 593 N16 633 N32 695 N40 720 N64 821 N72 895 N96 997 N104 1017 N128 1142
+  => per 8 KB of a hot expert (G88): 97 tokens now N64 + N40 = 1541 -> one N128 pass 1142 (-26%); 73 tokens N64 + N16 =
+  1454 -> 1142 (-21%); 128 tokens 1642 -> 1142 (-30%). The x tile from L2 at N128 (2:1 vs weights) is NOT a limit at G132.
+  Estimate, layer v32 (s17 seed 7: hot experts 97/73): (399 + 312) cyc x 3072 stages/expert / 132 SMs / 1.98 GHz = ~8.4
+  H200 us per v32 call before the extra launch / balance cost; net est. 5-7 us = ~0.25% layer score (v32 sl+full only;
+  v16's experts are <= ~49 tokens = already one pass).
+- Cluster-2 TMA multicast of x (each CTA copies half, mapa + mbarrier.arrive.release.cluster to the peer's empty barrier):
+  SLOWER (N128 2179 vs 1143 cyc; ring-only 1650 vs 760): the remote arrive inside the wgmma loop makes ptxas serialize every
+  HGMMA (DEPBAR gsb0 0x0 on all 8) and costs ~900 cycles per stage. Not needed anyway (x from L2 is fine). Also: mbarrier
+  try_wait with .acquire.cluster + release.cluster arrives in the MC=1 build halved its ring rate (1461 vs 761 cyc): use
+  plain cta-scope barriers wherever no peer CTA is involved.
+- tools/s28/mb_mix.py: TWO wgmma N variants (N72 / N128 chosen per stage at run time) in one kernel serialize every HGMMA
+  (1342 cyc vs 1142 for N128 alone, gsb0 0x0 on all 16). => a hot kernel is its OWN launch with ONE N (128): experts with
+  65..128 tokens in a single pass (MMA pays for N128 even at 73 tokens, numbers above already assume that).
+- All MC=1 builds: 0 LDL/STL at __launch_bounds__(384, 1) (ptxas budget 168 regs: RT2 N128 = 128 acc fits).
+- DESIGN for the next sandbox (2-3 sessions; verify with H200 DIAG checks, never submit DIAGs):
+  moe_hot<N=128> (384 thr: producer WG setmaxnreg 40 / 2 consumer WGs, RT2, NSTG ~6 of 25 KB) launched BEFORE moe_twm at
+  T=256 only (shape-based): its CTAs take hot items (expert with 65..128 tokens) from their own counter in meta, gemm13 rows
+  then gemm2 rows with twm's done[e] counters; moe_twm becomes its PDL secondary (hot CTAs trigger at their start or when the
+  hot counter runs dry, so twm CTAs fill SMs as hot CTAs exit) and skips hot experts (route/bucket marks them); twm CTAs
+  griddepcontrol.wait before exiting so moe_norm (twm's secondary) sees hot's Y. x tile = a 128-row tensor-map box of xg
+  (twm has 8/16/32/64/96 boxes: add 128). Weights: reuse twm's w*b2 RT2 packing (same item rows as the RT2 class).
+  With no hot expert (most T=128 routings) moe_hot exits at once: keep it off at T=128.

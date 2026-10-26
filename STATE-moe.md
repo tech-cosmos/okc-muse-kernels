@@ -71,6 +71,11 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 28 (no judge runs): hot-expert single pass is FEASIBLE (H100 microbench, NOTES s28): RT2 N128 with real streams
+= 1142 cyc per 8 KB vs 1454-1541 for twm's 2 passes of a 73-97-token expert (-21..26%); est. -5..7 H200 us at v32 (~0.25%).
+Needs its own launch (2 N variants in one kernel serialize wgmma; 128 acc regs > twm). x multicast not needed. Design in NOTES s28.
+NEXT (new sandbox): build moe_hot<128> + twm skipping hot experts (PDL chain hot -> twm -> norm) at T=256; H200 DIAG.
+
 ## Sessions 26-27 (no judge runs): UPF4 (unpool W L2 prefetch from twm) DEAD (v16/v32 +1.4..10 H100 us). s27 RFLAG (T=1
 tk2f launched during pr1, spins on a routing flag pr1 stores; tools/s27/rflag_patch.py): H100 d1 -0.1..-0.4 us only, parked
 (cross-kernel spin risk > 0.05%); RSPLIT (more gemm13 rows for early CTAs) dead +1.4..10 us. NOTES s26/s27.
@@ -79,19 +84,13 @@ tk2f launched during pr1, spins on a routing flag pr1 stores; tools/s27/rflag_pa
 Judge layer profile 703d3a7e (H200, us): tk2f d1 28.7/21.2 (incl. PDL overlap), d16 69.7/44.1, d32 82.6/93.5, v1 62.4/83.8;
 twm v16 161.5/165.9, v32 221.7/221.8. Score per us: d1 sl 0.16%, v1 0.10, d16 0.07, d32 0.05, v16 0.04, v32 0.03.
 Remaining moe ideas, all needing H200 time (next sandbox; moe checks = H200 DIAGs, never submits):
- a. Hot-expert single-pass kernel (RT1 N128-256, separate function: C7512) on a subset of SMs next to twm at v16/v32:
-    est. 5-10 us v32 => +0.15-0.3%. Biggest left; 2-3 sessions of work.
+ a. Hot-expert single-pass kernel: s28 says RT2 N128, own launch before twm at T=256 (design NOTES s28). Biggest left.
  b. Deterministic barrier-free d1: each CTA owns a 32-wide inter K-slice of every expert (w13 gate/up rows + w2 repacked
     K-slice-major in prepare), FP32 partials [132][slot][4096] (6.5 MB in L2) summed in fixed order by n2u (layer-owned).
     Saves the gemm13->gemm2 barrier/tail (~1.5 us) minus the partial reduce (~0.8 us): est. net <1 us d1 => <0.15%. Low value.
  c. Everything else in Ranked ideas is measured dead or <0.1%.
 
 ## Sessions 22-24 (summaries in NOTES s22/s23): big-M dq-bound, TK2F_L2H 4 = 1 in layer (tie)
-## Session 24 summary (NOTES s24; no speedup, no judge runs)
-- Dead on the H200 proxy: tk2f stage-ahead LDS register prefetch (+2.4..4.3 proxy-us), 2 CTAs/SM tk2f (+9..23: register cap).
-- Paper: phase-2 "slowness" is mostly end-of-kernel accounting (~1.5 us at d32 left); barrier already hidden by the w2
-  prefetch. Barrier-free split-K d1 (~-1.5 us, nondeterministic sums) parked.
-
 ## Session 21 summary (L2 cache hints on the expert weight streams; NOTES s21)
 - main = b32928b: TK2F_L2H = 4 (tk2f: evict_last on every row of an expert with > 8 tokens, evict_first on the rest)
   + TWM_L2H = 1 (moe_twm: evict_last if a later pass re-reads, evict_first else). Bitwise unchanged. H100 ncu: tk2f
