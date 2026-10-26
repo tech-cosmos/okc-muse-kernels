@@ -3469,10 +3469,12 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
 // it against both 8-token groups (TWO): group 0's x fragments in registers (xf), group 1's in smem (xs, lane-private,
 // written by the same lane at the segment change). Dequant is ~70% of a row's instructions, so a 2-group row costs
 // ~1.15x a 1-group row instead of 2x. s_red holds 2 groups x 2 tiles (double-buffered).
-template <int NRT, int NC, int NSTG, bool GATED_, int KPS, bool SA, bool TWO, bool RTG = false>
+template <int NRT, int NC, int NSTG, bool GATED_, int KPS, bool SA, bool TWO, bool RTG = false, bool SLOT = false>
 __device__ __forceinline__ void tk2g_row(const uint32_t* slut, const uint4 (&xf)[64 / NC][2], const uint4* xs, void* Out,
                                          int rp, int off, int n, float gsc, float* s_red, uint4* smem, uint64_t* full,
-                                         uint64_t* empty, int& st, int& ph, int& rb, bool gated_rt = false) {
+                                         uint64_t* empty, int& st, int& ph, int& rb, bool gated_rt = false,
+                                         const int* s_srt = nullptr) {
+  // SLOT (n6, = tk2f PF & 4): gemm2 Y row = route slot s_srt[off + tok], pre-scaled by gsc (= gs2 * 256): moe_norm3
   // RTG (s12): gated is a run-time flag (gemm13 and gemm2 share ONE main-loop body: i-cache), RPE from it
   const bool GATED = RTG ? gated_rt : GATED_;
   const int RPE = RTG ? (gated_rt ? 256 : 128) : NRT / 2;
@@ -3568,7 +3570,8 @@ __device__ __forceinline__ void tk2g_row(const uint32_t* slut, const uint4 (&xf)
       const int tok = h * 8 + 2 * tt + (r & 1);
       if (tok < n) {
         const int col = (rp + ii * RPE) * 16 + gg + ((r & 2) ? 8 : 0);
-        reinterpret_cast<float*>(Out)[(size_t)(off + tok) * NOUT + col] = v;
+        if (SLOT) reinterpret_cast<float*>(Out)[(size_t)s_srt[off + tok] * NOUT + col] = v * gsc;
+        else reinterpret_cast<float*>(Out)[(size_t)(off + tok) * NOUT + col] = v;
       }
     }
   }
@@ -3638,7 +3641,7 @@ __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* 
 // s12 MERGED consumer (tk2h): both phases in ONE run-time loop, so the kernel holds one main-loop body per row kind
 // (GS 8: 1 body; GS 16: 2) instead of 2 / 4. GS16's loss was instruction-cache misses: ncu stall_no_instruction at
 // layer d1 923 -> 9418 (118 KB kernel vs 65 KB) with no 2-group row at all.
-template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false>
+template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false, bool SLOT = false>
 __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* __restrict__ gs13,
                                              const float* __restrict__ gs2, const __nv_bfloat16* X,
                                              __nv_bfloat16* inter, float* Y, int* cnt, int need, int a0, int a1, int b0,
@@ -3698,9 +3701,9 @@ __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* 
         }
       }
       if (GS == 16 && n > 8)
-        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated);
+        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
       else
-        tk2g_row<0, NC, NSTG, false, KPS, SA, false, true>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated);
+        tk2g_row<0, NC, NSTG, false, KPS, SA, false, true, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
       if (gated && (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
         if (tid == 0) {
@@ -4316,7 +4319,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   int rb = 0;
   if constexpr (MRG) {
-    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
+    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
                                         s_srt, s_red, smem, smem + NSTG * NC * KPS * 72, full, empty, st, ph, rb);
     return;
   }
@@ -4418,6 +4421,10 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     // + 50000 / + 60000: the same with per-segment gemm13 -> gemm2 counters (PSC)
     const int kind = (int)(cfg / 10000);
     const int wt = 8 + (int)(cfg / 1000) % 10;
+    if (cfg % 1000 == 4) {  // n6: + 4 = slot-ordered pre-scaled y32 (tk2f PF 4) -> moe_norm3
+      if (kind == 3) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 1, 4>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 1, 4>(0, TK2F_ARGS0);
+      return sa ? tk2f_go<8, 4, 2, false, false, true, 16, 1, 4>(wt, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 16, 1, 4>(wt, TK2F_ARGS0);
+    }
     if (kind == 3) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 1>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 1>(0, TK2F_ARGS0);
     if (kind == 4) return sa ? tk2f_go<8, 4, 2, false, false, true, 16, 1>(wt, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 16, 1>(wt, TK2F_ARGS0);
     if (kind == 7) {  // + 70000: main consumer (tk2f_consume), weighted static split, wE = cfg / 1000 % 10
@@ -4819,7 +4826,9 @@ _DIAG_R = "eNqVXIt22zgOLc02laBVxDpQorWm/v+/5IpvAASdWZ8zjSVRJAjicXFJj0cfPmC9X66/7
 DIAG_VARIANTS = {  # s30 queued: H200 A/B of moe_hot (HOT_M) on the layer's v32 routings (v16 has no hot expert: = off)
     "dec": [("gs8", {}), ("l2h0", {"TK2F_L2H_RT": 0}), ("l2h1", {"TK2F_L2H_RT": 1})]  # n4s3: gs8 = TK2F_L2H 4
            # n4s5: GS16 merged consumer at M >= 9 with the warp-parallel weighted split (TK2G_PAR); w0 = count split (s12)
-           + [(f"h16w{w_}", {"TK2H": 16, "TK2H_W": w_, "TK2H_MIN": 9}) for w_ in (0, 2, 3, 4)],
+           + [("h16w0", {"TK2H": 16, "TK2H_W": 0, "TK2H_MIN": 9}), ("h8p4", {"TK2H": 8, "TK2H_MIN": 9, "TK2H_PF4": 1})]
+           # n6: + PF4 (slot-ordered y32 + moe_norm3, as main): bitwise = main; G88 proxy d32 h16w3p4 114.8 vs main 120.9
+           + [(f"h16w{w_}p4", {"TK2H": 16, "TK2H_W": w_, "TK2H_MIN": 9, "TK2H_PF4": 1}) for w_ in (2, 3, 4)],
     "big": [("off", {"HOT_M": {}, "TWM_ORDER_M": {}})]
            + [(f"h{g_}", {"HOT_M": {256: g_}, "TWM_ORDER_M": {}}) for g_ in (24, 32, 40)]
            + [("h32o76", {"HOT_M": {256: 32}, "TWM_ORDER_M": {256: 76}}), ("o76", {"HOT_M": {}, "TWM_ORDER_M": {256: 76}}),
@@ -4964,6 +4973,7 @@ TK2H_MIN16 = 1
 TK2H_MIN = 1  # n4s5: TK2H applies from this M (below: the main tk2f cfg); 9 = only calls that can have 2-group rows
 TK2W = 0  # s12: weighted static row split for M > 1 (extra-group rows weigh TK2W / 8; 0 = by count), cfg + 70000
 TK2H_PSC = 0  # s12: 1 = per-segment gemm13 -> gemm2 counters (cnt[64 + seg]) instead of the global one
+TK2H_PF4 = 0  # n6: 1 = tk2h writes y32 like tk2f PF 4 (slot order, pre-scaled) -> moe_norm3 (cfg + 4; kinds 3/4 only)
 TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
 
 
@@ -4976,7 +4986,7 @@ def _tk2f_cfg0(M, st):
     if TK2W and M > 1:
         return sa + 70000 + TK2W * 1000
     if TK2H and M >= TK2H_MIN:
-        return sa + (40000 + TK2H_W * 1000 if TK2H == 16 and M >= TK2H_MIN16 else 30000) + 20000 * TK2H_PSC
+        return sa + (40000 + TK2H_W * 1000 if TK2H == 16 and M >= TK2H_MIN16 else 30000) + 20000 * TK2H_PSC + 4 * (TK2H_PF4 and not TK2H_PSC)
     return (TK2F_DYN if M > 1 else TK2F) + sa + (10000 + TK2G_W * 1000 if TK2G and M >= TK2G_MIN else 0)
 
 
@@ -5006,7 +5016,8 @@ def kernel_fn(data, st):
             c = _tk2f_cfg(M, st)
             lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
-            if c % 100000 == 97204 or (80000 < c % 100000 < 96000 and (c % 100000 - 80000) // 1000 & 4):  # s13 slot-ordered y32
+            c5 = c % 100000
+            if c5 == 97204 or (80000 < c5 < 96000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
                 lib.moe_norm3_launch(y32, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out, st["cnt"])
                 return out
             lib.moe_norm2_launch(y32, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], POST_NORM_EPS, out,
