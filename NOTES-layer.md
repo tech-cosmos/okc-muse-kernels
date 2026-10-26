@@ -1191,3 +1191,28 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Tests: bench test 13/13 (tuner on), scored_test v1 x2 0 bad, replay_test v1 x seeds 11,23 0/80, nu8 D unit vs torch
   (/tmp/nu8d_unit.py: nl 0/5-7/30/64 local slots) ss and P rel err <= 5e-7. Default NU8_D True; TUNE[8] += {nu8d: False},
   {nu8d: False, nu8x: False} (the H200 decides).
+
+## s60 (2026-10-26 ~21:15Z, sandbox okc-night4, session 9): measurements only, no code change (budget 0 checks/0 submits until 00:00Z)
+- H100 tuner on v96 at T=8 picked {nu8d: False, nu8x: False} (sl 143.6 vs 145.4 default; full 155.0 vs 156.5) on SYNTHETIC routing.
+  Real inputs (ab_flag 6 rounds, SEEDS 99,7,13, TUNE = {} variant): D / X / plain-nu8 (no X) / D:
+  v1 sl s99 143.05/143.69/143.03/143.20, s7 117.10/117.89/116.52/117.11, s13 135.19/135.51/133.07/135.14;
+  full s99 154.45/155.06/154.82/154.81, s7 128.59/129.01/128.57/128.96, s13 155.35/156.37/156.09/155.87.
+  D beats X (~-0.5) as in s59; plain nu8 is -0.9 avg on sliding vs D (s13 -2.1), +0.2 on full. All three stay H200-tuned
+  options (TUNE[8]); no default change: the 00:00Z check's 'layer tune T=8' lines decide.
+- H100 timelines (TUNE = {}): d16 sl 201 us = qkv g19 17.6 | csl 12.2 + o g19 tail 7.6 | bnd 5.6 | pooler g19 28.0 beside
+  router 18.5 + routing | rmsnorm 2 | tk2f 108.7 | norm2 3 | unpool g19 21 after norm2 | bnd 2.5.
+  d32 sl 201 us = qkv cuBLAS 17.3 | nds 15.0 + combine | o 6.8 | bnd 5.4 | pooler g19 29.6 beside router 21.3 | rmsnorm 2.3 |
+  tk2f 98.2 | norm2 3.6 | unpool g19 23.6 after norm2 | bnd 2.7.
+- Pooler phase micro (/tmp/s60/pool_micro.py: _route + _g19 pooler from prepared state, cold L2): T=16 router alone 11.1,
+  pooler 108 blocks 25.4, 132 blocks 25.3, concurrent (as now) 27.8 (grid 120: 27.7), serial router->pooler 35.4;
+  T=32 11.9 / 26.9 / 26.9 / 31.8 / 37.2. => the router costs the pooler only +2.5 (T=16) / +4.9 (T=32) us; the pooler grid
+  does not matter; the phase floor is g19 itself (48 MB in ~25 us = 1.9 TB/s on H100; proj diag: issue-bound).
+  A fused pooler+router g19 can't use 12-bit for the router's lo rows (exponents ~8 below hi: escapes overflow -> whole
+  matrix uncompressed), and would save <= ~2 us at T=32 only. Not pursued.
+- DEAD again (s9/v32): pr3 router at T=32 beside the g19 pooler. Micro concurrent phase -1.2..1.6 us with cfgs
+  (32,32,2,2,512,4)/(32,64,2,4,256,4)/(32,64,2,4,1024,4), but in the layer (ab_flag 5 rounds x 3 seeds) every pr3 cfg
+  is +1.5..2.7 us on d32 sliding and +0.5..2 on full (base [0]/[4] 194.98/195.34, 203.54/203.79, 196.85/196.54 sl).
+  The micro misses the routing/rmsnorm/tk2f PDL chain. pr3 at T=16: no micro gain either.
+- Conclusion for the plan: at T=16/32 the three g19 calls (qkv at T=16, pooler, unpool) are ~65-75 us of ~200 us on H100
+  at 1.6-2.2 TB/s; that, the experts (moe) and nds attention (15 us vs 5.6 us KV floor at d32) are where the time is.
+  Layer glue is ~done; posted to proj under Requests.

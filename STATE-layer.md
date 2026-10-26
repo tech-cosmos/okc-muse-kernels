@@ -2,7 +2,8 @@
 
 Updated 2026-10-26 22:10Z (s59): **main = v96 = v95 + NU8D at T=8** (nu8 red.adds per-slot partials, no exchange; the
 T=8 boundary applies the per-slot post-expert norm scales; H100 v1 -0.6..0.9 sl / -0.4..0.6 full; TUNE[8] {nu8d: False}).
-NOT judge-checked. FIRST CHECK AFTER 00:00Z = main v96: read 'layer tune T=8' nu8d lines and 'T=16/32' tk2h lines. NOTES s59.
+NOT judge-checked. s60 (21:15Z): measurements only, no code change (NOTES s60: pooler-phase micro, pr3 T=32 dead again,
+nu8 variants on real v1: D < X; plain nu8 -0.9 sl / +0.2 full vs D, left to the H200 tuner). FIRST CHECK AFTER 00:00Z = main v96: read 'layer tune T=8' nu8d lines and 'T=16/32' tk2h lines. NOTES s59.
 Board 21:00Z: #52 at 1.995x (#1 2.380x). Per-load ratios: d1 2.43, d16 1.88, d32 1.68, v1 2.19, v16 1.93, v32 2.00.
 
 Mains since v89 (all NOT judge-checked, H100-validated; NOTES s52-s59): v90 NORM_EARLY (T>=128) | v91 __ldcg moe_norm/norm2 |
@@ -109,6 +110,7 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
    program); qkv/o g19 at T=32; csl overlapped with g13; T=8 norm3+unpool cluster fusion.
 
 ## Dead ends (details in NOTES)
+- s60: pr3 router at T=32 beside g19 pooler (+1.5..2.7 us in layer); pooler grid 108/120/132 all equal standalone (g19-bound).
 - s17: PR1 npf (pooler chunks L2-prefetched before the wait) 0/2/4: H100 d1 tie (91.5-91.6 us, 10 rounds); no H200 case.
 - s15: n2u8 (T=8 norm3+unpool on clusters), bndc (cluster boundary), CUDA 1-CTA boundary, BND_ROWS, UPF3 (unpool
   W L2 prefetch at tk2f end / in norm; H200 diag b1ee542c d32 -4%), G10_PFL2 (o W prefetch during csl), pr1 npf 6-12,
