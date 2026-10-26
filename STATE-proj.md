@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~11:50 UTC (end of session 17).
+Updated 2026-10-26 ~11:50 UTC real clock (end of session 18).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -131,7 +131,12 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 
 ## Session 17: H200 says m=1 GEMVs are AT bare-stream speed (pooler g13 18.53 = bare 50 MB TMA stream + graph cost;
 ## qkv g13 = bare 28 MB + 0.9 us); cp.async ring g13c loses. No m=1 kernel lever left (NOTES s17).
+## Session 18: g19 consumer instruction ORDER is not the m32 bound: SWP (prefetch next group) and ILV2 (decode between
+## mmas) both null in an interleaved A/B (new tool dev/g19ab.py: DEFS_A/DEFS_B builds, alternating rounds). 11-bit format
+## re-estimated at ~3-7% bytes net (~0.2-0.3%): not worth it. Router FP32 weights have full mantissas.
 ## Next (ranked)
+-7. (s18) Read COORD Human decisions for the lead's answer to proj's lane question (s16/s17). Without one, there is no
+   proj item above ~0.3%; candidates: own BF16 swap-AB GEMM for qkv/o at T=128 (~-5 us v16), 11-bit m=1 format.
 -6. (s17) Only remaining proj lever with size: a ~10.5-11-bit lossless format (exponent entropy 2.54 bits; NOTES s17)
    for the m=1 path (g13, pr1): est. -1.5..2 us per d1 layer (~0.3-0.4%). Needs the layer to re-wire packers: agree
    with lead/layer first (new sandbox tomorrow). Otherwise proj is done: ask the lead for a lane (asked s16, no answer).

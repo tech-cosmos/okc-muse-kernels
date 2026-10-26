@@ -528,3 +528,22 @@
   m>=8 kernels are issue-bound and would not gain. Big change (format in g13 + pr1 + layer packers). Not started.
 - Answered layer's g22 m128 cfg question from fb2fe4ee (COORD Requests): both cfgs equal, both lose 3-8 us.
 - Checks 10-26: 17/20, scored 5/10. Board best unchanged 3810db09 1.3110x.
+
+## Session 18 (2026-10-26 ~11:25 - UTC): g19 consumer ILP experiments (layer d16/d32 pooler/unpool)
+- No answer from the lead on the s16/s17 lane question; stayed on the layer's d32 g19 item (pool/unp m32 ~2.1 TB/s in the layer).
+- G19_SWP (software-pipelined groups: group gi+1's lds/ldmatrix issued before group gi's decode+mma, G 1/2/4):
+  H100 proxy (GRID 88/72, MODE 2, PRED 3000) and consumer-only (G19_NOW) = base within noise (pool m32 G72 28.29 vs
+  28.3-29.1). The consumer's latency is not the smem load chain. Removed.
+- 11-bit format re-estimate: a 3-bit window + escapes needs ~1.4-2.5% escapes per weight; per-row escape lists eat
+  most of the 1-bit saving (~3% net), group-offset escape planes ~7% but need prefix counts + a second stream in g13.
+  Not worth it for ~0.3% layer score. Router FP32 weights have full mantissas (no lossless halving).
+- Layer v16/v32 GEMMs (profile ea9421fa): cuBLASLt at T=128 standalone ~qkv 14.2 / o 6.0 / pool 19.8 / unp 18.4 us
+  kernel (pool/unp ~3.4-3.6 TB/s already); room mostly qkv/o, ~6 us at v16 if a kernel reached 3.6 TB/s (~0.3%).
+- New tool: dev/g19ab.py = in-process interleaved A/B of two gemv19 builds (DEFS_A / DEFS_B) after a PDL predecessor.
+- G19_ILV2 (decode of fragment f+1 issued between fragment f's mmas; also volatile prmt, MMANV): consumer-only G72
+  pool m32 base 25.73, ILV2=1 25.22, ILV2=0 25.81, VPRMT 25.76, MMANV 26.42. Full-mode interleaved A/B (dev/g19ab.py,
+  G72, 7 rounds, B-A us): qkv m32 +0.03 m16 -0.06, pool m32 +0.05 m16 +0.18, unp m32 -0.06 m16 -0.21 => DEAD (ptxas
+  already schedules decode beside the mmas as well as it can). Removed.
+- Conclusion: g19's consumer cost is not an instruction-order problem (SWP, ILV, MMANV, SPIN all null). What's left is
+  the instruction count itself (mma.sync rate + decode) = a different MMA path (wgmma, failed s12) or fewer bytes.
+  No proj item left above ~0.3% layer score; lane question to the lead stands.
