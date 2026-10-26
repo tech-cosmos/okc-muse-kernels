@@ -1,6 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~12:30Z (session 28).
+Updated 2026-10-26 ~12:16Z (session 28).
 
 **s28: main = v67 (d51f68c)** = v66 + QF32 (T=16 decode: attention reads g19's FP32 qkv, rounding to BF16 at each load;
 drops the 1.2 us cast; bit-identical; H100 d16 -1.6/-2.6 us; TUNE {qf32: False}). Scored 24/24, replay 0/240, tests 13/13.
