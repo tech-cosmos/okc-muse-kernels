@@ -819,3 +819,12 @@
   RT2 tail loses; dq has no cheaper decode on sm_90 (no e2m1 cvt), scale cannot leave the per-stage path; tk2f phase-2 gap
   is accounting; barrier-free d1 <0.15%). The remaining lever classes need the H200 (hot grid, order) or a design change
   of the layer (overlap expert streams with non-HBM phases), not moe-local tuning.
+
+## Session 31 (2026-10-26 16:50Z - 17:10Z) -- housekeeping before the sandbox expires (no judge runs: moe checks 20/20)
+- /tmp dies with the sandbox (~19:10Z): copied the layer routings /tmp/moe10/routes.pt (77 KB, 30 loads x 5 seeds) and
+  dump_routes.py to tools/data/; tools/layer_ab.py reads tools/data/routes.pt; mktl_diag.py makes /tmp/moe12 itself.
+  Sanity: layer_ab "verify 16" = 200.7 us (H100, = s30's 200-201). The DIAG path is self-contained (_DIAG_R embedded).
+- Token histogram of the layer routings (local experts): v16 17-19 experts, max 36-49 tokens, 33-48-token experts 1-2
+  per call, 49-64 0-1; v32 18-21 experts, 2 hot (73-98), 33-48: 0-2. => an N40/N48 pass class (separate launch, s18 said
+  twm itself cannot hold another N) would touch ~1 expert per call: < 0.5 us. Dead.
+- Nothing else is H100-testable with size (s30 review). Next sandbox: first moe check = the queued moe_hot DIAG.

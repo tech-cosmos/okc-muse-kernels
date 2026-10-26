@@ -7,7 +7,7 @@ import bench, importlib, os
 submission = importlib.import_module(os.environ.get("SUB", "submission"))
 bench.submission = submission
 w, st = bench.state()
-R = torch.load("/tmp/moe10/routes.pt")
+R = torch.load(__import__("os").path.join(__import__("os").path.dirname(__file__), "data", "routes.pt"))
 flush = torch.empty(512 << 20, dtype=torch.uint8, device='cuda'); sink = torch.empty((), dtype=torch.int64, device='cuda')
 def tg(fn, reps=40):
     g = torch.cuda.CUDAGraph(); fn(); torch.cuda.synchronize()

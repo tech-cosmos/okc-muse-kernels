@@ -1,4 +1,5 @@
 # static tk2f timeline stamps -> muse_moe_w4a16/sub_tl.py (gitignored copy)
+import os; os.makedirs("/tmp/moe12", exist_ok=True)
 s=open('/home/daytona/r-moe/muse_moe_w4a16/submission.py').read()
 def rep(a,b,n=1,start=0):
     global s

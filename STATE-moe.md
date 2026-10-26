@@ -83,15 +83,13 @@ NEXT: H200 DIAG (moe check) of HOT_M {256: 24/32/40} on the layer routings (DIAG
 the layer's tuner pick it as a T=256 option. Then: same idea at the 33..64-token experts (N64 RT2 passes already single)?
 no: those are one pass already. Next lever: the twm drain at v16/v32 (STATE idea -5).
 
-## Session 25 (15:26Z, paper only; no code, no judge runs): what is left, valued by layer score
-Judge layer profile 703d3a7e (H200, us): tk2f d1 28.7/21.2 (incl. PDL overlap), d16 69.7/44.1, d32 82.6/93.5, v1 62.4/83.8;
-twm v16 161.5/165.9, v32 221.7/221.8. Score per us: d1 sl 0.16%, v1 0.10, d16 0.07, d32 0.05, v16 0.04, v32 0.03.
-Remaining moe ideas, all needing H200 time (next sandbox; moe checks = H200 DIAGs, never submits):
- a. Hot-expert single-pass kernel: s28 says RT2 N128, own launch before twm at T=256 (design NOTES s28). Biggest left.
- b. Deterministic barrier-free d1: each CTA owns a 32-wide inter K-slice of every expert (w13 gate/up rows + w2 repacked
-    K-slice-major in prepare), FP32 partials [132][slot][4096] (6.5 MB in L2) summed in fixed order by n2u (layer-owned).
-    Saves the gemm13->gemm2 barrier/tail (~1.5 us) minus the partial reduce (~0.8 us): est. net <1 us d1 => <0.15%. Low value.
- c. Everything else in Ranked ideas is measured dead or <0.1%.
+## Session 31 (16:50Z, no judge runs): housekeeping for the NEW sandbox (/tmp is lost at ~19:10Z)
+- Layer routings now in the repo: tools/data/routes.pt (+ dump_routes.py); tools/layer_ab.py loads it from there
+  (was /tmp/moe10). tools/mktl_diag.py creates /tmp/moe12 itself. H100 layer_ab v16 = 200.7 us (= s30).
+- Re-checked the N40/N48 class idea against the routings: v16/v32 have only 0-2 experts of 33-48 tokens per call
+  (v16 max 36-49 tokens, v32 hot 73-98 + one 32-50): <0.5 us, stays dead (also s18: twm register limit).
+- Session 25's list (a = moe_hot: DONE s29; b = barrier-free d1 <0.15%) is closed. Next sandbox order: (1) the queued
+  moe_hot DIAG (s30 section), (2) if hot G != 32 wins by > 1 us, tell layer (Requests) which G / tuner candidates.
 
 ## Session 21 summary (L2 cache hints on the expert weight streams; NOTES s21)
 - main = b32928b: TK2F_L2H = 4 (tk2f: evict_last on every row of an expert with > 8 tokens, evict_first on the rest)
