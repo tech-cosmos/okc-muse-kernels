@@ -1006,3 +1006,11 @@
   (-1.6 us), agrees with proj's 7-round -1.6/-1.6. replay_test 10 x seeds 11,23 verify 1: 0/40; route_judge same 0 fails
   (worst gap 0.013, drop-lead 0.009).
 - FIRST CHECK OF THE NEXT SANDBOX = main (v88).
+
+## s47 (2026-10-26 17:24Z-17:40Z): probe only, no build, no judge runs (budget spent)
+- No new Handoffs since s46 (proj s37 and moe s32 posted notes only). Board 17:25Z: #46 at 1.9954x; #1 2.380x.
+- H100 d1 sliding timeline, main v88 (idle GPU): g13 qkv 0-13.1, csl 13.6-18.7, o g13 14.6-22.7, boundary 21.4-26.6,
+  pr1 22.4-45.8, rmsnorm 31.3-46.9, tk2f 46.3-80.3 (34.0), n2u 77.6-85.0, boundary 80.4-86.9 = 86.9 us. Same shape as s34
+  (89.8): every edge is already PDL-overlapped; the gains since then are in pr1 (-0.6) and the chain start. No idle gap
+  > 1 us. Biggest remaining d1 slices: tk2f 34 us (moe; ~2x its bytes floor) and pr1 23.5 us (proj; ~1.6x).
+- Next sandbox: unchanged plan in STATE (first check = main v88).
