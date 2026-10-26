@@ -1383,9 +1383,15 @@ LT_CFG = {("pooler", 128): (66, 143, 35, 1, 0, 0, 0, 2),
           # pooler/unpool at T=16/32 instead of g19 (proj diag19, H200 after a 3 us PDL predecessor: pooler m32 lt 20.3 vs
           # g19 21.6, unpool m32 19.3 vs 20.3; m16 g19 wins standalone)
           ("pooler", 16): (66, 312, 35, 1, 0, 0, 1, 4), ("pooler", 32): (66, 13, 35, 1, 0, 0, 1, 4),
-          ("unpool", 16): (66, 394, 35, 1, 0, 0, 7, 4), ("unpool", 32): (66, 397, 35, 1, 0, 0, 5, 4)}
+          ("unpool", 16): (66, 394, 35, 1, 0, 0, 7, 4), ("unpool", 32): (66, 397, 35, 1, 0, 0, 5, 4),
+          # s24: proj s16 H200 tuner (Handoffs 10:10Z, standalone, tuner us lt vs F.linear): pooler m256 28.6-28.9 vs
+          # 32.9-36.0 (other algo than the s5 m256 pick that lost beside the router), unpooler m256 -0.2
+          ("pooler", 256): (66, 18, 35, 1, 0, 0, 0, 2), ("unpool", 256): (66, 20, 35, 1, 0, 0, 6, 5)}
 LT_DEFAULT_OFF = {("qkv_gate", 16), ("qkv_gate", 32), ("o", 16), ("o", 32), ("o", 128), ("o", 256), ("unpool", 128),
-                  ("pooler", 16), ("pooler", 32), ("unpool", 16), ("unpool", 32)}
+                  ("pooler", 16), ("pooler", 32), ("unpool", 16), ("unpool", 32), ("pooler", 256), ("unpool", 256)}
+# s24: alternative cuBLASLt configs, TUNE option "ltalt:<key>" = 1-based index (implies lt): proj s16 H200 qkv m32
+# 17.2-17.3 vs F.linear 17.7-18.1 tuner us.
+LT_ALT = {("qkv_gate", 32): [(66, 27, 35, 3, 2, 0, 2, 4)]}
 _LT_SRC = None  # @@LT@@
 _LT = {}
 
@@ -1424,6 +1430,18 @@ def _lt_prepare(state):
             state["lt_ok"][(key, m)] = cfg
         else:
             print("layer cuBLASLt config dropped:", key, m, cfg, st)
+    state["lt_alt_ok"] = {}
+    for (key, m), cfgs in LT_ALT.items():
+        for i, cfg in enumerate(cfgs, 1):
+            x = torch.randn((m, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
+            out = torch.empty((m, w[key].shape[0]), dtype=torch.bfloat16, device=dev)
+            st = lib.lt_gemm(w[key], x, out, state["lt_ws"], list(cfg))
+            torch.cuda.synchronize()
+            ref = F.linear(x, w[key]).float()
+            if st == 0 and ((out.float() - ref).norm() / ref.norm()).item() < 1e-2:
+                state["lt_alt_ok"][(key, m, i)] = cfg
+            else:
+                print("layer cuBLASLt alt config dropped:", key, m, cfg, st)
 
 
 # s20: proj's gemv22 (g22_src.cu = r-proj dev/gemv22.cu @a17318c): m = 128/256 swap-AB wgmma GEMM over the 12-bit
@@ -1579,10 +1597,12 @@ TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g19:unpool": False, "lt:unpool": True}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
-             {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True}),
+             {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
+             {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True}),
-        256: ({}, {"lt:qkv_gate": False}, {"lt:o": True})}
+        256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
+              {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
 TUNE_REPS = 40
 TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}  # T -> (batch, q_len)
 
@@ -1750,6 +1770,12 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
         pdl = (int(key in GEMV_PDL_SECONDARY.get((G12_TOKENS, sliding), ())),) if UNPOOL_PDL else ()
         lib.g12_gemm(state["g12"][key], x.contiguous(), out, state["g12_ws"], state["g12_cnt"], w.shape[0] // 8,
                      *G12_CFG[key], *pdl)
+        return out
+    alt = _opt(state, x.shape[0], "ltalt:" + key, 0) if state is not None else 0
+    cfg = state.get("lt_alt_ok", {}).get((key, x.shape[0], alt)) if alt else None
+    if cfg is not None:
+        out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
+        _LT["lib"].lt_gemm(w, x.contiguous(), out, state["lt_ws"], list(cfg))
         return out
     cfg = state.get("lt_ok", {}).get((key, x.shape[0])) if state is not None else None
     if cfg is not None and _opt(state, x.shape[0], "lt:" + key, (key, x.shape[0]) not in LT_DEFAULT_OFF):
