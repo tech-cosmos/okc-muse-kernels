@@ -62,7 +62,7 @@ layer = layer.replace("_G10_SRC = None  # @@G10@@\n", "_G10_SRC = r" + Q3 + g10 
 g12 = (here / "g12_src.cu").read_text()  # proj's gemv12 (m = 8)
 assert Q3 not in g12 and layer.count("_G12_SRC = None  # @@G12@@\n") == 1
 layer = layer.replace("_G12_SRC = None  # @@G12@@\n", "_G12_SRC = r" + Q3 + g12 + Q3 + "\n")
-for _n in ("13", "14", "19", "PR3", "PR1", "PR8"):  # proj's gemv13 / gemv14 (compressed BF16 weights), router3 (hi/lo, T 9..128)
+for _n in ("13", "14", "19", "22", "PR3", "PR1", "PR8"):  # proj's gemv13 / gemv14 (compressed BF16 weights), router3 (hi/lo, T 9..128)
     _s = (here / (f"g{_n}_src.cu" if _n.isdigit() else f"{_n.lower()}_src.cu")).read_text()
     assert Q3 not in _s and layer.count(f"_G{_n}_SRC = None  # @@G{_n}@@\n") == 1
     layer = layer.replace(f"_G{_n}_SRC = None  # @@G{_n}@@\n", f"_G{_n}_SRC = r" + Q3 + _s + Q3 + "\n")

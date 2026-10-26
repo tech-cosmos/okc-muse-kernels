@@ -542,6 +542,7 @@ def prepare(weights):
     _g12_prepare(state)
     _g19_prepare(state)
     _lt_prepare(state)
+    _g22_prepare(state)
     torch.cuda.synchronize()
     _tune(state)
     return state
@@ -1398,7 +1399,91 @@ def _lt_prepare(state):
             print("layer cuBLASLt config dropped:", key, m, cfg, st)
 
 
-def _pack19(c, kc, ap):
+# s20: proj's gemv22 (g22_src.cu = r-proj dev/gemv22.cu @a17318c): m = 128/256 swap-AB wgmma GEMM over the 12-bit
+# weights, tile-major stream-K, escapes packed per stage; FP32 out (zero kernel + red.add; consumers round to BF16).
+# (key, T) -> (m, ap, ns, E). H100 standalone (cold L2): qkv m128 21.9 vs cuBLAS 21.1, pooler 30.9/27.5, unpool
+# 28.8/27.3, o 14.9/10.2; m256 all +10 us (compute-bound there: not built). Used only where TUNE picks it (H200).
+G22_CFG = {("qkv_gate", 128): (128, 4, 3, 32), ("pooler", 128): (128, 4, 3, 32), ("unpool", 128): (128, 4, 3, 32)}
+_G22_SRC = None  # @@G22@@
+_G22 = {}
+
+
+def _pack22(c, ap, E):
+    """proj's _pack22: tile-major gemv22 stages + E escapes per stage (int32 row | k << 8, true / scale bits); None
+    if a stage has more than E escapes."""
+    code, sm, hdr, scale = c
+    n, k = code.shape
+    kc = 32 * ap
+    P = _pack19(c, kc, ap, tm=1)
+    ks, ntr = k // kc, n // 128
+    EV = torch.full((ks * ntr, E, 2), -1, dtype=torch.int32, device=code.device)
+    EV[:, :, 1] = 0
+    rows, slots = (hdr[:, :, 1] != 2.0 ** -15).nonzero(as_tuple=True)
+    if len(rows):
+        col = hdr[rows, slots, 0].view(torch.int32).long()
+        u = (rows // 128) * ks + col // kc
+        o = torch.argsort(u * (1 << 20) + rows * 8 + slots)
+        rows, col, u, hy = rows[o], col[o], u[o], hdr[rows[o], slots[o], 1]
+        rank = torch.arange(len(u), device=code.device) - torch.searchsorted(u, u)
+        if int(rank.max()) >= E:
+            return None
+        EV[u, rank, 0] = ((rows % 128) | ((col % kc) << 8)).int()
+        EV[u, rank, 1] = hy.view(torch.int32)
+    return torch.cat([P, EV.view(torch.uint8).view(ks * ntr, -1)], 1).contiguous()
+
+
+def _g22_prepare(state):
+    """gemv22 packs per (key, T), each checked once against F.linear (dropped -> the default path)."""
+    state["g22"] = {}
+    if not G22_CFG or _G22_SRC is None:
+        return
+    if "lib" not in _G22:
+        try:
+            import hashlib
+            from torch.utils.cpp_extension import load_inline
+            src = _G22_SRC.replace("G22_CONFIGS", " ".join("G22_CASE(%d,%d,%d,%d)" % c for c in sorted(set(G22_CFG.values()))))
+            _G22["lib"] = load_inline(
+                name="layer_g22_" + hashlib.sha256(src.encode()).hexdigest()[:12],
+                cpp_sources="void g22_gemm(torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources=src, functions=["g22_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+        except Exception as e:  # noqa: BLE001
+            print("layer gemv22 build failed:", e)
+            _G22["lib"] = None
+    lib = _G22["lib"]
+    if lib is None:
+        return
+    w = {**state["dense"], "unpool": state["unpool"]}
+    dev = state["unpool"].device
+    g = torch.Generator(device=dev)
+    g.manual_seed(0)
+    comp = {}
+    for (key, m), c in G22_CFG.items():
+        if key not in comp:
+            comp[key] = _compress(w[key])
+        if comp[key] is None:
+            continue
+        pk = _pack22(comp[key], c[1], c[3])
+        if pk is None:
+            print("layer gemv22 escapes overflow:", key, m, c)
+            continue
+        x = torch.randn((m, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
+        out = torch.full((m, w[key].shape[0]), float("nan"), dtype=torch.float32, device=dev)
+        try:
+            lib.g22_gemm(pk, comp[key][3], x, out, c[1], c[2], c[3], _G19_SMS, 0, c[2])
+            torch.cuda.synchronize()
+            ref = F.linear(x, w[key]).float()
+            ok = ((out.bfloat16().float() - ref).norm() / ref.norm()).item() < 1e-2
+        except Exception as ex:  # noqa: BLE001
+            print("layer gemv22 failed:", key, m, ex)
+            ok = False
+        if ok:
+            state["g22"][(key, m)] = (pk, comp[key][3], w[key].shape[0], c)
+        else:
+            print("layer gemv22 config dropped:", key, m, c)
+    del comp
+
+
+def _pack19(c, kc, ap, tm=0):
     """proj's pack19 (r-proj dev/g19_lib.py): _compress output -> stage-major uint8 [stages, 8 * ap * 768]."""
     code, sm, hdr, scale = c
     n, k = code.shape
@@ -1408,8 +1493,9 @@ def _pack19(c, kc, ap):
     N = (perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8).long() << sh).sum(-1)
     N = torch.where(N >= 2 ** 31, N - 2 ** 32, N).int().contiguous()
     ks, ntr, spk = k // kc, n // 128, kc // 32 // ap
-    S = S.view(ks, ntr, 8, spk, ap * 512).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, 8 * ap * 512)
-    N = N.view(torch.uint8).view(ks, ntr, 8, spk, ap * 256).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, 8 * ap * 256)
+    pm = (1, 0, 3, 2, 4) if tm else (0, 1, 3, 2, 4)  # tm: tile-major stages (tile, ks, st) for gemv22
+    S = S.view(ks, ntr, 8, spk, ap * 512).permute(*pm).reshape(ks * ntr * spk, 8 * ap * 512)
+    N = N.view(torch.uint8).view(ks, ntr, 8, spk, ap * 256).permute(*pm).reshape(ks * ntr * spk, 8 * ap * 256)
     return torch.cat([S, N], 1).contiguous()
 
 
@@ -1463,7 +1549,8 @@ TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}),
         8: ({}, {"pr1": False}),
-        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}), 256: ({}, {"lt:qkv_gate": False})}
+        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"g22:qkv_gate": True}, {"g22:pooler": True},
+              {"g22:unpool": True}, {"g22:qkv_gate": True, "g22:pooler": True, "g22:unpool": True}), 256: ({}, {"lt:qkv_gate": False})}
 TUNE_REPS = 40
 TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}  # T -> (batch, q_len)
 
@@ -1561,6 +1648,12 @@ def _tune(state):
 def _g19(x, key, state):
     """x @ W.T (key's weight) in FP32 by gemv19 (a PDL dependent of the previous kernel), or None."""
     m = x.shape[0]
+    e = state.get("g22", {}).get((key, m)) if _opt(state, m, "g22:" + key, False) else None
+    if e is not None:  # s20: gemv22 (T=128), where TUNE picks it
+        c = e[3]
+        out = torch.empty((m, e[2]), dtype=torch.float32, device=x.device)
+        _G22["lib"].g22_gemm(e[0], e[1], x.contiguous(), out, c[1], c[2], c[3], _G19_SMS, 0, c[2])
+        return out
     on = key in G19_ON and _opt(state, m, "g19:" + key, (key, m) not in G19_DEFAULT_OFF)
     e = state.get("g19", {}).get((key, m)) if on else None
     if e is None:
