@@ -283,3 +283,26 @@
   possible for any FP8-query implementation; d1's f5fdc570 failure (0.0318 at T=1, where the worst seen here is
   0.006) is 5x outside this distribution: most likely a bug in that old diag build (Marlin-path profile, session 2),
   not reproducible on current code.
+- v30 = moe e8d47eb (SA: arithmetic e4m3 scale decode in tk2f/twf when prepare() finds all block scales positive
+  normal; the layer's own T=1 moe_tk2f_launch call passes cfg + 100000 when st["sa"]). H100: tie (moe saw the gain on
+  H200 only: issue-bound there). tk2f_stress 0/600, n2u_eq: 3/40 diffs at d1 full also with identical toggles
+  (known attention atomic-merge nondeterminism), sliding 0.
+- v31/v32 = + proj router3 (pr3_src.cu = r-proj a1f0af7 dev/router3.cu, built in _g10_lib, PR3_CFG): router above 8
+  tokens as one split-K mma kernel (hi+lo into one accumulator, float4 atomics into zeroed out). H100 layer: T=128
+  v16 sliding/full 318/466 -> 313/460; T=16/32 +1..3 us (72 KB-smem CTAs beside the pooler bmm) -> v32 = T=128 only.
+  route_judge v16 x 2 seeds: identical margins to v29.
+- check 50cb4a5b (v32, 0db3e8a) **1.930x, 11,721 us**: d1 74.5/83.6, d16 148.6/228.5, d32 190.5/342.5, v1 121.5/138.3,
+  v16 269.9/365.1, v32 378.5/550.5.
+- v33 (KV_PF): the qkv gemv13 at T=1 also L2-prefetches the sliding window's K/V rows: grid thread i < pfn reads
+  page_table[0, mp - 2049 + i] after issuing its W prologue, prefetch.global.L2 of the K and V row (text patch of
+  proj's g13 in _g10_lib; pooler call passes pfn = 0). Probe first: warming those rows (torch gather before the
+  graph's qkv) cut csl 6.1-7.3 -> 3.8-4.3 us. With KV_PF: csl 4.1-5.3, qkv unchanged, o GEMV (PDL secondary of csl)
+  ends 2.6 us earlier, timeline end 98.4 -> 95.8; A/B (5 rounds, one process) d1 sliding 97.17 -> 95.94. v1's vtk
+  barely gains from warm KV (5.7 -> 5.4): not done there.
+- DEAD (H100 A/B): ROUTER_L2_PF_TOKENS (1,) -0.4 (noise) and (8,) +0.9/-0.5; T=8 pooler g14 on 64 fat blocks (so the
+  router could share SMs) +2..6 us. Measured but not built: unpool slice warm in L2 before n2u: n2u 7.1 -> 5.8 and the
+  boundary after it 8.3 -> 6.9 (d1 ~-1.4 us), but keeping 8 MB in L2 through tk2f's 81 MB stream would need evict_first
+  hints on moe's bulk copies + an evict_last prefetch: idea for later.
+- v1 front (H100 timeline): r3_router's 256 x 512-thread blocks (64 regs) fill every SM's register file, so the
+  pooler g14 (128 x 1024 threads, 61 regs: a whole SM each) starts only as router blocks drain: 5 us after the
+  boundary. Fusing the router rows into the pooler kernel would fix it (~-3 us v1).
