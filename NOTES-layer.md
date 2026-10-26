@@ -230,3 +230,35 @@
 - submit dae762e4 (v23, 358d87c): **1.8852x, 11,999 us** (below v22's 1.8924 = noise: SGLang's own reference times moved
   2-3% between runs, e.g. v32 sliding 692 vs 704). Board best stays ca8f833a (v22) 1.8924x. v23 stays on main (real
   H100 -4.6 us at v1). Don't resubmit v23 unchanged; it rides along with the next real change.
+
+## Session 8 (2026-10-26 01:28Z-)
+- Scoring arithmetic (bench.py WEIGHT, judge): score = geomean over the 6 loads of SGLang/ours, each load = 46 sliding +
+  16 full layers. So 1 us saved = 46/load_us of that load: d1 sliding 1 us = +0.16% total, v1 sliding +0.10%, d16
+  +0.07%, d32 +0.05%, v16 +0.04%, v32 +0.03%. Small-T glue microseconds are worth 3-5x big-T ones.
+- moe_src.py = r-moe d899a76 (TK2F 204: 2 k chunks per ring stage; moe's H200 bs8-32 -3..4%). All build.py/layer.py patch
+  anchors still matched. tools/tk2f_stress.py 0/600 bad. H100 layer: tk2f d1 36.0 -> 35.1 us.
+- gemv17 (proj dev/gemv17.cu @405439e) for the unpool slice at T=1/8 (layer.py _G17_SRC, built in _g10_lib), with W
+  loads moved before griddepcontrol.wait (PDL secondary) and a launch_dependents trigger. H100 in-layer config sweep
+  (tools/g17sweep.py): all configs within 0.3 us of gemv10/gemv12 (PDL hides it). Kept (1,4,512)/(8,4,256) for
+  proj's H200 standalone gain (-0.9/-0.5).
+- n2u (layer.py _N2U_SRC, T=1): moe_norm2 fused into the unpool-slice GEMV. 128 blocks x 512 threads x R=8 rows: each
+  block loads its W rows, then recomputes the token's norm2 from y32 (<= 8 x 16 KB from L2), rounds to BF16 (as
+  moe_norm2's output), dots. Block 0 zeroes moe's tk2f counters (st["cnt"], norm2's other job). The layer calls
+  moe_tk2f_launch itself (_experts_n2u). Bitwise equal to norm2 -> gemv17 (tools/n2u_eq.py). H100 d1 sliding
+  96.7 -> 95.4, full 118.6 -> 116.8. R=4 +1.3 (256 blocks' redundant y32 reads), R=16 +1.5 (fewer W streams), PDL
+  secondary of tk2f +2..3 (tk2f triggers at its start: n2u blocks squat on SMs).
+- DEAD: second boundary as n2u's last-block epilogue (atomic counter, threadfence, L2 prefetch of its 5 vectors):
+  H100 d1 +2.7 us vs the PDL Triton _boundary, which has its vectors loaded before the GEMV ends. Kept as
+  N2U_BOUNDARY=False.
+- RACE (unexplained, reverted): gemv17 as a PDL secondary of moe_norm2 at T=8 (GEMV_PDL_SECONDARY (8, False) =
+  unpool_slice; H100 v1 -0.5..-0.7 us) fails test 8 (batch 1, ctx 1M, full, q_len 8) on repeats 2 and 3 (rel err 0.40),
+  rep 1 passes; v26 passes all reps. Don't re-enable without finding it.
+- Nondeterminism (benign): at d1 full, the attention output differs between identical runs in ~1 of 1024 elements on
+  ~15% of seeds (1 BF16 ulp): ~/attn's FP32 atomic merge (red plan). Not a race.
+- check d3c8c88d (v26, 45bb3ef) **1.9152x, 11,811 us**: d1 74.0/83.9, d16 150.4/228.1, d32 182.3/334.4, v1 123.7/132.0,
+  v16 264.5/357.0, v32 348.6/518.4. -> submit be766193 **1.927x, 11.74 ms** (board best; was 1.8924): d1 75.9/83.3,
+  d16 152.1/234.1, d32 194.1/339.6, v1 121.5/130.8, v16 283.0/365.2, v32 371.9/547.4.
+- v29 (9199ea7): pooler at T=16/32 = 2-slab split-K strided torch.bmm (FP32 out, no copies: views of h and W), the
+  slabs summed in _rmsnorm_gain (NS/SS, ROUND to BF16 = the pooler's dtype) instead of cuBLAS's splitK kernel + its
+  reduce. Standalone H100 m16/m32 25.8/26.1 vs F.linear 28.0/28.1; layer d16/d32 -2.3 us on both layer kinds; 4
+  slabs worse; T=128/256 noise (not used).
