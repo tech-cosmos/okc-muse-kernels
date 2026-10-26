@@ -677,6 +677,11 @@ _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_p
 _GPR3_SRC = None  # @@GPR3@@
 KV_PF = True  # s9: the qkv gemv13 L2-prefetches the window's KV rows for csl (d1 sliding; H100 csl 6.1-7.3 -> ~4 us)
 G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv, minb, pf, blocks), k = 8192
+# s33 (proj): o at T=1 on gemv13 (12-bit W, 12.6 vs 16.8 MB) as a PDL secondary: W prologue (.nc) before
+# griddepcontrol.wait, x (__ldcg) after. k = 1024. TUNE option "g13o" at T=1 (H100 d1 full -1.0..-1.3 us, sliding
+# +-0.3: attention and o share HBM, so W bytes moved before the wait slow csl about as much as they save; NOTES-proj s33).
+G13_O = (2, 1, 4, 1, 528)  # (u, nv, minb, pf, blocks); None = no o pack
+G13_K = {"o": 1024}
 # s21/s22: alternative GEMV configs, used only where TUNE picks them (option "<kind>alt:<key>" = index into the list, 1-based)
 G13_ALT = {"qkv_gate": [(2, 4, 1, 2, 132)]}  # s21: T=1 PF 2 (2 rows in flight per virtual block; H100 +1.3/+2 us)
 G10_ALT = {"o": [(1024, 4, 4, 1, 1, 132)]}  # s22: T=1 o (PDL secondary of csl): U 4 on 132 blocks (PF 2 on 264: H100 +11 us, dropped)
@@ -845,7 +850,8 @@ def _g10_lib():
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src.count(anchor) == 1, anchor
                     src = src.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
-            src13 = (_G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(8192,%d,%d,%d,%d)" % c[:4] for c in sorted(set(G13_CFG.values()) | {a for v in G13_ALT.values() for a in v})))
+            src13 = (_G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(8192,%d,%d,%d,%d)" % c[:4] for c in sorted(set(G13_CFG.values()) | {a for v in G13_ALT.values() for a in v}))
+                                      + " " + " ".join("G13_CASE(1024,%d,%d,%d,%d)" % c[:4] for c in [G13_O] if c))
                      + "\n" + _G14_SRC.replace("G14_CONFIGS", " ".join("G14_CASE(%d,%d,%d,%d,%d)" % (G12_TOKENS, c[0], c[1], c[2], c[4])
                                                                       for c in sorted(set(G14_CFG.values()) | {a for v in G14_ALT.values() for a in v}))))
             if GEMV_PDL:
@@ -859,7 +865,9 @@ def _g10_lib():
                 ("__nv_bfloat16* __restrict__ out, int n, float scale) {",
                  "__nv_bfloat16* __restrict__ out, int n, float scale,\n"
                  "                                                       const int* __restrict__ pft, const char* __restrict__ pfk,\n"
-                 "                                                       const char* __restrict__ pfv, int pfn, int pfrb) {"),
+                 "                                                       const char* __restrict__ pfv, int pfn, int pfrb, int pdl) {"),
+                ("        if (i < KK / 8) xv[q] = __ldg(reinterpret_cast<const uint4*>(x) + i);\n",
+                 "        if (i < KK / 8 && !pdl) xv[q] = __ldg(reinterpret_cast<const uint4*>(x) + i);\n"),
                 ("        if (c + p * G < nch) load(p, c + p * G);\n",
                  "        if (c + p * G < nch) load(p, c + p * G);\n"
                  "    if (pfn > 0) {\n"
@@ -869,13 +877,25 @@ def _g10_lib():
                  "            if (pg >= 0) {\n"
                  "                asm volatile(\"prefetch.global.L2::evict_last [%0];\" :: \"l\"(pfk + (long)pg * pfrb));\n"
                  "                asm volatile(\"prefetch.global.L2::evict_last [%0];\" :: \"l\"(pfv + (long)pg * pfrb));\n"
-                 "            }\n        }\n    }\n"),
+                 "            }\n        }\n    }\n"
+                 "    if (pdl) {  // s33: PDL secondary: W prologue above, x (the predecessor's output) after the wait\n"
+                 "        asm volatile(\"griddepcontrol.wait;\" ::: \"memory\");\n"
+                 "#pragma unroll\n"
+                 "        for (int q = 0; q < XV; ++q) {\n"
+                 "            const int i = threadIdx.x + q * 256 * NV;\n"
+                 "            if (i < KK / 8) xv[q] = __ldcg(reinterpret_cast<const uint4*>(x) + i);\n"
+                 "        }\n    }\n"),
                 ("int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks) {",
                  "int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks,\n"
-                 "              torch::Tensor pft, torch::Tensor pfk, torch::Tensor pfv, int64_t pfn, int64_t pfrb) {"),
+                 "              torch::Tensor pft, torch::Tensor pfk, torch::Tensor pfv, int64_t pfn, int64_t pfrb, int64_t pdl) {"),
+                ("        g13::gemv<U_, V_, B_, K_, P_><<<blocks, 256 * V_, 0, st>>>(",
+                 "        cudaLaunchConfig_t lc = {}; lc.gridDim = blocks; lc.blockDim = 256 * V_; lc.dynamicSmemBytes = 0; \\\n"
+                 "        lc.stream = st; cudaLaunchAttribute la[1]; la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; \\\n"
+                 "        la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0; \\\n"
+                 "        cudaLaunchKernelEx(&lc, g13::gemv<U_, V_, B_, K_, P_>, "),
                 ("(__nv_bfloat16*)out.data_ptr(), n, (float)scale); return; }",
                  "(__nv_bfloat16*)out.data_ptr(), n, (float)scale, \\\n"
-                 "        (const int*)pft.data_ptr(), (const char*)pfk.data_ptr(), (const char*)pfv.data_ptr(), (int)pfn, (int)pfrb); return; }"),
+                 "        (const int*)pft.data_ptr(), (const char*)pfk.data_ptr(), (const char*)pfv.data_ptr(), (int)pfn, (int)pfrb, (int)pdl); return; }"),
             ]
             for x_, y_ in reps:
                 assert src13.count(x_) == 1, x_
@@ -905,7 +925,7 @@ def _g10_lib():
                             "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                             "int64_t, int64_t, int64_t, int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");\n"
                             "void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
-                            "int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t);\n"
+                            "int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
                             "void g14_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
                             "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                             "void r3_router(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
@@ -1964,7 +1984,7 @@ def _g19_prepare(state):
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
-            {"rf_trig": False}),
+            {"rf_trig": False}, {"g13o": True}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}),
@@ -2166,7 +2186,7 @@ def _g12_prepare(state):
     state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
     state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)  # pr1's router ticket (self-resetting)
     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n2u's last-block counter (self-resetting)
-    state["g13"] = {key: pk for key in G13_CFG if (pk := _pack13(w[key])) is not None}
+    state["g13"] = {key: pk for key in list(G13_CFG) + (["o"] if G13_O else []) if (pk := _pack13(w[key])) is not None}
     state["g14"] = {key: pk for key, c in G14_CFG.items() if (pk := _pack14(w[key], 1024 * c[0])) is not None}
     state["g14k"] = {(key, kc): pk for key, v in G14_ALT.items() if key in state["g14"]  # alt packs (other kcu)
                      for kc in sorted({a[0] for a in v} - {G14_CFG[key][0]}) if (pk := _pack14(w[key], 1024 * kc)) is not None}
@@ -2178,12 +2198,14 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
     lib = _G10.get("lib")
     if state is not None and x.shape[0] in (1, G12_TOKENS):
         pk = state.get("g13" if x.shape[0] == 1 else "g14", {}).get(key)
-        if pk is not None and key not in GEMV_PDL_SECONDARY.get((x.shape[0], sliding), ()):
+        o13 = x.shape[0] == 1 and key == "o" and bool(_opt(state, 1, "g13o", False))
+        if pk is not None and (key not in GEMV_PDL_SECONDARY.get((x.shape[0], sliding), ()) or o13) and (key != "o" or o13):
             out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
             if x.shape[0] == 1:
                 pf = kv_pf if kv_pf is not None else (x, x, x, 0, 0)
                 lib.g13_gemv(pk[0], pk[1], pk[2], x.contiguous(), out, pk[3],
-                              *_cfg(state, 1, "g13", key, G13_CFG), *pf)
+                              *(G13_O if o13 else _cfg(state, 1, "g13", key, G13_CFG)), *pf,
+                              int(o13 and UNPOOL_PDL and key in GEMV_PDL_SECONDARY.get((1, sliding), ())))
             else:
                 c = _cfg(state, G12_TOKENS, "g14", key, G14_CFG)
                 pk = pk if c[0] == G14_CFG[key][0] else state["g14k"][(key, c[0])]
