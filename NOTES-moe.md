@@ -1072,3 +1072,14 @@
   remaining tk2f lever is then the stream itself (fixed costs, tail). If it is >= 8 us at d16/d32, tk2h GS16 / dq work is
   worth it on the H200 (compare h16w*p4 there).
 - r-moe 77fa9b6. Default build unchanged (bench test PASS); the DIAG build dry-runs.
+
+## Night4 session 11 (2026-10-26 22:06Z - ~22:30Z, no judge runs: moe checks 20/20 until 00:00Z) -- 00:00Z DIAG readiness
+- Full dry run of the queued DIAG check exactly as the judge builds it (/tmp copy with DIAG = 1, FRESH
+  TORCH_EXTENSIONS_DIR, bench.py test): compile + prepare + all DIAG variants = 104.6 s, whole run 107 s (judge limit
+  10-15 min: safe); 420 diag12 lines + diag9s; all 15 tests PASS (cloned state too). H100 numbers = n10's (gs8 - nm:
+  d1 1.1, d16 3.5, d32 4.2, v1 2.8 us; bal d16 -1.5, d32 +1.4; h16w0 d32 -2.0; h32 v32 228.5 vs off 243.4).
+- tools/n11/diag_read.py <profiles/submission.<job>.log>: per load every variant's MEAN, delta vs the base (gs8 / off),
+  delta x layer score weight (pct), per-seed values, the diag9s table, and the n9/n10 reading rules (gs8 - nm, gs8 - tkp).
+- Paper, not built: per-slice fused gemm13 -> gemm2 for d1 (each CTA does an intermediate slice's gate/up then the W2
+  K-slice partial, FP32 partials reduced in norm2: no phase barrier). n10 already showed the H200 ring absorbs the d1
+  barrier, and the finer granularity only removes 9 -> 8.73 row rounding (~3%, ~0.6 us). Not worth a 2 h build blind.

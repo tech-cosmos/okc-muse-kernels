@@ -69,6 +69,12 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 11 (22:06-22:30Z, no judge runs): DIAG dry run 107 s total (safe), tests PASS. READ the 00:00Z DIAG with
+  `python muse_moe_w4a16/tools/n11/diag_read.py ~/r-moe/muse_moe_w4a16/profiles/submission.<job>.log` (or the cwd's profiles/).
+  Decision rules: bal wins d16/v1 -> tell layer (TUNE bal); h16w*p4 wins d32 -> layer's tk2h TUNE value; l2h0/l2h1 beat gs8
+  -> layer #define TK2F_L2H; h32 vs h24/h40, h32ne0, h32rg1 -> layer TUNE at T=256; gs8 - nm < ~4 us at d16/d32 -> stop
+  tk2f consumer work for good. Post the per-load table under COORD Results/Requests for layer.
+
 ## Night4 session 10 (21:44-22:15Z, no judge runs) -- KPS 4 re-closed; DIAG er + nm (NOTES n10, r-moe 77fa9b6)
 - H100: tk2f with NO consumer math (nm, PF & 256 probe) is only 1.0/3.1/3.7/2.8 us faster (d1/d16/d32/v1), and copy size
   does not matter without math (nm402 = nm204); stream "tkp4" gains came from its missing L2 hints. ER (early ring release,
