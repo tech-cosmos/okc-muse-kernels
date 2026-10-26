@@ -454,3 +454,32 @@
     m32 23.33 vs lt 17.54. DEAD: g19's win is the PDL overlap; with no predecessor it loses ~3-6 us (x arrival +
     startup). Mode 3 kept in the kernel (cheap, tested) in case a predecessor appears; DIAG19Q = {} now.
 - Checks 10-26: 14/20 (ce84da07, 4e5fad5b diag). Scored 4/10. Board best unchanged (71145e34 1.307x).
+
+## Session 16 (2026-10-26 08:37 - UTC): gemv22 (m128/256 12-bit wgmma GEMM): DEAD; qkv m8 without split-K: WIN
+- gemv22 (dev/gemv22.cu, dev/g22.py "M,AP,NS[,E]" env CL/SH/DEFS): swap-AB wgmma m64nMk16 (M = 128/256 tokens as N),
+  A = 12-bit W decoded into registers (gemv19/20 atom packing, rg 8), B = x box by SW128 tensor map; W stage (12 KB) and
+  the stage's x box share one ring slot; tile-major stages, tile-aligned split (each tile gets floor/ceil(G/ntr) blocks:
+  one run per block), 3 warpgroups (setmaxnreg 40/232). Lessons, in order found (H100 traces, G22_TRACE stamps):
+  * wgmma in a data-dependent branch -> ptxas C7518 "serialized ... divergent path": consumers must run straight-line
+    stage pairs (static A/B sets) with runs computed from the static range; 384 threads, warp id via __shfl_sync.
+  * escape fixups that read x from global at run end: each dependent round trip under saturated HBM ~2-3 us. Final form:
+    escapes packed INTO each W stage (E = 32 entries x 8 B: row-in-tile | k-in-stage << 8, true/scale), one fixup warp
+    follows the ring and red.adds x (from the slot's x box) * (hy - 2^-15) * scale into out. No extra round trips.
+    Rounding: the fixup is a separate FP32 red (the decoded 2^-15 term cancels in a different add): probe rows exact to
+    ~1e-17 abs instead of bit-exact (ordinary FP32 accumulation; bench.py esc tolerates it at m >= 128 only).
+  * scalar red flush 4.3 (m128) / 9.6 us (m256); v4 reds through a [tok][16 rows] smem transpose: ~2 us per run end.
+  * blocks straddling 2 tiles flush twice (tail): tile-aligned split fixed it (qkv m128 22.3 -> 20.8 H100 = cuBLAS).
+  * THE LIMIT: per-SM smem ingest. NOMMA and NOX each leave the loop as slow; W-only stream ~2.9 TB/s on H100. Per stage
+    W 12 KB + x 16 KB (m128) / 32 KB (m256) -> ~47-50 GB/s per SM (moe s16 found ~60 for a bare ring). x/W bytes = 1.33
+    (m128) / 2.67 (m256) at BM 128. Cluster-2 x multicast halves L2 reads but NOT smem ingest: no gain (after fixing
+    remote arrives: mbarrier.arrive.release.cluster was 2x slower than the default .release.cta form CUTLASS uses).
+  * H200 (check fb2fe4ee, 1.3071x, diag): tuner us g22 vs best lt: qkv m128 22.1/18.8, o 17.9/10.6, pooler 29.6/24.4,
+    unp 30.7/23.0; m256 qkv 30.9/20.7, o 26.1/12.4, pool 41.3/28.7, unp 46.2/27.2. BM 256 would halve x/W but double the
+    flush volume (132 x BM x M x 4 B of reds) -> ~tie at best. Dead; BF16_G22 = {} (BF16_G22_S16 keeps the configs).
+- gemv13 cp.async ring (G13_CPA, smem ring of PF chunks): H100 qkv m1 13.4 vs U2V4 14.4, but = the existing VT 512 config
+  (13.6): the gain is the round-count tail, not bytes in flight. L2 bulk prefetch of the vb's chunks (G13_L2PF): +1..3 us
+  on H100. gemv13 for o (k 1024): loses to gemv10 (11.3 vs 11.0 tuner H100: 2 rounds per vb, latency-bound). All off.
+- cuBLASLt picks the layer doesn't use (Handoffs proj s16 10:10Z): pooler T=256 (66,18,35,1,0,0,0,2) -4.3..7 us H200.
+- **qkv m8 without split-K**: gemv14 (8, 8, 8, 4, 96, 2) = kcu 8 (S = 1), 96 blocks x 768 threads: no partials/counter
+  end phase (~2.5 us at S=4). H100 g14.py 15.2-15.6 vs 16.8; H200 check a9b13469 (1.3161x): 15.39 vs 16.58 tuner us.
+  Submit 3810db09 1.3110x = new board best (was 1.307). Handoff to layer (G14_CFG qkv). m16 gemv14 kcu 4 / 96 blocks: tie.
