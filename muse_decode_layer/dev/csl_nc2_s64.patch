@@ -1,0 +1,364 @@
+diff --git a/muse_decode_layer/attn_src.py b/muse_decode_layer/attn_src.py
+index ba1b258..bb2d545 100644
+--- a/muse_decode_layer/attn_src.py
++++ b/muse_decode_layer/attn_src.py
+@@ -77,6 +77,7 @@ _CSL_SRC = r'''// Batch-1-style decode sliding attention as ONE kernel: per (req
+ #include <c10/cuda/CUDAStream.h>
+ #include <cuda_bf16.h>
+ #include <cuda_fp8.h>
++#include <type_traits>
+ 
+ #ifndef CSL_SPEC
+ #define CSL_SPEC 1
+@@ -124,7 +125,17 @@ __device__ __forceinline__ unsigned pkbf(float lo, float hi) {
+     return *(unsigned*)&t;
+ }
+ __device__ __forceinline__ unsigned ld2(const unsigned short* p) { return *(const unsigned*)p; }
++// layer s64 (QSS at NC 2): qkv as 2 FP32 split-K slabs qss elements apart, added in FP32 and rounded to BF16 (RN) at the
++// load (= nds's qld8/qld4 and the torch slab sum it replaces: bit-identical).
++struct qs2 { float v; };
++__device__ __forceinline__ unsigned ld2(const unsigned short* p, int) { return ld2(p); }
++__device__ __forceinline__ unsigned ld2(const float* p, int);
++__device__ __forceinline__ unsigned ld2(const qs2* q, int qss) {
++    const float* p = (const float*)q; const float2 a = *(const float2*)p, c = *(const float2*)(p + qss);
++    return pkbf(a.x + c.x, a.y + c.y);
++}
+ __device__ __forceinline__ unsigned ld2(const float* p) { const float2 f = *(const float2*)p; return pkbf(f.x, f.y); }
++__device__ __forceinline__ unsigned ld2(const float* p, int) { return ld2(p); }
+ __device__ __forceinline__ void ld16(const unsigned short* p, uint4& a, uint4& b) {
+     a = *(const uint4*)p; b = *(const uint4*)(p + 8);
+ }
+@@ -134,14 +145,33 @@ __device__ __forceinline__ void ld16(const float* p, uint4& a, uint4& b) {
+     a = make_uint4(pkbf(f0.x, f0.y), pkbf(f0.z, f0.w), pkbf(f1.x, f1.y), pkbf(f1.z, f1.w));
+     b = make_uint4(pkbf(f2.x, f2.y), pkbf(f2.z, f2.w), pkbf(f3.x, f3.y), pkbf(f3.z, f3.w));
+ }
++__device__ __forceinline__ void ld16(const unsigned short* p, uint4& a, uint4& b, int) { ld16(p, a, b); }
++__device__ __forceinline__ void ld16(const float* p, uint4& a, uint4& b, int) { ld16(p, a, b); }
++__device__ __forceinline__ void ld16(const qs2* q, uint4& a, uint4& b, int qss) {
++    const float* p = (const float*)q;
++    float4 f[4], g[4];
++#pragma unroll
++    for (int i = 0; i < 4; ++i) { f[i] = *(const float4*)(p + 4 * i); g[i] = *(const float4*)(p + qss + 4 * i); }
++    a = make_uint4(pkbf(f[0].x + g[0].x, f[0].y + g[0].y), pkbf(f[0].z + g[0].z, f[0].w + g[0].w),
++                   pkbf(f[1].x + g[1].x, f[1].y + g[1].y), pkbf(f[1].z + g[1].z, f[1].w + g[1].w));
++    b = make_uint4(pkbf(f[2].x + g[2].x, f[2].y + g[2].y), pkbf(f[2].z + g[2].z, f[2].w + g[2].w),
++                   pkbf(f[3].x + g[3].x, f[3].y + g[3].y), pkbf(f[3].z + g[3].z, f[3].w + g[3].w));
++}
+ 
+-template <int PAGE, typename QT, bool PW = false>
+-__global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const float* __restrict__ cs,
++// layer s64 (NC 2): each warp gathers NC 32-key chunks at once (CTA = 128 NC keys, cluster = 16 / NC CTAs per KV head):
++// at batch 32 the NC 1 grid (1024 CTAs, 80 regs -> 6 CTAs/SM) needs two waves of latency-bound gathers.
++#ifndef CSL_NC2_MINB
++#define CSL_NC2_MINB 4
++#endif
++template <int NC> struct LB { static constexpr int min_blocks = CSL_NC2_MINB; };
++template <int PAGE, typename QT, bool PW = false, int NC = 1>
++__global__ void __launch_bounds__(128, NC == 1 ? 0 : LB<NC>::min_blocks) decode(const QT* __restrict__ qkv, const float* __restrict__ cs,
+                                               unsigned char* kc, unsigned char* vc, const int* __restrict__ pt,
+                                               const int* __restrict__ seqs, const long* __restrict__ loc,
+                                               const float* __restrict__ ks, const float* __restrict__ vs,
+                                               __nv_bfloat16* __restrict__ out, int MP, float qk_scale, int spec,
+-                                              const unsigned char* __restrict__ pf, long long pfb) {
++                                              const unsigned char* __restrict__ pf, long long pfb, int qss) {
++    constexpr int CL = 16 / NC;
+     __shared__ __align__(16) float racc[16][D];
+     __shared__ __align__(16) float rml[16][2];
+     __shared__ __align__(16) float lpart[2][4][8][D];
+@@ -150,16 +180,16 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const
+     __shared__ __align__(8) unsigned long long mbar;
+ 
+     const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, c = lane & 3;
+-    const int h = (blockIdx.x >> 4) & 1, wk = warp;
++    const int h = (blockIdx.x / CL) & 1, wk = warp;
+     unsigned rank;
+     asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(rank));
+-    const int b = blockIdx.x / 32;
++    const int b = blockIdx.x / (2 * CL);
+     // The owner's receive barrier counts the 16 partials' bytes (st.async complete_tx). Peers must have started
+     // (and initialized it) before anyone pushes: arrive now, wait before the pushes.
+     const unsigned mb = (unsigned)__cvta_generic_to_shared(&mbar);
+     if (threadIdx.x == 0 && rank < 8) {
+         asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;\n\tfence.mbarrier_init.release.cluster;" ::"r"(mb) : "memory");
+-        asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(mb), "r"(16 * (16 * 16 + 8)) : "memory");
++        asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(mb), "r"(CL * (16 * 16 + 8)) : "memory");
+     }
+     asm volatile("barrier.cluster.arrive.relaxed.aligned;" ::: "memory");
+ 
+@@ -172,10 +202,10 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const
+     const QT* kp = qkv + (long)b * QKV_W + (HQ + h) * D + 2 * lane;
+     unsigned kw, vw, gw;
+ #define CSL_QLOADS                                                                                             \
+-    ld16(qp, qa, qb);                                                                                          \
+-    kw = ld2(kp); vw = ld2(kp + HKV * D);                                                                      \
+-    gw = ld2(qkv + (long)b * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
+-    if (!PW) { CSL_QLOADS }
++    ld16(qp, qa, qb, qss);                                                                                     \
++    kw = ld2(kp, qss); vw = ld2(kp + HKV * D, qss);                                                            \
++    gw = ld2(qkv + (long)b * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane, qss);
++    if (!PW && NC == 1) { CSL_QLOADS }
+     const long nloc = loc[b];
+     const float kscale = *ks, vscale = *vs;
+     // spec >= 0 (batch 1, page 1): SGLang slices the page table to the batch's longest length, so the window's
+@@ -187,29 +217,32 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const
+     float co, si;
+     int base, w0, tmax;
+     const int* ptr = pt + (long)b * MP;
+-    long kslot[4], vslot[8];
+-    uint4 kr[4];
+-    uint2 vr[8];
++    using SlotT = typename std::conditional<NC == 1, long, unsigned>::type;  // NC 2: 32-bit (cache < 4 GB, launcher-checked)
++    SlotT kslot[NC][4], vslot[NC][8];
++    uint4 kr[NC][4];
++    uint2 vr[NC][8];
+ #define CSL_LOADS                                                                                              \
+     csr = cs + (long)seq * D + 8 * c;                                                                          \
+     c0 = *(const float4*)csr; c1 = *(const float4*)(csr + 4);                                                  \
+     s0 = *(const float4*)(csr + 32); s1 = *(const float4*)(csr + 36);                                          \
+     co = cs[(long)seq * D + lane]; si = cs[(long)seq * D + 32 + lane];                                         \
+     base = seq - (W - 1);                                                                                      \
+-    w0 = rank * 128 + wk * 32;                                                                                 \
++    w0 = rank * 128 * NC + wk * 32;  /* chunk n: keys w0 + 128 n + [0, 32) */                                 \
+     tmax = max(seq - 1, 0);                                                                                    \
+     /* Keys of this thread: K rows 8j + g (j 0..3), V rows {2c, 2c+1, 8+2c, 9+2c, 16+2c, ...}. */             \
++    _Pragma("unroll") for (int n = 0; n < NC; ++n) {                                                           \
+     _Pragma("unroll") for (int j = 0; j < 4; ++j) {                                                            \
+-        int t = min(max(base + w0 + 8 * j + g, 0), tmax);                                                      \
+-        kslot[j] = PAGE == 1 ? (long)max(ptr[t], 0) : (long)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;           \
++        int t = min(max(base + w0 + 128 * n + 8 * j + g, 0), tmax);                                            \
++        kslot[n][j] = PAGE == 1 ? (SlotT)max(ptr[t], 0) : (SlotT)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;      \
+     }                                                                                                          \
+     _Pragma("unroll") for (int i = 0; i < 8; ++i) {                                                            \
+         int k = 8 * (i >> 1) + 2 * c + (i & 1);                                                                \
+-        int t = min(max(base + w0 + k, 0), tmax);                                                              \
+-        vslot[i] = PAGE == 1 ? (long)max(ptr[t], 0) : (long)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;           \
+-    }                                                                                                          \
+-    _Pragma("unroll") for (int j = 0; j < 4; ++j) kr[j] = *(const uint4*)(kc + kslot[j] * (HKV * D) + h * D + 16 * c); \
+-    _Pragma("unroll") for (int i = 0; i < 8; ++i) vr[i] = *(const uint2*)(vc + vslot[i] * (HKV * D) + h * D + 8 * g);
++        int t = min(max(base + w0 + 128 * n + k, 0), tmax);                                                    \
++        vslot[n][i] = PAGE == 1 ? (SlotT)max(ptr[t], 0) : (SlotT)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;      \
++    } }                                                                                                        \
++    _Pragma("unroll") for (int n = 0; n < NC; ++n) {                                                           \
++    _Pragma("unroll") for (int j = 0; j < 4; ++j) kr[n][j] = *(const uint4*)(kc + kslot[n][j] * (HKV * D) + h * D + 16 * c); \
++    _Pragma("unroll") for (int i = 0; i < 8; ++i) vr[n][i] = *(const uint2*)(vc + vslot[n][i] * (HKV * D) + h * D + 8 * g); }
+     CSL_LOADS
+     if (spec >= 0) {
+         const int real = seqs[b];
+@@ -219,6 +252,8 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const
+     if (PW) {
+         asm volatile("griddepcontrol.wait;" ::: "memory");
+         CSL_QLOADS
++    } else if (NC == 2) {  // s64: FP32 / slab qkv rounds at its load: issue it after the gathers (in-order issue)
++        CSL_QLOADS
+     }
+ #undef CSL_QLOADS
+     const float g0 = bf(gw & 0xffff), g1 = bf(gw >> 16);
+@@ -249,7 +284,7 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const
+     }
+ 
+     // The new token (window key 2047): CTA 15, the last warp of each head.
+-    const bool newer = rank == 15 && wk == 3;
++    const bool newer = rank == CL - 1 && wk == 3;
+     if (newer) {
+         float k0 = bf(kw & 0xffff), k1 = bf(kw >> 16);
+         float s = k0 * k0 + k1 * k1;
+@@ -265,55 +300,65 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const
+         *(unsigned short*)(kc + slot) = k8;
+         *(unsigned short*)(vc + slot) = v8;
+         __syncwarp();
+-        if (g == 7) kr[3] = *(const uint4*)&newkv[h][0][16 * c];
+-        if (c == 3) vr[7] = *(const uint2*)&newkv[h][1][8 * g];
++        if (g == 7) kr[NC - 1][3] = *(const uint4*)&newkv[h][0][16 * c];
++        if (c == 3) vr[NC - 1][7] = *(const uint2*)&newkv[h][1][8 * g];
+     }
+ 
+     // S = Q K^T for row g: tile j holds keys 8j + 2c + {0, 1}.
+-    float sc[4][4];
++    float sc[NC][4][4];
++#pragma unroll
++    for (int n = 0; n < NC; ++n)
+ #pragma unroll
+     for (int j = 0; j < 4; ++j) {
+-        sc[j][0] = sc[j][1] = sc[j][2] = sc[j][3] = 0.f;
+-        mma8(sc[j], q8[0], 0u, q8[1], 0u, kr[j].x, kr[j].y);
+-        mma8(sc[j], q8[2], 0u, q8[3], 0u, kr[j].z, kr[j].w);
++        sc[n][j][0] = sc[n][j][1] = sc[n][j][2] = sc[n][j][3] = 0.f;
++        mma8(sc[n][j], q8[0], 0u, q8[1], 0u, kr[n][j].x, kr[n][j].y);
++        mma8(sc[n][j], q8[2], 0u, q8[3], 0u, kr[n][j].z, kr[n][j].w);
+     }
+     const float scale = qk_scale * kscale;
+     float m = -1e30f;
++#pragma unroll
++    for (int n = 0; n < NC; ++n)
+ #pragma unroll
+     for (int j = 0; j < 4; ++j)
+ #pragma unroll
+         for (int e = 0; e < 2; ++e) {
+-            bool ok = base + w0 + 8 * j + 2 * c + e >= 0;
+-            sc[j][e] = ok ? sc[j][e] * scale : -INFINITY;
+-            m = fmaxf(m, sc[j][e]);
++            bool ok = base + w0 + 128 * n + 8 * j + 2 * c + e >= 0;
++            sc[n][j][e] = ok ? sc[n][j][e] * scale : -INFINITY;
++            m = fmaxf(m, sc[n][j][e]);
+         }
+     m = fmaxf(m, __shfl_xor_sync(0xffffffff, m, 1));
+     m = fmaxf(m, __shfl_xor_sync(0xffffffff, m, 2));
+     const float mo = m - 8.f;  // FA3's FP8 max offset: P <= 2^8
+     float l = 0.f;
++#pragma unroll
++    for (int n = 0; n < NC; ++n)
+ #pragma unroll
+     for (int j = 0; j < 4; ++j)
+ #pragma unroll
+-        for (int e = 0; e < 2; ++e) { sc[j][e] = exp2f(sc[j][e] - mo); l += sc[j][e]; }
++        for (int e = 0; e < 2; ++e) { sc[n][j][e] = exp2f(sc[n][j][e] - mo); l += sc[n][j][e]; }
+     l += __shfl_xor_sync(0xffffffff, l, 1);
+     l += __shfl_xor_sync(0xffffffff, l, 2);
+-    const unsigned pb0 = pk8(sc[0][1], sc[0][0]) | (pk8(sc[1][1], sc[1][0]) << 16);
+-    const unsigned pb1 = pk8(sc[2][1], sc[2][0]) | (pk8(sc[3][1], sc[3][0]) << 16);
+ 
+-    // O^T = V^T P^T: m-tile i holds d 8g + 2i (rows m = g) and 8g + 2i + 1 (m = g + 8).
++    // O^T = V^T P^T: m-tile i holds d 8g + 2i (rows m = g) and 8g + 2i + 1 (m = g + 8); chunks accumulate.
+     float acc[4][4];
++#pragma unroll
++    for (int i = 0; i < 4; ++i) acc[i][0] = acc[i][1] = acc[i][2] = acc[i][3] = 0.f;
++#pragma unroll
++    for (int n = 0; n < NC; ++n) {
++    const unsigned pb0 = pk8(sc[n][0][1], sc[n][0][0]) | (pk8(sc[n][1][1], sc[n][1][0]) << 16);
++    const unsigned pb1 = pk8(sc[n][2][1], sc[n][2][0]) | (pk8(sc[n][3][1], sc[n][3][0]) << 16);
+ #pragma unroll
+     for (int i = 0; i < 4; ++i) {
+         const int bsel = (i & 1) ? 0x7362 : 0x5140;
+         unsigned w[8];
+ #pragma unroll
+-        for (int k = 0; k < 8; ++k) w[k] = (i < 2) ? vr[k].x : vr[k].y;
++        for (int k = 0; k < 8; ++k) w[k] = (i < 2) ? vr[n][k].x : vr[n][k].y;
+         unsigned t01 = __byte_perm(w[0], w[1], bsel), t23 = __byte_perm(w[2], w[3], bsel);
+         unsigned t45 = __byte_perm(w[4], w[5], bsel), t67 = __byte_perm(w[6], w[7], bsel);
+-        acc[i][0] = acc[i][1] = acc[i][2] = acc[i][3] = 0.f;
+         mma8(acc[i], __byte_perm(t01, t23, 0x5410), __byte_perm(t01, t23, 0x7632), __byte_perm(t45, t67, 0x5410),
+              __byte_perm(t45, t67, 0x7632), pb0, pb1);
+     }
++    }
+ 
+     if (pfb > 0 && warp == 1) {  // layer s34 (O_PF): K/V consumed: L2-prefetch this CTA's share of the next GEMM's weight
+         const long long per = ((pfb / gridDim.x) + 4095) & ~4095LL, end = min(pfb, per * (blockIdx.x + 1));
+@@ -361,10 +406,10 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const
+                      ::"r"(mb) : "memory");
+         float M = -1e30f;
+ #pragma unroll
+-        for (int s = 0; s < 16; ++s) M = fmaxf(M, rml[s][0]);
++        for (int s = 0; s < CL; ++s) M = fmaxf(M, rml[s][0]);
+         float den = 0.f, o0 = 0.f, o1 = 0.f;
+ #pragma unroll
+-        for (int s = 0; s < 16; ++s) {
++        for (int s = 0; s < CL; ++s) {
+             float w = exp2f(rml[s][0] - M);
+             den += w * rml[s][1];
+             float2 a = *(const float2*)&racc[s][2 * lane];
+@@ -385,31 +430,35 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const
+ 
+ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor pt,
+                 torch::Tensor seq, torch::Tensor loc, torch::Tensor ks, torch::Tensor vs, torch::Tensor out, int64_t page,
+-                double qk_scale, int64_t pf_ptr, int64_t pf_bytes, int64_t pw) {
++                double qk_scale, int64_t pf_ptr, int64_t pf_bytes, int64_t pw, int64_t nc, int64_t qss) {
+     int batch = seq.size(0), mp = pt.size(1);
++    TORCH_CHECK(nc == 1 || (nc == 2 && !pw), "csl: nc 1, or nc 2 without pw");
++    TORCH_CHECK(nc == 1 || (kc.numel() < (1LL << 32) && vc.numel() < (1LL << 32)), "csl: nc 2 needs caches < 4 GB");
++    TORCH_CHECK(!qss || (nc == 2 && qkv.scalar_type() == at::kFloat), "csl: qss needs nc 2 and FP32 slabs");
+     const int spec = (batch == 1 && page == 1 && CSL_SPEC) ? mp - 1 : -1;
+     cudaLaunchConfig_t cfg = {};
+-    cfg.gridDim = dim3(32 * batch);
++    cfg.gridDim = dim3(32 / nc * batch);
+     cfg.blockDim = dim3(128);
+     cfg.dynamicSmemBytes = 0;
+     cfg.stream = c10::cuda::getCurrentCUDAStream();
+     cudaLaunchAttribute at[2];
+     at[0].id = cudaLaunchAttributeClusterDimension;
+-    at[0].val.clusterDim.x = 16; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
++    at[0].val.clusterDim.x = 16 / nc; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+     at[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+     at[1].val.programmaticStreamSerializationAllowed = 1;
+     cfg.attrs = at; cfg.numAttrs = pw ? 2 : 1;
+ #define CSL_ARGS(QT) (const QT*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
+     (unsigned char*)vc.data_ptr(), pt.data_ptr<int>(), seq.data_ptr<int>(), loc.data_ptr<long>(), ks.data_ptr<float>(), \
+     vs.data_ptr<float>(), (__nv_bfloat16*)out.data_ptr(), mp, (float)qk_scale, spec, \
+-    (const unsigned char*)pf_ptr, (long long)pf_bytes
+-#define CSL_LAUNCH1(P, QT, PW) { \
++    (const unsigned char*)pf_ptr, (long long)pf_bytes, (int)qss
++#define CSL_LAUNCH1(P, QT, PW, NC) { \
+         static bool set = false; \
+-        if (!set) { cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); \
+-                    if (PW) cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributePreferredSharedMemoryCarveout, 100); \
++        if (!set) { cudaFuncSetAttribute(csl::decode<P, QT, PW, NC>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); \
++                    if (PW) cudaFuncSetAttribute(csl::decode<P, QT, PW, NC>, cudaFuncAttributePreferredSharedMemoryCarveout, 100); \
+                     set = true; } \
+-        cudaLaunchKernelEx(&cfg, csl::decode<P, QT, PW>, CSL_ARGS(QT)); }
+-#define CSL_LAUNCH(P, QT) { if (pw) CSL_LAUNCH1(P, QT, true) else CSL_LAUNCH1(P, QT, false) }
++        cudaLaunchKernelEx(&cfg, csl::decode<P, QT, PW, NC>, CSL_ARGS(QT)); }
++#define CSL_LAUNCH(P, QT) { if (nc == 2) { if (qss) CSL_LAUNCH1(P, csl::qs2, false, 2) else CSL_LAUNCH1(P, QT, false, 2) } \
++                            else if (pw) CSL_LAUNCH1(P, QT, true, 1) else CSL_LAUNCH1(P, QT, false, 1) }
+     TORCH_CHECK(page == 1 || page == 64, "csl: page 1 or 64");
+     const bool f32 = qkv.scalar_type() == at::kFloat;
+     if (page == 1) {
+@@ -784,7 +833,7 @@ try:
+     _CSL = _load_inline(
+         name="muse_csl_s96_" + __import__("hashlib").sha256(_CSL_SRC.encode()).hexdigest()[:10],
+         cpp_sources="void csl_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+-                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t, int64_t);"
++                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t, int64_t, int64_t, int64_t);"
+                     "void vtk_verify(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t);",
+         cuda_sources=_CSL_SRC, functions=["csl_decode", "vtk_verify"],
+@@ -793,6 +842,9 @@ except Exception as _e:  # noqa: BLE001
+     print("csl build failed, using Triton:", _e)
+     _CSL = None
+ VTK_MAX_BATCH = 1  # verify sliding on vtk (one cluster per (request, token, KV head)): H100 B1 7.7 -> 6.45 us
++# layer s64: decode sliding at batch CSL_NC2_MIN..CSL_NC2_MAX on csl NC 2 (each warp gathers 2 chunks: one wave at B32),
++# reading the QSS slabs directly; data["csl_nc"] (layer tuner) overrides.
++CSL_NC2_MIN, CSL_NC2_MAX = 17, 32
+ CSL_MAX_BATCH = 16  # decode sliding up to this batch on the cluster kernel (H100 paired: B1 4.70 -> 3.84, B16 10.61 -> 9.14 us; B32 15.84 -> 15.94)
+ 
+ # agent2 s3: native verify-sliding attention (tools/a2/nvs.cu): one CTA per (request, key split), a producer warpgroup
+@@ -3960,15 +4012,18 @@ def kernel_fn(data: Inputs) -> torch.Tensor:
+     device = qkv.device
+     page_table = data["page_table"]
+     max_pages = page_table.shape[1]
+-    if data.get("qkv_ss", 0) and not (length == 1 and batch >= NDS_MIN_BATCH):  # proj s22: csl/vtk/nvs: summed slabs
++    csl_ok = _CSL is not None and cfg["window"] == 2048 and length == 1 and hq == 16 and hkv == 2 and d == 64 \
++        and cfg["page_size"] in (1, 64) and cfg["rope_theta"]
++    nc2 = csl_ok and not data.get("csl_pw", 0) and data.get("csl_nc", 2 if CSL_NC2_MIN <= batch <= CSL_NC2_MAX else 1) == 2
++    if data.get("qkv_ss", 0) and not nc2 and not (length == 1 and batch >= NDS_MIN_BATCH):  # proj s22: csl/vtk/nvs: summed slabs
+         qkv = data["qkv_slabs"].sum(0).view(qkv.shape)
+         data = {**data, "qkv": qkv, "qkv_ss": 0}
+-    if _CSL is not None and cfg["window"] == 2048 and length == 1 and batch <= CSL_MAX_BATCH and hq == 16 \
+-            and hkv == 2 and d == 64 and cfg["page_size"] in (1, 64) and cfg["rope_theta"]:
++    if csl_ok and (batch <= CSL_MAX_BATCH or nc2):
+         out = torch.empty((batch, 1, hq * d), dtype=torch.bfloat16, device=device)
+         _CSL.csl_decode(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], page_table,
+                         data["seq_lens"], data["cache_loc"], data["k_scale"], data["v_scale"], out, cfg["page_size"],
+-                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, *data.get("o_pf", (0, 0)), int(data.get("csl_pw", 0)))
++                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, *data.get("o_pf", (0, 0)), int(data.get("csl_pw", 0)),
++                        2 if nc2 else 1, data.get("qkv_ss", 0) if nc2 else 0)
+         return out
+     if _CSL is not None and cfg["window"] == 2048 and length == 8 and batch <= VTK_MAX_BATCH and hq == 16 \
+             and hkv == 2 and d == 64 and cfg["page_size"] in (1, 64) and cfg["rope_theta"]:
+diff --git a/muse_decode_layer/build.py b/muse_decode_layer/build.py
+index bd4f979..e5dcda2 100644
+--- a/muse_decode_layer/build.py
++++ b/muse_decode_layer/build.py
+@@ -50,9 +50,11 @@ def _np2_jit(n):
+ class Config(TypedDict):""", 1)
+ # csl::decode (decode 1 sliding) triggers its dependents at start: the o GEMV (a PDL secondary) issues its first
+ # weight loads during attention.
+-csl_anchor = "    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, c = lane & 3;\n    const int h = (blockIdx.x >> 4) & 1, wk = warp;\n"
+-assert attn.count(csl_anchor) == 2  # csl and its verify twin (no PDL dependent there)
+-attn = attn.replace(csl_anchor, csl_anchor + '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n')
++_tid = "    const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, c = lane & 3;\n"
++for csl_anchor in (_tid + "    const int h = (blockIdx.x / CL) & 1, wk = warp;\n",  # csl (s64: CL = 16 / NC CTAs per head)
++                   _tid + "    const int h = (blockIdx.x >> 4) & 1, wk = warp;\n"):  # its verify twin (no PDL dependent there)
++    assert attn.count(csl_anchor) == 1
++    attn = attn.replace(csl_anchor, csl_anchor + '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n')
+ moe = moe_namespaced((here / "moe_src.py").read_text())
+ # s37: GNORM reads the pooler rows strided (fused pooler+router GEMM output): no contiguous() copy when gather_norm is set
+ _a = '    x = data["hidden_states"].contiguous()\n'

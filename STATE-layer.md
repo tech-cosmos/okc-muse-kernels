@@ -1,6 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 22:15Z (s63): **main = v100 = v99 + safety comment only**. v99 = v97 + CSL_PW (d16 sliding csl = PDL
+Updated 2026-10-26 22:20Z (s64: d32 attention closed, main unchanged): **main = v100 = v99 + safety comment only**. v99 = v97 + CSL_PW (d16 sliding csl = PDL
 secondary of the g19 qkv, K/V gathers before griddepcontrol.wait; H100 d16 sl -0.7..-1.0 us) + vtk PW as TUNE[8] option
 {cslpw: True}. NOT judge-checked. s63 AUDITED CSL_PW for the lead (NOTES s63): pre-wait loads read only inputs + context rows
 < seq_lens; tools/pw_race.py bitwise 0/40 diffs (control race 40/40 seen); safe to check. KEEP the qkv GEMM the graph's first
@@ -88,7 +88,9 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
--4. (s63) d32 sliding attention: nds/csl 15.9 us vs raw random-row gather 12.0 us (H100, tools/gather_bw.py): ~4 us; B16 csl is at the floor.
+-4. (s64) d32 sliding attention: CLOSED. csl NC 2 (one wave at B32) loses to nds+combine (18.1 vs 17.4 us); real-input gather
+   floor 12.3 (tools/gather_real.py) but nds is 14.0 us even fully L2-warm (pipeline-latency-bound): K/V L2 prefetch <= ~2 us,
+   nds+combine fusion <= ~1-1.5 us at d32 sl (<= 0.1% each): not built. NOTES s64, dev/csl_nc2_s64.patch.
 -3. (s15) Watch Handoffs: proj is building g19 mode 3 (BF16 out, per-tile tickets) for qkv T=16/32 (drops v44's 1.2 us
    cast at d16; m32 lost on H100 so far) and was asked for an M=8 g19 (T=8 qkv: g14 m8 is issue-bound, 13.0 us H200 vs
    g19 m16 10.6). moe works big-M (v16/v32 twm) on its calibrated H200 proxy (H100 with the expert grid capped at 88,

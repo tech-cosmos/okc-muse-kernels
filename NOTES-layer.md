@@ -1294,3 +1294,28 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   random page-1 cache rows (K+V, both heads = 128 B/row each) B16 9.12 us, B32 12.0 us (64 B/row = one head: 8.35 /
   10.5). csl B16 = 9.14 us: AT the gather floor. d32 sliding (nds/csl 15.8-15.9 us standalone) has ~4 us headroom
   (= ~0.2% total at 0.05%/us d32 sl): a B32 kernel reading both heads' 128 B rows per CTA would be the way. Not started.
+
+## s64 (2026-10-26 22:02Z-22:20Z, sandbox okc-night4, session 13): d32 sliding attention bound, csl NC 2 DEAD (no judge runs)
+- Goal: s63's "~4 us headroom" of d32 sliding attention (nds + _combine_hb 15.9 us standalone vs a 12.0 us raw gather).
+- Theory: csl at B32 = 1024 CTAs at 80 regs (6 CTAs/SM = 792/wave): two waves of latency-bound gathers. Built csl
+  template NC 2 (each warp gathers 2 x 32-key chunks at once, CTA = 256 keys, cluster 8 per KV head, 512 CTAs; QSS slab
+  loads in-kernel; 32-bit slot offsets; launch bounds (128, 4)). Cache writes bitwise = NC 1; output within FP8-P noise
+  (2e-2 of max vs nds at B32, 9e-3 vs csl at B16). H100, real d32 inputs, graph replay, cold L2 (all us):
+  raw csl B32 NC1 19.6 -> NC2 17.5 (128 regs, 8-24 B spill; minB 3 no spill: worse); through attn_kernel_fn with the
+  layer's QSS slabs: nds+combine 17.4-17.9 vs NC2 18.1-18.9 (qss loads moved after the gathers: qss = bf16). DEAD.
+  Patch + test: dev/csl_nc2_s64.patch, dev/csl_nc2_s64_test.py (needs the patch). Reverted (6 more instantiations = compile time).
+- Why there is no 4 us: tools/gather_real.py (new) gathers the layer's REAL d32/d16 inputs (2.75M-row cache, page table
+  trip included): B32 128 B rows 12.3, csl pattern (64 B head halves from separate programs) 12.9, one head 10.9;
+  B16 9.5 / 9.8 / 8.7. So the half-row pattern costs only ~0.5 us. And nds+combine with EVERYTHING warm in L2 is still
+  14.0 us (cold 16.7): nds is bound by its own per-CTA pipeline latency, not DRAM. Consequences:
+  * K/V L2 prefetch beside the d32 cuBLAS qkv bmm (it can't trigger PDL) wins at most ~2 us (= 0.1%), minus the
+    prefetch kernel's own ~2 us on the serial path and L2 eviction by the 38 MB weight stream: not built.
+  * fusing _combine_hb into nds (last CTA per batch merges; the combine ends 2.3 us after nds in the layer) bounded at
+    ~1-1.5 us d32 sl (~0.06%): not built.
+  * On real inputs csl B16 is 12.9 us cold vs the 9.5 gather floor (s63's "B16 at floor" used gather_bw's synthetic
+    600K-row cache); at d16 its tail is overlapped by the PDL o GEMM anyway.
+- H100 timelines main v100 (tuner on): d1 sl 87.4 = g13 qkv 12.9 | csl 5.3 | g10 o -> 23.4 | bnd -> 28.1 | pr1 -> 45.6 |
+  tk2f 46.1-81.0 | n2u -> 85.5 | bnd -> 87.4. d16 sl 200.9 (tk2f 108). d32 sl 198.6 = bmm qkv 16.4 | nds 16.6-31.0 |
+  combine -> 33.3 | o nvjet 6.8 | bnd | g19 pooler 40.9-70.4 (router/routing beside) | tk2f 71.1-169.9 | norm2 | g19
+  unpool -> 196.0 | bnd -> 198.6. v16 sl 304.9: glue router end 82.3 -> twm start 88.5 (_routing 3.8, moe_route 4.1,
+  moe_gathern 5.9; RG option exists only in TUNE[256]); v1 sl 145.4.
