@@ -192,7 +192,7 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
 @triton.jit
 def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr,
                   TRIG: tl.constexpr, XS: tl.constexpr = 0, ROUND: tl.constexpr = False, NS: tl.constexpr = 1,
-                  SS: tl.constexpr = 0, z_ptr=None, ZN: tl.constexpr = 0):
+                  SS: tl.constexpr = 0, z_ptr=None, ZN: tl.constexpr = 0, TRIG2: tl.constexpr = False):
     """One row: rmsnorm(x) (1 + w), BF16 in and out. ZN > 0: program 0 also zeroes z_ptr[:ZN] after its wait (nu8's
     sums of squares, accumulated by the following moe_tk2f). TRIG: let the dependent (moe_tk2 gemm13) launch now.
     XS: x row stride (0: N). ROUND: x is FP32, rounded to BF16 first (the pooler's output dtype).
@@ -204,6 +204,8 @@ def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, 
     gain = tl.load(gain_ptr + cols)
     if PDL:
         gdc_wait()
+    if TRIG2:  # s27 TK2FX: the dependent (moe_tk2f) reads pr1's routing before its own wait: trigger only after ours
+        gdc_launch_dependents()
     if ZN > 0:
         if tl.program_id(0) == 0:
             tl.store(z_ptr + tl.arange(0, ZN), tl.zeros((ZN,), tl.float32))
@@ -1195,6 +1197,27 @@ _a = "\nstatic const char* g_upf = nullptr;"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "\nstatic const float* g_ssw1 = nullptr;\nint64_t moe_set_ss(int64_t p) { g_ssw1 = (const float*)p; return 0; }" + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_set_ss(int64_t);"
+# s27 TK2FX (T = 1 / 8, pr1 paths: no side stream): moe_tk2f as a PDL secondary of the pre-expert _rmsnorm_gain, which
+# triggers right after its own griddepcontrol.wait (so pr1, which wrote ids, has completed): tk2f's routing and its
+# producer's first weight stages overlap the rmsnorm + launch gap; the consumers wait before their first x read (x =
+# the rmsnorm's output, read with __ldcg: __ldg/.nc gets hoisted above griddepcontrol.wait, NOTES s14). Without the
+# PDL launch attribute the wait is a no-op. Host static g_tk2fpdl (moe_set_tk2fpdl) read by tk2f_go at launch/capture.
+_a = ("  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,\n")
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, '  asm volatile("griddepcontrol.wait;" ::: "memory");  // s27 TK2FX: x is the PDL predecessor\'s output\n' + _a)
+_a = """        if (GATED) {
+          xf[qq][0] = v ? __ldg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
+          xf[qq][1] = v ? __ldg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
+"""
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("__ldg", "__ldcg"))
+_a = "  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM, st, false,"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "  const bool pdlx = g_tk2fpdl != 0;  // one-shot\n  g_tk2fpdl = 0;\n" + _a.replace("st, false,", "st, pdlx,"))
+_a = "\nstatic const char* g_upf = nullptr;"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "\nstatic int g_tk2fpdl = 0;\nint64_t moe_set_tk2fpdl(int64_t v) { g_tk2fpdl = (int)v; return 0; }" + _a)
+_moe__CPP = _moe__CPP + "int64_t moe_set_tk2fpdl(int64_t);"
 
 
 def _moe__lib():  # = moe_src's _lib() + moe_set_upf
@@ -1206,7 +1229,7 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
-                                           "moe_set_upf", "moe_set_ss"],
+                                           "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl"],
                                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                                 extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
@@ -1817,10 +1840,10 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx (bool) TK2FX (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
-            {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}),
+            {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}),
@@ -1829,7 +1852,8 @@ TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
-            {"nu8": True}, {"nu8": True, "nu8x": False}, {"nu8": True, "g14alt:qkv_gate": 1}),
+            {"nu8": True}, {"nu8": True, "nu8x": False}, {"nu8": True, "g14alt:qkv_gate": 1}, {"tk2fx": False},
+            {"tk2fx": False, "g14alt:qkv_gate": 1}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
@@ -2085,6 +2109,8 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
 # the unpool slice split over k into NU8_KB-wide FP32 slabs, PDL secondary of moe_tk2f) -> the boundary adds the slabs.
 # Replaces moe_norm3 + gemv17 (H100 v1 tail tk2f end -> norm3 3.7 -> g17 4.6 -> boundary 3.3 us). TUNE option "nu8".
 NU8_DEFAULT = False
+TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
+TK2FX_DEFAULT = True  # H100 ab_files 6 rounds: d1 90.4/112.8 -> 89.9/111.8, v1 154.0/167.7 -> 152.1/167.8 us
 NU8_KB = 512
 NU8_X = True  # sums of squares in nu8 (blocks 0..7 + a counter) instead of moe_tk2f PF 20 (H100: its epilogue +2.4 us)
 
@@ -2280,10 +2306,14 @@ def kernel_fn(data, state):
         main_stream.wait_stream(side_stream)
     nsp = pooled.shape[0] if pooled.dim() == 3 else 1  # bmm slabs [ns, T, n]
     nu8 = _nu8_on(state, tokens)
+    tk2fx = (pr1 and pdl and not tk2_pdl and tokens in TK2FX_TOKENS and _use_moe(tokens) and _moe_TK2F
+             and _opt(state, tokens, "tk2fx", TK2FX_DEFAULT))
     y32 = torch.empty((65, D_EXPERT), dtype=torch.float32, device=dev) if nu8 else None
     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl and not tk2_pdl,
                              TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
-                             launch_pdl=pdl and not tk2_pdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 else 0)
+                             launch_pdl=pdl and not tk2_pdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 else 0, TRIG2=tk2fx)
+    if tk2fx:
+        state["moe"]["lib"].moe_set_tk2fpdl(1)  # the next moe_tk2f launch (one-shot) is this rmsnorm's PDL secondary
     if not pr1:
         main_stream.wait_stream(side_stream)
     if not pr1 and not torch.cuda.is_current_stream_capturing():
