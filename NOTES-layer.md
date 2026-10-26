@@ -291,7 +291,7 @@
   tokens as one split-K mma kernel (hi+lo into one accumulator, float4 atomics into zeroed out). H100 layer: T=128
   v16 sliding/full 318/466 -> 313/460; T=16/32 +1..3 us (72 KB-smem CTAs beside the pooler bmm) -> v32 = T=128 only.
   route_judge v16 x 2 seeds: identical margins to v29.
-- check 50cb4a5b (v32, 0db3e8a) **1.930x, 11,721 us**: d1 74.5/83.6, d16 148.6/228.5, d32 190.5/342.5, v1 121.5/138.3,
+- check 50cb4a5b (v32, 062c6c6) **1.930x, 11,721 us**: d1 74.5/83.6, d16 148.6/228.5, d32 190.5/342.5, v1 121.5/138.3,
   v16 269.9/365.1, v32 378.5/550.5.
 - v33 (KV_PF): the qkv gemv13 at T=1 also L2-prefetches the sliding window's K/V rows: grid thread i < pfn reads
   page_table[0, mp - 2049 + i] after issuing its W prologue, prefetch.global.L2 of the K and V row (text patch of
