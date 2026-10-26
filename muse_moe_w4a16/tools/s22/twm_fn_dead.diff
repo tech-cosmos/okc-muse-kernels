@@ -1,0 +1,266 @@
+diff --git a/muse_moe_w4a16/submission.py b/muse_moe_w4a16/submission.py
+index 97df3b2..9c2c4bc 100644
+--- a/muse_moe_w4a16/submission.py
++++ b/muse_moe_w4a16/submission.py
+@@ -2290,6 +2290,98 @@ __device__ __forceinline__ unsigned long long gtimer() {
+   asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t));
+   return t;
+ }
++// s22 TWM_FN: moe_norm fused into moe_twm's drain. Each gemm2 item adds its output rows to a per-token ticket
++// (fnb[tok]) per warp, fire-and-forget (red.release after __syncwarp); consumers that ran out of items take tokens in
++// index order (fnb[1020]), wait (ld.acquire) until the ticket = local routes x 4096 rows, and norm them with moe_norm's
++// exact arithmetic (2 chunks of 8 per thread = moe_norm's 512-thread warp sums: bitwise equal), then zero the ticket.
++// The last CTA to exit zeroes the counters (no memset node).
++struct FNArgs {
++  const int* ids; const float* tw; const float* w1; __nv_bfloat16* out; int* b; int start, count, M; float eps;
++};
++__device__ __forceinline__ int fn_nloc(const FNArgs& fn, int tok) {
++  int n = 0;
++#pragma unroll
++  for (int s = 0; s < 8; ++s) { const int e = fn.ids[tok * 8 + s] - fn.start; n += e >= 0 && e < fn.count; }
++  return n;
++}
++// one token's post-expert norm + weighted sum by the 256 consumer threads (= moe_norm, bitwise); Y read once
++__device__ __forceinline__ void fn_norm(const FNArgs& fn, const __nv_bfloat16* Y, int tok, int tid, float (*ssum)[8]) {
++  const int lane = tid & 31, warp = tid >> 5;
++  uint4 raw[8][2];
++  int locm = 0;
++#pragma unroll
++  for (int s = 0; s < 8; ++s) {
++    const int e = fn.ids[tok * 8 + s] - fn.start;
++    const bool l = e >= 0 && e < fn.count;
++    locm |= l << s;
++#pragma unroll
++    for (int c = 0; c < 2; ++c)
++      raw[s][c] = l ? __ldcg(reinterpret_cast<const uint4*>(Y + ((size_t)(tok * 8 + s)) * NOUT + (tid + c * 256) * 8))
++                    : make_uint4(0, 0, 0, 0);
++  }
++  float wv[2][8];
++#pragma unroll
++  for (int c = 0; c < 2; ++c) {
++    const float4* wp = reinterpret_cast<const float4*>(fn.w1 + (tid + c * 256) * 8);
++    const float4 a = wp[0], b = wp[1];
++    wv[c][0] = a.x; wv[c][1] = a.y; wv[c][2] = a.z; wv[c][3] = a.w; wv[c][4] = b.x; wv[c][5] = b.y; wv[c][6] = b.z; wv[c][7] = b.w;
++  }
++#pragma unroll
++  for (int s = 0; s < 8; ++s)
++#pragma unroll
++    for (int c = 0; c < 2; ++c) {
++      float ss = 0.f;
++      if ((locm >> s) & 1) {
++        const __nv_bfloat162* p = reinterpret_cast<const __nv_bfloat162*>(&raw[s][c]);
++        float v[8];
++#pragma unroll
++        for (int k = 0; k < 4; ++k) {
++          const float2 f = __bfloat1622float2(p[k]);
++          v[2 * k] = f.x * wv[c][2 * k];
++          v[2 * k + 1] = f.y * wv[c][2 * k + 1];
++        }
++#pragma unroll
++        for (int k = 0; k < 8; ++k) ss += v[k] * v[k];
++      }
++#pragma unroll
++      for (int o = 16; o > 0; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
++      if (lane == 0) ssum[warp + c * 8][s] = ss;
++    }
++  asm volatile("bar.sync 1, 256;" ::: "memory");
++  float acc[2][8];
++#pragma unroll
++  for (int c = 0; c < 2; ++c)
++#pragma unroll
++    for (int k = 0; k < 8; ++k) acc[c][k] = 0.f;
++#pragma unroll
++  for (int s = 0; s < 8; ++s) {
++    if (!((locm >> s) & 1)) continue;
++    float tot = 0.f;
++#pragma unroll
++    for (int w = 0; w < 16; ++w) tot += ssum[w][s];
++    const float f = fn.tw[tok * 8 + s] * rsqrtf(tot / NOUT + fn.eps);
++#pragma unroll
++    for (int c = 0; c < 2; ++c) {
++      const __nv_bfloat162* p = reinterpret_cast<const __nv_bfloat162*>(&raw[s][c]);
++#pragma unroll
++      for (int k = 0; k < 4; ++k) {
++        const float2 fl = __bfloat1622float2(p[k]);
++        acc[c][2 * k] += f * (fl.x * wv[c][2 * k]);
++        acc[c][2 * k + 1] += f * (fl.y * wv[c][2 * k + 1]);
++      }
++    }
++  }
++#pragma unroll
++  for (int c = 0; c < 2; ++c) {
++    uint4 o;
++    __nv_bfloat162* op = reinterpret_cast<__nv_bfloat162*>(&o);
++#pragma unroll
++    for (int k = 0; k < 4; ++k) op[k] = __floats2bfloat162_rn(acc[c][2 * k], acc[c][2 * k + 1]);
++    *reinterpret_cast<uint4*>(fn.out + (size_t)tok * NOUT + (tid + c * 256) * 8) = o;
++  }
++  asm volatile("bar.sync 1, 256;" ::: "memory");  // ssum is reused by the next token
++}
++
+ // s17 moe_twm hot class (cl 3, -nsplit bit 23 = TWM_HOT): an expert with 65..96 tokens runs ONE pass (instead of two
+ // 64-token RT 2 passes = two dequantizations of every weight) with one 16-row tile per warp and N <= 96 (48
+ // accumulator registers: within twm's budget, unlike RT 2 x N 96). Item = half an RT 2 row block of the w*b2 packing
+@@ -2386,7 +2478,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+     const char* __restrict__ S2h,
+     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
+     int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
+-    __nv_bfloat16* __restrict__ Y, int* __restrict__ tick, float* __restrict__ part, int nsplit) {
++    __nv_bfloat16* __restrict__ Y, int* __restrict__ tick, float* __restrict__ part, int nsplit, const FNArgs fn) {
+   using CG = TWC<4, true, 8>;
+   using CN = TWC<4, false, 8>;
+   using HG = TWC<2, true, 8>;
+@@ -2398,6 +2490,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+   __shared__ uint32_t slut[256];
+   __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[2][32], s_ord[4], s_cost;
+   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
++  __shared__ int s_need[512];  // s22 TWM_FN: local routes x 4096 per token
+   int* done = meta + 68;
+   // s14: nsplit < 0 = no K split; instead the lightest (last) non-big experts whose RT 4 gemm2 items add up to
+   // <= -nsplit run their gemm2 at RT 2 with 32-token passes (class 2: half-size items, shorter drain)
+@@ -2491,6 +2584,15 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+     s_ord[1] = mrg == 0 ? 0 : mrg == 1 ? 100 : mrg == 2 ? 85 : 70;
+     s_ord[2] = order & 36;
+   }
++  if (fn.b)
++    for (int tok = tid; tok < fn.M; tok += 384) {
++      const int n = fn_nloc(fn, tok) * 4096;
++      s_need[tok] = n;
++      if (!n && blockIdx.x == 0) {
++        const int slot = atomicAdd(fn.b + 1021, 1);
++        asm volatile("st.release.gpu.global.b32 [%0], %1;" ::"l"(fn.b + 512 + slot), "r"(tok + 1) : "memory");
++      }
++    }
+   __syncthreads();
+   // item -> (gemm2?, active slot a, pass p, row block rb, K half h (-1: whole K), split slot j)
+   auto decode = [&](int item, int& g2, int& a, int& p, int& rb, int& h, int& j) {
+@@ -2635,6 +2737,21 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+       }
+     }
+ #undef TWI
++    if (g2 && fn.b && (h < 0 || s_flag != 0)) {  // s22 TWM_FN ticket: this warp's Y rows of each token (a K-split
++      // half that only stored its partial wrote none); bar.warp.sync orders the warp's Y stores before the acq_rel add;
++      // the add that completes a token queues it (fnb[512 + slot] = tok + 1)
++      __syncwarp();
++      const int rows = cl == 3 ? 16 : big ? 32 : 64;
++      for (int t = lane; t < nv; t += 32) {
++        const int tok = sroutes[off + t] >> 3;
++        int old;
++        asm volatile("atom.acq_rel.gpu.global.add.s32 %0, [%1], %2;" : "=r"(old) : "l"(fn.b + tok), "r"(rows) : "memory");
++        if (old + rows == s_need[tok]) {
++          const int slot = atomicAdd(fn.b + 1021, 1);
++          asm volatile("st.release.gpu.global.b32 [%0], %1;" ::"l"(fn.b + 512 + slot), "r"(tok + 1) : "memory");
++        }
++      }
++    }
+     if (!g2) {
+       // release this item's inter rows to gemm2 producers on other SMs (their TMA reads them: async proxy)
+       asm volatile("fence.proxy.async.global;" ::: "memory");
+@@ -2649,8 +2766,42 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+     ++ntl;
+ #endif
+   }
++  if (fn.b) {  // s22 TWM_FN drain: pop queue slots in order, norm each token as soon as it is queued
++    __shared__ float s_ss[16][8];
++    __shared__ int s_slot;
++    for (;;) {
++      if (tid == 0) {
++        const int slot = atomicAdd(fn.b + 1020, 1);
++        int v = 0;
++        if (slot < fn.M)
++          for (;;) {
++            asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(v) : "l"(fn.b + 512 + slot) : "memory");
++            if (v) break;
++            __nanosleep(64);
++          }
++        s_slot = slot < fn.M ? v - 1 : -1;
++      }
++      asm volatile("bar.sync 1, 256;" ::: "memory");
++      const int tok = s_slot;
++      if (tok < 0) break;
++      fn_norm(fn, Y, tok, tid, s_ss);  // ends with a consumer barrier
++    }
++    if (tid == 0) s_slot = atomicAdd(fn.b + 1022, 1) == (int)gridDim.x - 1;
++    asm volatile("bar.sync 1, 256;" ::: "memory");
++    if (s_slot) {  // last CTA out: every other CTA is done with the tickets and the queue
++      for (int i = tid; i < fn.M; i += 256) { fn.b[i] = 0; fn.b[512 + i] = 0; }
++      if (tid < 3) fn.b[1020 + tid] = 0;
++    }
++  }
+ }
+ 
++static FNArgs g_fn = {};
++int64_t moe_set_fn(torch::Tensor ids, torch::Tensor tw, torch::Tensor w1, int64_t start, int64_t count, double eps,
++                   torch::Tensor out, torch::Tensor fnb) {
++  g_fn = {(const int*)ids.data_ptr(), (const float*)tw.data_ptr(), (const float*)w1.data_ptr(),
++          (__nv_bfloat16*)out.data_ptr(), (int*)fnb.data_ptr(), (int)start, (int)count, (int)out.size(0), (float)eps};
++  return 0;
++}
+ template <bool SA>
+ static int64_t twm_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
+                       torch::Tensor gs2_, torch::Tensor w13h_, torch::Tensor s13h_, torch::Tensor w2h_, torch::Tensor s2h_,
+@@ -2669,12 +2820,14 @@ static int64_t twm_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
+   TMaps m13, m2;
+   tw_maps(m13, xg_.data_ptr(), xg_.size(0));
+   tw_maps(m2, inter_.data_ptr(), inter_.size(0));
++  const FNArgs fn = g_fn;
++  g_fn = {};  // one launch only
+   return launch_k(moe_twm<NSTG, SA>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
+       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const char*)PTR(w13h_), (const char*)PTR(s13h_),
+       (const char*)PTR(w2h_), (const char*)PTR(s2h_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
+       (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(), (int*)tk_.data_ptr(),
+-      (float*)part_.data_ptr(), (int)std::min<int64_t>(ns, std::min<int64_t>(tk_.numel() / 2, part_.numel() / 32768)));
++      (float*)part_.data_ptr(), (int)std::min<int64_t>(ns, std::min<int64_t>(tk_.numel() / 2, part_.numel() / 32768)), fn);
+ }
+ int64_t moe_twm_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
+                        torch::Tensor gs2_, torch::Tensor w13h_, torch::Tensor s13h_, torch::Tensor w2h_,
+@@ -4215,6 +4368,7 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
+         "int64_t moe_twm_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
++        "int64_t moe_set_fn(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, double, torch::Tensor, torch::Tensor);"
+         "int64_t moe_tw_launch(int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor);"
+         "int64_t moe_route2_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, "
+@@ -4248,7 +4402,7 @@ def _lib():
+         h = hashlib.sha256(src.encode()).hexdigest()[:12]
+         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=src,
+                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
+-                                      "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
++                                      "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_set_fn", "moe_twq_launch",
+                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa"],
+                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
+                            extra_cflags=["-O3"], verbose=False)
+@@ -4377,6 +4531,7 @@ def prepare(weights):
+     del sfb
+     st["cnt"] = torch.zeros(128, dtype=torch.int32, device=dev)  # moe_tk2f counters (zero between calls)
+     st["tk"] = torch.zeros(1024, dtype=torch.int32, device=dev)  # moe_twf split-item tickets (self-resetting)
++    st["fnb"] = torch.zeros(1024, dtype=torch.int32, device=dev)  # s22 TWM_FN tickets + queue (self-resetting)
+     st["w1"] = (1.0 + weights["post_norm_w"].float()).contiguous()
+     torch.cuda.synchronize()
+     global _DIAG_DONE
+@@ -4415,6 +4570,8 @@ TWM_TAIL13_M = {}
+ TWM_ORDER = 0  # s14: moe_twm item order (bits, see moe_twm): 76 = pass-minor + multi-pass experts' items merged evenly
+ #   over both phases (H100 layer v32 248.8 -> 239.9 us without TWM_TAIL (with it: 247), v16 = 0); 2 = timeline stamps
+ TWM_ORDER_M = {256: 76}  # s14: per-M override
++TWM_FN = 0  # s22: moe_norm fused into moe_twm's drain (per-token tickets + ready queue; bitwise = moe_norm)
++TWM_FN_M = {}  # s22: per-M override
+ TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
+ TWM_HOT_M = {}  # s17: per-M override
+ TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline,
+@@ -4675,9 +4832,14 @@ def kernel_fn(data, st):
+                     tl = (tl & ~((1 << 23) - 1)) + (1 << 22) + 4096 * min(ns, 1023)
+                 ns = -tl if tl else ns
+                 if DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)
++                fn = TWM_FN_M.get(M, TWM_FN) and M <= 512 and "fnb" in st
++                if fn:
++                    lib.moe_set_fn(ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out, st["fnb"])
+                 lib.moe_twm_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["w13b2"],
+                                    st["w13sb2"], st["w2b2"], st["w2sb2"], st["lut"], xg, meta, sroutes, inter, y, st["tk"],
+                                    part, ns)
++                if fn:
++                    return out
+             else:
+               lib.moe_twf_launch(st[f"w13b{trt}"], st[f"w13sb{trt}"], st["gs13"], st[f"w2b{trt}"], st[f"w2sb{trt}"], st["gs2"], st["lut"], xg,
+                                meta, sroutes, inter, y, st["tk"], part, ns)

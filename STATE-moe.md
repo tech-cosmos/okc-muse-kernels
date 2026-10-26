@@ -71,6 +71,14 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 22 summary (no speedup, no judge runs; NOTES s22)
+- Dead: FA3-style pingpong of the 2 consumer WGs (microbench 721 vs 737 cyc), dq without the bf16 multiply (no better
+  overlap: the dq/wgmma serialization is not an FP16-pipe conflict), TWM_FN = moe_norm fused into twm's drain (4
+  variants, best v16 +2 / v32 -1.6 us; tools/s22/twm_fn_dead.diff).
+- Floor: twm v32 is dq-bound (~5.6 GPU-us of dq per expert pass: ~146 + MMA 39 = ~185 vs 221 measured, HBM 140).
+  Remaining big-M levers are small (hot single pass ~5-10 us at v32, drain). Next sandbox: spend moe checks on H200
+  DIAGs the H100 cannot decide (TK2F_L2H 0 vs 4 on decode routings, if layer's first check is unclear).
+
 ## Session 21 summary (L2 cache hints on the expert weight streams; NOTES s21)
 - main = b32928b: TK2F_L2H = 4 (tk2f: evict_last on every row of an expert with > 8 tokens, evict_first on the rest)
   + TWM_L2H = 1 (moe_twm: evict_last if a later pass re-reads, evict_first else). Bitwise unchanged. H100 ncu: tk2f

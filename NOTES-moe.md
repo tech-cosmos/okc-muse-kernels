@@ -649,3 +649,26 @@
   (twm), b32928b (mode 4). Handoff: `python tools/s21/patch_layer.py <r-layer moe_src.py> 4 1`.
 - No judge runs (moe checks 20/20 used today). H200 unverified: L2 is 50 MB on both, HBM 4.8 vs 3.35 TB/s, so the
   HBM re-read costs less time on the H200 but the same bytes; the layer's first check of the next sandbox will tell.
+
+## Session 22 (2026-10-26 14:27Z - ~15:20Z) -- pingpong / pipe tests (dq vs wgmma overlap) and fused norm in twm: all dead
+- Pingpong (FA3-style WG alternation by named barriers; tools/s22/mb_pp.py mode 7, 1 CTA, cycles per stage, s18 harness):
+  first build was invalid (ptxas sank the dq into the MMA batch -> every HGMMA DEPBAR 0: check SASS); fixed by a
+  2-buffer software pipeline (dq of stage s+1 after issuing stage s). RT2 N64: RS both (twm) 737, pingpong 721,
+  stage-batch no-pp 695; RT4 N8: 800 / 809 / 762; RT4 N32: 1046 / 1055 / 1005. Pingpong gives nothing; stage
+  batching ~-5% in the microbench but that is twm's KG=4 (dead in twm, s16).
+- Pipe test (DQV env in mb_pp.py): dq without the bf16 scale multiply (int XOR only) overlaps NO better (RT2 N64 RS
+  both 776, RT4 N8 873); int IMUL or f16 HMUL2 instead: same as bf16. => dq/wgmma non-overlap is not an FP16-pipe
+  conflict; any ALU work in the consumer warps serializes with RS wgmma (RF/issue). Closed.
+- Floor arithmetic for big-M (H200, s18 cycle counts): every expert pass costs ~377 cycles of dq ALU per 8 KB stage =
+  ~5.6 whole-GPU us per pass; v32 (~20 experts, ~26 passes) dq ~146 us + MMA ~39 us (non-overlapping) = ~185 us
+  compute floor vs twm 221 measured and HBM 140: twm at v16/v32 is dq-bound, not HBM-bound. Only fewer passes
+  (hot-expert single pass: ~-11..16% of a hot expert, ~5-10 us at v32) or a cheaper dq (exhausted s11/s17) move it.
+- TWM_FN (moe_norm fused into moe_twm's drain; tools/s22/twm_fn_dead.diff, NOT on main): per-token tickets of
+  written Y rows, drain CTAs norm completed tokens with moe_norm's exact math (bitwise = main on 120 routings x 2
+  replays, buffers self-reset). Moe-only layer routings, H100 full grid, 3 rounds (tools/s22/proxy.py), us:
+    v1 (CTA barrier + returning atomic + queue):        v16 198.9 -> 200.9 (+2.0), v32 244.8 -> 243.3 (-1.6)
+    v2 (per-warp red.release, drain in token order):     v16 +3.4, v32 -1.3
+    v3 (all drain CTAs poll every ticket, claim ready):  v16 +27, v32 +88 (polling floods L2)
+    v4 (per-warp atom.acq_rel + queue, s_need prologue): v16 +5.1, v32 +1.5
+  moe_norm as a PDL secondary is already resident when twm ends (~3 us of real work); fusing saves at most the
+  launch, and any ticket work on the items costs as much. Dead.
