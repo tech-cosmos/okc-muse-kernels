@@ -9,6 +9,11 @@
 #include <cuda_bf16.h>
 #include <cuda.h>
 #include <cudaTypedefs.h>
+#ifdef G22_NOPEER
+#define G22_NOPEERV 1
+#else
+#define G22_NOPEERV 0
+#endif
 #ifdef G22_NOFIX
 #define G22_NOFIXV 1
 #else
@@ -54,6 +59,22 @@ __device__ __forceinline__ void bar_init(unsigned b, int count) {
 }
 __device__ __forceinline__ void bar_expect(unsigned b, int bytes) {
     asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(b), "r"(bytes) : "memory");
+}
+// arrive on the mbarrier at the same smem offset in CTA `peer` of the cluster
+__device__ __forceinline__ void bar_arrive_peer(unsigned b, unsigned peer) {
+#ifdef G22_NOPEER
+    return;
+#endif
+    unsigned r;
+    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(b), "r"(peer));
+    asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" :: "r"(r) : "memory");
+}
+__device__ __forceinline__ void tma2d_mc(unsigned dst, const CUtensorMap* map, int c0, int c1, unsigned bar, unsigned short mask) {
+    asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%2, %3}], [%4], %5;"
+                 :: "r"(dst), "l"(map), "r"(c0), "r"(c1), "r"(bar), "h"(mask) : "memory");
+}
+__device__ __forceinline__ void cluster_sync() {
+    asm volatile("barrier.cluster.arrive.release.aligned;\nbarrier.cluster.wait.acquire.aligned;" ::: "memory");
 }
 __device__ __forceinline__ void bar_arrive(unsigned b) {
     asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" :: "r"(b) : "memory");
@@ -128,7 +149,7 @@ __device__ __forceinline__ void stage(float* acc, unsigned (&af)[2 * AP][4], uns
 // WP: packed stages, tile-major (u = tile * S + ks, S = k / (32 AP)). out FP32 [M, n], zeroed before (PDL primary).
 // packed stage (PB bytes): W atoms (SB) | E escapes (row in tile | k in stage << 8, true / scale; row -1: none)
 // smem (1024-aligned): ring [NS][stage PB | pad to XO | XS x] | barriers | flush scratch
-template <int M, int AP, int NS, int E>
+template <int M, int AP, int NS, int E, int CL>
 __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__ WP,                                                float scale, const __grid_constant__ CUtensorMap xmap,
                                                const __nv_bfloat16* __restrict__ x, float* __restrict__ out, int n, int k, int npre) {
     constexpr int NCW = 8, NT = M / 8, SB = NCW * AP * 768, XS = AP / 2 * M * 128, PB = SB + 8 * E, XO = SB + 1024, SL = XO + XS;
@@ -140,19 +161,23 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
     const int t = threadIdx.x, lane = t & 31, w = __shfl_sync(0xffffffffu, t >> 5, 0), g = lane >> 2, c = lane & 3;
     const int S = k / (32 * AP), ntr = n / (16 * NCW);
     // tile-aligned split: tile t gets nb = G / ntr (+1 for the first G % ntr tiles) blocks: one run per block
+    // CL 2: clusters of 2 blocks on tiles (2p, 2p + 1) with the same k range; each loads half the x box, multicast to both
+    const int cr = CL == 2 ? blockIdx.x & 1 : 0;
     int ra0, rb0;
     {
-        const int G = gridDim.x, b = blockIdx.x, base = G / ntr, ex = G % ntr;
+        const int G = gridDim.x / CL, b = blockIdx.x / CL, base = G / (ntr / CL), ex = G % (ntr / CL);
         int tt, j, nb;
         if (b < ex * (base + 1)) { tt = b / (base + 1); j = b % (base + 1); nb = base + 1; }
         else { const int b2 = b - ex * (base + 1); tt = ex + b2 / base; j = b2 % base; nb = base; }
+        tt = tt * CL + cr;
         ra0 = tt * S + S * j / nb; rb0 = tt * S + S * (j + 1) / nb;
     }
     if (t == 0) {
-        for (int i = 0; i < NS; ++i) { bar_init(bars + 8 * i, 1); bar_init(bars + 8 * (NS + i), NCW + (G22_NOFIXV ? 0 : 1)); }
+        for (int i = 0; i < NS; ++i) { bar_init(bars + 8 * i, 1); bar_init(bars + 8 * (NS + i), (NCW + (G22_NOFIXV ? 0 : 1)) * (G22_NOPEERV ? 1 : CL)); }
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
-    __syncthreads();
+    if (CL == 1) __syncthreads();
+    else cluster_sync();  // the peer's barriers are initialized before any multicast / remote arrive
     if (t == 0) TR(0);
     if (w >= NCW) {  // producer warpgroup: one lane streams the block's stages
         asm volatile("setmaxnreg.dec.sync.aligned.u32 40;" ::: "memory");
@@ -183,7 +208,15 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
                 {
 #endif
 #pragma unroll
-                for (int b = 0; b < AP / 2; ++b) tma2d(ring + slot * SL + XO + b * M * 128, &xmap, ks * AP * 32 + b * 64, 0, bars + 8 * slot);
+                for (int b = 0; b < AP / 2; ++b) {
+#ifdef G22_NOMC
+                    if (true) { tma2d(ring + slot * SL + XO + b * M * 128, &xmap, ks * AP * 32 + b * 64, 0, bars + 8 * slot);
+                        tma2d(ring + slot * SL + XO + b * M * 128 + (M / 2) * 128, &xmap, ks * AP * 32 + b * 64, M / 2, bars + 8 * slot); }
+#else
+                    if (CL == 1) tma2d(ring + slot * SL + XO + b * M * 128, &xmap, ks * AP * 32 + b * 64, 0, bars + 8 * slot);
+#endif
+                    else tma2d_mc(ring + slot * SL + XO + b * M * 128 + cr * (M / 2) * 128, &xmap, ks * AP * 32 + b * 64, cr * (M / 2), bars + 8 * slot, 3);
+                }
                 }
             }
         } else if (w == NCW + 1 && !G22_NOFIXV) {  // fixup warp: escapes, x from the ring slot, red.add into out
@@ -217,10 +250,12 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
                     if (full != 0xffffffffu) break;
                 }
                 __syncwarp();
-                if (lane == 0) bar_arrive(bars + 8 * (NS + slot));
+                if (lane == 0) { bar_arrive(bars + 8 * (NS + slot)); if (CL == 2) bar_arrive_peer(bars + 8 * (NS + slot), cr ^ 1); }
             }
             if (lane == 0) TR(7);
         }
+        __syncwarp();
+        if (CL == 2) cluster_sync();  // no block exits while its peer may still multicast into it / arrive on it
         return;
     }
     asm volatile("setmaxnreg.inc.sync.aligned.u32 232;" ::: "memory");
@@ -238,7 +273,7 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
         wg_wait<1>(); \
         _Pragma("unroll") for (int j = 0; j < 2 * AP; ++j) _Pragma("unroll") for (int e = 0; e < 4; ++e) fence_r(ao[j][e]); \
         __syncwarp(); \
-        if (lane == 0 && pslot >= 0) bar_arrive(bars + 8 * (NS + pslot)); \
+        if (lane == 0 && pslot >= 0) { bar_arrive(bars + 8 * (NS + pslot)); if (CL == 2) bar_arrive_peer(bars + 8 * (NS + pslot), cr ^ 1); } \
         pslot = slot; ++i; }
 #pragma unroll 1
     for (int ra = ra0; ra < rb0;) {  // runs: the block's range split at tile boundaries
@@ -260,7 +295,7 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
 #pragma unroll
         for (int e = 0; e < NT * 4; ++e) fence_f(acc[e]);
         __syncwarp();
-        if (lane == 0) bar_arrive(bars + 8 * (NS + pslot));
+        if (lane == 0) { bar_arrive(bars + 8 * (NS + pslot)); if (CL == 2) bar_arrive_peer(bars + 8 * (NS + pslot), cr ^ 1); }
         pslot = -1;
         // flush: 32-token groups through smem ([tok][16 rows], stride 20 floats), red.add.v4 along rows
         {
@@ -293,6 +328,7 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
         ra = rb;
     }
     if (t == 0) TR(9);
+    if (CL == 2) cluster_sync();
 #undef G22_STEP
 }
 // PDL primary: lets the gemm launch at once and zeroes its output (the gemm waits before touching it)
@@ -309,7 +345,7 @@ torch::Tensor g22_trace() {
 }
 #endif
 static PFN_cuTensorMapEncodeTiled_v12000 g22_encode = nullptr;
-static void g22_xmap(CUtensorMap& map, void* ptr, int m, int k) {
+static void g22_xmap(CUtensorMap& map, void* ptr, int m, int k, int rows) {
     if (!g22_encode) {
         cudaDriverEntryPointQueryResult q;
         cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled", (void**)&g22_encode, 12000, cudaEnableDefault, &q);
@@ -317,7 +353,7 @@ static void g22_xmap(CUtensorMap& map, void* ptr, int m, int k) {
     }
     cuuint64_t dims[2] = {(cuuint64_t)k, (cuuint64_t)m};
     cuuint64_t strides[1] = {(cuuint64_t)k * 2};
-    cuuint32_t box[2] = {64, (cuuint32_t)m};
+    cuuint32_t box[2] = {64, (cuuint32_t)rows};
     cuuint32_t es[2] = {1, 1};
     CUresult r = g22_encode(&map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, ptr, dims, strides, box, es, CU_TENSOR_MAP_INTERLEAVE_NONE,
                             CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
@@ -326,23 +362,27 @@ static void g22_xmap(CUtensorMap& map, void* ptr, int m, int k) {
 // mode 0: zero kernel then the gemm (PDL dependent). mode 1: out already zero, the gemm a PDL dependent of the
 // previous kernel (npre W stages stream before griddepcontrol.wait).
 void g22_gemm(torch::Tensor wp, double scale, torch::Tensor x, torch::Tensor out,
-              int64_t ap, int64_t ns, int64_t e, int64_t grid, int64_t mode, int64_t npre) {
+              int64_t ap, int64_t ns, int64_t e, int64_t cl, int64_t grid, int64_t mode, int64_t npre) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const int sm = 1024 + ns * (8 * ap * 768 + 1024 + ap / 2 * m * 128) + 16 * ns + 64 + 8 * 32 * 20 * 4;
     CUtensorMap xmap;
-    g22_xmap(xmap, x.data_ptr(), m, k);
-    TORCH_CHECK(n % 128 == 0 && k % (32 * ap) == 0 && sm <= 227 * 1024 && n / 128 <= grid && grid <= (n / 128) * (k / (32 * ap)), "g22: shape/smem/grid ", sm);
+    g22_xmap(xmap, x.data_ptr(), m, k, m / cl);
+    TORCH_CHECK(n % 128 == 0 && k % (32 * ap) == 0 && sm <= 227 * 1024 && n / 128 <= grid && grid <= (n / 128) * (k / (32 * ap))
+                && grid % cl == 0 && (n / 128) % cl == 0, "g22: shape/smem/grid ", sm);
     auto stream = c10::cuda::getCurrentCUDAStream();
     if (!mode) g22::zero<<<132, 256, 0, stream>>>((float4*)out.data_ptr(), m * n / 4);
-#define G22_CASE(M_, AP_, NS_, E_) \
-    if (m == M_ && ap == AP_ && ns == NS_ && e == E_) { \
-        auto kern = g22::gemm<M_, AP_, NS_, E_>; \
+#define G22_CASE(M_, AP_, NS_, E_, CL_) \
+    if (m == M_ && ap == AP_ && ns == NS_ && e == E_ && cl == CL_) { \
+        auto kern = g22::gemm<M_, AP_, NS_, E_, CL_>; \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
         cudaLaunchConfig_t cfg = {}; \
         cfg.gridDim = dim3(grid); cfg.blockDim = dim3(384); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
-        cudaLaunchAttribute attr[1]; \
+        cudaLaunchAttribute attr[2]; \
         attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1; \
-        cfg.attrs = attr; cfg.numAttrs = 1; \
+        attr[1].id = cudaLaunchAttributeClusterDimension; attr[1].val.clusterDim.x = CL_; attr[1].val.clusterDim.y = 1; attr[1].val.clusterDim.z = 1; \
+        cfg.attrs = attr; cfg.numAttrs = 2; \
+        if (CL_ > 1) { int nc_ = 0; cudaOccupancyMaxActiveClusters(&nc_, kern, &cfg); \
+            TORCH_CHECK(nc_ * CL_ >= grid, "g22: grid not co-resident as clusters: ", nc_, " clusters"); } \
         cudaLaunchKernelEx(&cfg, kern, (const unsigned char*)wp.data_ptr(), (float)scale, xmap, \
             (const __nv_bfloat16*)x.data_ptr(), out.data_ptr<float>(), n, k, (int)npre); \
         C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }

@@ -86,7 +86,7 @@ if __name__ == "__main__":
                     op = torch.empty(1, n, dtype=torch.bfloat16, device="cuda")
                     mod.g13_gemv(sm, nib, hdr, xp, op, scale, u, nv, mb, pf, b, vt)
                     exp = (W[:, col].double() * 32).bfloat16()
-                    assert os.environ.get("XF") or torch.equal(op[0], exp), (nm, col, (op[0].double() - exp.double()).abs().max().item())
+                    assert (os.environ.get("XF") and "CPA" not in os.environ.get("XF")) or torch.equal(op[0], exp), (nm, col, (op[0].double() - exp.double()).abs().max().item())
                 dt = bench.time_graph(lambda: mod.g13_gemv(sm, nib, hdr, x, out, scale, u, nv, mb, pf, b, vt)) - e
                 line += f" | U{u}V{nv}B{mb}P{pf}T{vt} g{b} {dt:6.2f}"
         print(line, flush=True)

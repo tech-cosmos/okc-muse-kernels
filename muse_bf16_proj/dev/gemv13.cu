@@ -71,6 +71,25 @@ __global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ 
     float (*red)[U * WV] = red_[vg];
     const int G = gridDim.x * NV;
     int c = blockIdx.x * NV + vg;
+#ifdef G13_CPA
+    // cp.async ring: PF chunks in flight in smem (each thread reads back only its own 16 + 8 B per u: no sync)
+    extern __shared__ __align__(16) unsigned char dsm[];
+    uint4* sS = reinterpret_cast<uint4*>(dsm);                  // [PF][U][VT * NV]
+    uint2* sN = reinterpret_cast<uint2*>(sS + PF * U * VT * NV);  // [PF][U][VT * NV]
+    auto load = [&](int p, int ch) {
+        if (ch < nch) {
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                const long i = (long)ch * (CE / 16) + u * VT + t;
+                const unsigned ds = (unsigned)__cvta_generic_to_shared(sS + (p * U + u) * VT * NV + threadIdx.x);
+                const unsigned dn = (unsigned)__cvta_generic_to_shared(sN + (p * U + u) * VT * NV + threadIdx.x);
+                asm volatile("cp.async.cg.shared.global.L2::256B [%0], [%1], 16;" :: "r"(ds), "l"(S + i) : "memory");
+                asm volatile("cp.async.ca.shared.global.L2::256B [%0], [%1], 8;" :: "r"(dn), "l"(N + i) : "memory");
+            }
+        }
+        asm volatile("cp.async.commit_group;" ::: "memory");
+    };
+#else
     uint4 s[PF][U];
     uint2 nb[PF][U];
     // escapes: the row's reducing thread adds x[col] * (value - 2^-15) per header entry to the row's sum
@@ -82,6 +101,7 @@ __global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ 
             nb[p][u] = ld2(N + i);
         }
     };
+#endif
     // x and the escape headers first: they must not queue behind the W prologue
     constexpr int XV = (KK / 8 + VT * NV - 1) / (VT * NV), HV = (MAXC * RPC * ESC + VT - 1) / VT;
     uint4 xv[XV];
@@ -96,9 +116,21 @@ __global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ 
         const int i = t + q * VT, ch = c + (i / (RPC * ESC)) * G;
         if (i < MAXC * RPC * ESC && ch < nch) hv[q] = __ldg(H + (long)ch * RPC * ESC + i % (RPC * ESC));
     }
+#ifdef G13_CPA
+    for (int p = 0; p < PF - 1; ++p) load(p, c + p * G);
+#else
 #pragma unroll
     for (int p = 0; p < PF; ++p)
         if (c + p * G < nch) load(p, c + p * G);
+#endif
+#ifdef G13_L2PF
+    // L2 bulk prefetch of this vb's later chunks (no registers): HBM streams at full rate from the start
+    if (t == 0)
+        for (int cc = c + PF * G, d = 0; cc < nch && d < G13_L2PF; cc += G, ++d) {
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(S + (long)cc * (CE / 16)), "r"(CE) : "memory");
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(N + (long)cc * (CE / 16)), "r"(CE / 2) : "memory");
+        }
+#endif
 #pragma unroll
     for (int q = 0; q < HV; ++q) {
         const int i = t + q * VT, ch = c + (i / (RPC * ESC)) * G;
@@ -115,6 +147,50 @@ __global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ 
     }
     __syncthreads();
     int par = 0, j = 0;
+#ifdef G13_CPA
+    for (int i = 0; c < nch; c += G, ++i) {
+        load((i + PF - 1) % PF, c + (PF - 1) * G);  // the slot chunk i - 1 used
+        asm volatile("cp.async.wait_group %0;" :: "n"(PF - 1) : "memory");
+        const int p = i % PF, cc = c;
+        {
+            {
+                float acc[U];
+#pragma unroll
+                for (int u = 0; u < U; ++u) {
+                    const uint4 sv = sS[(p * U + u) * VT * NV + threadIdx.x];
+                    const uint2 nv = sN[(p * U + u) * VT * NV + threadIdx.x];
+                    acc[u] = dot16(sv, nv, xs + XI((u * VT * 16 + t * 16) % KK));
+                }
+#pragma unroll
+                for (int u = 0; u < U; ++u) {
+                    float v = acc[u];
+#pragma unroll
+                    for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+                    if (lane == 0) red[par][u * WV + wp] = v;
+                }
+                asm volatile("bar.sync %0, %1;" :: "r"(vg + 1), "n"(VT));
+                if (t < RPC) {
+                    float sum = 0.f;
+#pragma unroll
+                    for (int u = 0; u < U; ++u)
+#pragma unroll
+                        for (int w = 0; w < WV; ++w)
+                            if ((u * VT * 16 + w * 512) / KK == t) sum += red[par][u * WV + w];
+                    const float2* he = hs_[vg] + (i * RPC + t) * ESC;
+                    for (int e = 0; e < ESC; ++e) {
+                        const float2 h = he[e];
+                        if (h.y == 0x1p-15f) break;
+                        const float xe = xs[XI(__float_as_int(h.x))];
+                        sum = fmaf(xe, h.y, fmaf(xe, -0x1p-15f, sum));
+                    }
+                    out[(long)cc * RPC + t] = __float2bfloat16(sum * scale);
+                }
+                par ^= 1;
+            }
+        }
+    }
+    asm volatile("cp.async.wait_group 0;" ::: "memory");
+#else
     for (; c < nch; c += PF * G) {
 #pragma unroll
         for (int p = 0; p < PF; ++p) {
@@ -159,9 +235,15 @@ __global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ 
         }
         j += PF;
     }
+#endif
 }
 }  // namespace g13
 
+#ifdef G13_CPA
+#define G13_DSM(U_, V_, P_, VT_) ((P_) * (U_) * (VT_) * (V_) * 24)
+#else
+#define G13_DSM(U_, V_, P_, VT_) 0
+#endif
 void g13_gemv(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tensor x, torch::Tensor out, double scale,
               int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks, int64_t vt) {
     const int k = x.size(1), n = out.size(1);
@@ -170,7 +252,9 @@ void g13_gemv(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tensor 
     TORCH_CHECK((long)n * k <= (long)g13::MAXC * blocks * nv * u * vt * 16, "g13: too many chunks per virtual block");
 #define G13_CASE(K_, U_, V_, B_, P_, VT_) \
     if (k == K_ && u == U_ && nv == V_ && minb == B_ && pf == P_ && vt == VT_) { \
-        g13::gemv<U_, V_, B_, K_, P_, VT_><<<blocks, VT_ * V_, 0, st>>>((const uint4*)s.data_ptr(), (const uint2*)nb.data_ptr(), \
+        const int dsm_ = G13_DSM(U_, V_, P_, VT_); \
+        if (dsm_) cudaFuncSetAttribute(g13::gemv<U_, V_, B_, K_, P_, VT_>, cudaFuncAttributeMaxDynamicSharedMemorySize, dsm_); \
+        g13::gemv<U_, V_, B_, K_, P_, VT_><<<blocks, VT_ * V_, dsm_, st>>>((const uint4*)s.data_ptr(), (const uint2*)nb.data_ptr(), \
         (const float2*)h.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, (float)scale); return; }
     G13_CONFIGS
     TORCH_CHECK(false, "g13: no config");

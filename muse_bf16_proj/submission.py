@@ -679,6 +679,25 @@ __global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ 
     float (*red)[U * WV] = red_[vg];
     const int G = gridDim.x * NV;
     int c = blockIdx.x * NV + vg;
+#ifdef G13_CPA
+    // cp.async ring: PF chunks in flight in smem (each thread reads back only its own 16 + 8 B per u: no sync)
+    extern __shared__ __align__(16) unsigned char dsm[];
+    uint4* sS = reinterpret_cast<uint4*>(dsm);                  // [PF][U][VT * NV]
+    uint2* sN = reinterpret_cast<uint2*>(sS + PF * U * VT * NV);  // [PF][U][VT * NV]
+    auto load = [&](int p, int ch) {
+        if (ch < nch) {
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                const long i = (long)ch * (CE / 16) + u * VT + t;
+                const unsigned ds = (unsigned)__cvta_generic_to_shared(sS + (p * U + u) * VT * NV + threadIdx.x);
+                const unsigned dn = (unsigned)__cvta_generic_to_shared(sN + (p * U + u) * VT * NV + threadIdx.x);
+                asm volatile("cp.async.cg.shared.global.L2::256B [%0], [%1], 16;" :: "r"(ds), "l"(S + i) : "memory");
+                asm volatile("cp.async.ca.shared.global.L2::256B [%0], [%1], 8;" :: "r"(dn), "l"(N + i) : "memory");
+            }
+        }
+        asm volatile("cp.async.commit_group;" ::: "memory");
+    };
+#else
     uint4 s[PF][U];
     uint2 nb[PF][U];
     // escapes: the row's reducing thread adds x[col] * (value - 2^-15) per header entry to the row's sum
@@ -690,6 +709,7 @@ __global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ 
             nb[p][u] = ld2(N + i);
         }
     };
+#endif
     // x and the escape headers first: they must not queue behind the W prologue
     constexpr int XV = (KK / 8 + VT * NV - 1) / (VT * NV), HV = (MAXC * RPC * ESC + VT - 1) / VT;
     uint4 xv[XV];
@@ -704,9 +724,21 @@ __global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ 
         const int i = t + q * VT, ch = c + (i / (RPC * ESC)) * G;
         if (i < MAXC * RPC * ESC && ch < nch) hv[q] = __ldg(H + (long)ch * RPC * ESC + i % (RPC * ESC));
     }
+#ifdef G13_CPA
+    for (int p = 0; p < PF - 1; ++p) load(p, c + p * G);
+#else
 #pragma unroll
     for (int p = 0; p < PF; ++p)
         if (c + p * G < nch) load(p, c + p * G);
+#endif
+#ifdef G13_L2PF
+    // L2 bulk prefetch of this vb's later chunks (no registers): HBM streams at full rate from the start
+    if (t == 0)
+        for (int cc = c + PF * G, d = 0; cc < nch && d < G13_L2PF; cc += G, ++d) {
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(S + (long)cc * (CE / 16)), "r"(CE) : "memory");
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(N + (long)cc * (CE / 16)), "r"(CE / 2) : "memory");
+        }
+#endif
 #pragma unroll
     for (int q = 0; q < HV; ++q) {
         const int i = t + q * VT, ch = c + (i / (RPC * ESC)) * G;
@@ -723,6 +755,50 @@ __global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ 
     }
     __syncthreads();
     int par = 0, j = 0;
+#ifdef G13_CPA
+    for (int i = 0; c < nch; c += G, ++i) {
+        load((i + PF - 1) % PF, c + (PF - 1) * G);  // the slot chunk i - 1 used
+        asm volatile("cp.async.wait_group %0;" :: "n"(PF - 1) : "memory");
+        const int p = i % PF, cc = c;
+        {
+            {
+                float acc[U];
+#pragma unroll
+                for (int u = 0; u < U; ++u) {
+                    const uint4 sv = sS[(p * U + u) * VT * NV + threadIdx.x];
+                    const uint2 nv = sN[(p * U + u) * VT * NV + threadIdx.x];
+                    acc[u] = dot16(sv, nv, xs + XI((u * VT * 16 + t * 16) % KK));
+                }
+#pragma unroll
+                for (int u = 0; u < U; ++u) {
+                    float v = acc[u];
+#pragma unroll
+                    for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+                    if (lane == 0) red[par][u * WV + wp] = v;
+                }
+                asm volatile("bar.sync %0, %1;" :: "r"(vg + 1), "n"(VT));
+                if (t < RPC) {
+                    float sum = 0.f;
+#pragma unroll
+                    for (int u = 0; u < U; ++u)
+#pragma unroll
+                        for (int w = 0; w < WV; ++w)
+                            if ((u * VT * 16 + w * 512) / KK == t) sum += red[par][u * WV + w];
+                    const float2* he = hs_[vg] + (i * RPC + t) * ESC;
+                    for (int e = 0; e < ESC; ++e) {
+                        const float2 h = he[e];
+                        if (h.y == 0x1p-15f) break;
+                        const float xe = xs[XI(__float_as_int(h.x))];
+                        sum = fmaf(xe, h.y, fmaf(xe, -0x1p-15f, sum));
+                    }
+                    out[(long)cc * RPC + t] = __float2bfloat16(sum * scale);
+                }
+                par ^= 1;
+            }
+        }
+    }
+    asm volatile("cp.async.wait_group 0;" ::: "memory");
+#else
     for (; c < nch; c += PF * G) {
 #pragma unroll
         for (int p = 0; p < PF; ++p) {
@@ -767,9 +843,15 @@ __global__ void __launch_bounds__(VT * NV, MINB) gemv(const uint4* __restrict__ 
         }
         j += PF;
     }
+#endif
 }
 }  // namespace g13
 
+#ifdef G13_CPA
+#define G13_DSM(U_, V_, P_, VT_) ((P_) * (U_) * (VT_) * (V_) * 24)
+#else
+#define G13_DSM(U_, V_, P_, VT_) 0
+#endif
 void g13_gemv(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tensor x, torch::Tensor out, double scale,
               int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks, int64_t vt) {
     const int k = x.size(1), n = out.size(1);
@@ -778,7 +860,9 @@ void g13_gemv(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tensor 
     TORCH_CHECK((long)n * k <= (long)g13::MAXC * blocks * nv * u * vt * 16, "g13: too many chunks per virtual block");
 #define G13_CASE(K_, U_, V_, B_, P_, VT_) \
     if (k == K_ && u == U_ && nv == V_ && minb == B_ && pf == P_ && vt == VT_) { \
-        g13::gemv<U_, V_, B_, K_, P_, VT_><<<blocks, VT_ * V_, 0, st>>>((const uint4*)s.data_ptr(), (const uint2*)nb.data_ptr(), \
+        const int dsm_ = G13_DSM(U_, V_, P_, VT_); \
+        if (dsm_) cudaFuncSetAttribute(g13::gemv<U_, V_, B_, K_, P_, VT_>, cudaFuncAttributeMaxDynamicSharedMemorySize, dsm_); \
+        g13::gemv<U_, V_, B_, K_, P_, VT_><<<blocks, VT_ * V_, dsm_, st>>>((const uint4*)s.data_ptr(), (const uint2*)nb.data_ptr(), \
         (const float2*)h.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, (float)scale); return; }
     G13_CONFIGS
     TORCH_CHECK(false, "g13: no config");
@@ -2642,6 +2726,11 @@ _G22_SRC = r'''// gemv22: GEMM for m = 128 / 256 tokens (the layer's T=128/256: 
 #include <cuda_bf16.h>
 #include <cuda.h>
 #include <cudaTypedefs.h>
+#ifdef G22_NOPEER
+#define G22_NOPEERV 1
+#else
+#define G22_NOPEERV 0
+#endif
 #ifdef G22_NOFIX
 #define G22_NOFIXV 1
 #else
@@ -2687,6 +2776,22 @@ __device__ __forceinline__ void bar_init(unsigned b, int count) {
 }
 __device__ __forceinline__ void bar_expect(unsigned b, int bytes) {
     asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(b), "r"(bytes) : "memory");
+}
+// arrive on the mbarrier at the same smem offset in CTA `peer` of the cluster
+__device__ __forceinline__ void bar_arrive_peer(unsigned b, unsigned peer) {
+#ifdef G22_NOPEER
+    return;
+#endif
+    unsigned r;
+    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(b), "r"(peer));
+    asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" :: "r"(r) : "memory");
+}
+__device__ __forceinline__ void tma2d_mc(unsigned dst, const CUtensorMap* map, int c0, int c1, unsigned bar, unsigned short mask) {
+    asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%2, %3}], [%4], %5;"
+                 :: "r"(dst), "l"(map), "r"(c0), "r"(c1), "r"(bar), "h"(mask) : "memory");
+}
+__device__ __forceinline__ void cluster_sync() {
+    asm volatile("barrier.cluster.arrive.release.aligned;\nbarrier.cluster.wait.acquire.aligned;" ::: "memory");
 }
 __device__ __forceinline__ void bar_arrive(unsigned b) {
     asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" :: "r"(b) : "memory");
@@ -2761,7 +2866,7 @@ __device__ __forceinline__ void stage(float* acc, unsigned (&af)[2 * AP][4], uns
 // WP: packed stages, tile-major (u = tile * S + ks, S = k / (32 AP)). out FP32 [M, n], zeroed before (PDL primary).
 // packed stage (PB bytes): W atoms (SB) | E escapes (row in tile | k in stage << 8, true / scale; row -1: none)
 // smem (1024-aligned): ring [NS][stage PB | pad to XO | XS x] | barriers | flush scratch
-template <int M, int AP, int NS, int E>
+template <int M, int AP, int NS, int E, int CL>
 __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__ WP,                                                float scale, const __grid_constant__ CUtensorMap xmap,
                                                const __nv_bfloat16* __restrict__ x, float* __restrict__ out, int n, int k, int npre) {
     constexpr int NCW = 8, NT = M / 8, SB = NCW * AP * 768, XS = AP / 2 * M * 128, PB = SB + 8 * E, XO = SB + 1024, SL = XO + XS;
@@ -2773,19 +2878,23 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
     const int t = threadIdx.x, lane = t & 31, w = __shfl_sync(0xffffffffu, t >> 5, 0), g = lane >> 2, c = lane & 3;
     const int S = k / (32 * AP), ntr = n / (16 * NCW);
     // tile-aligned split: tile t gets nb = G / ntr (+1 for the first G % ntr tiles) blocks: one run per block
+    // CL 2: clusters of 2 blocks on tiles (2p, 2p + 1) with the same k range; each loads half the x box, multicast to both
+    const int cr = CL == 2 ? blockIdx.x & 1 : 0;
     int ra0, rb0;
     {
-        const int G = gridDim.x, b = blockIdx.x, base = G / ntr, ex = G % ntr;
+        const int G = gridDim.x / CL, b = blockIdx.x / CL, base = G / (ntr / CL), ex = G % (ntr / CL);
         int tt, j, nb;
         if (b < ex * (base + 1)) { tt = b / (base + 1); j = b % (base + 1); nb = base + 1; }
         else { const int b2 = b - ex * (base + 1); tt = ex + b2 / base; j = b2 % base; nb = base; }
+        tt = tt * CL + cr;
         ra0 = tt * S + S * j / nb; rb0 = tt * S + S * (j + 1) / nb;
     }
     if (t == 0) {
-        for (int i = 0; i < NS; ++i) { bar_init(bars + 8 * i, 1); bar_init(bars + 8 * (NS + i), NCW + (G22_NOFIXV ? 0 : 1)); }
+        for (int i = 0; i < NS; ++i) { bar_init(bars + 8 * i, 1); bar_init(bars + 8 * (NS + i), (NCW + (G22_NOFIXV ? 0 : 1)) * (G22_NOPEERV ? 1 : CL)); }
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
-    __syncthreads();
+    if (CL == 1) __syncthreads();
+    else cluster_sync();  // the peer's barriers are initialized before any multicast / remote arrive
     if (t == 0) TR(0);
     if (w >= NCW) {  // producer warpgroup: one lane streams the block's stages
         asm volatile("setmaxnreg.dec.sync.aligned.u32 40;" ::: "memory");
@@ -2816,7 +2925,15 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
                 {
 #endif
 #pragma unroll
-                for (int b = 0; b < AP / 2; ++b) tma2d(ring + slot * SL + XO + b * M * 128, &xmap, ks * AP * 32 + b * 64, 0, bars + 8 * slot);
+                for (int b = 0; b < AP / 2; ++b) {
+#ifdef G22_NOMC
+                    if (true) { tma2d(ring + slot * SL + XO + b * M * 128, &xmap, ks * AP * 32 + b * 64, 0, bars + 8 * slot);
+                        tma2d(ring + slot * SL + XO + b * M * 128 + (M / 2) * 128, &xmap, ks * AP * 32 + b * 64, M / 2, bars + 8 * slot); }
+#else
+                    if (CL == 1) tma2d(ring + slot * SL + XO + b * M * 128, &xmap, ks * AP * 32 + b * 64, 0, bars + 8 * slot);
+#endif
+                    else tma2d_mc(ring + slot * SL + XO + b * M * 128 + cr * (M / 2) * 128, &xmap, ks * AP * 32 + b * 64, cr * (M / 2), bars + 8 * slot, 3);
+                }
                 }
             }
         } else if (w == NCW + 1 && !G22_NOFIXV) {  // fixup warp: escapes, x from the ring slot, red.add into out
@@ -2850,10 +2967,12 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
                     if (full != 0xffffffffu) break;
                 }
                 __syncwarp();
-                if (lane == 0) bar_arrive(bars + 8 * (NS + slot));
+                if (lane == 0) { bar_arrive(bars + 8 * (NS + slot)); if (CL == 2) bar_arrive_peer(bars + 8 * (NS + slot), cr ^ 1); }
             }
             if (lane == 0) TR(7);
         }
+        __syncwarp();
+        if (CL == 2) cluster_sync();  // no block exits while its peer may still multicast into it / arrive on it
         return;
     }
     asm volatile("setmaxnreg.inc.sync.aligned.u32 232;" ::: "memory");
@@ -2871,7 +2990,7 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
         wg_wait<1>(); \
         _Pragma("unroll") for (int j = 0; j < 2 * AP; ++j) _Pragma("unroll") for (int e = 0; e < 4; ++e) fence_r(ao[j][e]); \
         __syncwarp(); \
-        if (lane == 0 && pslot >= 0) bar_arrive(bars + 8 * (NS + pslot)); \
+        if (lane == 0 && pslot >= 0) { bar_arrive(bars + 8 * (NS + pslot)); if (CL == 2) bar_arrive_peer(bars + 8 * (NS + pslot), cr ^ 1); } \
         pslot = slot; ++i; }
 #pragma unroll 1
     for (int ra = ra0; ra < rb0;) {  // runs: the block's range split at tile boundaries
@@ -2893,7 +3012,7 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
 #pragma unroll
         for (int e = 0; e < NT * 4; ++e) fence_f(acc[e]);
         __syncwarp();
-        if (lane == 0) bar_arrive(bars + 8 * (NS + pslot));
+        if (lane == 0) { bar_arrive(bars + 8 * (NS + pslot)); if (CL == 2) bar_arrive_peer(bars + 8 * (NS + pslot), cr ^ 1); }
         pslot = -1;
         // flush: 32-token groups through smem ([tok][16 rows], stride 20 floats), red.add.v4 along rows
         {
@@ -2926,6 +3045,7 @@ __global__ void __launch_bounds__(384, 1) gemm(const unsigned char* __restrict__
         ra = rb;
     }
     if (t == 0) TR(9);
+    if (CL == 2) cluster_sync();
 #undef G22_STEP
 }
 // PDL primary: lets the gemm launch at once and zeroes its output (the gemm waits before touching it)
@@ -2942,7 +3062,7 @@ torch::Tensor g22_trace() {
 }
 #endif
 static PFN_cuTensorMapEncodeTiled_v12000 g22_encode = nullptr;
-static void g22_xmap(CUtensorMap& map, void* ptr, int m, int k) {
+static void g22_xmap(CUtensorMap& map, void* ptr, int m, int k, int rows) {
     if (!g22_encode) {
         cudaDriverEntryPointQueryResult q;
         cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled", (void**)&g22_encode, 12000, cudaEnableDefault, &q);
@@ -2950,7 +3070,7 @@ static void g22_xmap(CUtensorMap& map, void* ptr, int m, int k) {
     }
     cuuint64_t dims[2] = {(cuuint64_t)k, (cuuint64_t)m};
     cuuint64_t strides[1] = {(cuuint64_t)k * 2};
-    cuuint32_t box[2] = {64, (cuuint32_t)m};
+    cuuint32_t box[2] = {64, (cuuint32_t)rows};
     cuuint32_t es[2] = {1, 1};
     CUresult r = g22_encode(&map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, ptr, dims, strides, box, es, CU_TENSOR_MAP_INTERLEAVE_NONE,
                             CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
@@ -2959,23 +3079,27 @@ static void g22_xmap(CUtensorMap& map, void* ptr, int m, int k) {
 // mode 0: zero kernel then the gemm (PDL dependent). mode 1: out already zero, the gemm a PDL dependent of the
 // previous kernel (npre W stages stream before griddepcontrol.wait).
 void g22_gemm(torch::Tensor wp, double scale, torch::Tensor x, torch::Tensor out,
-              int64_t ap, int64_t ns, int64_t e, int64_t grid, int64_t mode, int64_t npre) {
+              int64_t ap, int64_t ns, int64_t e, int64_t cl, int64_t grid, int64_t mode, int64_t npre) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const int sm = 1024 + ns * (8 * ap * 768 + 1024 + ap / 2 * m * 128) + 16 * ns + 64 + 8 * 32 * 20 * 4;
     CUtensorMap xmap;
-    g22_xmap(xmap, x.data_ptr(), m, k);
-    TORCH_CHECK(n % 128 == 0 && k % (32 * ap) == 0 && sm <= 227 * 1024 && n / 128 <= grid && grid <= (n / 128) * (k / (32 * ap)), "g22: shape/smem/grid ", sm);
+    g22_xmap(xmap, x.data_ptr(), m, k, m / cl);
+    TORCH_CHECK(n % 128 == 0 && k % (32 * ap) == 0 && sm <= 227 * 1024 && n / 128 <= grid && grid <= (n / 128) * (k / (32 * ap))
+                && grid % cl == 0 && (n / 128) % cl == 0, "g22: shape/smem/grid ", sm);
     auto stream = c10::cuda::getCurrentCUDAStream();
     if (!mode) g22::zero<<<132, 256, 0, stream>>>((float4*)out.data_ptr(), m * n / 4);
-#define G22_CASE(M_, AP_, NS_, E_) \
-    if (m == M_ && ap == AP_ && ns == NS_ && e == E_) { \
-        auto kern = g22::gemm<M_, AP_, NS_, E_>; \
+#define G22_CASE(M_, AP_, NS_, E_, CL_) \
+    if (m == M_ && ap == AP_ && ns == NS_ && e == E_ && cl == CL_) { \
+        auto kern = g22::gemm<M_, AP_, NS_, E_, CL_>; \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
         cudaLaunchConfig_t cfg = {}; \
         cfg.gridDim = dim3(grid); cfg.blockDim = dim3(384); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
-        cudaLaunchAttribute attr[1]; \
+        cudaLaunchAttribute attr[2]; \
         attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1; \
-        cfg.attrs = attr; cfg.numAttrs = 1; \
+        attr[1].id = cudaLaunchAttributeClusterDimension; attr[1].val.clusterDim.x = CL_; attr[1].val.clusterDim.y = 1; attr[1].val.clusterDim.z = 1; \
+        cfg.attrs = attr; cfg.numAttrs = 2; \
+        if (CL_ > 1) { int nc_ = 0; cudaOccupancyMaxActiveClusters(&nc_, kern, &cfg); \
+            TORCH_CHECK(nc_ * CL_ >= grid, "g22: grid not co-resident as clusters: ", nc_, " clusters"); } \
         cudaLaunchKernelEx(&cfg, kern, (const unsigned char*)wp.data_ptr(), (float)scale, xmap, \
             (const __nv_bfloat16*)x.data_ptr(), out.data_ptr<float>(), n, k, (int)npre); \
         C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
@@ -3573,10 +3697,18 @@ BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4,
 BF16_G13 = {"qkv_gate": [(1, 8192, 2, 4, 1, 1, 132, 256), (1, 8192, 2, 2, 1, 2, 132, 256), (1, 8192, 1, 2, 1, 1, 132, 512)],
             "pooler": [(1, 8192, 2, 4, 1, 1, 132, 256), (1, 8192, 2, 2, 1, 2, 132, 256)],
             "unpooler": [(1, 4096, 2, 4, 1, 2, 132, 256)]}
+# s16: gemv13 for o (k 1024) loses on the H100 tuner (11.3 vs gemv10 11.0: ~2 rounds per vb, latency-bound)
+# gemv13 built with G13_CPA: the weight chunks go through a cp.async smem ring (PF chunks in flight, no registers).
+# H100 qkv m1 (2,2,1,3) 13.4 vs gemv13 14.4 us, pooler tie, unp1k 7.6 vs 7.7 (dev/g13.py XF=-DG13_CPA).
+BF16_G13C_S16 = {"qkv_gate": [(1, 8192, 2, 2, 1, 3, 132, 256), (1, 8192, 2, 2, 1, 4, 132, 256)],
+             "pooler": [(1, 8192, 2, 2, 1, 3, 132, 256), (1, 8192, 2, 2, 1, 4, 132, 256)],
+             "unpooler": [(1, 4096, 2, 2, 1, 3, 132, 256), (1, 4096, 2, 2, 1, 4, 132, 256)]}
+BF16_G13C = {}  # H100 tuner: ties gemv13 VT 512 (the gain was the tail); not worth a judge check
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
 # BF16 tensor-core streaming GEMM over the same compressed weights (dev/gemv14.cu = gemv12 + decode), (m, kcu, wg, pf,
 # bk, xp), chosen on the H100 (dev/g14.py); tuned in prepare() like the others.
-BF16_G14 = {"qkv_gate": [(8, 2, 2, 4, 32, 1)], "o": [(8, 1, 2, 4, 128, 1), (8, 1, 2, 8, 128, 1)],
+# s16: qkv m8 without split-K (kcu 8, 96 blocks of 3 row groups): H100 15.2-15.6 vs (8, 2, 2, 4, 32, 1) 16.8 us
+BF16_G14 = {"qkv_gate": [(8, 2, 2, 4, 32, 1), (8, 8, 8, 4, 96, 1), (8, 8, 8, 4, 96, 2), (8, 8, 8, 8, 96, 1)], "o": [(8, 1, 2, 4, 128, 1), (8, 1, 2, 8, 128, 1)],
             "pooler": [(8, 8, 8, 4, 128, 1), (8, 2, 2, 4, 32, 1), (16, 4, 4, 4, 64, 1)],
             "unpooler": [(8, 4, 8, 4, 32, 1), (8, 2, 4, 4, 32, 1)]}
 # gemv14 with the split-K reduction over a thread-block cluster through DSMEM (dev/gemv15.cu), (m, kcu, wg, pf, runs, xp),
@@ -3629,7 +3761,10 @@ DIAG19_STREAM = []  # (stage bytes, stages): 50 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
 # (m, ap, ns, E). H100: qkv m128 20.8 vs cuBLAS 20.6, others lose (H100 TMA stream ~2.9 TB/s); built for the H200.
-BF16_G22 = {l: [(128, 2, 6, 32), (128, 4, 3, 32), (256, 2, 4, 32), (256, 2, 3, 32)] for l in ("qkv_gate", "o", "pooler", "unpooler")}
+# H200 (check fb2fe4ee): loses every m128/m256 shape (qkv m128 22.1 vs lt 18.8, pooler 29.6 vs 24.4; m256 +10..19 us):
+# per-SM smem ingest (W + x box per stage, x/W = 1.33 at m128) caps it, not HBM. DEAD; candidates were:
+BF16_G22_S16 = {l: [(128, 2, 6, 32), (128, 4, 3, 32), (256, 2, 4, 32), (256, 2, 3, 32)] for l in ("qkv_gate", "o", "pooler", "unpooler")}
+BF16_G22 = {}
 _SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _LAYER_K = {"qkv_gate": 8192, "o": 1024, "pooler": 8192, "unpooler": 4096}
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
@@ -3715,6 +3850,17 @@ try:
 except Exception as _e:  # noqa: BLE001
     print("muse_proj gemv19 build failed:", _e)
     _g19 = None
+
+try:
+    _g13c = load_inline(
+        name="muse_proj_g13c",
+        cpp_sources="void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
+                    "int64_t, int64_t, int64_t, int64_t, int64_t);",
+        cuda_sources="#define G13_CPA\n" + _G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d,%d)" % (c[1:6] + c[7:8]) for c in sorted({c for v in BF16_G13C.values() for c in v}))),
+        functions=["g13_gemv"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"]) if BF16_G13C else None
+except Exception as _e:  # noqa: BLE001
+    print("muse_proj gemv13 cp.async build failed:", _e)
+    _g13c = None
 
 try:
     _g22 = load_inline(
@@ -3977,6 +4123,9 @@ def _run(st, layer, x, out, cand):
     kind, c = cand
     if kind == "g10":
         _mod.g10_gemv(st[layer], x, out, *c[2:])  # W[:n] is the first n rows, in place
+    elif kind == "g13c":
+        sm, nib, hdr, scale = st[("g13", layer)]
+        _g13c.g13_gemv(sm, nib, hdr, x, out, scale, *c[2:])
     elif kind == "g13":
         sm, nib, hdr, scale = st[("g13", layer)]
         _mod.g13_gemv(sm, nib, hdr, x, out, scale, *c[2:])
@@ -4026,6 +4175,10 @@ def _tune(st, reps=25):
         for layer, cfgs in BF16_G10.items():
             for c in cfgs:
                 shapes.setdefault((layer, c[0]), []).append(("g10", c))
+        for layer, cfgs in BF16_G13C.items() if _g13c is not None else []:
+            if ("g13", layer) in st:
+                for c in cfgs:
+                    shapes.setdefault((layer, c[0]), []).append(("g13c", c))
         for layer, cfgs in BF16_G13.items():
             if ("g13", layer) in st:
                 for c in cfgs:

@@ -13,7 +13,8 @@ cfgs = [tuple(map(int, c.split(","))) for c in sys.argv[1].split(";")]
 src = open(os.path.join(d, "gemv22.cu")).read()
 src = "".join("#define %s\n" % d_.replace("=", " ") for d_ in os.environ.get("DEFS", "").split(",") if d_) + src
 cfgs = [c + (128 if os.environ.get("ESCW") else 32,) if len(c) == 3 else c for c in cfgs]
-src = src.replace("G22_CONFIGS", " ".join("G22_CASE(%d,%d,%d,%d)" % c for c in sorted(set(cfgs))))
+cfgs = [c + (int(os.environ.get("CL", 1)),) if len(c) == 4 else c for c in cfgs]
+src = src.replace("G22_CONFIGS", " ".join("G22_CASE(%d,%d,%d,%d,%d)" % c for c in sorted(set(cfgs))))
 src += "\nvoid g22_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_);\n"
 g20src = open(os.path.join(d, "gemv20.cu")).read()
 pred = g20src[g20src.index("// test predecessor"):g20src.index("// diagnostics: a bare")]
@@ -21,7 +22,7 @@ src = src.replace("}  // namespace g22", pred + "}  // namespace g22", 1)
 src += "void g22_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) { g22::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_); }\n"
 TRC = "G22_TRACE" in os.environ.get("DEFS", "")
 mod = load_inline(name="pj_g22_" + hashlib.md5(src.encode()).hexdigest()[:10],
-                  cpp_sources="void g22_gemm(torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g22_pred(torch::Tensor, torch::Tensor, int64_t);" + (" torch::Tensor g22_trace();" if TRC else ""),
+                  cpp_sources="void g22_gemm(torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g22_pred(torch::Tensor, torch::Tensor, int64_t);" + (" torch::Tensor g22_trace();" if TRC else ""),
                   cuda_sources=src, functions=["g22_gemm", "g22_pred"] + (["g22_trace"] if TRC else []), extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo", "-Xptxas=-v"], verbose=bool(os.environ.get("VERB")))
 
 
@@ -84,7 +85,7 @@ for nm, layer, n in SH:
         tc = bench.time_graph(lambda: (pre(), F.linear(x, W))) - ep
         line = f"{nm:5s} m{M}: cublas {tc:6.2f}"
         out = torch.empty(M, n, device="cuda")
-        for (m_, ap, ns, E) in cfgs:
+        for (m_, ap, ns, E, CLv) in cfgs:
             if m_ != M: continue
             if (ap, E) not in packs: packs[(ap, E)] = pack22(W, ap, E)
             if packs[(ap, E)] is None: line += f" | {ap},{ns},{E} overflow"; continue
@@ -100,7 +101,7 @@ for nm, layer, n in SH:
             refp = xp_.double() @ W.double().T
             for rep in range(0 if os.environ.get("SKIPCHK") else 20 if ESCW else 2):
                 out.fill_(1.0)
-                mod.g22_gemm(P, scale, xp_, out, ap, ns, E, GRID, 0, 0); torch.cuda.synchronize()
+                mod.g22_gemm(P, scale, xp_, out, ap, ns, E, CLv, GRID, 0, 0); torch.cuda.synchronize()
                 err = ((out.double() - refp).norm() / refp.norm()).item()
                 assert err < 1e-5, (err, nm, m_, ap, ns)
                 pw_ = (W[:, col].double() * 16).float()
@@ -115,7 +116,7 @@ for nm, layer, n in SH:
             if TRC:
                 fl = torch.empty(512 << 20, dtype=torch.uint8, device="cuda"); sk = torch.zeros(1, dtype=torch.int64, device="cuda")
                 for _ in range(3):
-                    torch.sum(fl.view(torch.int64), 0, out=sk[0]); mod.g22_gemm(P, scale, x, out, ap, ns, E, GRID, 0, 0); torch.cuda.synchronize()
+                    torch.sum(fl.view(torch.int64), 0, out=sk[0]); mod.g22_gemm(P, scale, x, out, ap, ns, E, CLv, GRID, 0, 0); torch.cuda.synchronize()
                 tr = mod.g22_trace().cpu()[:GRID].double(); t0 = tr[:, 0].min()
                 nmz = {1: "prodWait", 2: "stage0", 3: "run0mma", 4: "run0flush", 5: "run1mma", 6: "run1flush", 7: "fixEnd", 8: "fixScan", 9: "consEnd"}
                 for sl, nm_ in nmz.items():
@@ -123,9 +124,9 @@ for nm, layer, n in SH:
                     if v: print(f"  {nm_:9s} n{len(v):3d} min {v[0]:.1f} med {v[len(v)//2]:.1f} max {v[-1]:.1f}")
                 del fl
             if MODE == 1:
-                dt = bench.time_graph(lambda: (pre(), mod.g22_gemm(P, scale, x, out, ap, ns, E, GRID, 1, min(NPRE, ns)))) - ep
+                dt = bench.time_graph(lambda: (pre(), mod.g22_gemm(P, scale, x, out, ap, ns, E, CLv, GRID, 1, min(NPRE, ns)))) - ep
             else:
-                dt = bench.time_graph(lambda: mod.g22_gemm(P, scale, x, out, ap, ns, E, GRID, 0, min(NPRE, ns))) - e
-            line += f" | {ap},{ns},{E} {dt:6.2f}"
+                dt = bench.time_graph(lambda: mod.g22_gemm(P, scale, x, out, ap, ns, E, CLv, GRID, 0, min(NPRE, ns))) - e
+            line += f" | {ap},{ns},{E},c{CLv} {dt:6.2f}"
         print(line, flush=True)
     del W, packs

@@ -72,10 +72,18 @@ BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4,
 BF16_G13 = {"qkv_gate": [(1, 8192, 2, 4, 1, 1, 132, 256), (1, 8192, 2, 2, 1, 2, 132, 256), (1, 8192, 1, 2, 1, 1, 132, 512)],
             "pooler": [(1, 8192, 2, 4, 1, 1, 132, 256), (1, 8192, 2, 2, 1, 2, 132, 256)],
             "unpooler": [(1, 4096, 2, 4, 1, 2, 132, 256)]}
+# s16: gemv13 for o (k 1024) loses on the H100 tuner (11.3 vs gemv10 11.0: ~2 rounds per vb, latency-bound)
+# gemv13 built with G13_CPA: the weight chunks go through a cp.async smem ring (PF chunks in flight, no registers).
+# H100 qkv m1 (2,2,1,3) 13.4 vs gemv13 14.4 us, pooler tie, unp1k 7.6 vs 7.7 (dev/g13.py XF=-DG13_CPA).
+BF16_G13C_S16 = {"qkv_gate": [(1, 8192, 2, 2, 1, 3, 132, 256), (1, 8192, 2, 2, 1, 4, 132, 256)],
+             "pooler": [(1, 8192, 2, 2, 1, 3, 132, 256), (1, 8192, 2, 2, 1, 4, 132, 256)],
+             "unpooler": [(1, 4096, 2, 2, 1, 3, 132, 256), (1, 4096, 2, 2, 1, 4, 132, 256)]}
+BF16_G13C = {}  # H100 tuner: ties gemv13 VT 512 (the gain was the tail); not worth a judge check
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
 # BF16 tensor-core streaming GEMM over the same compressed weights (dev/gemv14.cu = gemv12 + decode), (m, kcu, wg, pf,
 # bk, xp), chosen on the H100 (dev/g14.py); tuned in prepare() like the others.
-BF16_G14 = {"qkv_gate": [(8, 2, 2, 4, 32, 1)], "o": [(8, 1, 2, 4, 128, 1), (8, 1, 2, 8, 128, 1)],
+# s16: qkv m8 without split-K (kcu 8, 96 blocks of 3 row groups): H100 15.2-15.6 vs (8, 2, 2, 4, 32, 1) 16.8 us
+BF16_G14 = {"qkv_gate": [(8, 2, 2, 4, 32, 1), (8, 8, 8, 4, 96, 1), (8, 8, 8, 4, 96, 2), (8, 8, 8, 8, 96, 1)], "o": [(8, 1, 2, 4, 128, 1), (8, 1, 2, 8, 128, 1)],
             "pooler": [(8, 8, 8, 4, 128, 1), (8, 2, 2, 4, 32, 1), (16, 4, 4, 4, 64, 1)],
             "unpooler": [(8, 4, 8, 4, 32, 1), (8, 2, 4, 4, 32, 1)]}
 # gemv14 with the split-K reduction over a thread-block cluster through DSMEM (dev/gemv15.cu), (m, kcu, wg, pf, runs, xp),
@@ -128,7 +136,10 @@ DIAG19_STREAM = []  # (stage bytes, stages): 50 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
 # (m, ap, ns, E). H100: qkv m128 20.8 vs cuBLAS 20.6, others lose (H100 TMA stream ~2.9 TB/s); built for the H200.
-BF16_G22 = {l: [(128, 2, 6, 32), (128, 4, 3, 32), (256, 2, 4, 32), (256, 2, 3, 32)] for l in ("qkv_gate", "o", "pooler", "unpooler")}
+# H200 (check fb2fe4ee): loses every m128/m256 shape (qkv m128 22.1 vs lt 18.8, pooler 29.6 vs 24.4; m256 +10..19 us):
+# per-SM smem ingest (W + x box per stage, x/W = 1.33 at m128) caps it, not HBM. DEAD; candidates were:
+BF16_G22_S16 = {l: [(128, 2, 6, 32), (128, 4, 3, 32), (256, 2, 4, 32), (256, 2, 3, 32)] for l in ("qkv_gate", "o", "pooler", "unpooler")}
+BF16_G22 = {}
 _SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _LAYER_K = {"qkv_gate": 8192, "o": 1024, "pooler": 8192, "unpooler": 4096}
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
@@ -195,6 +206,17 @@ try:
 except Exception as _e:  # noqa: BLE001
     print("muse_proj gemv19 build failed:", _e)
     _g19 = None
+
+try:
+    _g13c = load_inline(
+        name="muse_proj_g13c",
+        cpp_sources="void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
+                    "int64_t, int64_t, int64_t, int64_t, int64_t);",
+        cuda_sources="#define G13_CPA\n" + _G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d,%d)" % (c[1:6] + c[7:8]) for c in sorted({c for v in BF16_G13C.values() for c in v}))),
+        functions=["g13_gemv"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"]) if BF16_G13C else None
+except Exception as _e:  # noqa: BLE001
+    print("muse_proj gemv13 cp.async build failed:", _e)
+    _g13c = None
 
 try:
     _g22 = load_inline(
@@ -457,6 +479,9 @@ def _run(st, layer, x, out, cand):
     kind, c = cand
     if kind == "g10":
         _mod.g10_gemv(st[layer], x, out, *c[2:])  # W[:n] is the first n rows, in place
+    elif kind == "g13c":
+        sm, nib, hdr, scale = st[("g13", layer)]
+        _g13c.g13_gemv(sm, nib, hdr, x, out, scale, *c[2:])
     elif kind == "g13":
         sm, nib, hdr, scale = st[("g13", layer)]
         _mod.g13_gemv(sm, nib, hdr, x, out, scale, *c[2:])
@@ -506,6 +531,10 @@ def _tune(st, reps=25):
         for layer, cfgs in BF16_G10.items():
             for c in cfgs:
                 shapes.setdefault((layer, c[0]), []).append(("g10", c))
+        for layer, cfgs in BF16_G13C.items() if _g13c is not None else []:
+            if ("g13", layer) in st:
+                for c in cfgs:
+                    shapes.setdefault((layer, c[0]), []).append(("g13c", c))
         for layer, cfgs in BF16_G13.items():
             if ("g13", layer) in st:
                 for c in cfgs:
