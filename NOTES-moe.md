@@ -1042,3 +1042,33 @@
   achievable HBM read rate on these routings (the real floor for the layer's budget, instead of 4.0 TB/s);
   (c) uq vs sq32/uqk4 = what a repack to bigger copies could give if (a) is small. If tkp ~= gs8 and sq32 >> uq on
   the H200, a single-copy 36 KB-stage repack of w13/w2 with KPS 2 consumers (stage = 2 rows' chunks) is the next build.
+
+## Night4 session 10 (2026-10-26 21:44Z - ~22:15Z, no judge runs: moe checks 20/20 until 00:00Z) -- KPS 4 re-closed; er + nm DIAG probes
+- Paper first: (a) phase-interleaved tk2f (gemm2 of expert e while gemm13 of later experts streams, to drop the grid-wide
+  gemm13 -> gemm2 wait): NOT built: the H200 timeline (s12) shows the 72 KB ring already absorbs the wait at d1 (ph1end
+  median ~12.3, ring full ~13.8, cnt ok 14.1); and d1's 1152 rows / 132 CTAs = 8.73 -> 9 rows max whatever the order.
+  (b) row interleave of multi-group segments for L2 reuse: moot, TK2F_L2H 4 already gives DRAM bytes = floor (ncu, s21).
+- Stream probe (moe_stream, H100, 5 seeds MEAN, us; tools: /tmp/moe-n10/ds.py, monkeypatched _diag_stream variants;
+  moe_stream_launch now also takes NSTG 2):
+             tkp_n4  tkp_n8  tkp4_n2  tkp4_n3  tkp4_n4      (tkp = tk2f copy pattern 18 KB stages; tkp4 = 36 KB stages)
+    d1        30.3    29.6    27.7     28.0     27.9
+    d16       83.8    80.3    74.8     77.8     78.1
+    d32      104.5   103.4    95.1     98.4     98.6
+    v1        79.4    78.8    74.4     74.9     75.0
+  => at the SAME 72 KB of smem, 36 KB copies x 2 looked 5-9 us faster. BUT the stream has no L2 hints (tk2f has mode 4).
+- Real kernel, moe-only DIAG on the layer routings (H100, /tmp/moe-n10/dd.py <name>=<TK2F_DYN>:<TK2F>, us):
+    cfg 402 (KPS 4 NSTG 2, existing SA build): d1 +0.5..1, d16 +1, d32 +1, v1 +0.7 vs gs8 (bitwise).
+    ER (new, PF & 128): consumers release the ring slot right after the stage LDS, ordered by
+      `fence.proxy.async.shared::cta` before mbar_arrive (instead of after the dq/mma, s10): er204 tie (-0.5..+0.9),
+      er402 +0.5..1.3, er403 +1.5..2.7. Bitwise 0/1680 (tools/pf_ab.py 400 94204,91204,94402,94403). cfgs 94xxx = ER + PF4
+      (norm3), 91xxx = ER only (M = 1 / norm2); xxx = 204/402/403; SA only; L2 hint mode at run time (+1000000 * (mode+1)).
+    L2 hints off (mode 0) for er204/er402: +1.5..2.7 worse; mode 1 for er402: mixed.
+    NO-MATH probe (PF & 256, TK2_EXP builds only, cfg 91214 / 91412: LDS + arrive, no dq/mma, wrong output):
+      nm204 = nm402: d1 35.1, d16 79.5/79.3, d32 101.2/101.1, v1 81.5/81.4 vs gs8 36.1 / 82.6 / 104.9 / 84.3.
+  => On the H100 the whole consumer math costs only 1.0 / 3.1 / 3.7 / 2.8 us (d1/d16/d32/v1), and with no math the copy
+     size does not matter (nm402 = nm204): the stream probe's KPS 4 gain was its missing L2 hints. KPS 4 CLOSED (3rd time).
+- 00:00Z DIAG now also has `er` and `nm` (dec list) + diag9s `tkp4`. READ: gs8 - nm on the H200 = the upper bound of ANY
+  consumer-side work (GS16/tk2h, cheaper dq, ER). If it is ~1-4 us like the H100, stop consumer work on tk2f; the
+  remaining tk2f lever is then the stream itself (fixed costs, tail). If it is >= 8 us at d16/d32, tk2h GS16 / dq work is
+  worth it on the H200 (compare h16w*p4 there).
+- r-moe 77fa9b6. Default build unchanged (bench test PASS); the DIAG build dry-runs.

@@ -69,15 +69,17 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 10 (21:44-22:15Z, no judge runs) -- KPS 4 re-closed; DIAG er + nm (NOTES n10, r-moe 77fa9b6)
+- H100: tk2f with NO consumer math (nm, PF & 256 probe) is only 1.0/3.1/3.7/2.8 us faster (d1/d16/d32/v1), and copy size
+  does not matter without math (nm402 = nm204); stream "tkp4" gains came from its missing L2 hints. ER (early ring release,
+  fence.proxy.async; cfg 94204/91204, bitwise) = tie. 00:00Z DIAG: read gs8 - nm (upper bound of ANY consumer-side gain).
+
 ## Night4 session 9 (21:27-22:15Z, no judge runs) -- H200 HBM-ceiling probe in the DIAG (NOTES n9)
 - r-moe 804b9f5: moe_stream + _diag_stream: the 00:00Z DIAG check also prints `diag9s MEAN <load> <v>` (tkp = tk2f's
   copy pattern, uq = unique bytes, sq16..64 = contiguous single copies). H100: tk2f = its copy pattern's rate; 16 KB+
   copies ~6% faster than 8 KB. tk2f KPS 4 (84404/84403/404) DEAD (H100 +2..6 us, bitwise). Read diag9s vs diag12 gs8.
 
-## Night4 session 8 (21:17-22:20Z, no judge runs) -- BAL ported to the layer (NOTES n8)
-- tools/n8/patch_layer_bal.py: BAL into layer moe_src/layer.py (TUNE "bal"; cfg + 1000000; SA pf 4 only). Bitwise 0/560,
-  layer test 13/13. H100 layer d16 ABA 5 seeds: sliding -2.4, full -1.2 us mean; d32 LOSES (+1.5..12); v1 tie. Asked layer
-  for a T=16 TUNE candidate {"bal": True}.
+## Night4 session 8: BAL ported into the layer (tools/n8/patch_layer_bal.py); layer v97 runs it (TUNE bal at T=16/32).
 
 ## Night4 session 7 (20:50-21:50Z, no judge runs) -- tk2f phase transition (NOTES n7)
 - G88 timeline: rows cost the same in both phases; the loss is the transition (wait for the slowest CTA 0.8-2.3 + first
@@ -93,8 +95,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - H100 in the layer harness: h16w3p4 LOSES d16 +4, d32 +2..7 us (DRAM-bound H100); G88 proxy d32 -6 proxy-us. Only the
   H200 decides: the 00:00Z DIAG has h8p4 / h16w2p4 / h16w3p4 / h16w4p4 (moe-only), the layer's tuner does the rest.
 
-## Night4 session 5 (r-moe 1378d3e): GS16 H200 loss = row split (count split overloads 2-group rows; tk2g_split slow ->
-  tk2g_bound, bitwise). DIAG has h16w0/2/3/4. If h16 is within ~2 us of gs8 at d32: tools/n4s5/mktl_h.py timeline check.
+## Night4 s5 (1378d3e): GS16 H200 loss = row split; DIAG has h16w0/2/3/4 (tk2h); s1-2: NORM_EARLY + PDL .nc fix.
 
 ## Night4 session 3 (19:31-20:05Z, no judge runs) -- r-moe 1f3b71b
 - TK2F_L2H_RT (python, None = #define 4): run-time L2 hint mode, cfg + 1000000 * (mode + 1). H100 mode 4 vs 0: d16 -5.1, d32 -4.3.
@@ -102,9 +103,8 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - FIRST CHECK AT 00:00Z (unchanged plan + this): `sed 's/^DIAG = 0$/DIAG = 1/' muse_moe_w4a16/submission.py >
   /tmp/x/submission.py; okc check /tmp/x/submission.py --json`; grep "diag12 MEAN" in the job log. Report to layer:
   hot G (h24/32/40), RG, NORM_EARLY (h32ne0/offne0) at v32/v16, and L2H mode (l2h0/l2h1 vs gs8) at d1/d16/d32/v1.
-  n4s5: + h16w0/2/3/4 (GS16 at d16/d32) vs gs8; n7: + bal/bal1; n9: + "diag9s MEAN" (HBM-ceiling probe, read vs gs8).
-
-## Night4 sessions 1-2: NORM_EARLY on main (9898def) + PDL .nc-hoist fix (5960afc); both in the 00:00Z DIAG (NOTES n4s1/2).
+  n4s5: + h16w0/2/3/4 (GS16 at d16/d32) vs gs8; n7: + bal/bal1; n9: + "diag9s MEAN" (HBM-ceiling probe, read vs gs8);
+  n10: + er / nm (gs8 - nm = max consumer-side gain on the H200; nm output is WRONG by design, ignore its maxdiff).
 
 ## Ranked ideas
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
