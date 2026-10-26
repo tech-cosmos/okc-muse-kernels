@@ -1,6 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~11:20Z real UTC (session 25).
+Updated 2026-10-26 ~12:05Z (session 26).
 
 **s25: main = v59 (46fb62d) = v57 + tuner on SKEWED synthetic routing (`SYNTH_P`/`_synth_stream`: stream = sum of 8
 picked experts' unit router rows; local expert j picked w.p. SYNTH_P[j] = scored loads' mean shares; T=256 synth
@@ -13,6 +13,12 @@ in the last check decides (read its "layer tune T=256" lines). Tests 13/13, forc
 ~14:15Z, as TUNE options; expert options now tune on realistic loads), copy every "layer tune" line of
 profiles/submission.<job>.log into NOTES; submit by 17:30Z that code if its check >= 1.9558 (board best; ties ok), else
 v45 (`git show 2dddb88:muse_decode_layer/submission.py > /tmp/v45.py`, check ea9421fa 1.9634x). Push before 18:30Z.**
+
+**s26: main = v60** = v59 + NU8 (T=8 moe_norm3 + unpool slice fused: nu8 kernel, mma, FP32 slabs summed in `_boundary`)
+as T=8 TUNE options {"nu8"} (sums of squares exchanged inside nu8), {"nu8", "nu8x": False} (sums from a moe_tk2f PF 20
+epilogue patch), {"nu8", "g14alt:qkv_gate": 1}; default off. H100 A/B: -0.6..+0.7 us (tie; the fused tail saves ~2 but
+the sums cost it, NOTES s26); H100 tuner picks nu8+g14alt at T=8 full. Tests 13/13, scored verify x3 + replay 0/20 for
+both variants. NOT CHECKED: rides in the ~14:30Z last check (read its "layer tune T=8" lines).
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
 option sets on synthetic inputs (shapes only) and keeps the fastest in state["tune"]; `_opt()` reads it at trace time.

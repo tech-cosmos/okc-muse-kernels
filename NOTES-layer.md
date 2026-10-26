@@ -617,3 +617,26 @@
   666.3 -> 651.9 us; v1/v16 tie. (Unskewed tuner had o76 as a tie: 474.6 vs 473.0.)
   H200 truth unknown (moe proxy: o76 +3.6 at v32; judge v43 89325570: -11/-4): the last check's tuner lines decide.
 - Forced each option: scored verify 32 x2 ok, replay 0/20 (o76 also v16). Tests 13/13. Prepare (incl. tune) ~4 s warm.
+
+## s26 (2026-10-26 10:38Z-) NU8: T=8 moe_norm3 + unpool slice fusion (lead 10:32Z item)
+- Design (layer.py `_N2U_SRC` namespace nu8, `_experts_nu8`, `_nu8_on`): moe_tk2f (slot-ordered y32) -> nu8 = PDL secondary,
+  128 blocks x 512 thr, block (row group of 64 unpool rows, k chunk of 512): W tile -> smem by LDGSTS before
+  griddepcontrol.wait; after it the LOCAL slots' y32 chunks -> smem (one LDGSTS batch), h = BF16(sum_s f_s y_s w1)
+  (moe_norm3 math/order/rounding, thread = k), mma.m16n8k16 (W rows = M, 8 tokens = N, FP32), 4 k-quarters summed in
+  smem -> FP32 slabs [8][8][1024]; `_boundary` NS/SS adds the slabs, RB rounds to BF16. Per-slot sums of squares
+  (norm3's tot over all 4096 k) are the crux; two ways, both kept: (a) moe_tk2f PF 20 (cfg 85204; layer text patch,
+  w1 via moe_set_ss host static): gemm2 epilogue accumulates (y w1)^2 per segment, one atomic per 8 cols at the
+  segment end, into y32 row 64 (zeroed by `_rmsnorm_gain` ZN); (b) NU8_X: nu8 blocks 0..7 (row group 0) add their
+  chunk's partials, counter at y32 row 64 col 128, all blocks spin on it (blocks 0..7 dispatched first: no deadlock).
+- Exactness: vs main rel diff ~1e-4 (BF16 ulp flips from FP32 sum order); tests 13/13, scored verify 1/16 x3 ok.
+- H100 (tools/ab_files.py, 6 rounds, v1 sliding/full, tuner off): main 153.8/168.7, (a) 153.2/168.3, (b) 153.8/169.4,
+  ideal (sums free: atomics compiled out, wrong output) 152.0/166.5. So the fused tail saves ~2 us but the sums cost it:
+  (a) epilogue bisect: w1 load free, the per-row fmaf accumulate alone +1.1 us (!), flush atomics +1.3; (b) the
+  exchange adds ~2 us of latency (atomics + acquire spin). Stamps (globaltimer, rel. to the first wait release):
+  y chunks ready 0.9 med / 2.2 max, h done 3.5 max (was 1.2 us of chained LDS; fixed), end 4.2 max; wait release
+  itself spreads 0..1.3 us over the blocks. Micro (cold, no PDL) 14 us is meaningless (W from HBM serial).
+- Dead inside it: L2 prefetch of the late half's W tiles by the early blocks (tie); FMA dot (2.4 us) -> mma (fixed).
+- Shipped as T=8 TUNE options only (H200 decides): {"nu8": True} (= X), {"nu8": True, "nu8x": False} (= PF 20),
+  {"nu8": True, "g14alt:qkv_gate": 1}. Default off. Next idea if revisited: the sums for free = have tk2f write
+  y32 with the w1 multiply folded... no: the cost is any extra epilogue work in tk2f's serialized row loop; a
+  better place is a spare warp (tk2f's producer warp idles after its last stage) reading back the CTA's own y rows.
