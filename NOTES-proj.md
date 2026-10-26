@@ -1087,3 +1087,23 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   ranges at m32). qkv/o m16/m32 tie. In a /tmp clone of r-layer 088d8d7: bench.py test 13/13 PASS; tools/ab_files.py
   6 rounds A B B A (tuner on): all 12 scored shapes tie (d32 full 414.66/414.05 vs 413.97/414.79; d16 sl 196.92/196.62
   vs 196.71/196.74). Handoff posted, conditional on the 00:00Z diag19d (H200) or a layer A/B check.
+
+## s52 (2026-10-26 21:32-22:15Z, sandbox okc-night4, session 9): PDL flag handoff, g19 SWP, g19 ACC4: all DEAD (H100)
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z). Target: layer's g19 at T=16/32 (lead 20:16Z, layer s60).
+- (a) dev/s52/pdlwait.py: latency of griddepcontrol.wait vs a flag handoff (pred blocks: __threadfence + atomicAdd a
+  counter; secondary spins ld.acquire.gpu) at a PDL boundary (132 x 256 pred, 3 us spin, pred triggers at start). H100,
+  us after the last pred block's final write: gdc.wait 0.77 (blocks 0.77-0.86); flag 1.02 (0.96-1.22): fence + atomic
+  cost more than the wait. DEAD: griddepcontrol.wait is the fastest boundary (relevant to every layer PDL edge).
+- (b) ncu (SourceCounters, dev/g19.py PROF=1 SH=pool GRID 72 MODE 2 PRED 3000 NPRE 2 DEFS G19_NOTM,G19_TAG2,
+  "32,1024,8,2,4,0,1"; report /tmp/pj52/g19m32.ncu-rep): issue 0.32/scheduler, 2.46 warps active, 0.40 eligible;
+  stalls: long_sb 28% (nearly all on mbarrier try_wait branches = waiting for W stages: H100 W-bound), short_sb 24%
+  (HMMA/PRMT waiting on the just-issued LDS/ldmatrix), wait 15%, selected 14%, math 4%.
+- (c) G19_SWP (gemv19.cu, default off, RPW 1): next atom group's LDS + ldmatrix issued before this group's decode + mma
+  (register double buffer). H100 G72 R8 B-A: full kernel -0.18..+0.39 (tie), consumer-only (G19_NOW) -0.09..+0.14 (tie)
+  on qkv/pool/unp m16/m32. ptxas already hides this; short_sb is not the bound. DEAD.
+- (d) G19_ACC4 (with SWP): odd atoms into a second accumulator pair (8/16 independent HMMA chains): consumer-only B-A
+  +0.01..+0.60 (worse, more registers). Not HMMA-latency-bound. DEAD.
+- Arithmetic: NOW pool m32 G72 22.9 us = 14.2 stages/block -> 1.6 us/stage = 512 HMMA/SM/stage (~0.17 HMMA/cyc/SM,
+  ~25% of mma.sync peak), issue 32%. With smem latency, MMA chains and div/mod (s51) ruled out, what's left of the consumer
+  time is the per-stage skeleton (~0.4 us) + run ends + x arrival (s50/s51), and low TLP (2 consumer warps per
+  scheduler; more warps were slower in s14/s34). The 00:00Z H200 diag19d decomposition decides whether anything is left.

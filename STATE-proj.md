@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~21:45 UTC (s51: g19 loop-top 0.35 us/stage explained = runtime div/mod (tm) ~160 cyc/stage + NOW-mode producer turnaround; G19_TAG2 (bit-identical, precomputed ks/st/tr) queued in _diag19d as NOTM vs NOTM+TAG2; H100 full-kernel tie. s50: _diag19d = H200 g19 m32/m16 decomposition queued for the 00:00Z check; gemv23 BF16 wgmma at m16/m32 DEAD; H100 trace: ~0.35 us/stage of g19's consumer time is outside the decode/mma loop, unexplained. s49: 'fewer bytes at m=1' bounded: exponent entropy 2.54 bits -> 10.54-bit floor, no fixed-rate format < 12 bits; closed; lane request to lead. s48: g19 m32 header/fixup cost measured, FIX2/HPF dead; s47, sandbox okc-night4: PDL .nc-hoist SASS audit of proj kernels in layer v91 = no live hazard; unpool T=32 grid tie; checks 20/20 until 00:00Z; main unchanged).
+Updated 2026-10-26 ~22:15 UTC (s52: PDL flag handoff vs griddepcontrol.wait DEAD (flag +0.25 us); g19 SWP (software-pipelined smem loads) and ACC4 (2x HMMA chains) DEAD on H100 consumer-only; ncu: short_sb 24%, not the bound. s51: G19_TAG2 queued in _diag19d. Checks 20/20 until 00:00Z; main default build unchanged).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -103,11 +103,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 
 ## s19-s26 (NOTES): QSS (d32 qkv as 2 FP32 bmm slabs) in layer v70; G19_RAW dead; DeepGEMM bf16 dead (image: flashinfer
 ## 0.7.0, deep_gemm 0.2.1+muse, sgl_kernel 0.4.9); tinygemm2 port = proj tuner candidate at unpooler m8 (not judge-checked).
-## Session 31: pr1 router-W L2 prefetch with evict_last = WIN at T=1 (H100 layer d1 ~-1.3/-1.1 us, bitwise same): handoff
-## dev/s31/pr1_evl_layer.patch; all layer prefetch sites evict_last (dev/s31/pf_last.py) d1 -1.8/-1.7. evict_first on W streams null. NOTES s31.
-## Session 32 (in layer v80+): evict_last on ALL 9 layer L2 prefetch sites + KV_PF (g13's prefetch.global.L2 of the d1 KV rows): layer
-## v78 H100 d1 -2.0/-0.9 and -1.3/-1.4 us (2 runs), v1 noise, bitwise same at d1, tests/scored/replay clean. Handoff
-## dev/s32/evl_all_layer.patch (supersedes s31's). Dead: O_PF/boundary hints, pr8/other prefetch.global.L2 hints. NOTES s32.
+## s31/s32: evict_last on pr1 router-W prefetch + all 9 layer L2 prefetch sites + KV_PF = WIN (H100 layer d1 -1.3..-2.0 us,
+## bitwise same; in layer v80+, dev/s32/evl_all_layer.patch). Dead: evict_first on W streams, O_PF/boundary/pr8 hints. NOTES s31/s32.
 ## Session 33: g13 (12-bit) for the layer's T=1 o as a PDL secondary: H100 d1 full ~-1 us, sliding bimodal 0..-1.9:
 ## handoff as TUNE option g13o (dev/s33/g13o_layer.patch on v82). After the wait a GEMV is ISSUE-bound (~2.3 us decode+FMA);
 ## pre-decoding before the wait works (g13p) but loading all W beside csl slows csl as much: dead. NOTES s33.
@@ -125,25 +122,24 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## a side HBM stream beside a latency chain is zero-sum if it queues its whole range at once; ONE 32 KB TMA in flight per SM
 ## streams at ~95% rate and dilates the chain 40-60% less (rule for any layer weight-overlap/side-stream idea). s40: throttling
 ## g19's own few-stage pre-wait prologue (npre 1-2) beside a memory-touching pred: dead (keep deep npre).
-## s44: g19 m32 LONGRUN DEAD (proxy +0.3..+5 us, NOTES s44). s45: pooler T=16 npre 2 vs 3 in layer = tie (keep 3).
+## s44/s45: g19 m32 LONGRUN DEAD; layer pooler T=16 npre 2 vs 3 tie (keep 3).
 ## s46: T=1 pooler W pre-fill into L2/SMEM beside csl/o/bnd (side-stream throttled TMA filler, dev/s46): DEAD, +2..6 us d1:
 ## csl's window already carries o's pre-wait W stream; a side kernel alone costs ~2-3 us; bnd window = pr1's prologue.
 ## s47: SASS audit (dev/s47_pdl_audit.py) of all proj kernels in layer v91: no producer output read before griddepcontrol.wait;
-## only pr1's non-bnd x/x32 __ldg (layer copy) is fragile -> Request to layer. unpool T=32 G19_GRID 96-132 = tie (H100).
-## s48: g19 m32 escape fixups ~0.5-1.2 us/call proxy, header-load stall ~0.2-0.5; pipelined fixups (G19_FIX2) and
-## one-run-ahead header prefetch (G19_HPF) both DEAD (NOTES s48). Diag switches G19_NOHDR/NOFIXB in gemv19.cu (off).
+## only pr1 non-bnd x/x32 __ldg fragile (Request to layer). unpool T=32 G19_GRID 96-132 tie.
+## s48: g19 m32 escape fixups ~0.5-1.2 us/call proxy; G19_FIX2 / G19_HPF DEAD; diag G19_NOHDR/NOFIXB (off).
 ## s50: _diag19d (print only) in submission: g19 pool m32/m16, unp m32 x {main, NOW, NOW+NOMMA, NOW+NOX, NOFIX} x G132/108
 ## after a 3 us PDL pred (+~1-2 min compile). gemv23 at m16/m32 (BF16, no decode) = W-stream-bound, ties/loses cuBLAS: DEAD.
 ## H100 G19_TR2 trace: per consumer stage ~0.35 us outside the atom loop (loop top tag/int math 0.23, arrive->got 0.13).
 ## s51: G19_TAG2/G19_NOTM/G19_CLK switches (off by default). NOW-mode H100: TAG2 -1.0 (m16) / -0.1..-0.4 (m32) us vs layer-like
 ## NOTM; full kernel tie on H100 (W-bound). Loop top 0.30 -> 0.14 kcyc/stage (clock64). NOTES s51.
+## s52: dead (NOTES s52): flag-based PDL handoff (1.02 vs gdc.wait 0.77 us), G19_SWP, G19_ACC4 (switches off in gemv19.cu).
 ## Next (00:00Z check, ranked):
 ## 0. In the 00:00Z check log: diag19d 'NOTM' vs 'NOTM TAG2' (H200): >= 0.3 us win at m16/m32 -> TAG2 patch for layer's
 ##    g19_src.cu: patch READY dev/s51/tag2_layer.patch (handoff posted 21:50Z; layer H100 tie, tests 13/13): post the H200
 ##    numbers under Handoffs/Requests. diag19 'o m16' g19 vs pick: if g19 wins now -> layer TUNE option at T=16 o.
 ## a. First proj check after 00:00Z = main (carries _diag19d): read 'diag19d' lines. main-NOW = W-stream share on H200;
 ##    NOW-NOMMA = decode+mma; NOMMA = skeleton. Copy into NOTES. Submit only if > 1.3110 (diag adds nothing to timing).
-## b. (done s51: TAG2, see above)
 ## Next sandbox (ranked; sandbox okc-night3 expired ~19:10Z 10-26 with proj checks 20/20, scored 5/10)
 1. proj's first check = main as is (DEC3 in g13/g14 m1/m8 picks; tg2 unpooler m8 candidate): read the 'tune' lines in the
    judge log (profiles/*.log); submit if > 1.3110. Layer's first check = its main v88 (carries DEC3, pr8 npf 212, g19 s15).
@@ -151,4 +147,4 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
    gaps without PDL triggers). (npre 2 vs 3: dead s45; T=1 pooler pre-fill beside csl/o/bnd: dead s46.)
    (s49) fewer bytes at m=1 CLOSED: floor 10.54 bits (exp entropy 2.54), fixed-rate < 12 bits escapes 3.5%+, VL 11.2 bits
    ~ -1.3 us d1 at best (dev/s49_entropy.py, NOTES s49). All proj items now <= ~0.3% layer: asked lead for a new lane.
-3. Below the line: pr8 K-split tail balancing (~0.1%), 11-bit format (~0.2-0.3%), g22/g23/DeepGEMM at m128/256 (dead).
+3. Below the line: pr8 K-split tail (~0.1%), 11-bit (~0.2-0.3%), g22/g23/DeepGEMM m128/256 (dead).

@@ -2014,12 +2014,20 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     if (t == 0) TR(9);
     // RPW = 2: warp w owns row groups 2w, 2w + 1 of the tile (one x fragment load feeds both: half the ldmatrix traffic)
     float acc[RPW][NT][4], acc2[RPW][NT][4];
+#ifdef G19_ACC4  // s52: odd atoms into a second accumulator pair (2x independent HMMA chains; FP32 sum order changes)
+    float acc3[RPW][NT][4], acc4[RPW][NT][4];
+#endif
 #pragma unroll
     for (int r = 0; r < RPW; ++r)
 #pragma unroll
         for (int j = 0; j < NT; ++j)
 #pragma unroll
-            for (int e = 0; e < 4; ++e) acc[r][j][e] = acc2[r][j][e] = 0.f;
+            for (int e = 0; e < 4; ++e) {
+                acc[r][j][e] = acc2[r][j][e] = 0.f;
+#ifdef G19_ACC4
+                acc3[r][j][e] = acc4[r][j][e] = 0.f;
+#endif
+            }
     // ldmatrix row address: matrix q = lane / 8 (x4: n-tile pair member q / 2, k half q % 2), row = lane % 8
     // TS = 2: warps 2r, 2r + 1 share row group r (both decode it), tokens [th * MT, th * MT + MT)
     const int wr = (w / TS) * RPW, th = w % TS;  // wr: the warp's first row group in the tile
@@ -2134,6 +2142,49 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         // groups of G atoms: all shared loads of the group first, then the x fragments, then decode + mma (the asm
         // statements are volatile: issued in program order, so independent loads must come first to overlap)
         constexpr int G = NT * RPW == 2 ? AP : AP < 2 ? AP : 2;
+#if defined(G19_SWP) && !defined(G19_RAW)
+        // s52: software-pipelined: group j0 + G's shared loads + x fragments are issued before group j0's decode + mma
+        static_assert(RPW == 1, "G19_SWP: RPW 1 only");
+        uint4 sv[2][G];
+        uint2 nv[2][G];
+        unsigned bx[2][G][2][NT][2];
+        auto gload = [&](int b_, int j0_) {
+#pragma unroll
+            for (int j = 0; j < G; ++j) {
+                asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(sv[b_][j].x), "=r"(sv[b_][j].y), "=r"(sv[b_][j].z), "=r"(sv[b_][j].w) : "r"(sb + (j0_ + j) * 512));
+                asm volatile("ld.shared.v2.u32 {%0,%1}, [%2];" : "=r"(nv[b_][j].x), "=r"(nv[b_][j].y) : "r"(nb + (j0_ + j) * 256));
+            }
+#pragma unroll
+            for (int j = 0; j < G; ++j)
+                if (NT == 1) ldsm4(xbase + (st * AP + j0_ + j) * 64, bx[b_][j][0][0][0], bx[b_][j][0][0][1], bx[b_][j][1][0][0], bx[b_][j][1][0][1]);
+#pragma unroll
+            for (int j = 0; j < G; ++j)
+#pragma unroll
+                for (int s = 0; s < 2; ++s)
+#pragma unroll
+                    for (int jj = 0; jj + 1 < NT; jj += 2)
+                        ldsm4(xbase + jj * 8 * XS + (st * AP + j0_ + j) * 64 + s * 32, bx[b_][j][s][jj][0], bx[b_][j][s][jj][1], bx[b_][j][s][jj + 1][0], bx[b_][j][s][jj + 1][1]);
+        };
+        gload(0, 0);
+#pragma unroll
+        for (int j0 = 0; j0 < AP; j0 += G) {
+            const int cb = (j0 / G) & 1;
+            if (j0 + G < AP) gload(cb ^ 1, j0 + G);
+#pragma unroll
+            for (int j = 0; j < G; ++j)
+#pragma unroll
+                for (int s = 0; s < 2; ++s) {
+                    const uint4 af = dec8(s ? sv[cb][j].z : sv[cb][j].x, s ? sv[cb][j].w : sv[cb][j].y, s ? nv[cb][j].y : nv[cb][j].x);
+#pragma unroll
+#ifdef G19_ACC4
+                    for (int jj = 0; jj < NT; ++jj) mma(((j0 + j) & 1) ? (s ? acc4[0][jj] : acc3[0][jj]) : (s ? acc2[0][jj] : acc[0][jj]), af, bx[cb][j][s][jj][0], bx[cb][j][s][jj][1]);
+#else
+                    for (int jj = 0; jj < NT; ++jj) mma(s ? acc2[0][jj] : acc[0][jj], af, bx[cb][j][s][jj][0], bx[cb][j][s][jj][1]);
+#endif
+                }
+        }
+        if (false)
+#endif
 #pragma unroll
         for (int j0 = 0; j0 < AP; j0 += G) {
 #ifdef G19_RAW
@@ -2213,7 +2264,14 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
 #pragma unroll
             for (int jj = 0; jj < NT; ++jj)
 #pragma unroll
-                for (int e = 0; e < 4; ++e) { v[rr][jj][e] = acc[rr][jj][e] + acc2[rr][jj][e]; acc[rr][jj][e] = acc2[rr][jj][e] = 0.f; }
+                for (int e = 0; e < 4; ++e) {
+#ifdef G19_ACC4
+                    v[rr][jj][e] = (acc[rr][jj][e] + acc2[rr][jj][e]) + (acc3[rr][jj][e] + acc4[rr][jj][e]); acc3[rr][jj][e] = acc4[rr][jj][e] = 0.f;
+#else
+                    v[rr][jj][e] = acc[rr][jj][e] + acc2[rr][jj][e];
+#endif
+                    acc[rr][jj][e] = acc2[rr][jj][e] = 0.f;
+                }
 #pragma unroll
         for (int rr = 0; rr < (WB == 1024 ? 0 : RPW); ++rr)
 #pragma unroll
