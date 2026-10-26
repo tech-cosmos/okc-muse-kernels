@@ -2,7 +2,7 @@
 
 ## Board
 - Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z). Board is a TEST BED only (lead 01:45Z): the layer counts.
-  Used 2026-10-26: checks 17 of 20 (s12: 5 DIAG checks, never submit those), submits 3. s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
+  Used 2026-10-26: checks 19 of 20 (s12 5 + s13 2 DIAG checks, never submit those), submits 3. s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
   worse), d4909e24 2.170 (twm mixed: neutral). Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
   bs128 196-207, bs256 243-251 (judge noise +-4%).
 - **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.
@@ -49,17 +49,7 @@ spin (ld.acquire) until cnt[0] == n13, then load inter with __ldg. cnt = st["cnt
 re-zeroed by moe_norm2 after each call: no memset node). DO NOT go back to per-segment counters or ld.global.cg
 inter loads without a many-routing sweep (tools/sweep_routings.py, also with +64 KB dyn smem): see NOTES s7 race.
 TK2F = 0 = the old 3-launch path below (moe_tk2 x2 + norm2), kept as reference (tools/race_ab.py compares bitwise).
-Old 3-launch decode: `moe_tk2<NRT, NC=8, NSTG=8, GATED>` x2 + `moe_norm2`:
-- 1 CTA/SM, 8 consumer warps + 1 producer lane. Work = (active expert, 8-token group, row-tile pair rp)
-  "rows" R; CTA b takes rows [nrp*b/grid, nrp*(b+1)/grid). Per rp the producer streams 8 blocks; block q =
-  8 units (k chunks q*8..q*8+7) = 3 cp.async.bulk copies (gate tile 4 KB, up tile 4 KB, scales 1 KB) into an
-  8-stage smem ring (mbarrier full/empty; empty count = 256: every consumer lane arrives).
-- Consumer warp w does k chunk q*8+w of every block, so its x fragments (8 kc x 2 uint4) stay in registers
-  for a whole segment. Per rp: smem cross-warp reduce (double-buffered s_red, 1 named barrier), epilogue:
-  gemm13 -> bf16 silu(gate)*up into inter[pos]; gemm2 -> FP32 y[pos] (plain stores, no atomics/zeroing).
-- gemm13 CTAs compute the routing themselves (deterministic: __match_any_sync rank + per-warp counts), CTA 0
-  writes meta/sroutes/inv for gemm2 + norm2. Experts with > 8 tokens: one segment per 8-token group (weights
-  re-read per group). Scales repacked per pair: S2 [e][rp][kc][lane] u32 (_pair_scales in prepare).
+Old 3-launch decode (moe_tk2 x2 + norm2, TK2F = 0): see NOTES s3-s6.
 M > 32 (TW_CFG = 418, TWF = 1): route -> moe_gather -> moe_twf (gemm13 AND gemm2, one persistent launch) -> moe_norm.
 - moe_twf<RT=4, NSTG=8> (s6): 384 threads = 2 consumer WGs + producer warp (setmaxnreg 40/232), 1 CTA/SM. Work
   counter meta[66] hands out all gemm13 items, then all gemm2 items (heaviest experts first). Item = (expert,
@@ -93,16 +83,22 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
-## Session 12 summary
-- H200 diag tool + model (above). Measured on the H200, all on layer routings: GS16 (old, merged, any split weight)
-  +4..8 us DEAD; merged-phase h8 = main; per-segment counters (PSC) = main; deeper rings (208/206/403/108/402) lose;
-  DYN +3..10; NC16 +1..2; TWF_MIX 1 vs 0: v16 -3.3, v32 -4.4 us (keep 1; layer should take it).
-- GS16's d1 loss was i-cache (4 unrolled row bodies): tk2h one-body consumer fixed that, the d16/d32 loss remained.
-- Timeline: CTAs balanced (spread 1-3 us); phase 2 (w2) streams ~3.5 TB/s vs phase 1 ~4.0 TB/s; 3.6 us to first data.
+## Session 13 summary
+- MAIN: TK2F_DYN = 84204 (M > 1): gemm2 writes y32 in route-slot order pre-scaled by gs2*256 -> moe_norm3 (moe_norm2<SLOT>,
+  one dependent-load level less). Bitwise = 204. H200 diag: d16 -0.45, d32 -0.75 us. TK2F (M=1) stays 204 (layer n2u).
+- H200 diag 1fdf6eb2/adfb897e: next-segment x L1 prefetch +0.3..1.1 us (dead), gemm2 counter spin-once 0, 2 accumulator
+  chains 0. DQW (rotations via IMAD.WIDE on the FMA pipe): warm proxy +18% (dead).
+- ncu warm proxy: issue 50.6%, ALU pipe (half rate) active 51% = issue; fmaheavy (HMUL2+IMAD, also half rate) 34%;
+  stalls spread (wait .94, long_sb .65, throttle .43, barrier .33 cycles/instr). No single limiter left in the consumer.
+- Checks used 2026-10-26: 19 of 20 (all diag); 1 left.
 
-## Sessions 8-11: see NOTES (s10 race fix + layer harness, s11 twm/K-split).
+## Sessions 8-12: see NOTES (s10 race fix + layer harness, s11 twm/K-split).
 
 ## Ranked ideas
+-4. (s13) Consumer dq is ~73% of instrs and both int pipes are half rate: only fewer dq ops per weight (sharing a dequant
+   across >8 tokens = GS16, unexplained H200 loss) or a cheaper decode can move d16/d32 much. Phase-2 12% per-row gap on
+   the H200 is NOT the segment change / counter spin (s13 diag). Untested: phase-2 timeline with no extra groups
+   (synthetic 10 experts x 8 tokens) to tell L2-dedup effects from per-row cost.
 -3. (s12) Phase 2 (gemm2/w2) of tk2f streams ~12% slower per byte than phase 1 on the H200 (timeline): ~3 us at d32,
    ~2 at d16. Find out why with the diag timeline (stamp per-row times in phase 2; try phase-2 rows = 2 rps per
    ring pass, or w2 tile pairs adjacent instead of 2048 rows apart (prepare repack), or x (inter) prefetch earlier).

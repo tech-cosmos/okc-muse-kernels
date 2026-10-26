@@ -3816,7 +3816,7 @@ TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
 _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
 TK2_MAX = 32  # M above this: big-M path
-TK2F_DYN = 204  # M > 1 cfg; 5402 = DYN row tail (D = 4): H100 bs8-32 -3..4% but judge no gain (check b890d69b 2.125x)
+TK2F_DYN = 84204  # M > 1 cfg. s13: 84204 = 204 + y32 in route-slot order pre-scaled + moe_norm3 (bitwise = 204; H200 diag adfb897e d16 -0.45, d32 -0.75 us). M = 1 (TK2F) stays 204: the layer's n2u reads the old y32 order. 5402 = DYN row tail (D = 4): judge no gain (b890d69b)
 TWSA = 1  # s9: same for moe_twf (big-M)
 TK2SA = 1  # s9: arithmetic e4m3 scale decode in moe_tk2f (when prepare() found all scales positive normal)
 TK2FN = 0  # s9: 1 = post-expert norm fused into moe_tk2f (moe_tk2fn_launch): judge bs1 +2 us (check 168fa04c), dead

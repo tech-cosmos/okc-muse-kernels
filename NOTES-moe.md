@@ -326,3 +326,11 @@
   ALU pipe (LOP3/SHF/PRMT/LEA, half rate) 7.0M of 13.9M instr, pipe active 51% (= issue): per mma ~8.7 ALU instr.
   SASS census (bs32 cold, per HMMA): LOP3 5.15, HMUL2 4, SHF 2.04, IMAD 1.36, BRA .89, SYNCS .76, YIELD .71 (ring spin, H100
   DRAM-bound), LEA .61, PRMT .5, LDS .49.
+- DQW: dq()'s two rotations as IMAD.WIDE.U32 by 2^10/2^13 from constant memory (FMA pipe) + 3-input LOP3: warm proxy
+  T=8 18.2 vs 16.8, T=32 41.4 vs 35.0 us: MUCH worse. Removed. (ALU and fmaheavy pipes are both half rate on H100:
+  pipe-active % per instr equal; HMUL2 runs on fmaheavy.)
+- PF & 8 = 2 accumulator chains per tile (j even/odd, summed before the reduce; FP32, not bitwise): warm proxy no change.
+- H200 DIAG adfb897e (gs8 / pf4 / pf12, each twice): d1 30.4/30.4/30.3, d16 68.45/68.0/67.9, d32 88.35/87.6/87.8,
+  v1 66.1/66.15/66.0. => pf4 (norm3 alone) -0.45 d16, -0.75 d32, 0 at d1/v1; 2 chains nothing.
+- MAIN: TK2F_DYN = 84204 (M > 1: slot-ordered pre-scaled y32 + moe_norm3), TK2F (M = 1) stays 204 because the layer's
+  T=1 n2u reimplements moe_norm2 on the old y32 layout. Bitwise = before (pf_ab), bench test 15/15.
