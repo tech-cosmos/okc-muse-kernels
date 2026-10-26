@@ -1,6 +1,8 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 23:00Z (s65): **main = v101 = v100 + proj s53 gemv24 default at T=16 (all 4 GEMMs) and T=32 (pooler+unpool)**: H100 ab_flag d16 sl/full -2.9/-3.0, d32 -1.5/-1.8 us; tuner off-options; tests/replay/route_judge 0 bad, cold 5:05 (NOTES s65). v100 = v99 + safety comment only. v99 = v97 + CSL_PW (d16 sliding csl = PDL
+Updated 2026-10-26 22:50Z (s66): **main = v102 = v101 + proj s54 g24 stream-K (g24sk) default at T=32 pooler+unpool** (H100 ab_flag
+3 seeds d32 sl -0.9..-2.1, full -1.3..-2.0 us; T=16 SK and T=32 SK qkv = TUNE options; tests 13/13, d32 scored/replay/route_judge 0 bad; NOTES s66).
+s65: v101 = v100 + proj s53 gemv24 default at T=16 (all 4 GEMMs) and T=32 (pooler+unpool)**: H100 ab_flag d16 sl/full -2.9/-3.0, d32 -1.5/-1.8 us; tuner off-options; tests/replay/route_judge 0 bad, cold 5:05 (NOTES s65). v100 = v99 + safety comment only. v99 = v97 + CSL_PW (d16 sliding csl = PDL
 secondary of the g19 qkv, K/V gathers before griddepcontrol.wait; H100 d16 sl -0.7..-1.0 us) + vtk PW as TUNE[8] option
 {cslpw: True}. NOT judge-checked. s63 AUDITED CSL_PW for the lead (NOTES s63): pre-wait loads read only inputs + context rows
 < seq_lens; tools/pw_race.py bitwise 0/40 diffs (control race 40/40 seen); safe to check. KEEP the qkv GEMM the graph's first
@@ -15,7 +17,7 @@ The 00:00Z check reads the H200 tuner lines for all of these ('layer tune T=8/16
 <= 1-2 us on paper (s57), not built.
 
 ## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
-1. `okc check muse_decode_layer/submission.py --json` on main (v101; read the g24 tune lines too). Compare per shape vs 703d3a7e (d1 69.6/77.8,
+1. `okc check muse_decode_layer/submission.py --json` on main (v102; read the g24 + g24sk tune lines too). Compare per shape vs 703d3a7e (d1 69.6/77.8,
    d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5; tools/ckparse.py). Expected:
    v32 -8..14 us (moe_hot, RG), v1 -2..4 (pr8 npf 212, BND_SEP, NU8D), d16/d32 -1..5 (G19_TRIG, tk2h), d1 -1..2. Submit if > 1.9954x.
 2. Copy the profile's 'layer tune' lines into NOTES (every T: which TUNE option the H200 picked, and by how much).
