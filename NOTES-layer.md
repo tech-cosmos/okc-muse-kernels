@@ -479,3 +479,19 @@
   asked proj for an M=8 mode-3 g19.
 - Session 15 summary: v43 (moe twm order) and v44 (proj g19 fixups + T=32 pooler/unpool + T=16 qkv, twm order reverted
   per moe's proxy) on main; v44 check c6a00da7 1.9608x, submit HELD for the day's last bundle (STATE ACTION).
+
+## Session 16 (2026-10-26 08:52Z-)
+- Budget at start: 1 submit, 2 checks (verified `okc problems`). v44 submit still HELD per s15 plan (bundle later, submit before ~17:30Z).
+- H100 timelines of v44 (d1/d16/d32/v1 sliding, d1 full) re-read: boundaries are not idle HBM time (the pooler
+  streams W during them via TRIG/PDL); boundary micro (after a cuBLAS mm, cold vs params pre-warmed): 4.6 us at
+  T=1/16/32 either way, so its params' cold misses are not the cost.
+- DEAD: KV rows pre-warmed in L2 before the replay (gathered kc/vc[window rows]): csl d16 8.5 cold vs 8.8-10.2 warm,
+  nds d32 10.8 vs 12.3, csl d1 3.9 vs 3.9 (d1 already has KV_PF). Attention at d16/d32 is latency-bound: no KV_PF
+  extension to g19 qkv.
+- H200 profile v44 (c6a00da7): d32 sliding g19 pooler+unpool 49.0 us for 2 x 50.6 MB (~2.1 TB/s): biggest non-expert
+  gap (~20 us/layer at d32); posted to proj (Requests s16) to try gemv22 (wgmma) at N=16/32. d32 full: _gd_full 167 +
+  _red_fin (waits) = attention ~at KV floor.
+- H200 vs H100 difference found: _router_split 5.6/6.5 us on H200 (d16/d32) vs 18-19 on H100 -> pooler G19_GRID 108
+  (H100-tuned) likely leaves SMs idle on the H200. Candidate 120 (variants/sub_v45g.py): correct (tests 13/13, scored
+  decode 2 seeds, replay decode 0/60), H100 loses as expected (d16 212.5 -> 219.3, d32 204.6 -> 217.4). Queued for the
+  bundle check (STATE Next -4); not on main.
