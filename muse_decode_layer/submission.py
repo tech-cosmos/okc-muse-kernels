@@ -7482,6 +7482,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
                                              int& ph, int& rb) {
   constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152;
+  constexpr bool BAL = (PF & 32) != 0;  // moe n8 BAL: per-segment counters cnt[64 + j]
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   uint4 xf[NQ][2];
   int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0, ci = 0;
@@ -7498,7 +7499,13 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       off = s_off[e] + gi * 8;
       n = min(8, s_off[e + 1] - off);
       ci = a * 4 + gi;
-      if (!GATED && !((PF & 2) && R != r0)) {  // all gemm13 rows written (by any CTA): see moe_tk2f. PF & 2 (s13): only
+      if (BAL && !GATED) {
+        const int* cp = cnt + 64 + seg_start / RPE;
+        int c;
+        do {
+          asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cp) : "memory");
+        } while (c < 2 * RPE);
+      } else if (!GATED && !((PF & 2) && R != r0)) {  // all gemm13 rows written (by any CTA): see moe_tk2f. PF & 2 (s13): only
         int c;                                    // at the CTA's first gemm2 row (cnt never decreases within a call)
         do {
           asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt) : "memory");
@@ -7611,7 +7618,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
         if (tid == 0) {
           __threadfence();
-          atomicAdd(cnt, R + 1 - max(seg_start, r0));
+          atomicAdd(BAL ? cnt + 64 + seg_start / RPE : cnt, R + 1 - max(seg_start, r0));
         }
       }
     } else if (NC == 8 || ct < 256) {
@@ -8375,6 +8382,11 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       b1 = tk2g_split(blockIdx.x + 1, nact, D, 128, s_e, s_off);
     }
   }
+  if (PF & 32) {  // moe n8 BAL: gemm13's extra rows (n13 % G) on the LAST CTAs, gemm2's (n2 % G) on the FIRST ones
+    const int G = gridDim.x, b = blockIdx.x, q1 = n13 / G, e1 = G - n13 % G, q2 = n2 / G, e2 = n2 % G;
+    a0 = b * q1 + max(0, b - e1); a1 = a0 + q1 + (b >= e1);
+    b0 = b * q2 + min(b, e2); b1 = b0 + q2 + (b < e2);
+  }
   int st = 0, ph = 0;
   if (warp == NC) {
     if (lane == 0) {
@@ -8467,12 +8479,21 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
     (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
     cnt_.data_ptr()
+  const bool bal = cfg >= 1000000;  // moe n8: + 1000000 = BAL (PF | 32; SA pf 4 / 5 only)
+  cfg %= 1000000;
   const bool sa = cfg >= 100000;  // + 100000: SA (arithmetic scale decode; prepare() checked the scales)
   cfg %= 100000;
   if (cfg > 80000 && cfg < 100000 && cfg % 1000 == 204) {  // s13 PF = cfg / 1000 % 10: 1 = L1 prefetch of the next segment's
     // x one row ahead, 2 = gemm2's counter spin only at the CTA's first gemm2 row, 4 = y32 in route slot order, pre-scaled
     // by gs2 * 256 (then moe_norm3 instead of moe_norm2), 8 = 2 accumulator chains per tile; built: 1, 2, 3, 4, 7, 12
     const int pf = (int)(cfg - 80000) / 1000;
+    if (bal && sa && pf == 4) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 36>(0, TK2F_ARGS0);
+#ifdef MOE_BAL_NU8
+    if (bal && sa && pf == 5) {
+      TORCH_CHECK(nr == 64 && y_.size(0) >= 65 && g_ssw1 != nullptr, "tk2f PF 52: shape");
+      return tk2f_go<8, 4, 2, false, false, true, 8, 0, 52>(0, TK2F_ARGS0, nullptr, g_ssw1);
+    }
+#endif
     if (pf == 12) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 12>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 12>(0, TK2F_ARGS0);
     if (pf == 4) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 4>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 4>(0, TK2F_ARGS0);
     if (pf == 7) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 7>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 7>(0, TK2F_ARGS0);
@@ -9026,7 +9047,14 @@ _moe_TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g
 _moe_TK2H_M = {}  # layer s58: {M: W + 1}: tk2h GS16 + PF4 (SA only) at that M, 2-group weight (8 + W) / 8
 
 
+_moe_TK2F_BAL_M = set()  # moe n8 BAL: M values whose tk2f (84204 / NU8 85204, SA) runs balanced (cfg + 1000000)
+
+
 def _moe__tk2f_cfg(M, st):
+    return _moe__tk2f_cfg0(M, st) + (1000000 if M in _moe_TK2F_BAL_M and _moe_TK2SA and st["sa"] else 0)
+
+
+def _moe__tk2f_cfg0(M, st):
     sa = 100000 if _moe_TK2SA and st["sa"] else 0
     if _moe_TK2H_M.get(M) and sa:
         return sa + 40000 + (_moe_TK2H_M[M] - 1) * 1000 + 4
@@ -9063,7 +9091,7 @@ def _moe_kernel_fn(data, st):
             c = _moe__tk2f_cfg(M, st)
             lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
-            c5 = c % 100000
+            c5 = c % 1000000 % 100000
             if (80000 < c5 < 100000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
                 lib.moe_norm3_launch(y32, ids, tw, st["w1"], st["start"], st["count"], _moe_POST_NORM_EPS, out, st["cnt"])
                 return out
@@ -9679,6 +9707,9 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
         _moe_HOT_M.clear()
         if _opt(state, m, "hot", 0):  # moe s29: moe_hot (65..128-token experts in one N128 pass) on that many CTAs before moe_twm
             _moe_HOT_M[m] = _opt(state, m, "hot", 0)
+        _moe_TK2F_BAL_M.clear()
+        if _opt(state, m, "bal", TK2F_BAL_DEFAULT):  # moe n8 BAL (balanced tk2f phases, per-segment counters) at T=8/16/32
+            _moe_TK2F_BAL_M.add(m)
         _moe_TK2H_M.clear()
         if _opt(state, m, "tk2h", 0):  # s58: moe n6 tk2h (GS16 merged consumer + PF4) at T=16/32, value = 2-group weight W + 1
             _moe_TK2H_M[m] = _opt(state, m, "tk2h", 0)
@@ -10584,13 +10615,14 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                                                          float scale, const __nv_bfloat16* __restrict__ x,
                                                          float* __restrict__ out, int* __restrict__ ctr, int n, int k, int tail, int npre) {
     constexpr int NT = M / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * 768, XS = KC * 2 + 16, PBF = NWC * 16 * M;
-    static_assert(NA % AP == 0 && SPK % IS == 0, "config");
+    static_assert(SPK <= 32 && NA % AP == 0 && SPK % IS == 0, "config");
     extern __shared__ __align__(128) unsigned char smem[];
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
     float* pbuf = (float*)(smem + NS * SB + XB * M * XS);
     const unsigned bars = (unsigned)__cvta_generic_to_shared(pbuf + 2 * PBF);
     int* tag = (int*)(pbuf + 2 * PBF) + 2 * (2 * NS + 8);  // after the barriers. per slot: u | xb << 29 | last x use << 30 | run end << 31 (-1: no more work)
     int* ptag = tag + NS;                                 // per pbuf: tile (-1: consumers done)
+    int* tag2 = ptag + 2;  // proj s51 TAG2: per slot ks | st << 8 | tr << 13, written by the producer (no runtime div/mod in the consumers)
     // full[NS], empty[NS], xfull[2], xempty[2], pfull[2], pempty[2]
     const unsigned xfull = bars + 16 * NS, xempty = xfull + 16, pfull = xfull + 32, pempty = xfull + 48;
     // s57 (layer): npre bit 16 = trigger the PDL dependent at start (the boundary after the unpool: its pre-wait loads
@@ -10622,6 +10654,7 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                     const int st = ra % SPK;
                     const bool xl = ra + 1 == rb || (ra + 1) / (ntr * SPK) != ks0;
                     tag[i] = ra | (xl ? 1 << 30 : 0) | (ra + 1 == rb || st + 1 == SPK ? 1 << 31 : 0);  // x buffer 0
+                    tag2[i] = ks0 | st << 8 | ((ra % (ntr * SPK)) / SPK) << 13;
                     bar_expect(bars + 8 * i, SB);
                     bulk(ring + i * SB, WP + (long)ra * SB, SB, bars + 8 * i);
                 }
@@ -10655,6 +10688,7 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                     const bool xl = u + 1 == rb || (u + 1) / (ntr * SPK) != ks;
                     if (xl) xks[xb] = -1;  // released by the consumers after this stage: reload even if the next run has this ks
                     tag[slot] = u | xb << 29 | (xl ? 1 << 30 : 0) | (end ? 1 << 31 : 0);
+                    tag2[slot] = ks | st << 8 | ((u % (ntr * SPK)) / SPK) << 13;
                     const unsigned full = bars + 8 * slot;
                     bar_expect(full, SB);
                     bulk(ring + slot * SB, WP + (long)u * SB, SB, full);
@@ -10724,7 +10758,7 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
         if (tg == -1) break;
         const int u = tg & 0x1FFFFFFF, xb = (tg >> 29) & 1;
         const bool end = tg < 0, xl = (tg >> 30) & 1;
-        const int ks = u / (ntr * SPK), r = u % (ntr * SPK), tr = r / SPK, st = r % SPK;
+        const int t2 = tag2[slot], ks = t2 & 0xFF, st = (t2 >> 8) & 31, tr = t2 >> 13;
         if (prev_xl) {  // first stage of an x use: wait for it
             bar_wait(xfull + 8 * xb, xph[xb]);
             xph[xb] ^= 1;
@@ -10962,7 +10996,7 @@ torch::Tensor g19_trace() {
 void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out, torch::Tensor ctr,
               int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode, int64_t npre, int64_t xb) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
-    const int sm = ns * g19::NWC * ap * 768 + xb * m * (kc * 2 + 16) + 2 * g19::NWC * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
+    const int sm = ns * g19::NWC * ap * 768 + xb * m * (kc * 2 + 16) + 2 * g19::NWC * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8 + 4 * ns;
     TORCH_CHECK(n % (16 * g19::NWC) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0) && (npre & 0xffff) <= ns, "g19: shape");
     auto stream = c10::cuda::getCurrentCUDAStream();
     if (!mode) g19::zero<<<32, 256, 0, stream>>>((float4*)out.data_ptr(), m * n / 4, ctr.data_ptr<int>());
@@ -13920,7 +13954,7 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); rg (bool) RG (s52); tk2h (int) moe n6 tk2h GS16+PF4 at T=16/32, 2-group weight W + 1 (s58); nu8d (bool) NU8_D (s59); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); rg (bool) RG (s52); tk2h (int) moe n6 tk2h GS16+PF4 at T=16/32, 2-group weight W + 1 (s58); nu8d (bool) NU8_D (s59); bal (bool) moe n8 BAL tk2f (s61); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
@@ -13928,13 +13962,13 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
-             {"tk2h": 3}, {"tk2h": 4}),
+             {"tk2h": 3}, {"tk2h": 4}, {"bal": True}, {"bal": False}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
              {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
-             {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}),
+             {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
@@ -13954,8 +13988,8 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 # s35: per-(T, sliding) defaults under the tuner (the tune pick overrides them; {} = these): the picks both logged H200
 # tuners of 909010f (0f065691, 703d3a7e) agreed on, so a noisy judge tuner can't fall back to the slower setting.
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
-TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True},
-             (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
+TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True, "bal": True},
+             (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s61: T=16 sliding moe n8 BAL (H100 real routings 4 seeds -2.6 us mean); s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
@@ -14243,6 +14277,9 @@ NU8_D = True  # s59 NU8D: per-slot partials, the post-expert norm scales applied
 # H100 ab_flag 6 rounds ABBA x 3 seeds (tuner off) vs X: v1 sliding -0.6..0.9, full -0.4..0.6 us (nu8 -0.7, boundary +0.6)
 
 
+TK2F_BAL_DEFAULT = False  # moe n8 BAL at T = 8/16/32 (TUNE option "bal")
+
+
 def _nu8_d(state, tokens):
     return _opt(state, tokens, "nu8d", NU8_D)
 
@@ -14251,6 +14288,9 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
     """T = 8: moe_tk2f (PF 20) -> nu8: the unpool slice as FP32 split-K slabs [D_EXPERT / NU8_KB, 8, 1024]. y32 [65, 4096]:
     row 64 (the slots' sums of squares) was zeroed by the pre-expert _rmsnorm_gain."""
     st = state["moe"]
+    _moe_TK2F_BAL_M.discard(8)
+    if _opt(state, 8, "bal", TK2F_BAL_DEFAULT):  # moe n8 BAL
+        _moe_TK2F_BAL_M.add(8)
     lib = st["lib"]
     dev = x.device
     meta = torch.empty(132, dtype=torch.int32, device=dev)

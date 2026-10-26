@@ -3218,6 +3218,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
                                              int& ph, int& rb) {
   constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152;
+  constexpr bool BAL = (PF & 32) != 0;  // moe n8 BAL: per-segment counters cnt[64 + j]
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   uint4 xf[NQ][2];
   int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0, ci = 0;
@@ -3234,7 +3235,13 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       off = s_off[e] + gi * 8;
       n = min(8, s_off[e + 1] - off);
       ci = a * 4 + gi;
-      if (!GATED && !((PF & 2) && R != r0)) {  // all gemm13 rows written (by any CTA): see moe_tk2f. PF & 2 (s13): only
+      if (BAL && !GATED) {
+        const int* cp = cnt + 64 + seg_start / RPE;
+        int c;
+        do {
+          asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cp) : "memory");
+        } while (c < 2 * RPE);
+      } else if (!GATED && !((PF & 2) && R != r0)) {  // all gemm13 rows written (by any CTA): see moe_tk2f. PF & 2 (s13): only
         int c;                                    // at the CTA's first gemm2 row (cnt never decreases within a call)
         do {
           asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt) : "memory");
@@ -3347,7 +3354,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
         if (tid == 0) {
           __threadfence();
-          atomicAdd(cnt, R + 1 - max(seg_start, r0));
+          atomicAdd(BAL ? cnt + 64 + seg_start / RPE : cnt, R + 1 - max(seg_start, r0));
         }
       }
     } else if (NC == 8 || ct < 256) {
@@ -4111,6 +4118,11 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       b1 = tk2g_split(blockIdx.x + 1, nact, D, 128, s_e, s_off);
     }
   }
+  if (PF & 32) {  // moe n8 BAL: gemm13's extra rows (n13 % G) on the LAST CTAs, gemm2's (n2 % G) on the FIRST ones
+    const int G = gridDim.x, b = blockIdx.x, q1 = n13 / G, e1 = G - n13 % G, q2 = n2 / G, e2 = n2 % G;
+    a0 = b * q1 + max(0, b - e1); a1 = a0 + q1 + (b >= e1);
+    b0 = b * q2 + min(b, e2); b1 = b0 + q2 + (b < e2);
+  }
   int st = 0, ph = 0;
   if (warp == NC) {
     if (lane == 0) {
@@ -4203,12 +4215,21 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
     (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
     cnt_.data_ptr()
+  const bool bal = cfg >= 1000000;  // moe n8: + 1000000 = BAL (PF | 32; SA pf 4 / 5 only)
+  cfg %= 1000000;
   const bool sa = cfg >= 100000;  // + 100000: SA (arithmetic scale decode; prepare() checked the scales)
   cfg %= 100000;
   if (cfg > 80000 && cfg < 100000 && cfg % 1000 == 204) {  // s13 PF = cfg / 1000 % 10: 1 = L1 prefetch of the next segment's
     // x one row ahead, 2 = gemm2's counter spin only at the CTA's first gemm2 row, 4 = y32 in route slot order, pre-scaled
     // by gs2 * 256 (then moe_norm3 instead of moe_norm2), 8 = 2 accumulator chains per tile; built: 1, 2, 3, 4, 7, 12
     const int pf = (int)(cfg - 80000) / 1000;
+    if (bal && sa && pf == 4) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 36>(0, TK2F_ARGS0);
+#ifdef MOE_BAL_NU8
+    if (bal && sa && pf == 5) {
+      TORCH_CHECK(nr == 64 && y_.size(0) >= 65 && g_ssw1 != nullptr, "tk2f PF 52: shape");
+      return tk2f_go<8, 4, 2, false, false, true, 8, 0, 52>(0, TK2F_ARGS0, nullptr, g_ssw1);
+    }
+#endif
     if (pf == 12) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 12>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 12>(0, TK2F_ARGS0);
     if (pf == 4) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 4>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 4>(0, TK2F_ARGS0);
     if (pf == 7) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 7>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 7>(0, TK2F_ARGS0);
@@ -4762,7 +4783,14 @@ TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_spli
 TK2H_M = {}  # layer s58: {M: W + 1}: tk2h GS16 + PF4 (SA only) at that M, 2-group weight (8 + W) / 8
 
 
+TK2F_BAL_M = set()  # moe n8 BAL: M values whose tk2f (84204 / NU8 85204, SA) runs balanced (cfg + 1000000)
+
+
 def _tk2f_cfg(M, st):
+    return _tk2f_cfg0(M, st) + (1000000 if M in TK2F_BAL_M and TK2SA and st["sa"] else 0)
+
+
+def _tk2f_cfg0(M, st):
     sa = 100000 if TK2SA and st["sa"] else 0
     if TK2H_M.get(M) and sa:
         return sa + 40000 + (TK2H_M[M] - 1) * 1000 + 4
@@ -4799,7 +4827,7 @@ def kernel_fn(data, st):
             c = _tk2f_cfg(M, st)
             lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
-            c5 = c % 100000
+            c5 = c % 1000000 % 100000
             if (80000 < c5 < 100000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
                 lib.moe_norm3_launch(y32, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out, st["cnt"])
                 return out
