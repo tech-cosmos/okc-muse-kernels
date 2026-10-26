@@ -1,19 +1,23 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~02:40Z (end of session 8).
+Updated 2026-10-26 ~03:55Z (end of session 9).
 
 ## Board
-- **Best scored: be766193 = v26 (45bb3ef), 1.927x, 11.74 ms/step (2026-10-26 ~02:10Z).** Board #1 2.360x, #10 2.167x
-  (10-26 01:20Z). Check d3c8c88d (v26) 1.9152x.
-- main = v29 (9199ea7) = v26 + pooler split-K bmm at T=16/32 (H100 d16/d32 -2.3 us): check 0092b908 1.9492x, scored
-  3fca3609 1.9139x (noise). Do not resubmit unchanged.
-- Budget 2026-10-26: 5 submits (81e501e9, ca8f833a, dae762e4, be766193, 3fca3609), 6 checks used (02:50Z).
-- v26 scored per shape (H200 us sliding/full; SGLang in brackets): d1 75.9/83.3 (173/183), d16 152.1/234.1 (261/442),
-  d32 194.1/339.6 (271/618), v1 121.5/130.8 (261/268), v16 283.0/365.2 (554/716), v32 371.9/547.4 (728/1091).
-  Judge noise: identical code moves up to 4% per shape; total ~+-1%.
+- **Best scored: e5512e00 = v33 (bb6fb77), 1.9459x, 11,624 us/step (2026-10-26 ~04:00Z), overall #52.** Per shape:
+  d1 73.5/82.0, d16 149.9/238.6, d32 187.7/323.8, v1 118.8/131.5, v16 282.8/363.1, v32 361.3/533.9.
+  Board #1 2.360x, #10 2.167x (10-26 04:00Z). Previous best be766193 (v26) 1.927x.
+- main = v33 (bb6fb77) = v29 + moe e8d47eb (SA) + proj router3 at T=128 (v32) + KV_PF (qkv gemv13 L2-prefetches the
+  d1 sliding KV window). Checks: 50cb4a5b (v32) 1.930x; **6aaff5a2 (v33) 1.9377x, 11,674 us**: d1 73.2/85.2,
+  d16 148.1/229.6, d32 177.3/309.3, v1 120.2/131.7, v16 264.6/348.6, v32 357.0/537.2 (H200 us sliding/full).
+- Budget 2026-10-26: submits 81e501e9, ca8f833a, dae762e4, be766193, 3fca3609 e5512e00 (6 of 9); checks 8 used (~04:00Z).
+- SGLang per shape (H200 us sliding/full, moves 2-3% between runs): d1 171/182, d16 257/436, d32 260/618, v1 257/268,
+  v16 502/680, v32 681/1046. Judge noise: identical code moves up to 4% per shape; total ~+-1%.
 - Scoring: geomean over 6 loads, each = 46 sliding + 16 full layers: 1 us on d1 sliding = +0.16% total, v1 +0.10%,
   d16 +0.07%, d32 +0.05%, v16 +0.04%, v32 +0.03%.
 - Floors (us): d1 40/44, d16 77/137, d32 85/208, v1 62/66, v16 127/189, v32 144/267.
+- Routing robustness (lead 01:45Z): DONE s9: tools/route_judge.py (judge-like graph replay on fresh inputs) 0/900
+  fails; our margins = the FP8-query reference's own (attention's FP8 queries dominate; glue adds nothing). Details
+  NOTES s9. Rerun it after any change upstream of the router: `python tools/route_judge.py <file> 25 11,12,13 [filter]`.
 
 ## Code (muse_decode_layer/)
 - `layer.py` = the layer. Inlined by **`python build.py` -> submission.py** (never edit submission.py by hand):
@@ -23,7 +27,9 @@ Updated 2026-10-26 ~02:40Z (end of session 8).
   m=8), `g13_src.cu`/`g14_src.cu` = proj gemv13 (m=1)/gemv14 (m=8) over lossless 12-bit BF16 (r-proj 3f173eb, bit-exact escape headers; packs `_pack13/_pack14` in `_g12_prepare`, used for qkv+pooler (G13_CFG/G14_CFG) when the weight compresses, built in `_g10_lib`), `lt_src.cu` = proj cuBLASLt explicit-algo GEMM (LT_CFG fixed H200 picks, `_lt_prepare`); layer.py `_g10_lib` builds g10/g12 in one load_inline and text-patches them (PDL trigger, PDL-secondary launch).
   Re-copy: `git -C ~/r-moe show <c>:muse_moe_w4a16/submission.py > moe_src.py` (check the 68-int route meta
   matches `_moe_bucket`, and that the patch anchors in layer.py/build.py still match: asserts fire at import).
-- Router: T=1 `_router_fma` (Triton FP32), T=8 `r3_router` (CUDA FP32, in `_g10_lib`), T>8 `_router_split` (SGLang hi/lo BF16).
+- Router: T=1 `_router_fma` (Triton FP32), T=8 `r3_router` (CUDA FP32, in `_g10_lib`), T=128 proj `pj_router3` (`pr3_src.cu`,
+  PR3_CFG; hi/lo one kernel, atomics), other T>8 `_router_split` (SGLang hi/lo BF16).
+- KV_PF (T=1 sliding): `_linear(..., kv_pf=)` passes page_table[0, -2049:], k/v cache to the text-patched g13 (`_g10_lib`).
 - Pipeline: qkv `_linear` (gemv10 T=1, gemv12 T=8, cuBLASLt pick at T=128/256, else cuBLAS) -> attn -> o `_linear` -> `_boundary` -> side stream:
   router + `_routing` || pooler `_linear` -> `_rmsnorm_gain` -> experts (`_moe_kernel_fn`: tk2 at T<=32, route+gather+
   moe_tw at T>32) -> unpool `_linear` (1024-row slice at T<=8; gemv17 `_G17_SRC` at T=1/8) -> `_boundary`.
@@ -48,19 +54,23 @@ Updated 2026-10-26 ~02:40Z (end of session 8).
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
-0. Watch r-moe / r-proj Handoffs; re-copy + rebuild + test (+ tools/tk2f_stress.py, tools/n2u_eq.py) + interleaved
-   bench vs variants/sub_v26.py + check. Only submit on a check beating the board by more than noise. NOTE: the layer
-   now calls moe_tk2f_launch directly at T=1 (`_experts_n2u`) and reimplements moe_norm2 in `_N2U_SRC`: when moe
-   changes tk2f's args, y32 layout or norm2 math, update both.
-1. Experts are 50-60% of every T>=16 shape: moe's lane. proj's compressed m16/m32 GEMM (requested s8): cuBLAS is 63 of
-   182 us at d32 sliding (H200).
-2. d1 (worth the most per us): critical path H100 = qkv 13 -> csl 7 -> o -> boundary (ends 28) -> router 5 / pooler starts
-   3.4 us late (19 us) -> rmsnorm -> tk2f 36 -> n2u 7.5 -> boundary (2 us tail). Ideas: router rows inside the pooler
-   kernel (one launch, ~-3 us), rmsnorm into tk2f's x staging (moe).
-3. v1: tail tk2f -> norm2 4.6 -> g17 7 -> boundary (~14 us). n2u doesn't scale to 8 tokens (1 MB of y32 per block).
-4. Routing risk: diag check f5fdc570 once failed a timed rep's routing (3.18e-2 > 0.03). Not seen since.
+0. Watch r-moe / r-proj Handoffs (proj gemv18 = compressed m16/m32 in progress; moe tk2f T=16/32); re-copy + rebuild +
+   test (+ tools/tk2f_stress.py, tools/n2u_eq.py, tools/route_judge.py) + interleaved A/B (/tmp-style: two subs in one
+   process, 5 rounds; separate-process bench drifts +-1 us) + check. NOTE: the layer calls moe_tk2f_launch directly at
+   T=1 (`_experts_n2u`, cfg + 100000 for SA) and reimplements moe_norm2 in `_N2U_SRC`: update both when moe changes.
+1. Pooler + router (+ top-8) in ONE kernel at T=1 and T=8 (layer-owned, the best lever left in the glue): today the
+   router's CTAs fill every SM's register file, so the pooler starts 3.4 us (d1) / 5 us (v1) after the boundary and
+   the two run at ~2.5 TB/s instead of ~3.2 (H100). Plan: one grid, blockIdx role split (~110 pooler g13/g14 blocks +
+   ~22 router2-style FP32 blocks, 1 block/SM, one wave), the last router block (atomic ticket) does the top-8 +
+   weights (_routing) while the pooler streams. Estimate d1 -2..3, v1 -3..5 us (+0.5..1%).
+2. d1 tail: n2u/boundary ~-1.4 us if the 8 MB unpool slice were in L2 (needs evict_first on moe's bulk copies +
+   evict_last prefetch in an HBM-idle window): ask moe first.
+3. Experts are 50-60% of every T>=16 shape (moe), cuBLAS GEMMs ~87 us vs ~61 BF16 floor at d32 (proj).
+4. v1: tail tk2f -> norm2 4.7 -> g17 7 -> boundary (~14 us). n2u doesn't scale to 8 tokens (1 MB of y32 per block).
 
 ## Dead ends (details in NOTES)
+- s9: router3 at T=16/32 (+1..3 H100, crowds the pooler bmm); ROUTER_L2_PF (1,)/(8,) (noise); T=8 pooler g14 on 64
+  fat blocks (+2..6); KV_PF at v1 (vtk barely gains from warm KV).
 - s8: boundary as n2u's last-block epilogue (+2.7); n2u PDL after tk2f (+2..3); moe_norm2 PDL after tk2f (g_pdl 6:
   +1.1..1.4); bmm split-K for o/unpool at T=16/32 (+0.3..0.6); pooler bmm at T=128/256 (noise). RACE: gemv17 PDL
   secondary of norm2 at T=8 fails test 8 on repeats (unexplained; off).

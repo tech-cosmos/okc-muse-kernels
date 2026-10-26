@@ -306,3 +306,8 @@
 - v1 front (H100 timeline): r3_router's 256 x 512-thread blocks (64 regs) fill every SM's register file, so the
   pooler g14 (128 x 1024 threads, 61 regs: a whole SM each) starts only as router blocks drain: 5 us after the
   boundary. Fusing the router rows into the pooler kernel would fix it (~-3 us v1).
+- check 6aaff5a2 (v33, bb6fb77) **1.9377x, 11,674 us**: d1 73.2/85.2, d16 148.1/229.6, d32 177.3/309.3, v1
+  120.2/131.7, v16 264.6/348.6, v32 357.0/537.2. -> submit e5512e00 **1.9459x, 11,624 us** (new best; was be766193
+  1.927x; overall #52): d1 73.5/82.0, d16 149.9/238.6, d32 187.7/323.8, v1 118.8/131.5, v16 282.8/363.1, v32
+  361.3/533.9.
+- Next big layer-owned item (STATE Next 1): pooler + router (+ top-8 by the last router block) in one kernel at T=1/8.
