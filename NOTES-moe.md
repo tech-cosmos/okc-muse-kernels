@@ -1013,3 +1013,32 @@
   T=8 -> PF 20 path, BAL not built there). d32 (tools/n8/ab_st.py: tk2h removed from the tuned state vs BAL vs tk2h 4):
   BAL LOSES, sliding +1.5..11.6 vs plain tk2f (noisy, shared GPU), full mixed. => BAL at T=16 only.
 - Handed to layer (COORD Requests): apply the patch, add {"bal": True} to the T=16 TUNE candidates (the H200 tuner decides).
+
+## Night4 session 9 (2026-10-26 21:27Z - ~22:15Z, no judge runs: moe checks 20/20 until 00:00Z) -- H200 HBM-ceiling probe in the DIAG
+- Added moe_stream (r-moe 804b9f5): a bulk-copy ring kernel (1 producer lane + 1 warp that only waits full / arrives
+  empty, 64 threads, NSTG 3/4/8) streaming a host-built copy list; `_diag_stream` (DIAG_STREAM = True, DIAG builds
+  only) times it on the DIAG's 30 layer routings, cold L2, graph replay, 20 reps; prints `diag9s <load> s<seed> <v>`
+  and `diag9s MEAN <load> <v>: t us, TB/s over UNIQUE bytes` (distinct experts x 28.3 MB). Variants:
+  tkp = tk2f's exact copy pattern (rows of 4 stages x {W 8K, W 8K, S 2K} from 3 regions, one pass per 8-token group,
+  gemm13 rows then gemm2 rows, count split, NSTG 4); uq / uq8 = each expert once (NSTG 4 / 8); uqk4 = KPS 4 shape
+  (16K/16K/4K); sq16/sq18/sq18x8/sq32/sq36/sq64 = contiguous single-copy stages of that size. Default build unchanged
+  (the kernel + launcher are compiled in but only the DIAG calls them); bench test PASS. DIAG dry run: seconds.
+- H100 (full grid, MEAN of 5 seeds, us; tk2f gs8 = main from diag12 on the same routings):
+           gs8    tkp    uq     uqk4   sq18   sq32   sq64
+    d1     36.1   29.5   29.4   27.8   29.2   27.7   27.3
+    d16    82.6   80.6   76.3   71.5   75.1   71.3   70.2
+    d32   105.1  104.1   97.0   91.3   94.8   90.6   89.4
+    v1     84.3   80.4   80.0   75.0   78.3   74.5   73.4
+    v16  196.9*  271.8  172.2  166.4  169.8  165.7  163.4   (* twm off; tkp is meaningless at big M)
+    v32  243.5*  421.0  190.7  184.8  186.8  183.4  181.0
+  Reading (H100): tk2f runs AT its own copy pattern's rate (d16 82.6 vs 80.6, d32 105 vs 104): DRAM-bound as known.
+  The stream rate depends on bytes per bulk copy: 8 KB copies (KPS 2) ~6% slower than 16 KB+ (uqk4 ~ sq32); one 18 KB
+  copy ~ three copies 8/8/2 (sq18 vs uq, 1.5%). Multi-group re-reads (tkp vs uq) cost d16 +4, d32 +7 us without hints.
+- DEAD (H100, bitwise = main): tk2f KPS 4 in the real kernel (cfg 84404 / 84403 / 404 at M = 1, PF 4): d1 +2.2 / 0,
+  d16 +5.8 / +2.9, d32 +4.2 / +1.8, v1 +4.3 / +2.0 us (NSTG 4 / 3). With the older H200 result (diag 619ad6ad: 403
+  +0.8, 402 +3 at d32) KPS 4 is closed: the stream's 16 KB preference does not carry into tk2f. Code reverted.
+- 00:00Z: the DIAG check now also prints diag9s. What to read: on the H200, (a) tkp vs gs8 per decode load = how far
+  tk2f is from its own copy pattern (consumer cost; the H100 shows ~2 us = fixed costs only); (b) sq64 TB/s = the
+  achievable HBM read rate on these routings (the real floor for the layer's budget, instead of 4.0 TB/s);
+  (c) uq vs sq32/uqk4 = what a repack to bigger copies could give if (a) is small. If tkp ~= gs8 and sq32 >> uq on
+  the H200, a single-copy 36 KB-stage repack of w13/w2 with KPS 2 consumers (stage = 2 rows' chunks) is the next build.
