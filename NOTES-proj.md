@@ -734,3 +734,18 @@
 - Bitwise: decode 1 outputs identical to base (tools/files_eq.py, 3 seeds); tests 13/13 on every variant.
 - Dead: pr1_npf 4/8 WITH evict_last: d1 +0.7..+6 us (pinning pooler chunks hurts, like plain npf).
 - Handoff: dev/s31/pr1_evl_layer.patch (site 0, pr1_src.cu, `git apply` in r-layer), optional all sites via pf_last.py.
+
+## Session 32 (2026-10-26 15:03-16:00Z): evict_last on all layer L2 prefetches, rebased to layer v77/v78 + KV_PF hint
+- No judge runs (proj checks 20/20). /tmp copies of r-layer v77 (b66a869) and v78 (5c27e0a), TUNE = {} appended to every
+  file, tools/ab_files.py interleaved, H100 medians us. New tool dev/s32/pf_all.py (any prefetch site in the file, by index;
+  `list` prints them): 0-3 attention O_PF (3 kernels), 4 moe twm prefetch_l2 (left alone), 5 Triton boundary PF, 6-14 = s31's
+  pf_last sites (6 pr1 router W, 7-8 pr1 npf, 9 g10 o, 10 g17, 11-12 upf, 13 n2u, 14 nu8). Plus KV_PF (g13's
+  `prefetch.global.L2` of the d1 sliding KV rows) -> `prefetch.global.L2::evict_last` (the 28 MB qkv stream runs between).
+- v77, 5 rounds (two runs): A base / B site 6 / C sites 6-14 / D = C + KV_PF evict_last / E = D + O_PF + boundary:
+  d1 sl 88.43 87.71 87.18 86.90 87.12 | 88.05 - 87.07 86.56 86.54; d1 full 108.77 107.86 107.70 107.66 107.98 | 108.40 - 107.62
+  107.81 107.86. d16/d32 (A C D E): all within +-1 (E +0.5..1.6 at d16: O_PF hint dead). verify (A C D): noise (+-0.8).
+- v78, 6 rounds, A vs D: d1 sl 88.72 -> 86.69, full 107.81 -> 106.94, v1 sl 149.36 -> 148.58, full 160.88 -> 161.04.
+  Est. layer score ~+0.3% (d1 weights .161/.056 per us).
+- Correctness: bench.py test 13/13 (v77+D and v78+D), scored_test all shapes x2 seeds 0 bad, replay decode 1/16 0/20,
+  files_eq d1 bitwise identical x3 seeds (v1 diffs = the base's own nondeterminism, orig vs orig shows the same).
+- Handoff: dev/s32/evl_all_layer.patch (layer.py + pr1_src.cu on r-layer 5c27e0a; then build.py). Supersedes s31's patch.
