@@ -94,9 +94,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   the gemm2 counter spin), (b) the weighted split tk2g_split cost 1.8-4.1 us per call (64-bit loops in every thread).
   (b) fixed: tk2g_bound (warp 0, TK2G_PAR 1), bitwise. G88 proxy d32 h16w3 114.6 vs main 120.6 proxy-us, d16 tie.
 - The proxy misjudged the GS16 weight before (NOTES n4s5): only the H200 decides. Queued in the DIAG below: h16w0/2/3/4.
-- If the DIAG shows h16 within ~2 us of gs8 at d32: 2nd check = `python muse_moe_w4a16/tools/n4s5/mktl_h.py;
-  okc check /tmp/moe5tl/submission.py --json` (grep diagth: per-CTA ph1end/wait/end on the H200) to pick the weight.
-  PF 4 port + layer port: DONE n6.
+- If the DIAG shows h16 within ~2 us of gs8 at d32: 2nd check = tools/n4s5/mktl_h.py (diagth timeline, NOTES n4s5).
 
 ## Night4 session 3 (19:31-20:05Z, no judge runs) -- r-moe 1f3b71b
 - TK2F_L2H_RT (python, None = #define 4): run-time tk2f L2 hint mode via cfg + 1000000 * (mode + 1) (PF | 64 copies of
