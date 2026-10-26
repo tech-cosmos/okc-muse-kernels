@@ -71,21 +71,17 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 30 (no judge runs): DIAG_VARIANTS on main = moe_hot H200 queue (off/h24/h32/h40/h32o76/o76); local run v32
+off 253.3 -> h32 236.7 us (H100 full grid), bitwise. Proxy: with hot on, o76/o4/split66 tie, tail32 +2.6. Layer v87 has hot 32.
+NEXT (new sandbox): FIRST moe check = this DIAG (sed DIAG = 1 into a /tmp copy; NOTES s30). Then: no moe-local idea is left
+with size on the H100 (NOTES s30); ask lead/layer for an overlap item (expert stream during attention/routing) to own.
+
 ## Session 29 (no judge runs): moe_hot BUILT (r-moe main, HOT_M default {} = board unchanged). Layer: _moe_HOT_M = {256: 32}
 + 2 function names (tools/s29/README, hot_moe_src.diff). Bitwise = off; 48 skewed routings 0 bad. Layer copy H100: v32 sliding
 395.2 -> 387.4, full 646.3 -> 644.0 us; H200 proxy (HOT_EMU queued-CTA emulation) -18 proxy-us (~-13 H200 us). NOTES s29.
 NEXT: H200 DIAG (moe check) of HOT_M {256: 24/32/40} on the layer routings (DIAG_VARIANTS = python globals: works), or let
 the layer's tuner pick it as a T=256 option. Then: same idea at the 33..64-token experts (N64 RT2 passes already single)?
 no: those are one pass already. Next lever: the twm drain at v16/v32 (STATE idea -5).
-
-## Session 28 (no judge runs): hot-expert single pass is FEASIBLE (H100 microbench, NOTES s28): RT2 N128 with real streams
-= 1142 cyc per 8 KB vs 1454-1541 for twm's 2 passes of a 73-97-token expert (-21..26%); est. -5..7 H200 us at v32 (~0.25%).
-Needs its own launch (2 N variants in one kernel serialize wgmma; 128 acc regs > twm). x multicast not needed. Design in NOTES s28.
-NEXT (new sandbox): build moe_hot<128> + twm skipping hot experts (PDL chain hot -> twm -> norm) at T=256; H200 DIAG.
-
-## Sessions 26-27 (no judge runs): UPF4 (unpool W L2 prefetch from twm) DEAD (v16/v32 +1.4..10 H100 us). s27 RFLAG (T=1
-tk2f launched during pr1, spins on a routing flag pr1 stores; tools/s27/rflag_patch.py): H100 d1 -0.1..-0.4 us only, parked
-(cross-kernel spin risk > 0.05%); RSPLIT (more gemm13 rows for early CTAs) dead +1.4..10 us. NOTES s26/s27.
 
 ## Session 25 (15:26Z, paper only; no code, no judge runs): what is left, valued by layer score
 Judge layer profile 703d3a7e (H200, us): tk2f d1 28.7/21.2 (incl. PDL overlap), d16 69.7/44.1, d32 82.6/93.5, v1 62.4/83.8;
@@ -97,16 +93,12 @@ Remaining moe ideas, all needing H200 time (next sandbox; moe checks = H200 DIAG
     Saves the gemm13->gemm2 barrier/tail (~1.5 us) minus the partial reduce (~0.8 us): est. net <1 us d1 => <0.15%. Low value.
  c. Everything else in Ranked ideas is measured dead or <0.1%.
 
-## Sessions 22-24 (summaries in NOTES s22/s23): big-M dq-bound, TK2F_L2H 4 = 1 in layer (tie)
 ## Session 21 summary (L2 cache hints on the expert weight streams; NOTES s21)
 - main = b32928b: TK2F_L2H = 4 (tk2f: evict_last on every row of an expert with > 8 tokens, evict_first on the rest)
   + TWM_L2H = 1 (moe_twm: evict_last if a later pass re-reads, evict_first else). Bitwise unchanged. H100 ncu: tk2f
   DRAM bytes at d16/d32 = floor (was +12% when an expert's 2nd 8-token group re-read from HBM). Layer harness copy
   (H100): v1 -4..-6, d16 -3..-4 full, v16 -3..-4, d1 -0.5, d32/v32 0 us. Handoff posted (tools/s21/patch_layer.py 4 1).
 - Dead: the same hints in moe_twq (v16 +7 us). Untested on the H200 (no checks left today).
-- NEXT: judge-verify via the layer's first check (or a moe DIAG check: DIAG_VARIANTS cannot switch compile-time
-  macros; build a DIAG copy with TK2F_L2H 0 vs 4 as two libs if needed). Then: evict_first/evict_last hints elsewhere
-  (layer's own streams, proj GEMVs: Requests), x/inter loads in tk2f (ld.global with L2::evict_last for inter?).
 
 ## Ranked ideas
 -9. (s19) grid-aware twm tail by K-split: DONE s20, tie (halves) / dead (quarters). Tail needs cheaper items, not finer.

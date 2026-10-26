@@ -803,3 +803,19 @@
   replay_test 4 inputs x rs 3 0/8 fails. The layer tuner (skewed synthetic T=256 loads, H100) with hot on: default full
   619.6 vs 655.4 us with hot off (s29 first A/B run), and it then picks {'twf_split': 66, 'twm_order': 76}.
 - COORD: Handoffs + Requests (layer: patch + 2 names + _moe_HOT_M = {256: 32}) posted 16:43Z.
+
+## Session 30 (2026-10-26 16:44Z - 16:52Z) -- moe_hot follow-ups (no judge runs: moe checks 20/20)
+- H200 proxy (HOT_EMU 32 build, MOE_GRID 88, 3 rounds x 5 layer v32 routings, H100 us): off 302.0 | hot G32 285.2 |
+  + o76 285.9 | + o4 285.8 | + split66 285.6 | + split66 o76 286.4 | + tail32 287.8. With hot on, the other twm options
+  tie (+0.3..1) or lose (tail32 +2.6): moe_hot already removes what o76/split were trimming (the hot experts' 2nd passes).
+- DIAG_VARIANTS on main now = the moe_hot H200 A/B queue (off / h24 / h32 / h40 / h32o76 / o76 / offb). Local H100 run
+  of exactly that DIAG (/tmp copy, DIAG = 1, full grid, 2 runs): v32 off 253.3 | h24 251.5 | h32 236.7 | h40 237.2 |
+  h32o76 237.0 | o76 242.9 | offb 251.5 us; v16 all 200-201 (no hot experts at T=128: = off). 180/180 outputs bitwise = off.
+  Next sandbox, FIRST moe check: `sed 's/^DIAG = 0$/DIAG = 1/' submission.py > /tmp/x/submission.py; okc check
+  /tmp/x/submission.py --json`, then grep "diag12 MEAN" in profiles/submission.<job>.log. It settles hot G (layer v87
+  runs hot 32 at T=256 with 0/24/40 as tuner candidates) on the H200 for the moe part alone.
+- layer s44 (v87, r-layer 1b9743e) took moe_hot: H100 tuner hot0 vs hot32 v32 sliding +14, full +11 us.
+- Re-read s12-s29 for anything H100-testable with size: nothing left (big-M tail: K-split halves tie / quarters lose /
+  RT2 tail loses; dq has no cheaper decode on sm_90 (no e2m1 cvt), scale cannot leave the per-stage path; tk2f phase-2 gap
+  is accounting; barrier-free d1 <0.15%). The remaining lever classes need the H200 (hot grid, order) or a design change
+  of the layer (overlap expert streams with non-HBM phases), not moe-local tuning.
