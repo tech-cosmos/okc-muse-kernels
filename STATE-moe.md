@@ -33,7 +33,6 @@ in tk2f_consume and tw_item (moe_twf) when prepare() found every scale positive 
 moe_twf's choice is a host flag (moe_set_sa, set in kernel_fn). TK2FN = 0: fused norm (moe_tk2fn_launch) kept, dead.
 M <= 32 (decode, bs8): 2 launches, moe_tk2f (gemm13 rows then gemm2 rows in ONE persistent launch: one routing
 prologue, the ring continues, so the producer streams w2 while gemm13 drains) + moe_norm2.
-- s8: template <NC, NSTG, KPS, DYN>; KPS = k chunks per consumer warp per ring stage (stage = NC*KPS*1152 B).
   Launch cfg = (D+1)*1000 + KPS*100 + NSTG (tk2f_go dispatch in moe_tk2f_launch). Defaults: TK2F = TK2F_DYN = 204 (static, all M:
   the submitted code); DYN = cfg 5402 (judge: no gain, check b890d69b). KPS 2/4 cut per-stage overhead: H200 -3..4% at bs8-32 (check 74a049c0);
   locally the H100 is DRAM-bound (ncu dram 83%) and shows nothing: use smsp__inst_executed (tools/ncu_tk2f.sh) as proxy.
