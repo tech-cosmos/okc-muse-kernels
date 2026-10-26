@@ -1,6 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 21:05Z (s57): **main = v94 = v92 + BND_SEP at T=8 (v93: second boundary loads nu8's 8 slabs as an [8,1024] tile;
+Updated 2026-10-26 20:40Z (s57): **main = v94 = v92 + BND_SEP at T=8 (v93: second boundary loads nu8's 8 slabs as an [8,1024] tile;
 H100 v1 -1.0/-1.1 us) + G19_TRIG (v94: g19 unpool/o trigger PDL at start, both boundaries their PDL secondaries at T=16/32;
 H100 d16 -1.1..2.8 sl / -1.0 full, d32 -1.6 / -1.4 us; TUNE {g19trig: False} at T=16/32)**. NOT judge-checked.
 First check after 00:00Z = main v94 (look at 'layer tune T=16/32' g19trig lines). Persistent experts->norm2->unpool->boundary
