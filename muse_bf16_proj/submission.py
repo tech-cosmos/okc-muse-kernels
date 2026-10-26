@@ -2641,6 +2641,10 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
     constexpr int NT = M / 8, NA = KC / 32, SPK = NA / AP, SB = R * AP * WB, XS = KC * 2 + 16, STR = 16 * R + 4;
     static_assert(NA % AP == 0 && NT % 2 == 0 && M <= 32, "config");
     extern __shared__ __align__(128) unsigned char smem[];
+    // npre bit 16: trigger the PDL dependent at start (the layer's g19 convention, s57: dependents that only touch out
+    // after their own griddepcontrol.wait)
+    if (npre >> 16) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    npre &= 0xffff;
     const int t = threadIdx.x, lane = t & 31, w = t >> 5, g = lane >> 2, c = lane & 3;
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem) + w * NS * SB, xs = (unsigned)__cvta_generic_to_shared(smem) + WPB * NS * SB;
     float* stg = (float*)(smem + WPB * NS * SB + XB * M * XS) + w * M * STR;

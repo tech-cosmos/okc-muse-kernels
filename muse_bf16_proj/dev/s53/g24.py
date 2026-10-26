@@ -41,6 +41,19 @@ NPRE = int(os.environ.get("NPRE", 99))
 NOW = "G24_NOW" in DEFS
 NOFIX = "G24_NOFIX" in DEFS
 Wr = reference.generate_weights(reference.WEIGHTS_SEED)
+ESCW = bool(os.environ.get("ESCW"))  # adversarial escapes (as dev/g19.py ESCW) + exact spike rows at them, 20 reps
+CE = {}
+if ESCW:
+    g_ = torch.Generator(device="cuda").manual_seed(7)
+    for name in ["qkv_gate", "o", "pooler", "unpooler"]:
+        t = Wr[name]; n_, k_ = t.shape; mx = t.float().abs().max().item()
+        vals = torch.tensor([0.0, -0.0, 2.0 ** -133, -3 * 2.0 ** -131, 2.0 ** -100, -1.37 * 2.0 ** -60,
+                             mx * 2.0 ** -17, -mx * 1.9 * 2.0 ** -18, 1.5 * 2.0 ** -126], device="cuda").to(torch.bfloat16)
+        CE[name] = torch.randperm(k_, device="cuda", generator=g_)[:32]
+        for j in range(2 if k_ == 8192 else 3):
+            rows = torch.arange(n_, device="cuda")[torch.rand(n_, device="cuda", generator=g_) < 0.75]
+            cols = CE[name][torch.randint(0, 32, (len(rows),), device="cuda", generator=g_)]
+            t[rows, cols] = vals[torch.randint(0, len(vals), (len(rows),), device="cuda", generator=g_)]
 ctr = torch.zeros(4, dtype=torch.int32, device="cuda")
 for nm, layer, n in SH:
     if only and nm not in only.split(","): continue
@@ -68,18 +81,26 @@ for nm, layer, n in SH:
                 packs[(kc, ap, r)] = (P, hdr, scale, Wp, col)
             P, hdr, scale, Wp_, col = packs[(kc, ap, r)]
             xp_ = x.clone(); xp_[M - 1].zero_(); xp_[M - 1, col] = 16.0  # probe row: one escaped weight x 16, exact
+            sp = list(range(0, M - 1, 2)) if ESCW else []
+            for j_, r_ in enumerate(sp):
+                xp_[r_].zero_(); xp_[r_, CE[layer][j_ % 32]] = 8.0
             ref = xp_.double() @ Wp_.double().T
             cf = (kc, ap, ns, wpb, xb, GRID, min(NPRE, ns), r)
             try:
-                for rep in range(3):
+                for rep in range(20 if ESCW else 3):
                     out.fill_(1.0); mod.g24_gemm(P, hdr, scale, xp_, out, ctr, *cf); torch.cuda.synchronize()
                     err = ((out.double() - ref).norm() / ref.norm()).item()
                     if not NOW:
                         assert err < 1e-5, (err, nm, m_, cf)
                         pw_ = (Wp_[:, col].double() * 16).float()
                         assert NOFIX or torch.equal(out[M - 1], torch.where(pw_.abs() < 2.0 ** -126, 0 * pw_, pw_)), ("probe", nm, col)
+                        for j_, r_ in enumerate(sp):
+                            want = (Wp_[:, CE[layer][j_ % 32]].double() * 8).float()
+                            want = torch.where(want.abs() < 2.0 ** -126, torch.zeros_like(want), want)
+                            assert torch.equal(out[r_], want), ("spike", nm, r_, int((out[r_] != want).sum()))
             except RuntimeError as ex:
                 line += f" | {kc},{ap},{ns},{wpb},{xb},r{r} ERR {str(ex).splitlines()[0][:60]}"; continue
+            if ESCW: print("  esc ok", nm, M, cf, "rel err", err, flush=True)
             dt = bench.time_graph(lambda: (pre(), mod.g24_gemm(P, hdr, scale, x, out, ctr, *cf))) - e
             line += f" | {kc},{ap},{ns},{wpb},{xb},r{r} {dt:6.2f}"
         print(line, flush=True)
