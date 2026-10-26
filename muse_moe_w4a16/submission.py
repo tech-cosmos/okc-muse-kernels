@@ -3976,8 +3976,82 @@ def _diag(st):
         del graphs
     for (load, n), v in res.items():
         print(f"diag12 MEAN {load} {n}: {sum(v) / len(v):.1f} us", flush=True)
+    if DIAG_TL:
+        for load, seed, T, data in routes:
+            if T > TK2_MAX:
+                for o in DIAG_TL:
+                    _diag_tl(st, data, f"{load} s{seed}", o)
     del flush
     torch.cuda.synchronize()
+
+
+DIAG_TL = ()  # s14: twm item orders to timeline in the diag (needs TWM_TL 1 in the CUDA source: diag copies only)
+
+
+def _diag_tl(st, data, name, order):
+    """s14: per-CTA moe_twm timeline (TWM_TL build): exit spread, HBM-rate estimate per 10 us, item durations by kind."""
+    import collections
+    g = globals()
+    old = (g["TWM_ORDER"], g["TWM_TAIL_M"], g["TWM_ORDER_M"])
+    g["TWM_ORDER"], g["TWM_TAIL_M"], g["TWM_ORDER_M"] = order | 2, {}, {}
+    try:
+        for _ in range(3):
+            kernel_fn(data, st)
+        torch.cuda.synchronize()
+    finally:
+        g["TWM_ORDER"], g["TWM_TAIL_M"], g["TWM_ORDER_M"] = old
+    part, meta = st.pop("_tl")
+    tl = part.view(torch.int64)[:132 * 64].view(132, 64).cpu()
+    meta = meta.cpu()
+    t0 = tl[:, 0].min().item()
+    us = lambda v: (v - t0) / 1000
+    n = tl[:, 1]
+    ex = sorted(us(tl[c, 63].item()) for c in range(132))
+    rows = sorted((us(tl[c, 2 + 3 * k].item()), us(tl[c, 3 + 3 * k].item()), tl[c, 4 + 3 * k].item())
+                  for c in range(132) for k in range(min(n[c].item(), 20)))
+    na = meta[0].item(); off = meta[33:66].tolist()
+    E = [meta[1 + a].item() for a in range(na)]
+    nt = [off[e + 1] - off[e] for e in E]; big = [x > 32 for x in nt]
+    PS = [64 if b else 32 for b in big]; npass = [(x + q - 1) // q for x, q in zip(nt, PS)]
+    nbig = 0
+    while nbig < na and big[nbig] and (not (order & 64) or npass[nbig] > 1): nbig += 1
+    items = []
+    for g2, nrbl in ((0, [32 if b else 16 for b in big]), (1, [16 if b else 8 for b in big])):
+        lst = []
+        for a in range(na):
+            if order & 4:
+                lst += [(g2, a, q) for rb in range(nrbl[a]) for q in range(npass[a])]
+            else:
+                lst += [(g2, a, q) for q in range(npass[a]) for rb in range(nrbl[a])]
+        mrg = (order >> 3) & 3
+        if mrg and not (g2 and order & 32):
+            phx = {1: 100, 2: 85, 3: 70}[mrg]
+            nA = sum(npass[a] * nrbl[a] for a in range(nbig)); N = len(lst)
+            if 0 < nA < N:
+                W = max(nA, N * phx // 100); out = []
+                for it in range(N):
+                    ca = it * nA // W if it < W else nA; ca1 = (it + 1) * nA // W if it + 1 <= W else nA
+                    out.append(lst[ca] if ca1 > ca else lst[nA + it - ca])
+                lst = out
+        items += lst
+    T = ex[-1]; hb = [0.0] * (int(T / 10) + 2)
+    kinds = collections.defaultdict(list)
+    for a_, b_, it in rows:
+        g2, a, q = items[it]
+        nv = min(PS[a], nt[a] - q * PS[a])
+        kinds[(g2, int(big[a]), q > 0, (nv + 7) // 8 * 8)].append(b_ - a_)
+        if q: continue
+        mb = 0.55 if big[a] else 1.09
+        d = max(b_ - a_, 0.1)
+        for z in range(int(a_ / 10), int(b_ / 10) + 1):
+            lo, hi = max(a_, z * 10), min(b_, z * 10 + 10)
+            if hi > lo: hb[z] += mb * (hi - lo) / d
+    print(f"diagtl {name} o{order}: experts {na} exit min/med/max {ex[0]:.1f}/{ex[66]:.1f}/{ex[-1]:.1f} "
+          f"first g2 start {min(a for a, b, it in rows if items[it][0]):.1f} last g13 end "
+          f"{max(b for a, b, it in rows if not items[it][0]):.1f} tokens {nt}", flush=True)
+    print(f"diagtl {name} o{order} HBM TB/s per 10us: " + " ".join(f"{v / 10:.2f}" for v in hb), flush=True)
+    print(f"diagtl {name} o{order} kinds (g2 big reuse N: n mean): " + "; ".join(
+        f"{k[0]}{k[1]}{int(k[2])} {k[3]}: {len(v)} {sum(v) / len(v):.1f}" for k, v in sorted(kinds.items())), flush=True)
 
 
 TK2H = 0  # s12: merged-phase tk2f consumer (one main-loop body, i-cache): 8 = GS 8, 16 = GS 16 (from M >= TK2H_MIN16)
@@ -4062,6 +4136,7 @@ def kernel_fn(data, st):
             if TWF_MIX and "w2b2" in st:
                 tl = TWM_TAIL_M.get(M, TWM_TAIL) + 4096 * TWM_TAIL13_M.get(M, TWM_TAIL13) + (TWM_ORDER_M.get(M, TWM_ORDER) << 24)
                 ns = -tl if tl else ns
+                if DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)
                 lib.moe_twm_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["w13b2"],
                                    st["w13sb2"], st["w2b2"], st["w2sb2"], st["lut"], xg, meta, sroutes, inter, y, st["tk"],
                                    part, ns)
