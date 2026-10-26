@@ -253,3 +253,32 @@
   barriers in consumption order, or PDL (producer streams W before griddepcontrol.wait; xload after). (3) H200 check
   via the tuner (BF16_G18) once (1) is in: H200 gains of compressed kernels differ from H100 (gemv14 bigger, gemv16 smaller).
 - No judge runs this session (budget 10-26: checks 5/20, scored 4/10).
+
+## Session 10 (2026-10-26 03:12 - ~04:30 UTC): gemv19 = FP32-out PDL 12-bit GEMM for the layer's T=16/32
+- gemv18 F32 mode (pdl=2: FP32 out by red.add, zero kernel as PDL primary, no counters): H100 warm x pool m16 24.5,
+  qkv m16 16.8 (cuBLAS 27.0/17.7); m32/o weak. Stream analysis (/tmp/pj/tmab.py-style microbench, now gone: TMA ring
+  only, consumers just read smem): a 50 MB TMA stream = 21 us graph on H100 for ANY stage size 12-48 KB / depth 3-12;
+  slope 3.1 TB/s + ~4 us intercept. gemv18's MEDIAN block ends with the pure stream's median; its excess is the spread
+  (blocks end 21-27 us vs 23-25.5 for the stream). NOMMA = same time: memory-bound, not compute.
+- Dead: deeper rings (NS 5-12: worse), x before W (XPRE: x lands 3.5 instead of 6 us, total same), interleaved stage
+  layout (block b's stage i at i*G+b: same), dynamic tail (static ranges + atomic-grabbed items of IS stages: producer
+  ends tighten but every tail stage pays a flush: +2-4 us), per-SM calibration (per-SM end times don't correlate between
+  runs: r ~0).
+- The lever: PDL. gemv19 (dev/gemv19.cu, sweep dev/g19.py "M,KC,AP,NS,IS,TAILPB;..." env MODE/PRED/NPRE/XWARM/ESCW/CVT):
+  producer streams the first npre W stages BEFORE griddepcontrol.wait (W never depends on the previous kernel), then
+  x; FP32 out; mode 2 zeroes out in-kernel (finisher warp zeroes a slice, then epoch-counter grid barrier: atomicAdd
+  ctr[1], wait until ctr >= old - old % G + G, never reset; plain full-k stores disabled in mode 2). Producer tags each
+  ring slot (u | x buffer | run end), x double-buffered, finisher driven by pbuf tags.
+- H100, after a 3 us predecessor kernel that triggers launch_dependents at start and writes x (PRED=3000), mode 2:
+  m16 qkv (1024,4,4) 11.8 (cuBLAS 17.1), o (512,4,3) 7.3 (8.5), pool (1024,4,4) 20.3-20.8 (27.5), unp 20.7 (25.2);
+  m32 qkv (512,4,3) 16.3 (18.2), pool (512,4,4) 24.0 (28.2), unp (512,4,4) 23.5 (25.7), o 9.1+ (8.5: keep cuBLAS).
+  WITHOUT a predecessor (judge standalone): ~cuBLAS at m16 (pool 24.8 vs 28.0, qkv 16.1 vs 18.2 with npre 2; npre 0
+  worse), loses at m32 (pool 27.9 vs 28.1, unp 28.0 vs 26.0). + g19_cvt (BF16 copy, PDL) ~ +1 us.
+- red.global.add.f32 flushes subnormal results to zero: spike rows at escapes with |8 w| < 2^-126 come out 0 (accumulator
+  behaviour, the 12-bit decode is still exact; tests compare against FTZ'd expectations). ESCW=1 (bench esc injection,
+  40 reps per config, all four layers, m16/m32): pass, rel err <= 4e-7 vs FP64.
+- dev/g19_lib.py = layer interface (pack19 from _compress output, build, call doc + numbers); dev/t19lib.py tests it.
+  Handoff posted in ~/COORD.md (proj s10).
+- Submission (b812fe4 -> this session): BF16_G19 tuner candidates (+ cvt) and _diag19 (print only: 3 us PDL predecessor +
+  g19 vs the pick, per shape). H100 standalone: never picked. diag (pick vs g19): qkv m16 15.4/11.5, m32 16.5/16.0,
+  pool m16 24.1/20.2, m32 25.9/24.6, unp m16 21.3/20.5, m32 25.1/22.9, o m16 7.9/6.9.
