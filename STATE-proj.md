@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~13:05 UTC (end of session 22).
+Updated 2026-10-26 ~13:45 UTC (end of session 23).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -8,7 +8,7 @@ Updated 2026-10-26 ~13:05 UTC (end of session 22).
 - Before: 6d0fc4d4 (405439e) 1.2742x; d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 18/20, scored 5/10 (cap 10). s22 check ccf41026 1.3162 (diag: qkv m32 bmm slabs). s17 check 29a2b16b 1.3173 (diag: m=1 = bare stream). s16 checks fb2fe4ee 1.3071 (g22 diag), a9b13469 1.3161; submit 3810db09. s15 checks ce84da07 1.3001, 4e5fad5b 1.2951 (diag only). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
+- Budget 10-26 used: checks 19/20, scored 5/10 (cap 10). s23 check 2722e8c4 1.3108 (diag: g13 for o m1 loses on H200). s22 check ccf41026 1.3162 (diag: qkv m32 bmm slabs). s17 check 29a2b16b 1.3173 (diag: m=1 = bare stream). s16 checks fb2fe4ee 1.3071 (g22 diag), a9b13469 1.3161; submit 3810db09. s15 checks ce84da07 1.3001, 4e5fad5b 1.2951 (diag only). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
   1.3064 (diag only).
 - H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
@@ -140,7 +140,9 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## cuBLAS 18.7 us, so no gain even without the cast). NOTES s20.
 ## Session 22: QSS handoff (dev/qss_layer.patch): the layer's d32 qkv as 2 FP32 bmm slabs, attention sums them at load
 ## (no splitKreduce). H200 GEMM 16.03 vs lt 17.50 us; H100 layer d32 sliding/full -1.5 us each (TUNE pinned). NOTES s22.
+## Session 23: gemv13 for o at m=1: H100 -0.4 us but H200 +0.35 (check 2722e8c4): DEAD. Don't hand it to the layer.
 ## Next (ranked)
+-12. (s23) As -11. 1 proj check left today (sandbox ends ~19:10Z): keep it for an A/B the layer asks for.
 -11. (s22) Check COORD for the layer's verdict on QSS (its check's d32 numbers + tuner line for {"qss": False}). If the
    layer wants it at other T: v16/v32 qkv (T=128/256) is lt without split-K (no gain); d16 qkv is g19 (FP32 already).
    Same slab idea for o at T=32 loses (H200 10.66 vs 10.24). Lane question to the lead still open.

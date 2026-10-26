@@ -3827,10 +3827,10 @@ BF16_G10 = {"qkv_gate": [(1, 8192, 4, 4, 1, 1, 132)], "pooler": [(1, 8192, 4, 4,
 # vt 512 (512-thread virtual blocks, half the rows per round): qkv H100 13.7 -> 13.1 us (2304 rows: smaller tail).
 BF16_G13 = {"qkv_gate": [(1, 8192, 2, 4, 1, 1, 132, 256), (1, 8192, 2, 2, 1, 2, 132, 256), (1, 8192, 1, 2, 1, 1, 132, 512)],
             "pooler": [(1, 8192, 2, 4, 1, 1, 132, 256), (1, 8192, 2, 2, 1, 2, 132, 256)],
-            "unpooler": [(1, 4096, 2, 4, 1, 2, 132, 256)],
-            "o": [(1, 1024, 2, 2, 2, 1, 264, 256), (1, 1024, 2, 1, 4, 1, 528, 256)]}
+            "unpooler": [(1, 4096, 2, 4, 1, 2, 132, 256)]}
 # s16: gemv13 for o (k 1024) U2 V4 loses on the H100 tuner (11.3 vs gemv10 11.0: ~2 rounds per vb, latency-bound);
-# s23: U2 V2 B2 on 264 blocks (512-thread blocks, 2/SM) wins on H100 g13.py: 8.16-8.38 vs gemv10 8.53-8.58 us.
+# s23: U2 V2 B2 on 264 blocks (512-thread blocks, 2/SM) wins on H100 g13.py (8.16-8.38 vs gemv10 8.53-8.58 us) but LOSES
+# on the H200 (check 2722e8c4 tuner: g13 10.05 / U2V1B4 g528 10.11 vs gemv10 9.70): o m1 is latency-bound there. Dead.
 # gemv13 built with G13_CPA: the weight chunks go through a cp.async smem ring (PF chunks in flight, no registers).
 # H100 qkv m1 (2,2,1,3) 13.4 vs gemv13 14.4 us, pooler tie, unp1k 7.6 vs 7.7 (dev/g13.py XF=-DG13_CPA).
 BF16_G13C_S16 = {"qkv_gate": [(1, 8192, 2, 2, 1, 3, 132, 256), (1, 8192, 2, 2, 1, 4, 132, 256)],

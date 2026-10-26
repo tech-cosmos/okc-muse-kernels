@@ -600,3 +600,13 @@
   earlier; attention itself +0.3 (nds/combine) .. +0.9 (full) us for the 2nd slab loads.
 - Tests on the patched build: bench.py test 13/13, replay_test decode 32 x 20 inputs x 3 router seeds: 0 fails.
 - Session 22 end: checks 10-26 18/20, scored 5/10. Board best unchanged 3810db09 1.3110x. DIAG_SLAB off again (c5cf31c).
+
+## Session 23 (2026-10-26 13:01 - ~13:45 UTC): gemv13 (12-bit) for o at m=1: DEAD on the H200
+- Layer had not answered QSS (Handoffs proj s22) yet; its last check is ~14:30Z. No lane pick from the lead.
+- o (8192 x 1024, 16.8 MB) is the only big BF16 weight still uncompressed at m=1 (gemv10). H100 dev/g13.py SH=o:
+  U2 V2 B2 P1 on 264 blocks 8.16-8.38 us vs gemv10 (U2 V4 B2 g264) 8.53-8.58; U2 V1 B4 g528 8.54; U2 V4 g132 8.67;
+  PF 2 / U4 / B8 worse. H100 tuner: g13 10.66 vs g10 11.07.
+- Check 2722e8c495294b9e (97ec405) 1.3108x, DIAG: H200 tuner o m1 g10 9.70, g13 (U2V2B2 g264) 10.05, (U2V1B4 g528)
+  10.11: loses. As s17 found for qkv/pooler, the H200 m=1 GEMVs are not byte-bound at these sizes; o is latency-bound.
+  Candidates removed again (comment kept in sub_template.py); submission.py = 2480c53 code. Not submitted.
+- Same log: o m8 lt 9.76 (g14 10.43-10.50, g12 10.11); unpooler m1 g17 7.17 (g13 8.35).
