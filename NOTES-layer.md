@@ -951,3 +951,16 @@
   norm is one L2 round trip + PDL release, <= ~1 us to gain (~0.05%); fused pooler+router-hi/lo rows in g19 at T=32
   (pooler on 132 SMs, routing on the critical path after it): expected tie (s7 cuBLAS version tied), routing-order risk.
   The d32 gap is g19 m32 (consumer-bound, proj) and tk2f (moe).
+
+## s43 (2026-10-26 16:36Z-): v86 = proj s35 DEC3 (no judge runs: budget for 10-26 spent)
+- v86: proj's DEC3 12-bit layout (r-layer 10cde26, muse_bf16_proj/dev/s35): kernels via `python
+  ../muse_bf16_proj/dev/s35/dec3_src.py g13_src.cu g14_src.cu g19_src.cu pr1_src.cu pr8_src.cu` (decw: prmt with 0x38
+  + one lop3 per BF16 pair; old decode kept under -DPJ_DEC4), packers: proj's `_dec3` (with its prepare-time round-trip
+  check) copied into layer.py and used by _pack13/_pack14/_pack19. g22 (off, G22_CFG = {}) keeps the old layout:
+  `_pack19(..., dec3=False)` from _pack22. pr1/pr8 read the g13/g14 pooler packs (converted with them).
+- H100: bench test 13/13; files_eq v85_nt vs v86_nt T=1/T=8 identical (d1 full x6 seeds identical; one transient
+  1.6e-4 diff on d1 full seed 1 in the first run did not reproduce), d16/d32/v16 = the usual FP32 atomic-order noise;
+  same g19/g13/g14 picks survive prepare's F.linear check (11 g19, 3 g13, 2 g14); replay_test 10 x seeds 11,23 0/240;
+  route_judge 0/240. ab_files ABBA 4 rounds (v85_nt v86_nt v86_nt v85_nt): d1 -0.3/-0.4 us, every other shape +-0.2
+  (H100 is bandwidth-bound here; proj's H200 proxy says -0.5..-1.6 us per g19 call at m16, -0.2..-0.5 at m32).
+- FIRST CHECK OF THE NEXT SANDBOX = main (v86); compare per shape vs 703d3a7e.

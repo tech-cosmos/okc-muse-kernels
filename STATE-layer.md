@@ -1,6 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 (session 42: main = v85, NOT judge-checked; budget for 10-26 spent).
+Updated 2026-10-26 (session 43: main = v86, NOT judge-checked; budget for 10-26 spent).
+**s43: main = v86** = v85 + proj s35 DEC3 (12-bit decode 3 instr per BF16 pair; packers via proj's _dec3 with round-trip
+check; g22 keeps the old layout). H100: tests 13/13, T=1/8 bit-identical to v85, replay 0/240, route_judge 0/240, ab_files
+ABBA 4 rounds tie (d1 -0.3/-0.4). FIRST CHECK OF THE NEXT SANDBOX = main (v86): compare per shape vs 703d3a7e.
+
 **s42: main = v85 (cf16011)** = v84 + proj s34 DEC4 (r-proj dev/s34/dec4_layer.patch: 12-bit decode in 4 instead of 5
 instr per BF16 pair in g13/g14/g19/pr1/pr8; bit-identical). H100: tests 13/13, replay 0/240, route_judge 0/240 (tuner on),
 ab_files ABBA 4 rounds tie on every shape (proj's H200 proxy: -0.4..-1.6 us per g19 call at d16/d32).

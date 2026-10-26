@@ -755,13 +755,32 @@ def _nib(code):
     return torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
 
 
+def _dec3(sm, code):
+    """s35 DEC3 layout over groups of 8 weights (last dim = the kernels' dec8 unit: 8 bytes + 1 word): byte = c0 << 7 |
+    mantissa; word: weight 2P + h's sign, c1, c2, c3 at bits (15, 8, 9, 10) + 16h + (0, -4, -8, 4)[P] (mod 32). Kernels
+    (decw in dev/gemv*.cu): prmt with 0x38 for the exponent's top bits + one lop3 per BF16 pair. Checked lossless here."""
+    sm, code = sm.long(), code.long()
+    i = torch.arange(8, device=sm.device)
+    off = 16 * (i % 2) + torch.tensor([0, -4, -8, 4], device=sm.device)[i // 2]
+    pos = [(b + off) % 32 for b in (15, 8, 9, 10)]
+    bits = [(sm >> 7) & 1, (code >> 1) & 1, (code >> 2) & 1, (code >> 3) & 1]
+    v = sum(b << q for b, q in zip(bits, pos)).sum(-1)
+    b3 = ((code & 1) << 7) | (sm & 0x7F)
+    back = [(v.unsqueeze(-1) >> q) & 1 for q in pos]  # round trip: every bit lands in its own place
+    if not (torch.equal(back[0], bits[0]) and torch.equal(back[1] | back[2] << 1 | back[3] << 2, code >> 1)
+            and torch.equal(b3 >> 7, code & 1) and torch.equal(b3 & 0x7F, sm & 0x7F)):
+        raise RuntimeError("DEC3 packing round trip failed")
+    return b3.to(torch.uint8), torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
+
+
 def _pack13(w):
     """gemv13 layout: flat byte plane, code words over 8 consecutive weights."""
     c = _compress(w)
     if c is None:
         return None
     code, sm, hdr, scale = c
-    return sm.to(torch.uint8).flatten().contiguous(), _nib(code.flatten().view(-1, 8)).contiguous(), hdr, scale
+    s3, n3 = _dec3(sm.flatten().view(-1, 8), code.flatten().view(-1, 8))
+    return s3.flatten().contiguous(), n3.contiguous(), hdr, scale
 
 
 def _pack14(w, kc):
@@ -772,7 +791,8 @@ def _pack14(w, kc):
     code, sm, hdr, scale = c
     n, k = w.shape
     perm = lambda t: t.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
-    return perm(sm).to(torch.uint8), _nib(perm(code)).contiguous(), hdr, scale
+    s3, n3 = _dec3(perm(sm), perm(code))
+    return s3, n3.contiguous(), hdr, scale
 # (k, u, nv, minb, pf, blocks) per weight, m = 1, chosen by proj on the H100 (dev/g10.py)
 G10_CFG = {"qkv_gate": (8192, 4, 4, 1, 1, 132), "pooler": (8192, 4, 4, 1, 1, 132), "o": (1024, 2, 4, 2, 1, 264),
            "unpool_slice": (4096, 2, 4, 1, 1, 132)}
@@ -1851,7 +1871,7 @@ def _pack22(c, ap, E):
     code, sm, hdr, scale = c
     n, k = code.shape
     kc = 32 * ap
-    P = _pack19(c, kc, ap, tm=1)
+    P = _pack19(c, kc, ap, tm=1, dec3=False)
     ks, ntr = k // kc, n // 128
     EV = torch.full((ks * ntr, E, 2), -1, dtype=torch.int32, device=code.device)
     EV[:, :, 1] = 0
@@ -1920,15 +1940,19 @@ def _g22_prepare(state):
     del comp
 
 
-def _pack19(c, kc, ap, tm=0):
+def _pack19(c, kc, ap, tm=0, dec3=True):
     """proj's pack19 (r-proj dev/g19_lib.py): _compress output -> stage-major uint8 [stages, 8 * ap * 768]."""
     code, sm, hdr, scale = c
     n, k = code.shape
     perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()  # noqa: E731
-    S = perm(sm).to(torch.uint8).reshape(k // kc, n // 16, kc // 32, 32, 16)
-    sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=code.device)
-    N = (perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8).long() << sh).sum(-1)
-    N = torch.where(N >= 2 ** 31, N - 2 ** 32, N).int().contiguous()
+    if dec3:  # s43: proj s35 DEC3 layout (g19); gemv22 keeps the old one
+        S, N = _dec3(perm(sm).reshape(k // kc, n // 16, kc // 32, 32, 2, 8), perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8))
+        S, N = S.reshape(k // kc, n // 16, kc // 32, 32, 16), N.contiguous()
+    else:
+        S = perm(sm).to(torch.uint8).reshape(k // kc, n // 16, kc // 32, 32, 16)
+        sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=code.device)
+        N = (perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8).long() << sh).sum(-1)
+        N = torch.where(N >= 2 ** 31, N - 2 ** 32, N).int().contiguous()
     ks, ntr, spk = k // kc, n // 128, kc // 32 // ap
     pm = (1, 0, 3, 2, 4) if tm else (0, 1, 3, 2, 4)  # tm: tile-major stages (tile, ks, st) for gemv22
     S = S.view(ks, ntr, 8, spk, ap * 512).permute(*pm).reshape(ks * ntr * spk, 8 * ap * 512)
