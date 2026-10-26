@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~15:35 UTC (end of session 31).
+Updated 2026-10-26 ~15:35 UTC (end of session 32).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -140,7 +140,11 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## but the layer has no split-K cuBLAS left (profile 703d3a7e), so nothing to apply. dev/pdl_cublas.py, NOTES s30.
 ## Session 31: pr1 router-W L2 prefetch with evict_last = WIN at T=1 (H100 layer d1 ~-1.3/-1.1 us, bitwise same): handoff
 ## dev/s31/pr1_evl_layer.patch; all layer prefetch sites evict_last (dev/s31/pf_last.py) d1 -1.8/-1.7. evict_first on W streams null. NOTES s31.
+## Session 32: evict_last on ALL 9 layer L2 prefetch sites + KV_PF (g13's prefetch.global.L2 of the d1 KV rows): layer
+## v78 H100 d1 -2.0/-0.9 and -1.3/-1.4 us (2 runs), v1 noise, bitwise same at d1, tests/scored/replay clean. Handoff
+## dev/s32/evl_all_layer.patch (supersedes s31's). Dead: O_PF/boundary hints, pr8/other prefetch.global.L2 hints. NOTES s32.
 ## Next (ranked)
+-21. (s32) Layer: next sandbox's first check should carry dev/s32/evl_all_layer.patch (est. ~+0.3% layer score).
 -20. (s31) Layer: confirm the pr1 evict_last patch on the H200 in the next sandbox's first layer check. Other evict_last
    candidates: any prefetch issued before a PDL wait while a big stream runs (attention's own pf, moe upf already in pf_last).
 -19. (s30) Still waiting for a lane (Requests proj s28/s30). Proj checks 20/20 today.

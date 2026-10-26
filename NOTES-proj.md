@@ -735,7 +735,7 @@
 - Dead: pr1_npf 4/8 WITH evict_last: d1 +0.7..+6 us (pinning pooler chunks hurts, like plain npf).
 - Handoff: dev/s31/pr1_evl_layer.patch (site 0, pr1_src.cu, `git apply` in r-layer), optional all sites via pf_last.py.
 
-## Session 32 (2026-10-26 15:03-16:00Z): evict_last on all layer L2 prefetches, rebased to layer v77/v78 + KV_PF hint
+## Session 32 (2026-10-26 15:03-15:35Z): evict_last on all layer L2 prefetches, rebased to layer v77/v78 + KV_PF hint
 - No judge runs (proj checks 20/20). /tmp copies of r-layer v77 (b66a869) and v78 (5c27e0a), TUNE = {} appended to every
   file, tools/ab_files.py interleaved, H100 medians us. New tool dev/s32/pf_all.py (any prefetch site in the file, by index;
   `list` prints them): 0-3 attention O_PF (3 kernels), 4 moe twm prefetch_l2 (left alone), 5 Triton boundary PF, 6-14 = s31's
@@ -749,3 +749,6 @@
 - Correctness: bench.py test 13/13 (v77+D and v78+D), scored_test all shapes x2 seeds 0 bad, replay decode 1/16 0/20,
   files_eq d1 bitwise identical x3 seeds (v1 diffs = the base's own nondeterminism, orig vs orig shows the same).
 - Handoff: dev/s32/evl_all_layer.patch (layer.py + pr1_src.cu on r-layer 5c27e0a; then build.py). Supersedes s31's patch.
+- Dead too: evict_last on the remaining CUDA `prefetch.global.L2` sites (pr8 router W WS/WN, g13 pb, upf, vecs) on top of
+  D (v78, 6 rounds, A/D/F): d1 sl 88.20/86.92/87.05, full 109.09/107.71/107.61, v1 sl 148.73/148.36/148.68, full
+  162.30/162.08/162.10: F = D. Repeat confirms D at d1 -1.3/-1.4 us.
