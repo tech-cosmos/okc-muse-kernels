@@ -1714,6 +1714,11 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 #else
 #define KHI_B khi
 #endif
+#ifdef G19_NOTM  // diag (s51): stage order fixed to k-major (tm 0) at compile time, like the layer's g19 copy
+#define TMV 0
+#else
+#define TMV tm
+#endif
 #ifndef G19_NPB
 #define G19_NPB 2
 #endif
@@ -1731,7 +1736,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     constexpr int NWC = RG;  // 16-row groups per tile (one stage covers RG x AP atoms)
     static_assert(RPW == 1 || TS == 1, "config");
     constexpr int NCW = NWC * TS / RPW, MT = M / TS, NT = MT / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * WB, XS = KC * 2 + 16, PBF = NWC * 16 * M;
-    static_assert(NA % AP == 0 && SPK % IS == 0 && (NT % 2 == 0 || NT == 1) && M <= 32, "config");  // NT even: x B fragments by ldmatrix.x4 (NT 1: one x4 = both k16 halves)
+    static_assert(SPK <= 32 && NA % AP == 0 && SPK % IS == 0 && (NT % 2 == 0 || NT == 1) && M <= 32, "config");  // NT even: x B fragments by ldmatrix.x4 (NT 1: one x4 = both k16 halves)
     extern __shared__ __align__(128) unsigned char smem[];
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
     float* pbuf = (float*)(smem + NS * SB + XB * M * XS);
@@ -1746,8 +1751,14 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
 #endif
     int* tag = (int*)(pbuf + NPB * PBF) + 2 * (2 * NS + 8) + XQB;  // after the barriers. per slot: u | xb << 29 | last x use << 30 | run end << 31 (-1: no more work)
     int* ptag = tag + NS;                                 // per pbuf: tile | atoms << 12 (-1: consumers done)
+#ifdef G19_TAG2  // s51: per slot ks | st << 8 | tr << 13, computed by the producer (no runtime div/mod in the consumers' loop top)
+    int* tag2 = ptag + 2;
+    constexpr int T2N = NS;
+#else
+    constexpr int T2N = 0;
+#endif
     // PRE 3: tile read-back buffer [M][NWC * 16] f32 (bulk copy) + its mbarrier
-    const unsigned cbuf = ((unsigned)__cvta_generic_to_shared(ptag + 2) + 127u) & ~127u, cbar = cbuf + M * NWC * 64;
+    const unsigned cbuf = ((unsigned)__cvta_generic_to_shared(ptag + 2 + T2N) + 127u) & ~127u, cbar = cbuf + M * NWC * 64;
     // full[NS], empty[NS], xfull[2], xempty[2], pfull[2], pempty[2]
     const unsigned xfull = bars + 16 * NS, xempty = xfull + 16, pfull = xfull + 32, pempty = xfull + 48, xq = xfull + 64;
     const int t = threadIdx.x, lane = t & 31, w = t >> 5, g = lane >> 2, c = lane & 3;
@@ -1755,7 +1766,12 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     const int U = S * ntr * SPK, US = U - tail;
     // tm: tile-major stage order (pack19 tm): stage u = (tile, k-chunk, st): tiles complete throughout the kernel
     // (mode 3: their BF16 conversions overlap the stream instead of all landing in the tail)
-    auto KSof = [&](int u_) { return tm ? (u_ / SPK) % S : u_ / (ntr * SPK); };
+    auto KSof = [&](int u_) { return TMV ? (u_ / SPK) % S : u_ / (ntr * SPK); };
+#ifdef G19_TAG2
+#define T2SET(sl_, u_) tag2[sl_] = KSof(u_) | ((u_) % SPK) << 8 | (TMV ? (u_) / (S * SPK) : ((u_) % (ntr * SPK)) / SPK) << 13
+#else
+#define T2SET(sl_, u_)
+#endif
     if (t == 0) {
         for (int i = 0; i < NS; ++i) { bar_init(bars + 8 * i, 1); bar_init(bars + 8 * (NS + i), NCW); }
         for (int i = 0; i < 2; ++i) {
@@ -1795,6 +1811,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                 const bool xl = ra + 1 == rb || KSof(ra + 1) != ks0;
                 if (lane == 0) {
                     tag[i] = ra | (xl ? 1 << 30 : 0) | (ra + 1 == rb || st + 1 == SPK ? 1 << 31 : 0);  // x buffer 0
+                    T2SET(i, ra);
                     bar_expect(bars + 8 * i, SB);
                     bulk(ring + i * SB, WP + (long)ra * SB, SB, bars + 8 * i);
                 }
@@ -1830,6 +1847,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                 if (xl) xks[xb] = -1;  // released by the consumers after this stage: reload even if the next run has this ks
                 if (lane == 0) {
                     tag[slot] = u | xb << 29 | (xl ? 1 << 30 : 0) | (end ? 1 << 31 : 0);
+                    T2SET(slot, u);
                     if (i < 24) TR(40 + i);
                     const unsigned full = bars + 8 * slot;
 #ifdef G19_NOW
@@ -1862,6 +1880,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                     const int st = ra % SPK;
                     const bool xl = ra + 1 == rb || KSof(ra + 1) != ks0;
                     tag[i] = ra | (xl ? 1 << 30 : 0) | (ra + 1 == rb || st + 1 == SPK ? 1 << 31 : 0);  // x buffer 0
+                    T2SET(i, ra);
                     bar_expect(bars + 8 * i, SB);
                     bulk(ring + i * SB, WP + (long)ra * SB, SB, bars + 8 * i);
                 }
@@ -1895,6 +1914,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                     const bool xl = u + 1 == rb || KSof(u + 1) != ks;
                     if (xl) xks[xb] = -1;  // released by the consumers after this stage: reload even if the next run has this ks
                     tag[slot] = u | xb << 29 | (xl ? 1 << 30 : 0) | (end ? 1 << 31 : 0);
+                    T2SET(slot, u);
                     if (i < 24) TR(40 + i);
                     const unsigned full = bars + 8 * slot;
 #ifdef G19_NOW
@@ -2017,7 +2037,11 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         if (tg == -1) break;
         const int u = tg & 0x1FFFFFFF, xb = (tg >> 29) & 1;
         const bool end = tg < 0, xl = (tg >> 30) & 1;
-        const int ks = KSof(u), tr = tm ? u / (S * SPK) : (u % (ntr * SPK)) / SPK, st = u % SPK;
+#ifdef G19_TAG2
+        const int t2 = tag2[slot], ks = t2 & 0xFF, st = (t2 >> 8) & 31, tr = t2 >> 13;
+#else
+        const int ks = KSof(u), tr = TMV ? u / (S * SPK) : (u % (ntr * SPK)) / SPK, st = u % SPK;
+#endif
 #ifdef G19_XQ
         if (prev_xl) { xpc[xb] = xph[xb]; xph[xb] ^= 1; }  // a new x use of buffer xb: its quarters' phase parity
         prev_xl = xl;
@@ -2038,7 +2062,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
             st0 = st;
 #ifdef G19_HPF
             const bool hit = tr == htr;
-            const int un = (u / SPK + 1) * SPK, trn = tm ? un / (S * SPK) : (un % (ntr * SPK)) / SPK;
+            const int un = (u / SPK + 1) * SPK, trn = TMV ? un / (S * SPK) : (un % (ntr * SPK)) / SPK;
             htr = un < U ? trn : -1;
 #pragma unroll
             for (int rr = 0; rr < RPW; ++rr) {
@@ -2452,6 +2476,9 @@ void g19_gemm_ob(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor 
               __nv_bfloat16* ob, int tm) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const int sm = ns * rg * ap * g19::WB + xb * m * (kc * 2 + 16) + g19::NPB * rg * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8
+#ifdef G19_TAG2
+                 + 4 * ns
+#endif
 #ifdef G19_XQ
                  + 64
 #endif
@@ -4747,7 +4774,10 @@ DIAG_EXT = {}  # s25 diag done (check 5abb71f1: DeepGEMM bf16_gemm_nt ties/loses
 # +G19_NOX (decode, no x/mma), G19_NOFIX (no escape fixups); grids 132 and 108 (the layer's pooler grid). H100 proxy
 # (NOTES s16/s34): skeleton 13.8, decode +5.9, mma+ldsm +7.5 proxy-us at pool m32 G72; the H200 itself never measured.
 DIAG19D = {"pooler": [(32, 1024, 8, 2, 2, 1, 1, 8, 1), (16, 1024, 8, 3, 2, 1, 1, 8, 1)], "unpooler": [(32, 1024, 8, 2, 2, 1, 1, 8, 1)]}
-DIAG19D_DEFS = ["", "G19_NOW", "G19_NOW G19_NOMMA", "G19_NOW G19_NOX", "G19_NOFIX"]
+# s51: + NOTM (k-major order at compile time, = the layer's g19 copy) and NOTM+TAG2 (producer precomputes ks/st/tr per
+# slot: no runtime div/mod in the consumers' loop top; bit-identical). H100 proxy G72: NOW mode m16 -1.0, m32 -0.1..-0.4;
+# full kernel tie (W-bound on H100). The H200 decides whether it goes to the layer.
+DIAG19D_DEFS = ["", "G19_NOW", "G19_NOW G19_NOMMA", "G19_NOW G19_NOX", "G19_NOFIX", "G19_NOTM", "G19_NOTM G19_TAG2"]
 DIAG19D_GRIDS = (132, 108)
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
