@@ -216,3 +216,14 @@
   (M=8, T=512: 128 regs for x alone): split tokens 2 x 4 per block, or x via L1 per j. ~2 us on v1 only.
 - Ops lesson: `okc check` blocks ~20-40 min when the judge queue is busy: run it with run_in_background and a 1 h
   timeout; if the client dies, `okc jobs` + `okc status <job> --json` recover the result.
+- check 511378a9 (v22, 3fab554) **1.9046x, 11,876 us**: d1 77.3/88.0, d16 148.7/228.7, d32 190.4/341.0, v1 126.0/138.8,
+  v16 269.1/365.7, v32 365.5/540.7. -> submit ca8f833a (v22) **1.8924x, 11,953 us** (new best; was 1.8815): d1
+  76.4/87.2, d16 147.6/237.7, d32 189.0/337.9, v1 123.1/143.6, v16 271.7/356.0, v32 353.0/529.1.
+- DEAD: cuBLASLt heuristic search (64 algos, FP32 out) for the fused [T, 4608] pooler+router GEMM: nothing beats
+  torch.mm's pick at T=16/32/128/256 (H100 cold L2; /tmp sweep: lt_setup/lt_info/lt_run over AlgoGetHeuristic).
+  nvcc gotcha: a static std::vector<cublasLtMatmulHeuristicResult_t> crashes nvcc (internal error); use an array.
+- v23 (358d87c): T=8 FP32 router = r3_router (layer.py _R3_SRC, built in _g10_lib; ROUTER3_CFG {8: (4, 2, 512)}):
+  proj's router2 with FP32 x, M=4 tokens per block over blockIdx.y (x float4 in registers: 64 regs), 2 rows per
+  block, 512 threads, no split K (part = logits, KS=1). H100 standalone m8 8.74 vs _router_fma 11.52 us (err 1e-7
+  vs FP64); m1 tie (6.91 vs 7.10, not used). Layer H100 v1 162.1/177.3 -> 157.6/172.6 (3 rounds). Timeline: pooler
+  (side g14) now starts 5 us after the router (was 8). check f2db2454 **1.9088x, 11,851 us**: v1 123.3/138.4.

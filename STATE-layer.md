@@ -1,16 +1,16 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~01:20Z (session 7).
+Updated 2026-10-26 ~01:30Z (end of session 7).
 
 ## Board
-- **Best scored: 81e501e9 = v20 (164ea45), 1.8815x, 12,023 us/step (2026-10-26 00:11Z).** Board #1 2.285x (10-25 19:30Z).
-- main = v22 code (3fab554) + FUSED_ROUTER_TOKENS option off (522da14: different submission.py bytes, same kernels).
-  v21 (f57c3be, moe tk2f) check f72eff30 1.8834x (tie: v1 sliding 135.9 -> 123.9, d1 80.4 -> 77.8, rest noise).
-  v22 (3fab554 = v21 + proj's bit-exact escape headers) check 511378a9: see NOTES (submitted if it beat 1.8815).
-- v21 per shape, H200 check f72eff30 (ours, us sliding/full; SGLang in brackets): d1 77.8/85.1 (172/181), d16
-  160.8/233.2 (270/433), d32 196.4/346.5 (261/610), v1 123.9/138.4 (260/273), v16 280.3/371.6 (531/722), v32
-  367.2/542.9 (733/1089). Speedups: d1 2.21/2.13, d16 1.68/1.86, **d32 1.33/1.76**, v1 2.10/1.97, v16 1.89/1.94,
-  v32 2.00/2.01. Judge noise: identical code moves up to 4% per shape; total ~+-1%.
+- **Best scored: ca8f833a = v22 (3fab554), 1.8924x, 11,953 us/step (2026-10-26 ~01:20Z).** Board #1 2.360x, #10 2.167x
+  (10-26 01:20Z). v23 (358d87c = main, check f2db2454 1.9088x) submitted after it: see NOTES / COORD for its score.
+- main = v23: v22 + r3_router (FP32 router at T=8, no split K). FUSED_ROUTER_TOKENS option off (tie).
+- Budget 2026-10-26: 3 submits (81e501e9, ca8f833a, v23), 3 checks used.
+- v22 scored per shape (H200 us sliding/full; SGLang in brackets): d1 76.4/87.2 (173/184), d16 147.6/237.7 (252/445),
+  d32 189.0/337.9 (254/609), v1 123.1/143.6 (260/285), v16 271.7/356.0 (508/661), v32 353.0/529.1 (704/1050).
+  Speedups: d1 2.27/2.11, d16 1.71/1.87, **d32 1.35/1.80**, v1 2.11/1.98, v16 1.87/1.86, v32 1.99/1.98.
+  Judge noise: identical code moves up to 4% per shape; total ~+-1%.
 - Floors (us): d1 40/44, d16 77/137, d32 85/208, v1 62/66, v16 127/189, v32 144/267.
 
 ## Code (muse_decode_layer/)
@@ -21,6 +21,7 @@ Updated 2026-10-26 ~01:20Z (session 7).
   m=8), `g13_src.cu`/`g14_src.cu` = proj gemv13 (m=1)/gemv14 (m=8) over lossless 12-bit BF16 (r-proj 3f173eb, bit-exact escape headers; packs `_pack13/_pack14` in `_g12_prepare`, used for qkv+pooler (G13_CFG/G14_CFG) when the weight compresses, built in `_g10_lib`), `lt_src.cu` = proj cuBLASLt explicit-algo GEMM (LT_CFG fixed H200 picks, `_lt_prepare`); layer.py `_g10_lib` builds g10/g12 in one load_inline and text-patches them (PDL trigger, PDL-secondary launch).
   Re-copy: `git -C ~/r-moe show <c>:muse_moe_w4a16/submission.py > moe_src.py` (check the 68-int route meta
   matches `_moe_bucket`, and that the patch anchors in layer.py/build.py still match: asserts fire at import).
+- Router: T=1 `_router_fma` (Triton FP32), T=8 `r3_router` (CUDA FP32, in `_g10_lib`), T>8 `_router_split` (SGLang hi/lo BF16).
 - Pipeline: qkv `_linear` (gemv10 T=1, gemv12 T=8, cuBLASLt pick at T=128/256, else cuBLAS) -> attn -> o `_linear` -> `_boundary` -> side stream:
   router + `_routing` || pooler `_linear` -> `_rmsnorm_gain` -> experts (`_moe_kernel_fn`: tk2 at T<=32, route+gather+
   moe_tw at T>32) -> unpool `_linear` (1024-row slice at T<=8) -> `_boundary`.
@@ -48,8 +49,8 @@ Updated 2026-10-26 ~01:20Z (session 7).
 1. Experts are 50-60% of every T>=16 shape (tk2f d32 101 of 217 us H100): moe's lane.
 2. d32 sliding is the weakest shape (1.33x): critical path = qkv 19, attn ~26, o 9, boundary 4, pooler||router 38,
    tk2f 101, norm2 5, unpool 27, boundary 4 (H100 us). FUSED_ROUTER_TOKENS would win ~3-5 us at T>=16 with a GEMM
-   config for [T,4608] FP32 out better than cuBLAS's heuristic (try proj lt_src with Ctype/Dtype 32F + a config sweep).
-3. FP32-x port of proj's router2 (r-proj e605717) for T=8: ~2 us on v1 (router delays the pooler start).
+   config for [T,4608] FP32 out better than cuBLAS's heuristic (cuBLASLt heuristic list: nothing better, s7; needs a custom kernel).
+3. Done s7 (v23 r3_router). Left at v1: the pooler still starts 5 us after the router (r3 = 256 CTAs, 2 waves).
 4. Glue fusions (each ~1-3 us at d1/v1): rmsnorm into tk2f x staging, boundary into a GEMV epilogue (last-CTA).
 5. Routing risk: diag check f5fdc570 once failed a timed rep's routing (3.18e-2 > 0.03). Not seen since.
 
