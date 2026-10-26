@@ -133,6 +133,9 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s55: gemv24 tail balancing DEAD (dynamic tail pools gemm_dt dev/s55, +1..5 us proxy; finished-warp L2 lend-prefetch PF
 ## +0.5..1 us). Per-warp end spread = HBM share; static SK/r1 stay. Also dead: m32 KC1024, x copies over 32 lanes, lazy
 ## out-zero fence (LZ/LZ2 +0.4..2). Upper bounds (illegal probes): x arrival 0.4-1.4 us, zero+fence 0.4-1.7 us at m32. NOTES s55.
+## s56: g24 EZ/ZN zero-ahead chain at T=16 (each g24 zeroes the next g24's out; consumer skips zero+fence+epoch barrier):
+## H100 layer d16 sl -0.3..-1.7, full tie; T=32 loses (+2..4, off). Handoff dev/s56/g24z_layer.patch. dev/s56/diag_read.py
+## = readout for the 00:00Z log. NOTES s56.
 ## Next (00:00Z check, ranked):
 ## -2. (s54) In the same log: diag24 r257 lines vs r1 (H200 SK vs static per op/m/grid): post which g24sk:<key> to default
 ##    ON (layer TUNE_BASE) per T; check pool/unp m16 G108 (16,1024,4,3,12) vs (16,1024,2,4,16) (H100 layer: sl -0.6..0.8).

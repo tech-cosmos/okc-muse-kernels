@@ -1192,3 +1192,26 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
     address; epoch in units of 4096/launch) +1..2 us; v2 (LZ2, on file) block-aggregated (smem count, last warp does the one
     global atomic, spinners read target from smem) +0.4..1.5 us. DEAD. (v1 first HUNG in the harness: the epoch target
     old % (G*WPB) breaks when configs with different WPB share a ctr; any per-launch-unit epoch needs a fixed unit.)
+
+## s56 (2026-10-26 23:15-~00:30Z, sandbox okc-night4, session 13): g24 EZ/ZN (zero-ahead chain) for the layer at T=16
+- dev/s56/diag_read.py: readout of a proj judge log's diag24/diag19d lines vs layer main's g24 picks (pool G108, rest G132).
+- Idea (from s55's bound: zero+fence+epoch barrier 0.4-1.7 us/call): out arrives zeroed, the kernel skips zero, fence,
+  epoch atomic and spin (EZ). Standalone dev/s56/gemv26.cu + g26.py (DEFS G24_EZ: the 3 us pred zeroes out; G24_ZN: the
+  g24 zeroes a second m x n buffer at its warps' end; NOCHK=1 timing; ESCW PASS for EZ and EZ+ZN). Graph pred+gemm, us/call,
+  2 rounds each, layer cfgs (r1 / r257): EZ alone G88 proxy -1.0..-1.5 on every op/m; H100 G132 -0.4..-1.4 (pool m32 SK
+  +0.4). EZ+ZN (the chain element): G88 qkv/o/pool/unp m16 -0.5..-1.3, m32 qkv/o/pool -0.9..-1.5 but unp m32 +0.6..0.8;
+  H100 G132 m16 -0.4..-1.4, unp m32 +0.9..1.5. ZN alone +0..0.3 (pool m32 r1 +0.6 at G88).
+- Layer (copy /tmp/pj56/L of r-layer a2a2d41): kernel args zo/zn4 + npre bit 17 (EZ) / 18 (EZPF); _g24_sel() helper;
+  G24_ZCHAIN qkv->o->pooler->unpool: the g24 of key K preallocates the next key's out (_G24_ZN, cleared at kernel_fn start)
+  and zeroes it at its warps' end; the consumer pops it and runs EZ. dev/s56/ezcalls.py confirms: d16 qkv(ZN o) ->
+  o(EZ, ZN pooler) -> pooler(EZ, ZN unpool) -> unpool(EZ); d32 pooler -> unpool; T=128/256 untouched.
+- Safety (needs completion transitivity between the zeroing g24 and its consumer): d16 sl qkv->csl(PW, waits; PDL attr
+  only with PW)->o; d16 full qkv->_gd_full (no launch_pdl = full edge)->_red_fin (waits)->o; o->_boundary (waits on SEP and
+  non-SEP paths when PDL)->pooler; pooler->_rmsnorm_gain (waits when PDL)->event join->tk2f->moe_norm2->unpool. OK.
+  Tests 13/13, tools/replay_test.py d16 40 inputs x seeds 11,7: 0/160 fails.
+- H100 ab_flag (variants TUNE {}, 4-5 rounds x seeds 7,11,99), us vs off: chain on at T=16: d16 sl -0.3..-1.7 (3 runs,
+  mean ~-1.1), d16 full -0.1..+0.2 (tie). T=32: d32 sl/full +2..+4 (LOSES): ZN stores on the pooler +0.6..1.5 and the EZ
+  unpool +0.5..1 on top (not L2 eviction: EZPF L2 prefetch of out before the wait = tie). Short chain (no pooler->unpool)
+  at d16: -0.3..-1.2 sl (less than the full chain). A/A noise floor of ab_flag here +-0.5 us.
+  NB ab_flag stmts persist across variants in one namespace: "pass" after "X = set()" is an A/A run (my first try).
+- Handoff dev/s56/g24z_layer.patch (git apply in r-layer a2a2d41): G24Z_TOKENS {16} on, TUNE[16] += {"g24z": False}.
