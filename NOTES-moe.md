@@ -881,3 +881,12 @@
   TWF_SPLIT_M off/on, 20 back-to-back graph replays each); seeds_big 0 bad (hot off and on); bench test 15/15.
 - DIAG_VARIANTS big += ("h32ne0", hot 32 NE 0), ("offne0", NE 0): the 00:00Z DIAG check A/Bs it on the H200 too.
 - Why v16 gains little: probably most tokens have a route to one of the last-finishing experts; not investigated.
+
+## Night4 session 2 (19:26Z, no judge runs: moe checks 20/20 until 00:00Z) -- PDL .nc-hoist fix
+- layer s52 request: moe_routegather read ids (and X) via const __restrict__ after griddepcontrol.wait = .nc loads
+  ptxas may hoist above the wait. Now __ldcg for ids and X. SASS audit (cuobjdump of the built .so, every kernel with
+  ACQBULK, LDG.*CONSTANT before the first ACQBULK): moe_norm also had `ids` hoisted above its wait (LDG.E.CONSTANT
+  from param ids before ACQBULK) -> ids and tw via __ldcg there too. Remaining pre-wait .nc loads: w1 (moe_norm),
+  lut (twm/hot/twf/tw/twq) = prepared state, safe. moe_route / r-moe tk2f have no wait (not PDL secondaries here;
+  layer owns its patched tk2f). Standalone outputs unchanged (cache op only); bench test 15/15.
+  Layer: its moe_norm copy (and moe_norme) needs the same __ldcg on ids/tw if it runs it as a PDL secondary.

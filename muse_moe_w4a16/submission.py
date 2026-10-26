@@ -328,7 +328,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     // n4s1 (NORM_EARLY): wait only for the experts of this token's routes (flagged by moe_twm / moe_hot after their
     // last gemm2 item of the expert): CTAs run on the SMs twm's drain frees. Y then read through L2 (ld.cg).
     if (tid < 8) {
-      const int e = ids[tok * 8 + tid] - start;
+      const int e = __ldcg(ids + tok * 8 + tid) - start;
       if (e >= 0 && e < count) {
         int fv;
         for (;;) {
@@ -346,7 +346,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
   bool loc[8];
 #pragma unroll
   for (int s = 0; s < 8; ++s) {
-    const int e = ids[tok * 8 + s] - start;
+    const int e = __ldcg(ids + tok * 8 + s) - start;
     loc[s] = e >= 0 && e < count;
     ss[s] = 0.f;
     if (loc[s]) {
@@ -382,7 +382,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     float tot = 0.f;
 #pragma unroll
     for (int w = 0; w < 16; ++w) tot += ssum[w][s];
-    const float f = tw[tok * 8 + s] * rsqrtf(tot / NOUT + eps);
+    const float f = __ldcg(tw + tok * 8 + s) * rsqrtf(tot / NOUT + eps);
 #pragma unroll
     for (int k = 0; k < 8; ++k) acc[k] += f * v[s][k];
   }
@@ -2023,7 +2023,7 @@ __global__ void __launch_bounds__(256) moe_routegather(const int* __restrict__ i
   __syncthreads();
   const int lim = tok * 8;
   for (int i = tid; i < ((nroutes + 255) & ~255); i += 256) {  // uniform trip count: __match_any_sync below
-    const int e = i < nroutes ? ids[i] - start : -1;
+    const int e = i < nroutes ? __ldcg(ids + i) - start : -1;
     const bool v = e >= 0 && e < count;
     // warp-aggregated: one smem atomic per distinct expert per warp
     const unsigned m = __match_any_sync(0xffffffffu, v ? e : -1);
@@ -2064,11 +2064,11 @@ __global__ void __launch_bounds__(256) moe_routegather(const int* __restrict__ i
   }
   __syncthreads();
   if (tid < 8) {
-    const int e = ids[lim + tid] - start;
+    const int e = __ldcg(ids + lim + tid) - start;
     int pos = -1;
     if (e >= 0 && e < count) {
       pos = pre[e];
-      for (int j = 0; j < tid; ++j) pos += ids[lim + j] - start == e;  // repeated ids in a token (not from topk)
+      for (int j = 0; j < tid; ++j) pos += __ldcg(ids + lim + j) - start == e;  // repeated ids in a token (not from topk)
       sroutes[pos] = lim + tid;
     }
     s_pos[tid] = pos;
@@ -2078,7 +2078,7 @@ __global__ void __launch_bounds__(256) moe_routegather(const int* __restrict__ i
 #pragma unroll
   for (int i = 0; i < KD / 2 / 256; ++i) {
     const int o = tid + 256 * i, w = o & 31, t = w & 3, jh = w >> 2;
-    v[i] = src[(o & ~31) | (8 * t + jh)];
+    v[i] = __ldcg(src + ((o & ~31) | (8 * t + jh)));
   }
   __syncthreads();
 #pragma unroll
