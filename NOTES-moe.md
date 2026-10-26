@@ -799,3 +799,7 @@
   => recommend _moe_HOT_M = {256: 32} in the layer (est. H200 -8..13 us sliding, -2..5 full = ~+0.3% layer score).
 - Not done: hot at T=128 (layer v16 experts <= ~49 tokens: no hot experts, launch would cost ~2 us); weighting the hot
   grid by the number of hot experts (shape-only rule: grid can't depend on routing).
+- Layer copy with _moe_HOT_M = {256: 32}: bench test 13/13, tools/scored_test.py "verify 32" 6 seeds 0 bad,
+  replay_test 4 inputs x rs 3 0/8 fails. The layer tuner (skewed synthetic T=256 loads, H100) with hot on: default full
+  619.6 vs 655.4 us with hot off (s29 first A/B run), and it then picks {'twf_split': 66, 'twm_order': 76}.
+- COORD: Handoffs + Requests (layer: patch + 2 names + _moe_HOT_M = {256: 32}) posted 16:50Z.
