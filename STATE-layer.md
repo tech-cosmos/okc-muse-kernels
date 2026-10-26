@@ -1,6 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 17:40Z (session 47: probe only, main unchanged). **main = v88 (v87 + proj s36 pr8 npf 212), NOT judge-checked** (layer budget for 10-26 spent:
+Updated 2026-10-26 17:50Z (session 48: housekeeping only, main unchanged). **main = v88 (v87 + proj s36 pr8 npf 212), NOT judge-checked** (layer budget for 10-26 spent:
 20/20 checks, 10/10 submits). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x (9,505 us/step), #10 2.180x.
 
 ## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
@@ -148,3 +148,8 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
   attention is delayed/slowed by the same amount; a side-stream fork at graph START costs ~9 us.
 - GEMV with PDL preloading W before griddepcontrol.wait AFTER A BIG PRODUCER (s2: Triton o GEMV after attention): zero-sum. After small producers (norm2, csl at d1) it wins (v12-v14).
 - torch.mm(out_dtype=float32) instead of F.linear: same speed.
+
+## s48 (2026-10-26 17:40Z-17:50Z): housekeeping, no build, no judge runs (layer 20/20 checks, 10/10 submits for 10-26)
+- Board: #46 at 1.9954x; #1 2.380x, #10 2.208x. submission.py == build.py output (rebuilt, no diff); no tool reads
+  inputs from /tmp (only scratch trace files), so a fresh sandbox rebuilds from git alone. variants/ now gitignored
+  (the 5 tracked files stay). Next sandbox: unchanged plan (FIRST THING above: check main v88).

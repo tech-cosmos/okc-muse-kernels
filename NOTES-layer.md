@@ -1014,3 +1014,7 @@
   (89.8): every edge is already PDL-overlapped; the gains since then are in pr1 (-0.6) and the chain start. No idle gap
   > 1 us. Biggest remaining d1 slices: tk2f 34 us (moe; ~2x its bytes floor) and pr1 23.5 us (proj; ~1.6x).
 - Next sandbox: unchanged plan in STATE (first check = main v88).
+
+## s48 (2026-10-26 17:40Z-17:50Z): housekeeping only
+- Budget spent (layer 20/20 checks, 10/10 submits), sandbox ends ~19:10Z. Verified submission.py == build.py output,
+  no /tmp input dependencies in tools/, added variants/ to muse_decode_layer/.gitignore. main = v88 unchanged.
