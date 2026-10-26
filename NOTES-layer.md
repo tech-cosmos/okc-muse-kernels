@@ -919,3 +919,6 @@
   -> 45.8 | rmsnorm +1.1 | tk2f 46.1-81.0 | n2u +4.5 | bnd +1.9 = 87.4. v1 sl: tk2f 58.1-141.8 (83.7) | nu8 +6.5 | bnd
   +4.0 (T=8 boundary 2x the d1 one: 8 FP32 slabs per row + SPL 2).
 - FIRST CHECK OF THE NEXT SANDBOX = main (v84): copy the 'layer tune T=1' lines (g13o vs default, sl and full) for proj.
+- DEAD: T=8 second-boundary BND_SPLIT (8,2) 1/2/4/8: H100 ab_files 6 rounds v1 149.0-149.8 / 161.7-162.8 us (noise):
+  the 4 us after nu8 is the PDL release + latency chain, not the row work.
+- main (tuner on) replay T=1/T=8 shapes 0/10 each.
