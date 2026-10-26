@@ -86,7 +86,7 @@ int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
-#define TK2F_L2H 0       // s21: tk2f weight-copy L2 hints (python TK2F_L2H): 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
+#define TK2F_L2H 0       // s21: tk2f weight-copy L2 hints (python TK2F_L2H): 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only; 4 = evict_last every group of a multi-group expert, evict_first else
 #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
 #define TK2_EXP 0        // s12: tk2h (TK2H/PSC) and weighted-split (TK2W) instantiations: H200 diags, no gain (off: compile time)
 
@@ -2975,7 +2975,9 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
     const uint4* src = Wq + ((size_t)e * NRT * 64 + lr * 64) * 32;
     const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
 #if TK2F_L2H
-    const bool nfin = R + RPE < s_rs[a + 1];  // a later group of this expert re-reads this row
+    // mode 1-3: nfin = a later group of this expert re-reads this row; mode 4: any group of a multi-group expert
+    // (the other group's CTA may read the same row first)
+    const bool nfin = TK2F_L2H == 4 ? s_rs[a + 1] - s_rs[a] > RPE : R + RPE < s_rs[a + 1];
     const int hk = nfin ? (TK2F_L2H == 3 ? 0 : 1) : (TK2F_L2H == 2 ? 0 : 2);  // 0 none, 1 evict_last, 2 evict_first
     const uint64_t pol = hk == 1 ? pol_last : pol_first;
 #endif
@@ -4434,7 +4436,7 @@ TWF_DBG = 0
 TWF_SPLIT_M = {}  # s11 per-M override of TWF_SPLIT; judge c1659443 {128: 132, 256: 66}: tie (tail -12 us, twf +10 us)
 TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K halves (FP32 partials, ticket): shorter tail
 TWM_L2H = 1  # s21: same hints in moe_twm's producer (compile time; evict_last if a later pass re-reads). Bitwise = 0. Layer harness H100 (tuner off): v16 -0.8..-2.6 / -2.4..-9, v32 0 us
-TK2F_L2H = 1  # s21: tk2f L2 cache hints on the weight copies (see #define TK2F_L2H; compile time, 0 = off). Bitwise = 0. H100 layer harness (tuner off): v1 -3.6/-3.9, d16 -2.0/-4.3, d1 -0.3/-0.5, d32 0 us
+TK2F_L2H = 4  # s21: tk2f L2 cache hints on the weight copies (see #define TK2F_L2H; compile time, 0 = off). Bitwise = 0. DRAM bytes at d16/d32 = floor (ncu). moe-only layer routings (H100, 5 seeds): d16 -4.9, d32 -2.8, v1 -1.1, d1 -0.5 us (mode 1: d16 -1.2); layer harness (tuner off) mode 1/4: v1 -4..-6, d16 -0.5/-3.5, d32 0
 TK2F = 204  # s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2

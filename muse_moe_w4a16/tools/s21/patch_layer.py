@@ -15,7 +15,7 @@ rep(anchor, anchor + '''__device__ __forceinline__ void bulk_g2s_h(void* dst, co
                ::"r"(smem_u32(dst)), "l"(src), "r"(bytes), "r"(smem_u32(bar)), "l"(pol) : "memory");
 }
 ''')
-rep('''#define TK2_EXP 0 ''', f'''#define TK2F_L2H {mode}       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
+rep('''#define TK2_EXP 0 ''', f'''#define TK2F_L2H {mode}       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only; 4 = evict_last every group of a multi-group expert, evict_first else
 #define TK2_EXP 0 ''')
 rep('''  constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * 1152, KB = NC * KPS;
   int a = 0;
@@ -50,7 +50,9 @@ rep('''  constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * 1152
     const uint4* src = Wq + ((size_t)e * NRT * 64 + lr * 64) * 32;
     const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
 #if TK2F_L2H
-    const bool nfin = R + RPE < s_rs[a + 1];  // a later group of this expert re-reads this row
+    // mode 1-3: nfin = a later group of this expert re-reads this row; mode 4: any group of a multi-group expert
+    // (the other group's CTA may read the same row first)
+    const bool nfin = TK2F_L2H == 4 ? s_rs[a + 1] - s_rs[a] > RPE : R + RPE < s_rs[a + 1];
     const int hk = nfin ? (TK2F_L2H == 3 ? 0 : 1) : (TK2F_L2H == 2 ? 0 : 2);  // 0 none, 1 evict_last, 2 evict_first
     const uint64_t pol = hk == 1 ? pol_last : pol_first;
 #endif
