@@ -3329,7 +3329,7 @@ TK2SA = 1  # s9: arithmetic e4m3 scale decode in moe_tk2f (when prepare() found 
 TK2FN = 0  # s9: 1 = post-expert norm fused into moe_tk2f (moe_tk2fn_launch): judge bs1 +2 us (check 168fa04c), dead
 TK2G_W = 0  # s10: GS16 2-group row weight = (8 + TK2G_W) / 8 in the static row split
 TK2G_MIN = 17  # s10: GS16 only from this M (H100: GS16 is slower on the layer routings; A/B on the judge)
-TK2G = 1  # s10: M > 8: 16-token segments in moe_tk2f (2 token groups share each dequantized weight fragment)
+TK2G = 0  # s10: 1 = 16-token segments in moe_tk2f (2 token groups share each dequantized weight fragment): judge bs32 +7 us (check b25182e8), H100 layer routings +6..18 us: off
 TK2F = 204  # decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
