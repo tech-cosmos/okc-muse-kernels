@@ -886,3 +886,34 @@
   block) = K splitting, so partial combines (stealer partial + done flag/ticket, ~1-2 us at the tail).
 - Value estimate: <= ~1.5 us net at v1 (score weight ~.096%/us sliding) = ~0.1-0.15% layer. Moved below the line: not worth
   a next-sandbox session unless everything bigger is gone.
+
+## Session 39 (2026-10-26 17:40-18:00Z): overlap probe for layer s45's "pooler W into SMEM during csl/o/bnd" idea
+No judge runs (checks 20/20). H100 probe dev/s39/fill.py (run from /tmp: `cp dev/s39/fill.py /tmp/x/; cd /tmp/x; python fill.py`):
+one CUDA graph = 256 MB flush, then a side-stream `fill` kernel (132 blocks x 128 thr, 1/SM, TMA bulk copies of 26 MB into
+192 KB SMEM per SM) forked beside a main-stream chain of NO tiny kernels (`xs.mul_`, XS elements), joined. Times = median
+of 60 replays minus the flush-only graph. Env: PB bytes/SM, NB blocks, CH chunk (>0: all chunks issued at once;
+<0: ONE |CH|-byte chunk in flight per SM; 999999: unpaced L2 prefetch; 1000000+g: 32 KB L2 prefetch per SM every g ns).
+- Unthrottled fill (all 192 KB/SM issued at once) is ZERO-SUM against ANY chain: m=1 cuBLAS o GEMV 2x: 15.5 + 13.2 ->
+  28.6 (sum); 8 tiny 32-element kernels (8.5 us, launch-bound, no DRAM): +9.3 us (= the fill's whole stream time); 40 tiny
+  kernels: 39.8 -> 49.1 (+9.2). Fewer SMs (NB 66/33, 13/6.5 MB) dilate by their own stream time too. So under a deep HBM
+  queue even L2-hit / launch-latency-bound kernels slow down by ~the stream's duration (each dependent round trip waits).
+- **Dilation is set by bytes IN FLIGHT, not by bandwidth.** 40-kernel chain (39.9 us), 26 MB fill, one chunk in flight/SM:
+  CH  fill alone  chain dilation (32-elem kernels / 256 KB kernels)
+  all-at-once 13.3  +9.2 / +9.9
+  -32768      13.9  +3.8 / +6.4     <- ~full rate, 40-60% less dilation
+  -16384      17.1  +2.1 / +3.5
+  -8192       22.6  +0.7 / +2.6
+  -4096       33.8  +0.0 / +2.7
+  So a fill/prefetch that keeps ~32 KB in flight per SM (4.3 MB total) streams at ~95% of full rate and leaves latency
+  chains much faster than one that queues its whole range. Net saving vs streaming later: 26 MB loaded for ~3.8-6.4 us of
+  chain dilation instead of ~10.5 us of serial stream = ~4-6.5 us per 26 MB on H100 (H200 untested).
+- L2 prefetch (cp.async.bulk.prefetch.L2, 32 KB per op): unpaced +2.4/+3.1, paced 1-3 us per op +3.6..4.8 dilation; a
+  follow-up reader test (torch.amax over the 26 MB, itself slow: 22 us, compute-bound) was inconclusive (unpaced prefetches
+  may be partly dropped). Not a clean result; prefer the SMEM fill (completion is known) when testing this for real.
+- Implication for the layer (s45 idea): an SMEM-resident pooler W at T=1 (pr1 resident during csl/o/bnd) is worth at most
+  ~4-6 us/d1 layer, and ONLY if the filler keeps few bytes in flight (one 32 KB TMA per SM): a deep TMA ring (like g13's or
+  pr1's prologue) issued beside csl/o/bnd will dilate them by its whole duration (explains the zero-sum L2 prefetch results,
+  layer s2/s15/s34, if those were issued as one deep burst). Real csl/o/bnd touch more memory than this chain: expect the
+  256-KB-kernel column or worse. Also the same rule for our own PDL prologues (W stages BEFORE griddepcontrol.wait in g19/pr1/
+  pr8/g13): a shallow throttle there might help the predecessor more than it hurts us: untested, cheap to test in g19.py
+  MODE=2 PRED=3000 (the PRED kernel is a spin, not memory-latency-bound: use a memory-touching PRED for that test).

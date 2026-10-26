@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~17:40 UTC (session 38).
+Updated 2026-10-26 ~18:00 UTC (session 39).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -35,7 +35,6 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   Run with SUB=<abs path to submission.py> and cwd /tmp/pj (scripts expect /tmp/pj/lt.py: copy dev/lte_lib.py there).
 - bench.py: `python bench.py test` (39 cases), `python bench.py bench [filter]`.
 
-
 ## What I learned (numbers in NOTES)
 - A graph's kernel launch costs ~1.8-2.6 us over an empty graph (more blocks -> more). Reader slope 3.24 TB/s (H100).
 - Read pattern: only high-occupancy grid-stride or block-contiguous (threads interleaved at 16 B) reads approach
@@ -48,8 +47,6 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   ~1.8 us spread inside a block. H200 gemv12 at m16: qkv 0.99, o 0.91, pooler 1.08, unpooler 0.95; m32 0.72-0.93.
 - Dead ends this session: TMA bulk x staging (slower than cp.async), shared float atomics, 4-block clusters,
   R=2 row groups per warp (spills), gemv9 warp stream-K, CUDA-core math at m>=8, cuBLAS swap-AB.
-
-## gemv16 (s6; W = mma A, x ldmatrix, TMA multicast x): H100 m16 wins 1-2.5 us, H200 ~par with lt (NOTES s6).
 
 ## Lossless 12-bit weights (session 5): the big lever
 - m=1 was already AT a bare reader's speed: only fewer bytes help. _compress in dev/sub_template.py: sign|mantissa byte
@@ -140,7 +137,13 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## ~9 us block-finish spread. Dead: prefetch before the wait, PF loads after it, router last/mid-loop, g14 bulk prefetch. NOTES s36.
 ## s37/s38: pr8 tail = random block-finish spread (~3 us), not the pred's late SMs; PR8_RGI +0.25 dead (TRACE=2 tool); whole-rg
 ## work queue ruled out (units >= 6 us > spread); only K split + combines left, <= ~0.1% layer: DEPRIORITIZED. NOTES s37/s38.
+## Session 39: H100 overlap probe dev/s39/fill.py: a concurrent HBM stream dilates latency chains (even launch-bound tiny
+## kernels) by ~its whole duration when it queues its whole range at once (zero-sum); with ONE 32 KB TMA in flight per SM it
+## streams at ~95% rate and dilates 40-60% less (16 KB: -75%, 8 KB: ~0 but half rate). NOTES s39 table.
 ## Next (ranked)
+-26. (s39) Throttled-prologue test: g19/pr1/pr8 stream W stages before griddepcontrol.wait; with a MEMORY-touching PRED
+   (not a spin) compare deep vs 1-2 stages in flight per SM (pred time + ours). If the pred dilates less, hand off. Also the
+   layer s45 SMEM-resident pooler at T=1 is worth <= ~4-6 us/d1 only with a shallow filler (see NOTES s39).
 -25. (s36/s37) Layer should bundle pr8 npf 212 (and DEC3) into its next-sandbox first check (it is in layer v88). Remaining pr8 room
    (H100 ~24.4 us after pred vs ~18 us bytes): random block-finish tail ~3 us (s37: dynamic K-half stealing, design in NOTES s37)
    and the router-math phase (fewer, fatter router items). s38: the tail fix needs K split + combines, worth <= ~0.1% layer: low.
