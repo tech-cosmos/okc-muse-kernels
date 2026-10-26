@@ -806,3 +806,20 @@
   nds holds the SMs' smem (2 CTAs/SM), full layers are KV-HBM-bound: only d16 sliding (csl) could hide it (~-4 us H100,
   needs g19 split + csl ungated FP32 out + gated o GEMV or a cuBLAS-side gating pass). Est. <= +0.3%: parked.
 - Tests on v72: bench test 13/13; scored_test all 12 shapes x3 seeds 0 bad; replay_test all shapes 0/20, seeds 11+12.
+
+## s35 (2026-10-26 14:11Z-): v73-v75 (no judge runs: today's layer budget 20/20 checks, 10/10 submits is spent)
+- v73 (f170e82) = v72 + moe s21 TK2F_L2H 1 (`python ~/r-moe/muse_moe_w4a16/tools/s21/patch_layer.py moe_src.py 1`):
+  tk2f weight bulk copies carry L2 policies (evict_last for rows a later 8-token group of the same expert re-reads,
+  evict_first otherwise). H100 ab_files vs v72, 4 rounds: d16 208.78/311.42 -> 205.54/306.79, v1 152.34/167.09 ->
+  148.78/160.84, d32 -0.5/+1.2, T>=16 verify 0. Tests 13/13, tk2f_stress 0/600, scored_test all x3 0 bad, replay all 0/20.
+- TUNER NOISE (important for reading A/Bs and judge runs): identical files' prepare-time tuners pick differently; at d1
+  sliding v72 vs v72 = 89.09 vs 90.74 us (pick pr1_npf 0 vs default). Mode 2 (no hint on final rows) showed the same
+  apparent d1 +0.5: it was the tuner, not L2H. Read the "layer tune" lines before blaming a change.
+- v74 (13e5517): PR1_CFG[1] npf 4 -> 0 (tuner option {"pr1_npf": 4}): both logged H200 tuners (703d3a7e, 0f065691,
+  same code 909010f) picked npf 0 at T=1 sliding (-2.3/-0.8 us). H100 d1 sl 87.96/88.10 vs v73 89.58/88.39.
+- v75 (482a3b6): TUNE_BASE = per-(T, sliding) defaults under the tuner (`_opt`: tune pick > TUNE_BASE > code default),
+  set to the picks both H200 logs agreed on: T=8 sl nu8, T=8 full nu8 + g14alt:qkv_gate 1 (-2.0/-2.1 both runs), T=16 sl
+  g19:o. Tuner candidates now include the "off" variants. H100 tie (the tuners converge here). Picks that disagreed
+  between the two H200 runs (not in base): T=32 sl lt:o vs lt:unpool, T=128/256 (twf_split 1022 -12 us in one run, twm_tail
+  32 / default in the other): the synthetic T=256 timings vary ~3% between runs.
+- Tests v75: scored_test all x2 0 bad; replay verify 1/16, decode 16 0/20 (seed 12).

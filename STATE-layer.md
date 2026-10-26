@@ -1,12 +1,17 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~15:20Z (session 34: main = v72 = v71 + O_PF, NOT judge-checked; budget for 10-26 spent).
+Updated 2026-10-26 ~14:25Z (session 35: main = v75, NOT judge-checked; budget for 10-26 spent).
+
+**s35: main = v75 (482a3b6)** = v72 + moe s21 TK2F_L2H (v73: H100 d16 -3.2/-4.6, v1 -3.6/-6.3 us) + pr1_npf default 0
+at T=1 (v74: H200 tuners picked it twice) + TUNE_BASE (v75: per-(T, sliding) defaults = picks both H200 tuner logs agreed on:
+T=8 nu8 (+ g14alt 1 full), T=16 sl g19:o). Tests 13/13 (v73), scored all 0 bad, replay 0/20.
+FIRST CHECK OF THE NEXT SANDBOX: main (v75) as-is; compare per shape vs 703d3a7e (d1 69.6/77.8, d16 143.3/227.7,
+d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5); read the "layer tune" lines in the log (tuner
+picks swing d1 by ~1.5 us between identical files). Submit if it beats 1.9954x.
 
 **s34: main = v72 (6baba9e)** = v71 + O_PF {32: 0.5, 128: 0.5}: sliding attention (nds at d32, nvs at v16) L2-prefetches
 half of o's W after each CTA's last K/V load (TUNE option {"o_pf": 0} at T=32/128). H100 ab_flag d32 sl -1.3/-1.5,
 v16 sl -0.8/-1.5 us; d16/v32/full layers lose or tie (off). Tests 13/13, scored all x3 0 bad, replay all 0/20 x2 seeds.
-FIRST CHECK OF THE NEXT SANDBOX: main (v72) as-is; compare per shape vs 0f065691/703d3a7e (v71 est. +0.2..0.3%,
-v72 +0.1%: d32 sl, v16 sl). Submit if it beats 1.9954x.
 Dead this session (NOTES s34): prefetch at nds start (zero-sum), POOL_PF (boundary prefetching the cuBLAS pooler at
 T=128), O_PF on _gd_full (full layers), NDS splits 4/16, split qkv/gate (d1 ~zero, only d16 could gain).
 
@@ -17,8 +22,6 @@ bit-identical). H100 ab_flag: d1 -0.5/-1.0, v1 -1.1/-0.1, d16 -1.5/-1.9, d32 -1.
 + moe s20 twm AUTO K-split (TUNE twf_split 1022 at T=128/256). Check 0f065691 1.9754x; **submit 703d3a7e 1.9954x = board
 best** (d1 69.6/77.8, d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5). H200 tuner
 lines in NOTES s32. Sandbox ends ~19:10Z: no judge runs left today; next sandbox (after 00:00Z) starts from main.
-
-(s25-s29 details: NOTES s25-s29. Live TUNE options incl. skewed synthetic routing SYNTH_P, nu8, QF32/QF32_NDS, TK2FX/TK2FJ, RF_TRIG, BKT, GNORM, twq/twm_*.)
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
 option sets on synthetic inputs (shapes only) and keeps the fastest in state["tune"]; `_opt()` reads it at trace time.
