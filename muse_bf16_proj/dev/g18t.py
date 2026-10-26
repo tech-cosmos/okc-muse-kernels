@@ -18,8 +18,8 @@ P, hdr, scale = g["pack18"](W, KC, AP)
 x = torch.randn(M, k, device="cuda").bfloat16(); out = torch.empty(M, n, dtype=torch.bfloat16, device="cuda")
 fl = torch.empty(512 << 20, dtype=torch.uint8, device="cuda")
 for _ in range(3):
-    fl.add_(1); torch.cuda.synchronize()
-    g["mod"].g18_gemm(P, hdr, scale, x, out, g["wsf"], g["cnt"], KC, AP, NS, g["GRID"], 0); torch.cuda.synchronize()
+    fl.add_(1); x.mul_(1) if os.environ.get("XWARM") else None; torch.cuda.synchronize()
+    g["mod"].g18_gemm(P, hdr, scale, x, out, g["wsf"], g["cnt"], KC, AP, NS, g["GRID"], g["MODE"]); torch.cuda.synchronize()
 tr = g["mod"].g18_trace().cpu()
 t0 = tr[:, 0].min()
 names = {0: "start", 1: "prodEnd", 2: "x1", 3: "x2", 4: "consEnd"}
@@ -28,3 +28,20 @@ for b in list(range(0, 132, 13)) + [131]:
     ev = [(int(i), (int(row[i]) - int(t0)) / 1000) for i in range(64) if row[i] > 0 and int(row[i]) >= int(t0)]
     print(b, " ".join(f"{names.get(i, i)}:{v:.1f}" for i, v in ev))
 print("max consEnd", (tr[:, 4].max() - t0).item() / 1000, "max any", (tr.max() - t0).item() / 1000)
+import statistics as _st
+ce = [(int(tr[b, 4]) - int(t0)) / 1000 for b in range(132)]
+pe = [(int(tr[b, 1]) - int(t0)) / 1000 for b in range(132)]
+la = [(int(tr[b].max()) - int(t0)) / 1000 for b in range(132)]
+x1 = [(int(tr[b, 2]) - int(t0)) / 1000 for b in range(132)]
+for nm_, v in (("x1", x1), ("prodEnd", pe), ("consEnd", ce), ("last", la)):
+    v = sorted(v); print(f"{nm_:8s} min {v[0]:.1f} p10 {v[13]:.1f} med {v[66]:.1f} p90 {v[118]:.1f} max {v[-1]:.1f}")
+U = (k // KC) * (n // 128) * (KC // 32 // AP); SPK = KC // 32 // AP; ntr = n // 128
+rows = []
+for b in range(132):
+    u0, u1 = U * b // 132, U * (b + 1) // 132
+    xr = len({u // (ntr * SPK) for u in range(u0, u1)}) - 1
+    seg = len({u // SPK for u in range(u0, u1)})
+    rows.append((ce[b], b, xr, seg, u1 - u0, x1[b]))
+rows.sort()
+print("late:", " ".join(f"b{b}:{c:.1f}(xr{xr},seg{sg},len{ln},x1 {xx:.1f})" for c, b, xr, sg, ln, xx in rows[-12:]))
+print("early:", " ".join(f"b{b}:{c:.1f}(xr{xr},seg{sg},len{ln})" for c, b, xr, sg, ln, xx in rows[:8]))

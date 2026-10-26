@@ -67,10 +67,11 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 // kernel (griddepcontrol.wait) only before touching x / ws / out.
 // Warps: NWC consumers, 1 producer (TMA ring), 1 finisher (split segments: partials from smem -> red.global.add.v4 into
 // ws, counters, last-arriver BF16 conversion; its global round trips overlap the consumers' streaming).
-template <int M, int KC, int AP, int NS, int PDL>
+template <int M, int KC, int AP, int NS, int PDL, int F32>
 __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* __restrict__ WP,
                                                          const float2* __restrict__ H, float scale, const __nv_bfloat16* __restrict__ x,
-                                                         __nv_bfloat16* __restrict__ out, float* __restrict__ ws, int* __restrict__ cnt,
+                                                         __nv_bfloat16* __restrict__ out, float* __restrict__ ws,  // F32: ws = the FP32 output [M, n] (zeroed before: PDL primary)
+ int* __restrict__ cnt,
                                                          int n, int k) {
     constexpr int NT = M / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * 768, XS = KC * 2 + 16, PBF = NWC * 16 * M;
     static_assert(NA % AP == 0, "config");
@@ -99,18 +100,28 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                 for (int qq = 0; qq < M; ++qq) bulk(xs + qq * XS, x + (long)qq * k + (long)ks * KC, KC * 2, xbar);
             };
             if (!PDL) xload();
+#ifdef G18_XPRE
+            if (PDL) { asm volatile("griddepcontrol.wait;" ::: "memory"); xload(); }
+            constexpr int PW = 0;  // x issued before W
+#else
+            constexpr int PW = PDL;
+#endif
 #ifdef G18_XFIRST
             if (!PDL) bar_wait(xbar, 0);
 #endif
             for (int u = u0, i = 0; u < u1; ++u, ++i) {
-                if (PDL && i == (NS < u1 - u0 ? NS : u1 - u0)) { asm volatile("griddepcontrol.wait;" ::: "memory"); xload(); }
+                if (PW && i == (NS < u1 - u0 ? NS : u1 - u0)) { asm volatile("griddepcontrol.wait;" ::: "memory"); xload(); }
                 const int slot = i % NS;
                 if (i >= NS) bar_wait(bars + 8 * (NS + slot), ((i / NS) - 1) & 1);
                 const unsigned full = bars + 8 * slot, dst = ring + slot * SB;
                 bar_expect(full, SB);
-                bulk(dst, WP + (long)u * SB, SB, full);  // stage u = [NWC x AP atoms of bytes][NWC x AP atoms of codes]
+                #ifdef G18_ILV
+                bulk(dst, WP + ((long)i * gridDim.x + blockIdx.x) * SB, SB, full);  // interleaved repack: stage i of every block adjacent
+#else
+                bulk(dst, WP + (long)u * SB, SB, full);
+#endif  // stage u = [NWC x AP atoms of bytes][NWC x AP atoms of codes]
             }
-            if (PDL && u1 - u0 <= NS) { asm volatile("griddepcontrol.wait;" ::: "memory"); xload(); }
+            if (PW && u1 - u0 <= NS) { asm volatile("griddepcontrol.wait;" ::: "memory"); xload(); }
             TR(1);
         }
         return;
@@ -126,6 +137,22 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
             (void)ks;
             const int pb = q & 1;
             bar_wait(pfull + 8 * pb, (q >> 1) & 1);
+            if (F32) {  // pbuf [128 rows][M] -> ws [M][n]: lane = (token, 4 rows)
+                if (q == 0) asm volatile("griddepcontrol.wait;" ::: "memory");
+                const float* src = pbuf + pb * PBF;
+                float* wt = ws + (long)tr * NWC * 16;
+#pragma unroll 4
+                for (int i = lane; i < PBF / 4; i += 32) {
+                    const int tok = i % M, r4 = (i / M) * 4;
+                    const float a0 = src[r4 * M + tok] * scale, a1 = src[(r4 + 1) * M + tok] * scale;
+                    const float a2 = src[(r4 + 2) * M + tok] * scale, a3 = src[(r4 + 3) * M + tok] * scale;
+                    asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(wt + (long)tok * n + r4), "f"(a0), "f"(a1), "f"(a2), "f"(a3) : "memory");
+                }
+                __syncwarp();
+                if (lane == 0) bar_arrive(pempty + 8 * pb);
+                ++q;
+                continue;
+            }
             const float4* src = (const float4*)(pbuf + pb * PBF);
             float* wt = ws + (long)tr * NWC * 16 * M;  // the tile's 128 rows x M, contiguous
 #pragma unroll 4
@@ -277,6 +304,7 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
             for (int jj = 0; jj < NT; ++jj)
 #pragma unroll
                 for (int e = 0; e < 4; ++e)
+                    if (F32) ws[(long)(jj * 8 + 2 * c + (e & 1)) * n + row0 + 8 * (e >> 1)] = v[jj][e] * scale; else
                     out[(long)(jj * 8 + 2 * c + (e & 1)) * n + row0 + 8 * (e >> 1)] = __float2bfloat16(v[jj][e] * scale);
             continue;
         }
@@ -296,6 +324,11 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
     }
     if (t == 0) TR(4);
 }
+// PDL primary of an F32 gemm: lets it launch at once, zeroes its output (the gemm waits before its first red)
+__global__ void zero(float4* __restrict__ p, int n4) {
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += gridDim.x * blockDim.x) p[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+}
 }  // namespace g18
 // ws: FP32 zeros >= n * m (self-cleaning), cnt: int32 zeros >= n / 16 (self-cleaning). grid: blocks (<= #SMs).
 #ifdef G18_TRACE
@@ -305,6 +338,9 @@ torch::Tensor g18_trace() {
     return o;
 }
 #endif
+// pdl: 0 plain, 1 PDL dependent of the previous kernel, 2 = FP32 output into wsf [m, n] (not self-cleaning; a zero
+// kernel launched first is the PDL primary)
+constexpr int ZB = 32;
 void g18_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out,
               torch::Tensor wsf, torch::Tensor cnt, int64_t kc, int64_t ap, int64_t ns, int64_t grid, int64_t pdl) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
@@ -312,7 +348,8 @@ void g18_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
     TORCH_CHECK(n % (16 * g18::NWC) == 0 && k % kc == 0 && sm <= 227 * 1024, "g18: shape");
 #define G18_CASE(M_, KC_, AP_, NS_) \
     if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_) { \
-        auto kern = pdl ? g18::gemm<M_, KC_, AP_, NS_, 1> : g18::gemm<M_, KC_, AP_, NS_, 0>; \
+        auto kern = pdl == 2 ? g18::gemm<M_, KC_, AP_, NS_, 1, 1> : pdl ? g18::gemm<M_, KC_, AP_, NS_, 1, 0> : g18::gemm<M_, KC_, AP_, NS_, 0, 0>; \
+        if (pdl == 2) g18::zero<<<ZB, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((float4*)wsf.data_ptr(), m * n / 4); \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
         cudaLaunchConfig_t cfg = {}; \
         cfg.gridDim = dim3(grid); cfg.blockDim = dim3((g18::NWC + 2) * 32); cfg.dynamicSmemBytes = sm; \
