@@ -1349,3 +1349,9 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   d32 sl  203.9/211.2/192.6 | 205.3/212.1/194.7 | 204.6/212.1/193.1   (SK pool+unp -0.9..-2.1; +qkv loses 0.5..0.9)
   d32 full 420.2/419.1/411.8 | 422.1/420.5/413.8 | 420.9/419.6/412.0   (-1.3..-2.0)
 - Tests: bench test 13/13; scored_test decode 32 x3 PASS; replay_test d32 seeds 11,23 0/160; route_judge d32 0/240.
+- Cold compile+prepare+test (fresh TORCH_EXTENSIONS_DIR/TRITON_CACHE_DIR): 5:09 total (v101 5:05), 13/13 PASS, twice.
+- H100 timelines (v102): d1 sl 86 us = g13 qkv 13.3 | csl 5.1 | o 8.1 | bnd 4.3 | pr1 22.5 (~bytes floor) | tk2f 34.2 | n2u+bnd tail 6.4.
+  d32 sl 198 us = cuBLAS qkv 16.6 | nds+combine 17 | o 6.3 | bnd 4.5 | g24sk pooler 27.6 (|| router_split 20.3 + routing 21.0, ends
+  just after the pooler) | rmsnorm 2 | tk2f 98.7 | norm2 +3.8 | g24sk unpool ends +21 after tk2f | bnd 2.7. The remaining lever at
+  d32 is tk2f (moe) and the unpool weight stream after it (can't be prefetched: dead s14/s15/s55).
+- Next session at/after 00:00Z: FIRST CHECK = main v102 (STATE "FIRST THING").
