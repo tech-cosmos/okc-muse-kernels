@@ -803,3 +803,28 @@
 - Dead: G19_G (atoms per load group 1/4 vs default 2): +-0.2 us (s18 again: issue order is not the bound).
 - moe's dq() has no two-immediate logic op (already 1 imm each): nothing to hand to moe from this trick.
 - Handoff: dev/s34/dec4_layer.patch (g13/g14/g19/pr1/pr8 _src.cu; then build.py), applies on r-layer f5fe1ec.
+
+## Session 35 (2026-10-26 16:25-16:45Z): DEC3 = 12-bit decode in 3 instructions per BF16 pair: WIN (H200 proxy)
+- No judge runs (proj checks 20/20 for 10-26). Item: layer request s38 (g19 consumer-bound at M=32/16 on the H200).
+- Idea: re-arrange the same 12 bits per weight so the decode needs neither the sign-replicating prmt + 0x807f807f mask
+  nor the exponent constant OR: byte' = c0 << 7 | mantissa (code bit 0 sits exactly at exponent bit 7); the code word
+  holds sign, c1, c2, c3 of weight 2P+h at bits (15, 8, 9, 10) + 16h + d_P (mod 32), d = (0, -4, -8, +4). Kernel word P:
+  p = prmt(bytes, 0x38383838, 0x4140 / 0x4342) (byte 1/3 = 0x38 = exponent bits 11-13), result = p | (sh_P(nw) & 0x87008700)
+  with sh = (nw, nw << 4, nw << 8, rotr(nw, 4)): 3 instructions per pair, P0 needs no shift: dec8 11 instead of 16.
+  Escapes (byte 0, code 0) decode exactly as before (2^(base-127)); headers unchanged.
+- dev/s35/dec3.py: tr3 (old packed -> DEC3), kernel-op emulation check (1M random + edge groups: identical bits);
+  dev/s35/dec3_src.py: source transform (decw<P>, old decode kept under -DPJ_DEC4 for A/B builds), applied to gemv13-16,
+  18-22, pr1, pr8 (15/16/18/20/21/22 first got s34's dec4.py). sub_template: _dec3(sm, code) in every packer (_pack13/14/
+  16/19, _pack22 via _pack19), raises if its bit round trip fails. g19.py / g19ab.py: DEFS containing G19_DEC3 = tr3 the
+  packs; now default: g19.py / g19ab.py tr3 their (old-layout pack16) packs unless DEFS has PJ_DEC4 (old decode).
+- H100 H200-proxy interleaved A/B (g19ab, GRID 72, 7 rounds, A = DEC4, B = DEC3; ranges non-overlapping except unp m32):
+  pool m32 (1024,8,2) -0.48, unp m32 -0.16, qkv m32 -0.06; pool m16 (8,3) -0.74 / (4,4) -1.65; unp m16 -0.70 / -1.39;
+  qkv m16 -0.43 / -1.02 us (x 0.73 ~ H200). g19.py ESCW (adversarial escapes x40) ok on qkv/o/pool/unp/poolr m16/m32.
+  proj bench.py test 39/39 + esc pass. m32 gains less than m16: there mma + ldmatrix dominate the consumers (s34).
+- Layer (/tmp copy of r-layer cf16011, kernels + packers patched; dev/s35/dec3_layer.patch applies on 8a24599): bench.py
+  test 13/13, tools/scored_test.py 24/24 PASS (0 bad), files_eq vs main (TUNE cleared): T=1/8/v32 bitwise identical;
+  d16/d32/v16 differ at the same size as main vs main (g19's red.add order). ab_files A B B A (3-4 rounds): all shapes
+  tie within +-0.5 us (d1 full -0.4); the H100 layer cannot show g19 consumer gains (HBM shared with _router_split), as
+  with DEC4. tools/esc_probe.py is stale on layer main (g13_gemv signature).
+- The layer agent picked DEC3 up from the r-proj commit while I tested (its working tree, g22 left on the old layout via
+  _pack19(dec3=False): correct, since g22_src.cu has the old decode).

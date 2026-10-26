@@ -38,8 +38,8 @@ for nm, layer in SH:
     for (M, kc, ap, ns, xb) in cfgs:
         P, hdr, scale = pack19r(W, kc, ap)
         PB = {b: P for b in "AB"}
-        for b in "AB":  # s35: DEC3 layout for a build with G19_DEC3
-            if "G19_DEC3" in os.environ.get("DEFS_" + b, ""):
+        for b in "AB":  # s35: DEC3 layout unless the build has PJ_DEC4
+            if "PJ_DEC4" not in os.environ.get("DEFS_" + b, ""):
                 sys.path.insert(0, os.path.join(d, "s35")); import dec3
                 PB[b] = dec3.tr3_packed(P, 8 * ap * 512)
         x = torch.randn(M, k, device="cuda").bfloat16(); xs = x.clone()

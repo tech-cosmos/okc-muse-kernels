@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~16:25 UTC (end of session 34; s33's '17:15Z' stamps were a clock slip, s33 ended ~15:45Z).
+Updated 2026-10-26 ~16:45 UTC (session 35).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -117,16 +117,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## Session 18: g19 consumer instruction ORDER is not the m32 bound: SWP (prefetch next group) and ILV2 (decode between
 ## mmas) both null in an interleaved A/B (new tool dev/g19ab.py: DEFS_A/DEFS_B builds, alternating rounds). 11-bit format
 ## re-estimated at ~3-7% bytes net (~0.2-0.3%): not worth it. Router FP32 weights have full mantissas.
-## Session 19: review only. Every proj option for the layer's T=16/32/128 GEMMs is already a layer H200 TUNE option;
-## posted a layer request (attention reads g19's FP32 qkv, drops the 1.3 us cast at d16). Lane question to the lead stands.
-## Session 22: QSS handoff (dev/qss_layer.patch): the layer's d32 qkv as 2 FP32 bmm slabs, attention sums them at load
-## (no splitKreduce). H200 GEMM 16.03 vs lt 17.50 us; H100 layer d32 sliding/full -1.5 us each (TUNE pinned). NOTES s22.
-## Session 24: QSS verified on layer v69 (+ Requests line for the ~14:30Z layer check). G19_RAW (plain BF16 g19, no
-## decode) DEAD in the H100 proxy (+1.5..3.5 us at m32: stream-bound on the extra bytes). NOTES s24.
-## Session 25: judge-image libs diag (check 5abb71f1): DeepGEMM bf16_gemm_nt ties/loses vs our lt picks at m16-256: DEAD.
-## Image has flashinfer 0.7.0 (tinygemm_bf16, trtllm_low_latency_gemm), deep_gemm 0.2.1+muse, sgl_kernel 0.4.9 (NOTES s25).
-## Session 26: tinygemm2 (flashinfer tinygemm_bf16 port, dev/tinygemm2.cu): tuner candidate at unpooler m8 (H100 6.53 vs
-## g17 7.26), main 3addab4 (NOT judge-checked yet). After a PDL pred it wins o m1/m8 and unp m1/m8 by 0.8-3.7 us (H100): handoff.
+## s19-s26 (NOTES): QSS (d32 qkv as 2 FP32 bmm slabs) in layer v70; G19_RAW dead; DeepGEMM bf16 dead (image: flashinfer
+## 0.7.0, deep_gemm 0.2.1+muse, sgl_kernel 0.4.9); tinygemm2 port = proj tuner candidate at unpooler m8 (not judge-checked).
 ## Session 28: gemv23 (own BF16 SS-wgmma swap-AB GEMM for m128/256, packed W, cluster DSMEM split-K, BF16 out) DEAD:
 ## H100 loses 1-4 us at every m128 shape, m256 worse; H200 proxy (GRID 88 x0.73) loses too. Lead option (a) closed. NOTES s28.
 ## Session 29: M=8 gemv19 (layer's T=8 qkv) DEAD: H100 16.6 vs g14 15.4 us (g14 is already mma.sync). NOTES s29.
@@ -145,12 +137,12 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## H200 proxy g19 -0.5..-1.6 us per call (m32 pool -1.36 unp -1.22); in the H100 layer a tie (g19 there is HBM-shared with
 ## _router_split). Handoff dev/s34/dec4_layer.patch (applies on r-layer f5fe1ec). ab_files has a ~1.5 us file-position bias
 ## at d16/d32 sliding: use A B B A. g19 m32 = consumer-bound (NOW 27.1 vs full 29.6 at G72); load-group size G: null. NOTES s34.
+## Session 35: DEC3 (dev/s35/dec3.py layout + dec3_src.py transform; on main in ALL 12-bit kernels + packers via _dec3):
+## same 12 bits re-arranged (code bit 0 in the byte, sign + c1..c3 in the word at shift-friendly bits; prmt injects 0x38):
+## 3 instr per BF16 pair (dec8 11 vs 16). H200 proxy g19 B-A: m16 -0.4..-1.65, pool m32 -0.48 us; layer H100 tie, tests
+## 13/13 + scored 24/24, T=1/8 bitwise same. Layer agent integrating it (g22 kept on old layout). Old decode: -DPJ_DEC4.
 ## Next (ranked)
--23. (s34) Layer: bundle dev/s34/dec4_layer.patch into the next sandbox's first check (H200 decides; tie on H100). proj's
-   own first check tomorrow = main (DEC4 in g13/g14 m1/m8 picks; submit if > 1.3110).
--22. (s33) Layer: add the g13o TUNE option (dev/s33/g13o_layer.patch) to the next sandbox's first check; read its
-   'layer tune T=1' lines (g13o True vs default, sliding and full).
+-24. (s35) Layer's next-sandbox first check should carry DEC3 (layer is integrating it). proj's own first check tomorrow = main
+   (DEC3 in g13/g14 m1/m8 picks, tg2 unpooler m8 candidate: read 'tune' lines in the judge log; submit if > 1.3110).
+   DEC4 (v85) and g13o (v84) are already in the layer.
 -19. (s30) Still waiting for a lane (Requests proj s28/s30). Proj checks 20/20 today.
--17. (s28) Nothing proj-side with size left: tomorrow's first proj check = main (tg2 unpooler m8 tuner candidate: read "tune unpooler m8" in the judge log; submit if > 1.3110).
-   Ask the lead for a new lane (moe sub-task or layer glue) instead of more GEMM variants.
-
