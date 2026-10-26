@@ -955,3 +955,10 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   H200 proxy (GRID 72, PRED 3000, R 6), pool m32, B-A: (1024,8,2,xb1) +4.99 us (x reloaded per chunk into a single
   buffer: stalls), (512,8,2,xb2) +0.34. => run-end flushes are NOT the m32 bound; tile-major order costs more x reloads
   than it saves. DEAD. (s18's conclusion stands: g19 m32 = consumer instruction count, mma.sync + decode.)
+
+## s45 (2026-10-26 19:23-19:50Z, sandbox okc-night4, session 2): layer pooler T=16 g19 npre 2 vs 3 = TIE (dead)
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z). STATE Next 2's cheap A/B, in a copy of r-layer 4c98aa3 (v88,
+  /tmp/pj45): G19_CFG ("pooler", 16) (16,1024,8,3,3,1) [A, main] vs (16,1024,8,3,2,1) [B], TUNE = {} in both (TUNE_BASE kept),
+  tools/ab_files.py "decode 16" 8 rounds, files A B B A (H100 us, medians): d16 sliding A 198.34/199.22 B 198.97/199.10
+  (B-A +0.26), d16 full A 295.98/295.26 B 295.32/295.90 (B-A 0.0). Standalone s40's -0.1..-0.4 does not show in the layer.
+  Keep npre 3. Nothing for layer.

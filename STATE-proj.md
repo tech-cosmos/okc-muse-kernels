@@ -138,10 +138,11 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## g19's own few-stage pre-wait prologue (npre 1-2) beside a memory-touching pred: dead (keep deep npre).
 
 ## s44: g19 m32 LONGRUN (runs spanning k-chunks, tile-major) DEAD: proxy pool m32 +0.3..+5 us even without fixups (NOTES s44).
+## s45: layer pooler T=16 g19 npre 2 vs 3 in v88 (H100 ABBA): tie (sl +0.26, full 0.0 us): dead, keep 3.
 ## Next sandbox (ranked; sandbox okc-night3 expired ~19:10Z 10-26 with proj checks 20/20, scored 5/10)
 1. proj's first check = main as is (DEC3 in g13/g14 m1/m8 picks; tg2 unpooler m8 candidate): read the 'tune' lines in the
    judge log (profiles/*.log); submit if > 1.3110. Layer's first check = its main v88 (carries DEC3, pr8 npf 212, g19 s15).
 2. Ask layer for a fresh H200 idle budget from v88's profile; take the proj-owned rows (T<=8 GEMV ramps, T>=16 cuBLAS
-   gaps without PDL triggers). Ideas left: pooler m16 npre 2 vs 3 in the layer (cheap A/B, noise-level on H100); SMEM-resident
+   gaps without PDL triggers). Ideas left (npre 2 vs 3: dead s45): SMEM-resident
    pooler at T=1 with a throttled (one 32 KB TMA/SM) filler beside csl/o/bnd (s39: <= ~4-6 us/d1 on H100, untested in layer).
 3. Below the line: pr8 K-split tail balancing (~0.1%), 11-bit format (~0.2-0.3%), g22/g23/DeepGEMM at m128/256 (dead).
