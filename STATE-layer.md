@@ -68,6 +68,7 @@ Updated 2026-10-26 ~05:00Z (end of session 10).
    starts 30.1 (3.4 late) and takes 19.4 (qkv g13 14.5); _routing (1 CTA) cannot get an SM until the pooler drains
    (46.9-51.2); tk2f starts 51.3. Fewer pooler blocks: worse (132 95.1, 120 95.8, 96 96.2). Pooler + FP32 router +
    top-8 in ONE kernel (blockIdx role split; the last router block does the routing) est. d1 -3..5 us, v1 similar.
+   proj CLAIMED this (COORD 04:30Z, s11, r-proj dev/): integrate their Handoff, do not build a second one.
 2. T=16 o / qkv on g19: proj's H200 diag says o +0.8 worse, qkv has no PDL predecessor (first op): low value.
 3. Experts are 50-60% of every T>=16 shape and 27 us of d1's 72 (moe lane: tk2f ~63% of H200 HBM peak at d1).
 
