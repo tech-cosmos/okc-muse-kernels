@@ -38,120 +38,85 @@ class Inputs(TypedDict):
     config: Config
 
 
-_ROUTER_SRC = r'''// Router at m <= 8 in true FP32 (as SGLang's F.linear): out[m, 256] = x[m, k] (BF16 -> FP32) @ W[256, k]^T (FP32).
-// Block = (RB rows, K chunk of KB): x[:, chunk] staged in smem as FP32; warp w takes rows r0 + w*RW .. +RW, each
-// lane FP32 float4 loads of W at k = 4 (lane + 32 j) (all KB/128 loads in flight), FMA against smem x, warp
-// shuffle reduce. Split K: FP32 red.global into a workspace, the last block of a row block writes the output and
-// re-zeroes workspace + counter.
+_ROUTER_SRC = r'''// Router at m <= 8 in true FP32, no split K: block = R whole rows (k = 8192), T threads; thread t owns k positions
+// 4 (t + T j), j < J = k / (4 T), so its x slice goes straight to registers (no smem staging) and all R * J float4 W
+// loads are issued up front. Warp shuffle reduce, then one smem pass over the block's warps. No workspace/atomics.
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
 
-namespace pr {
-template <int M, int KB, int RW, int NWARP>
-__global__ void __launch_bounds__(NWARP * 32) router(const float4* __restrict__ w, const __nv_bfloat16* __restrict__ x,
-                                                     float* __restrict__ out, float* __restrict__ ws,
-                                                     int* __restrict__ cnt, int m, int n, int k) {
-    constexpr int J = KB / 128, RB = NWARP * RW;
-    __shared__ __align__(16) float xs[M][KB];
-    __shared__ int last;
-    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
-    const int r0 = blockIdx.x * RB + warp * RW, k0 = blockIdx.y * KB;
-    constexpr int XV = (M * KB / 8 + NWARP * 32 - 1) / (NWARP * 32);
-    uint4 xr[XV];
+namespace pr2 {
+template <int M, int R, int T, int K>
+__global__ void __launch_bounds__(T) router(const float4* __restrict__ w, const __nv_bfloat16* __restrict__ x,
+                                            float* __restrict__ out, int m, int n) {
+    constexpr int J = K / (4 * T), NW = T / 32;
+    static_assert(K % (4 * T) == 0, "k split");
+    __shared__ float red[NW][R * M];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5, r0 = blockIdx.x * R;
+    uint2 xr[M][J];  // 4 BF16 per (token, j)
 #pragma unroll
-    for (int q = 0; q < XV; ++q) {
-        const int i = threadIdx.x + q * NWARP * 32, t = i / (KB / 8), c = (i % (KB / 8)) * 8;
-        xr[q] = make_uint4(0, 0, 0, 0);
-        if (i < M * KB / 8 && t < m) xr[q] = __ldcs(reinterpret_cast<const uint4*>(x + (size_t)t * k + k0 + c));
-    }
-    float4 a[RW][J];
+    for (int i = 0; i < M; ++i)
 #pragma unroll
-    for (int r = 0; r < RW; ++r)
+        for (int j = 0; j < J; ++j)
+            xr[i][j] = i < m ? __ldg(reinterpret_cast<const uint2*>(x + (size_t)i * K) + t + T * j) : make_uint2(0, 0);
+    float4 a[R][J];
 #pragma unroll
-        for (int j = 0; j < J; ++j) a[r][j] = __ldcs(w + ((size_t)(r0 + r) * k + k0) / 4 + lane + 32 * j);
+    for (int r = 0; r < R; ++r)
 #pragma unroll
-    for (int q = 0; q < XV; ++q) {
-        const int i = threadIdx.x + q * NWARP * 32, t = i / (KB / 8), c = (i % (KB / 8)) * 8;
-        if (i >= M * KB / 8) break;
-        const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&xr[q]);
-        float v[8];
+        for (int j = 0; j < J; ++j) a[r][j] = __ldcs(w + (size_t)(r0 + r) * (K / 4) + t + T * j);
+    float acc[R][M];
 #pragma unroll
-        for (int e = 0; e < 4; ++e) { const float2 f = __bfloat1622float2(h[e]); v[2 * e] = f.x; v[2 * e + 1] = f.y; }
-        *reinterpret_cast<float4*>(&xs[t][c]) = make_float4(v[0], v[1], v[2], v[3]);
-        *reinterpret_cast<float4*>(&xs[t][c + 4]) = make_float4(v[4], v[5], v[6], v[7]);
-    }
-    __syncthreads();
-    float acc[RW][M];
+    for (int r = 0; r < R; ++r)
 #pragma unroll
-    for (int r = 0; r < RW; ++r)
-#pragma unroll
-        for (int t = 0; t < M; ++t) acc[r][t] = 0.f;
+        for (int i = 0; i < M; ++i) acc[r][i] = 0.f;
 #pragma unroll
     for (int j = 0; j < J; ++j)
 #pragma unroll
-        for (int t = 0; t < M; ++t) {
-            const float4 xv = *reinterpret_cast<const float4*>(&xs[t][4 * (lane + 32 * j)]);
+        for (int i = 0; i < M; ++i) {
+            const float x0 = __uint_as_float(xr[i][j].x << 16), x1 = __uint_as_float(xr[i][j].x & 0xffff0000u);
+            const float x2 = __uint_as_float(xr[i][j].y << 16), x3 = __uint_as_float(xr[i][j].y & 0xffff0000u);
 #pragma unroll
-            for (int r = 0; r < RW; ++r) {
-                acc[r][t] = fmaf(a[r][j].x, xv.x, acc[r][t]);
-                acc[r][t] = fmaf(a[r][j].y, xv.y, acc[r][t]);
-                acc[r][t] = fmaf(a[r][j].z, xv.z, acc[r][t]);
-                acc[r][t] = fmaf(a[r][j].w, xv.w, acc[r][t]);
+            for (int r = 0; r < R; ++r) {
+                acc[r][i] = fmaf(a[r][j].x, x0, acc[r][i]);
+                acc[r][i] = fmaf(a[r][j].y, x1, acc[r][i]);
+                acc[r][i] = fmaf(a[r][j].z, x2, acc[r][i]);
+                acc[r][i] = fmaf(a[r][j].w, x3, acc[r][i]);
             }
         }
 #pragma unroll
-    for (int r = 0; r < RW; ++r)
+    for (int r = 0; r < R; ++r)
 #pragma unroll
-        for (int t = 0; t < M; ++t)
+        for (int i = 0; i < M; ++i) {
+            float v = acc[r][i];
 #pragma unroll
-            for (int o = 16; o; o >>= 1) acc[r][t] += __shfl_xor_sync(0xffffffffu, acc[r][t], o);
-    const bool split = gridDim.y > 1;
-    // every lane holds all RW * M sums: lane (r * M + t) % 32 writes (r, t), so the atomics issue in parallel
-#pragma unroll
-    for (int r = 0; r < RW; ++r)
-#pragma unroll
-        for (int t = 0; t < M; ++t)
-            if (t < m && lane == (r * M + t) % 32) {
-                if (split) atomicAdd(ws + (size_t)t * n + r0 + r, acc[r][t]);
-                else out[(size_t)t * n + r0 + r] = acc[r][t];
-            }
-    if (!split) return;
-    __threadfence();
+            for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+            if (lane == 0) red[warp][r * M + i] = v;
+        }
     __syncthreads();
-    if (threadIdx.x == 0) {
-        const int prev = atomicAdd(cnt + blockIdx.x, 1);
-        last = prev == (int)gridDim.y - 1;
-        if (last) cnt[blockIdx.x] = 0;
-    }
-    __syncthreads();
-    if (!last) return;
-    __threadfence();
-    for (int i = threadIdx.x; i < m * RB; i += NWARP * 32) {
-        const int t = i / RB, row = blockIdx.x * RB + i % RB;
-        float* p = ws + (size_t)t * n + row;
-        out[(size_t)t * n + row] = __ldcg(p);
-        __stcg(p, 0.f);
+    if (t < R * M) {
+        const int r = t / M, i = t % M;
+        float s = 0.f;
+#pragma unroll
+        for (int q = 0; q < NW; ++q) s += red[q][t];
+        if (i < m) out[(size_t)i * n + r0 + r] = s;
     }
 }
-}  // namespace pr
+}  // namespace pr2
 
-#define PR_CASE(M, KB, RW, NWARP)                                                                                   \
-    if (mp == M && kb == KB && rw == RW && nwarp == NWARP) {                                                        \
-        dim3 grid(n / (RW * NWARP), k / KB);                                                                        \
-        pr::router<M, KB, RW, NWARP><<<grid, NWARP * 32, 0, c10::cuda::getCurrentCUDAStream()>>>(                   \
+#define PR2_CASE(M, R, T)                                                                                           \
+    if (mp == M && rr == R && tt == T) {                                                                            \
+        pr2::router<M, R, T, 8192><<<n / R, T, 0, c10::cuda::getCurrentCUDAStream()>>>(                             \
             reinterpret_cast<const float4*>(w.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),    \
-            out.data_ptr<float>(), ws.data_ptr<float>(), cnt.data_ptr<int>(), m, n, k);                             \
+            out.data_ptr<float>(), m, n);                                                                           \
         C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                             \
         return;                                                                                                     \
     }
 
-void pj_router(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tensor ws, torch::Tensor cnt, int64_t mp,
-               int64_t kb, int64_t rw, int64_t nwarp) {
-    const int m = (int)x.size(0), n = (int)w.size(0), k = (int)w.size(1);
-    TORCH_CHECK(m <= mp, "pr: m");
-    PR_CONFIGS
-    TORCH_CHECK(false, "pr: no such config");
+void pj_router2(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mp, int64_t rr, int64_t tt) {
+    const int m = (int)x.size(0), n = (int)w.size(0);
+    TORCH_CHECK(m <= mp && w.size(1) == 8192, "pr2: shape");
+    PR2_CONFIGS
+    TORCH_CHECK(false, "pr2: no such config");
 }
 '''
 _GEMV_SRC = r'''// Skinny GEMM out[m, n] = x[m, k] @ W[n, k]^T for small m: BF16 x, BF16 W (NA = 1) or the router's BF16 hi + lo
@@ -1541,9 +1506,8 @@ int64_t lt_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tens
 }
 '''
 
-# Router FP32 kernel configs (mp, kb, rw, nwarp), chosen on the H100 (dev/rt.py).
-ROUTER_F32 = [(1, (1, 2048, 1, 8)), (8, (8, 512, 2, 8)), (16, (16, 512, 2, 8))]
-ROUTER_F32 = [c for c in ROUTER_F32 if c[0] <= 8]
+# Router FP32 kernel configs (mp, rows per block, threads), dev/router2.cu, chosen on the H100 (dev/r2.py).
+ROUTER_F32 = [(1, (1, 2, 512)), (8, (8, 2, 512))]
 # Router hi/lo tensor-core configs (n, mt, nwr, nwk, stages, na, cluster, token groups), chosen on the H100 (dev/g5.py).
 ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
 # BF16 grid-stride GEMV configs per layer: (m, k, u, nv, minb, pf, blocks), chosen on the H100 (dev/g10.py).
@@ -1597,7 +1561,7 @@ BF16_LT = {('o', 8): [(66, 312, 35, 1, 0, 0, 3, 3), (66, 312, 35, 1, 0, 0, 7, 3)
            ('unpooler', 256): [(66, 20, 35, 1, 0, 0, 6, 5), (66, 20, 35, 1, 0, 0, 0, 3), (66, 405, 35, 1, 0, 0, 7, 5), (66, 20, 35, 1, 0, 0, 4, 3), (66, 405, 35, 1, 0, 0, 3, 5)]}
 LT_WS_BYTES = 32 << 20
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
-_SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
+_SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
         _G10_SRC.replace("G10_CONFIGS", " ".join("G10_CASE(%d,%d,%d,%d,%d,%d)" % c[:6] for v in BF16_G10.values() for c in v)) + "\n" +
         _G12_SRC.replace("G12_CONFIGS", " ".join("G12_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted({c[:4] + c[5:] for v in BF16_G12.values() for c in v}))) + "\n" +
@@ -1608,9 +1572,8 @@ _SRC = (_ROUTER_SRC.replace("PR_CONFIGS", " ".join("PR_CASE(%d,%d,%d,%d)" % c fo
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v11",
-        cpp_sources="void pj_router(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
-                    "int64_t, int64_t, int64_t);\n"
+        name="muse_proj_v12",
+        cpp_sources="void pj_router2(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
                     "void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
@@ -1624,7 +1587,7 @@ try:
                     "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                     "void g16_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
                     "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
-        cuda_sources=_SRC, functions=["pj_router", "g7_gemv", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "g15_gemm",
+        cuda_sources=_SRC, functions=["pj_router2", "g7_gemv", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "g15_gemm",
                                       "g16_gemm"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
@@ -1898,7 +1861,7 @@ def _router(x, st, m):
         for mmax, cfg in ROUTER_F32:
             if m <= mmax:
                 out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
-                _mod.pj_router(st["router"], x, out, st["ws"], st["cnt"], *cfg)
+                _mod.pj_router2(st["router"], x, out, *cfg)
                 return out
         for mmax, cfg in ROUTER_HL:
             if m <= mmax:
