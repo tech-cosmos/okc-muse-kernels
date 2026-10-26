@@ -107,21 +107,57 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
         for (; jn < total && jn < npre; ++jn) issue(jn);  // W only, before the predecessor is done
     }
+#ifndef G24_XPRE
     asm volatile("griddepcontrol.wait;" ::: "memory");
-    if (t == 0) {  // the block's x chunks
+#endif
+#ifdef G24_XPAR
+    if (w == 0) {  // s55: the block's x chunks, row copies spread over warp 0's lanes (thread 0 alone issued XB * M serially)
+        const int ksl = (tb - 1) / nrt;
+        if (lane == 0) for (int b = 0; b < XB && ks0 + b <= ksl; ++b) bar_expect(xfb + 8 * b, M * KC * 2);
+        __syncwarp();
+        for (int b = 0; b < XB && ks0 + b <= ksl; ++b)
+            for (int qq = lane; qq < M; qq += 32) bulk(xs + b * M * XS + qq * XS, x + (long)qq * k + (long)(ks0 + b) * KC, KC * 2, xfb + 8 * b);
+    }
+#else
+    if (t == 0) {  // the block's x chunks (G24_XPRE: before the wait = timing probe only, NOT correct in a real chain)
         const int ksl = (tb - 1) / nrt;
         for (int b = 0; b < XB && ks0 + b <= ksl; ++b) {
             bar_expect(xfb + 8 * b, M * KC * 2);
             for (int qq = 0; qq < M; ++qq) bulk(xs + b * M * XS + qq * XS, x + (long)qq * k + (long)(ks0 + b) * KC, KC * 2, xfb + 8 * b);
         }
     }
+#endif
+#ifdef G24_XPRE
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
     if (lane == 0) for (; jn < total && jn < NS; ++jn) issue(jn);
     jn = __shfl_sync(0xffffffffu, jn, 0);
     if (PF && lane == 0) prog[w] = wa + jn;
     {  // zero this block's slice of out, then arrive on the epoch counter ctr[1] (+gridDim.x per launch, never reset)
         float4* o4 = (float4*)out;
+#ifndef G24_ZPROBE  // timing probe only: no zeroing / fence (output wrong)
         for (int i = blockIdx.x * WPB * 32 + t; i < M * n / 4; i += gridDim.x * WPB * 32) o4[i] = make_float4(0.f, 0.f, 0.f, 0.f);
         __threadfence();
+#endif
+#ifdef G24_LZ
+        if (t == 0) { tgt[0] = 0; tgt[2] = 0; }
+        __syncthreads();  // mbarrier inits; the fence + epoch arrive move to after each warp's first stage (s55 LZ)
+    }
+    int target = 0;
+    bool arrived = false;
+    volatile int* zs = tgt;  // [0] warps arrived, [1] target, [2] flag (zeroed before the __syncthreads above)
+    auto arrive = [&]() {  // LZ2: this warp's zero stores visible; the block's last warp arrives on ctr[1] (+gridDim.x / launch)
+        __threadfence();
+        __syncwarp();
+        if (lane == 0 && atomicAdd((int*)zs, 1) == WPB - 1) {
+            const unsigned old = atomicAdd((unsigned*)ctr + 1, 1u);
+            zs[1] = (int)(old - old % gridDim.x + gridDim.x);
+            __threadfence_block();
+            zs[2] = 1;
+        }
+        arrived = true;
+    };
+#else
         __syncthreads();
         if (t == 0) {
             const unsigned old = atomicAdd((unsigned*)ctr + 1, 1u);
@@ -130,6 +166,7 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
         __syncthreads();
     }
     const int target = *tgt;
+#endif
     bool passed = false;
 #ifdef G24_TRACE
     unsigned long long tr0;
@@ -202,6 +239,9 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
                 }
                 ++jn;
             }
+#ifdef G24_LZ
+            if (!arrived) arrive();
+#endif
         }
         // task end: partials (16 R rows x M tokens) -> stage tile [tok][row] -> red.add.v4 into out [tok][n]
 #pragma unroll
@@ -252,6 +292,11 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
                 for (int e = 0; e < 4; ++e) stg[(jj * 8 + 2 * c + (e & 1)) * STR + r * 16 + g + 8 * (e >> 1)] = acc[r][jj][e] * scale;
         if (!passed) {  // every block has zeroed its slice of out
             if (lane == 0) {
+#ifdef G24_LZ
+                while (zs[2] == 0) {}
+                __threadfence_block();
+                target = zs[1];
+#endif
                 unsigned v;
                 do { asm volatile("ld.acquire.gpu.u32 %0, [%1];" : "=r"(v) : "l"(ctr + 1) : "memory"); } while ((int)(v - (unsigned)target) < 0);
             }
@@ -266,6 +311,9 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
         }
         __syncwarp();
     }
+#ifdef G24_LZ
+    if (!arrived) arrive();  // warps without stages
+#endif
     if (PF && lane == 0) {  // done: prefetch the not yet issued remainder of every other warp's range into L2 (once each)
         for (int i = 1; i < WPB; ++i) {
             const int w2 = (w + i) % WPB;

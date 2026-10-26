@@ -1163,7 +1163,7 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   += 3 g24sk sets, TUNE[32] += g24sk off/qkv sets.
 - Submission: DIAG24 += SK twins (r 257) of every config (print-only, for the 00:00Z check).
 
-## s55 (2026-10-26 22:32-23:00Z, sandbox okc-night4, session 12): gemv24 tail balancing: dynamic tail + L2 lend-prefetch DEAD
+## s55 (2026-10-26 22:32-23:15Z, sandbox okc-night4, session 12): gemv24 tail balancing: dynamic tail + L2 lend-prefetch DEAD
 - No judge runs (proj checks 20/20 for 10-26, reset 00:00Z).
 - Motivation (G24_TRACE, H100 G132 SK): warp ends q0/50/90/100 ~11.5/17.2/18.5/20.2 us at pool m32 (same work per warp),
   block-end med 18.5 / max 20.2, intra-block spread ~3 us: up to ~2 us/call if perfectly balanced.
@@ -1181,3 +1181,14 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
     H100 is HBM-bound, the prefetch only moves bytes earlier), G88 proxy +0.5..1.1 everywhere. DEAD.
 - Lesson: in g24 the per-warp end spread is per-warp HBM share, and any rebalancing that adds claims, flushes or bytes in
   flight in the main phase costs more than the ~2 us tail it targets. Static SK / static r1 stay (tuner picks).
+- More s55 probes (all in dev/s55/gemv25.cu's g24 kernel behind defines, off by default; harness dev/s55/g25.py,
+  env NOCHK=1 skips the result check for timing-only probes). H200 proxy G88 and H100 G132, alternated A B A B:
+  * m32 KC 1024 XB 1 (half the FP32 split-K red traffic; grid multiple of k/KC so SK block ranges align): tie
+    (unp G132 20.0-20.2 vs layer cfg 20.1-20.2; pool G104/G112 23.0-24.0 vs 23.3; G108 does not align). DEAD.
+  * G24_XPRE (x bulk-loaded BEFORE griddepcontrol.wait; timing upper bound only, not legal): m32 -0.4..-1.4, m16 -0.2..-0.6 us
+    = the whole post-wait x arrival cost. G24_XPAR (x row copies issued by warp 0's 32 lanes instead of thread 0): tie. DEAD.
+  * G24_ZPROBE (no out zeroing / no fence; timing only): -0.4..-1.7 us (qkv m32, pool m32 most). G24_LZ = lazy zero: plain
+    zero stores + __syncthreads, fence + epoch arrive per warp after its first stage: v1 per-warp global atomics (2112 on one
+    address; epoch in units of 4096/launch) +1..2 us; v2 (LZ2, on file) block-aggregated (smem count, last warp does the one
+    global atomic, spinners read target from smem) +0.4..1.5 us. DEAD. (v1 first HUNG in the harness: the epoch target
+    old % (G*WPB) breaks when configs with different WPB share a ctr; any per-launch-unit epoch needs a fixed unit.)

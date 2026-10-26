@@ -102,7 +102,7 @@ for nm, layer, n in SH:
                 for rep in range(20 if ESCW else 3):
                     out.fill_(1.0); gem(P, hdr, scale, xp_, out, ctr, *cf); torch.cuda.synchronize()
                     err = ((out.double() - ref).norm() / ref.norm()).item()
-                    if not NOW:
+                    if not NOW and not os.environ.get("NOCHK"):
                         assert err < 1e-5, (err, nm, m_, cf)
                         pw_ = (Wp_[:, col].double() * 16).float()
                         assert NOFIX or torch.equal(out[M - 1], torch.where(pw_.abs() < 2.0 ** -126, 0 * pw_, pw_)), ("probe", nm, col)
