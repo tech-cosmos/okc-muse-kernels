@@ -8802,6 +8802,7 @@ def prepare(weights):
     _g19_prepare(state)
     _lt_prepare(state)
     torch.cuda.synchronize()
+    _tune_g19_grid(state)
     return state
 
 
@@ -11745,6 +11746,88 @@ def _g19_prepare(state):
     del comp
 
 
+# (s18) The pooler's g19 grid at T=16/32 trades SMs with the side-stream router, whose speed differs by GPU (H200
+# _router_split 5.6 us vs H100 18.5): prepare() times the whole layer (CUDA graph replays, cold L2, synthetic sliding
+# decode inputs; shapes only) with each candidate grid and keeps the fastest in state["g19_grid"].
+G19_GRID_TUNE = {16: (108, 114, 120, 126, 132), 32: (108, 114, 120, 126, 132)}
+G19_TUNE_REPS = 40
+
+
+def _synth_input(batch, dev, ctx=3000):
+    """A sliding-window decode step (page 1) of random data with the scored inputs' shapes and dtypes."""
+    g = torch.Generator(device=dev).manual_seed(1234)
+    seq = torch.full((batch,), ctx, dtype=torch.int32, device=dev)
+    maxp = ctx + 1
+    pt = torch.randperm(batch * maxp, generator=g, device=dev).to(torch.int32).view(batch, maxp)
+    pos = seq.long()
+    stream = torch.randn((batch, HIDDEN), generator=g, device=dev)
+    kc = (torch.randn((batch * maxp, 1, 2, 64), generator=g, device=dev) * 0.5).to(torch.float8_e4m3fn)
+    vc = (torch.randn((batch * maxp, 1, 2, 64), generator=g, device=dev) * 0.5).to(torch.float8_e4m3fn)
+    one = torch.tensor(1.0, dtype=torch.float32, device=dev)
+    return {"stream": stream, "attn_input": (stream * torch.rsqrt(stream.square().mean(-1, keepdim=True) + RMS_EPS)).to(torch.bfloat16),
+            "k_cache": kc, "v_cache": vc, "positions": pos,
+            "cache_loc": torch.gather(pt.long(), 1, pos[:, None]).view(-1),
+            "cache_seqlens": seq + 1, "cu_seqlens_q": torch.arange(batch + 1, dtype=torch.int32, device=dev),
+            "scheduler_metadata": None, "k_scale": one, "v_scale": one.clone(), "page_table": pt, "seq_lens": seq,
+            "local_start": torch.zeros(1, dtype=torch.int32, device=dev),
+            "config": {"batch": batch, "q_len": 1, "tokens": batch, "hidden": HIDDEN, "num_q_heads": 16,
+                       "num_kv_heads": 2, "head_dim": 64, "page_size": 1, "window": 2048, "rope_theta": 500000.0,
+                       "qk_scale_factor": 5.4730064863875, "sm_scale": 0.125, "kv_scale": 1.0,
+                       "n_experts": N_EXPERTS, "top_k": TOP_K, "local_experts": LOCAL_EXPERTS}}
+
+
+def _tune_g19_grid(state):
+    grids = state["g19_grid"] = dict(G19_GRID)
+    if not G19_GRID_TUNE or "pooler" not in G19_ON:
+        return
+    dev = state["unpool_slice"].device
+    try:
+        flush = torch.empty(256 << 20, dtype=torch.uint8, device=dev)
+        for tokens, cands in G19_GRID_TUNE.items():
+            if state.get("g19", {}).get(("pooler", tokens)) is None:
+                continue
+            data = _synth_input(tokens, dev)
+            graphs = {}
+            for grid in cands:
+                grids[("pooler", tokens)] = grid
+                fn = lambda: kernel_fn(data, state)  # noqa: E731
+                fn()
+                torch.cuda.synchronize()
+                s = torch.cuda.Stream(dev)
+                s.wait_stream(torch.cuda.current_stream())
+                gr = torch.cuda.CUDAGraph()
+                with torch.cuda.stream(s):
+                    fn()
+                    with torch.cuda.graph(gr, stream=s):
+                        fn()
+                torch.cuda.current_stream().wait_stream(s)
+                torch.cuda.synchronize()
+                graphs[grid] = gr
+            ts = {grid: [] for grid in cands}
+            for r in range(G19_TUNE_REPS + 3):
+                order = cands if r % 2 == 0 else cands[::-1]
+                for grid in order:
+                    flush.zero_()
+                    a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                    a.record()
+                    graphs[grid].replay()
+                    b.record()
+                    b.synchronize()
+                    if r >= 3:
+                        ts[grid].append(a.elapsed_time(b))
+            med = {grid: sorted(v)[len(v) // 2] for grid, v in ts.items()}
+            grids[("pooler", tokens)] = min(cands, key=lambda c: med[c])
+            print(f"g19 grid tune T={tokens}: " + " ".join(f"{c}:{med[c] * 1e3:.1f}us" for c in cands)
+                  + f" -> {grids[('pooler', tokens)]}", flush=True)
+            del graphs, data
+        del flush
+    except Exception as ex:  # keep the fixed grids
+        print(f"g19 grid tune failed ({type(ex).__name__}: {ex}); using G19_GRID", flush=True)
+        state["g19_grid"] = dict(G19_GRID)
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+
+
 def _g19(x, key, state):
     """x @ W.T (key's weight) in FP32 by gemv19 (a PDL dependent of the previous kernel), or None."""
     e = state.get("g19", {}).get((key, x.shape[0])) if key in G19_ON else None
@@ -11752,7 +11835,7 @@ def _g19(x, key, state):
         return None
     c = e[4]
     out = torch.empty((x.shape[0], e[1].shape[0]), dtype=torch.float32, device=x.device)
-    grid = G19_GRID.get((key, x.shape[0]), _G19_SMS)
+    grid = state.get("g19_grid", G19_GRID).get((key, x.shape[0]), _G19_SMS)
     ctr = e[3].get(grid)  # the epoch barrier needs one counter per grid size
     if ctr is None:
         ctr = e[3][grid] = torch.zeros(2, dtype=torch.int32, device=x.device)
