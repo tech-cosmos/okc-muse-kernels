@@ -1290,3 +1290,7 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
     not bitwise deterministic (g19 split-K red.add order: tools/step_bitwise.py nondet 6/6), so it can't be used there.
   * s62's replay_test (fresh inputs: new K/V cache, page table, seq_lens, positions every replay) d16/v1 0/160.
 - Verdict: CSL_PW (T=16 default) and vtk PW (TUNE[8]) are safe to check at 00:00Z.
+- Bound (tools/gather_bw.py, H100, graph replay + cold L2, same method as attn's csl numbers): raw Triton gather of
+  random page-1 cache rows (K+V, both heads = 128 B/row each) B16 9.12 us, B32 12.0 us (64 B/row = one head: 8.35 /
+  10.5). csl B16 = 9.14 us: AT the gather floor. d32 sliding (nds/csl 15.8-15.9 us standalone) has ~4 us headroom
+  (= ~0.2% total at 0.05%/us d32 sl): a B32 kernel reading both heads' 128 B rows per CTA would be the way. Not started.

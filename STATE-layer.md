@@ -1,9 +1,11 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 21:55Z (s62): **main = v99 = v97 + CSL_PW (d16 sliding csl = PDL secondary of the g19 qkv, K/V gathers
-before griddepcontrol.wait; H100 d16 sl -0.7..-1.0 us) + vtk PW as TUNE[8] option {cslpw: True} (v1 sl -0.3..0)**. NOT judge-checked.
-v97 = v96 + moe n8 BAL + proj TAG2. FIRST CHECK AFTER 00:00Z = main v99: read 'layer tune T=8' nu8d/cslpw, 'T=16' bal/tk2h/
-cslpw/cslcarve, 'T=32' bal/tk2h lines. NOTES s59-s62.
+Updated 2026-10-26 22:15Z (s63): **main = v100 = v99 + safety comment only**. v99 = v97 + CSL_PW (d16 sliding csl = PDL
+secondary of the g19 qkv, K/V gathers before griddepcontrol.wait; H100 d16 sl -0.7..-1.0 us) + vtk PW as TUNE[8] option
+{cslpw: True}. NOT judge-checked. s63 AUDITED CSL_PW for the lead (NOTES s63): pre-wait loads read only inputs + context rows
+< seq_lens; tools/pw_race.py bitwise 0/40 diffs (control race 40/40 seen); safe to check. KEEP the qkv GEMM the graph's first
+kernel at T=8/16 (else PW can race). FIRST CHECK AFTER 00:00Z = main: read 'layer tune T=8' nu8d/cslpw, 'T=16' bal/tk2h/
+cslpw/cslcarve, 'T=32' bal/tk2h lines. NOTES s59-s63.
 Board 21:00Z: #52 at 1.995x (#1 2.380x). Per-load ratios: d1 2.43, d16 1.88, d32 1.68, v1 2.19, v16 1.93, v32 2.00.
 
 Mains since v89 (all NOT judge-checked, H100-validated; NOTES s52-s59): v90 NORM_EARLY (T>=128) | v91 __ldcg moe_norm/norm2 |
@@ -28,7 +30,6 @@ proj evict_last on all L2 prefetches | v81-v83 PDL edges in the routing glue | v
 DEC4 | v86 proj DEC3 (12-bit decode 3 instr/pair) | v87 moe_hot at T=256 (TUNE_BASE hot 32; H100 v32 -14 sl / -11 full) |
 v88 proj s36 pr8 bulk L2 prefetch after the wait (PR8_CFG npf 212; H100 ABBA 6 rounds v1 -1.9 sl / -1.6 full).
 
-**s32: v70 (909010f)** = proj QSS + moe twm AUTO K-split: check 0f065691 1.9754x; **submit 703d3a7e 1.9954x = board best**.
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
 option sets on synthetic inputs (shapes only) and keeps the fastest in state["tune"]; `_opt()` reads it at trace time.
@@ -87,6 +88,7 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
+-4. (s63) d32 sliding attention: nds/csl 15.9 us vs raw random-row gather 12.0 us (H100, tools/gather_bw.py): ~4 us; B16 csl is at the floor.
 -3. (s15) Watch Handoffs: proj is building g19 mode 3 (BF16 out, per-tile tickets) for qkv T=16/32 (drops v44's 1.2 us
    cast at d16; m32 lost on H100 so far) and was asked for an M=8 g19 (T=8 qkv: g14 m8 is issue-bound, 13.0 us H200 vs
    g19 m16 10.6). moe works big-M (v16/v32 twm) on its calibrated H200 proxy (H100 with the expert grid capped at 88,
@@ -114,14 +116,12 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
 - s61: nds at d16 sliding (+4..4.6 us); pooler W L2 prefetch at T=16/32 (g19 consumer-bound, warm L2 no faster); qkv T=16/32 at
   H100 cold-stream floor; T=1 pr1 SMEM preload bounded ~-3 us (needs o+bnd+pr1 megakernel; not started).
 - s60: pr3 router at T=32 beside g19 pooler (+1.5..2.7 us in layer); pooler grid 108/120/132 all equal standalone (g19-bound).
-- s17: PR1 npf (pooler chunks L2-prefetched before the wait) 0/2/4: H100 d1 tie (91.5-91.6 us, 10 rounds); no H200 case.
 - s15: n2u8 (T=8 norm3+unpool on clusters), bndc (cluster boundary), CUDA 1-CTA boundary, BND_ROWS, UPF3 (unpool
   W L2 prefetch at tk2f end / in norm; H200 diag b1ee542c d32 -4%), G10_PFL2 (o W prefetch during csl), pr1 npf 6-12,
   qkv/o g19 at T=32 (8 rounds H100 +2.6..3.4), qkv g19 at T=8 (m=8 unsupported). Patches: dev/n2u8_s15.patch, dev/bndc_s15.patch.
 - s14: UPF2 (tk2f finishers L2-prefetch the unpool slice), N2U_BOUNDARY (still +2.8), BND_SPIN (flag-spin boundary:
   +2 us, race), g17 8/16 rows per block. RULE: no __ldg/.nc on producer data after griddepcontrol.wait (hoisted
   above it); register loads "before the wait" get sunk below it: use cp.async.bulk.prefetch.L2 / LDGSTS; check SASS.
-- s13: pooler bmm 4 slabs at T=32 (tie). LATE_TRIG variants 1 (trigger at CTA end) < 2 (gemm2 start, T=1) < 3 (all T).
 - s12: XN (pre-expert rmsnorm inside tk2f: +0.2..0.7 us as its own instantiation; in the shared one it slowed
   d16/d32 by 1-2 us), UPF (tk2f L2-prefetches the unpool slice: tie). A/B kernel edits against the original binary.
 - s10: g19 at T=32 (H200: proj diag + check 5cf5247d); g19 pooler on all 132 SMs (router starved, +4 us H100); router3
