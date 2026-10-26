@@ -1005,8 +1005,27 @@ void g17_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mp, i
 # BF16 (as moe_norm2's output) and dots it with its R rows. Bitwise the same as moe_norm2 -> gemv17. Block 0 zeroes
 # moe_tk2f's segment counters (moe_norm2's other job). Saves the norm2 launch + its serial latency.
 N2U_TOKENS = (1,)
-N2U_CFG = (8, 0)  # rows per block, PDL secondary of moe_tk2f (which triggers at its start)
+N2U_CFG = (8, 1)  # rows per block, PDL secondary of moe_tk2f (s13: which triggers at its CTAs' gemm2 rows, TK2F_LATE_TRIG)
 N2U_BOUNDARY = False  # the last block also does the second boundary: H100 d1 +2.7 us vs the PDL _boundary (dead, s8)
+# s13: TK2F_LATE_TRIG (T = 1 tk2f instantiation only, PF == 0): 0 = trigger PDL dependents at the kernel's start (moe's),
+# 1 = at each CTA's end (after its last gemm2 row), 2 = when a CTA starts its gemm2 rows, 3 = as 2 in every tk2f
+# instantiation (T <= 32) + moe_norm2/3 as PDL secondaries (g_pdl 6). With N2U_CFG[1] = 1 n2u then
+# launches onto the SMs freed by drained tk2f CTAs and streams its W rows before griddepcontrol.wait.
+TK2F_LATE_TRIG = 3
+if TK2F_LATE_TRIG:
+    _a = '  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n  {  // routing, as moe_tk2 GATED'
+    assert _moe_CUDA_SRC.count(_a) == 1
+    _c = "(PF != 0)" if TK2F_LATE_TRIG < 3 else "(false)"
+    _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "  if " + _c + " " + _a[2:])
+    _t = ("  if (PF == 0) " if TK2F_LATE_TRIG < 3 else "  ") + 'asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n'
+    _a = ("  tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, "
+          "s_red, smem, full,\n                                     empty, st, ph, rb);\n")
+    assert _moe_CUDA_SRC.count(_a) == 1
+    _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a + _t if TK2F_LATE_TRIG == 1 else _t + _a)
+    if TK2F_LATE_TRIG == 3:  # 3: all instantiations trigger at their gemm2 rows, and moe_norm2/3 launch as PDL secondaries
+        _a = "static int g_pdl = 4,"
+        assert _moe_CUDA_SRC.count(_a) == 1
+        _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "static int g_pdl = 6,")
 _N2U_SRC = r'''namespace n2u {
 template <int R>
 __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const int* __restrict__ inv,
