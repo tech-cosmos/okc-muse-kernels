@@ -1597,7 +1597,7 @@ static int launch_tb(const void* wb, const void* sb, const void* gs, const void*
 // from a gathered, K-permuted copy (moe_gather: row pos = route in expert order; within each 64-chunk logical
 // k = j*16 + h*8 + 2t + b holds physical k = 16t + 4j + 2h + b, the order _pack_weight uses), and gemm13 writes
 // inter in that order too. 2 consumer warpgroups (warp w: RT 16-row tiles), 1 producer warp, 1 CTA/SM.
-struct TMaps { CUtensorMap m[4]; };  // box rows 8, 16, 32, 64
+struct TMaps { CUtensorMap m[5]; };  // box rows 8, 16, 32, 64, 96 (s17: moe_twm hot class)
 
 // NW = consumer warps: 8 (RT 2, 2 consumer WGs + a producer WG, setmaxnreg) or 16 (RT 1, 4 consumer WGs + a
 // producer warp; same weight/scale packing: warp 2w+r of NW 16 = (warp w, tile r) of NW 8; gated: even warps gate,
@@ -2031,10 +2031,10 @@ static void tw_maps(TMaps& maps, void* ptr, int64_t rows) {
     cudaDriverEntryPointQueryResult q;
     cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled", (void**)&g_encode, 12000, cudaEnableDefault, &q);
   }
-  for (int i = 0; i < 4; ++i) {
+  for (int i = 0; i < 5; ++i) {
     cuuint64_t dims[2] = {(cuuint64_t)KD, (cuuint64_t)rows};
     cuuint64_t strides[1] = {(cuuint64_t)KD * 2};
-    cuuint32_t box[2] = {64, (cuuint32_t)(8 << i)};
+    cuuint32_t box[2] = {64, (cuuint32_t)(i < 4 ? 8 << i : 96)};
     cuuint32_t es[2] = {1, 1};
     CUresult r = g_encode(&maps.m[i], CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, ptr, dims, strides, box, es,
                           CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
@@ -2284,6 +2284,94 @@ __device__ __forceinline__ unsigned long long gtimer() {
   asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t));
   return t;
 }
+// s17 moe_twm hot class (cl 3, -nsplit bit 23 = TWM_HOT): an expert with 65..96 tokens runs ONE pass (instead of two
+// 64-token RT 2 passes = two dequantizations of every weight) with one 16-row tile per warp and N <= 96 (48
+// accumulator registers: within twm's budget, unlike RT 2 x N 96). Item = half an RT 2 row block of the w*b2 packing
+// (slots w8 4h..4h+3 are contiguous: 4 KB of weights + 512 B of scales per k chunk); stage = x (96-row box) at 0,
+// weights at 12 KB, scales at 16 KB. Gated: warp 2i = gate tile, 2i+1 = its up tile; the up warp hands its FP32
+// accumulators to the gate warp through the item's LAST ring slot (24 KB <= one stage; after a consumer barrier:
+// the other warpgroup may still be reading that slot), released only afterwards.
+template <int N, int NSTG, bool SA, int STRIDE>
+__device__ __forceinline__ void tw_hot(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
+                                       const uint32_t* slut, int warp, int lane, int nv, int off, int rb2, float gsc,
+                                       const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, bool g2) {
+  constexpr int NA = N / 2, XB = 96 * 128, WB = 4096;
+  float acc[1][NA];
+#pragma unroll
+  for (int i = 0; i < NA; ++i) acc[0][i] = 0.f;
+  uint32_t afA[4], afB[4];
+  const int so = XB + WB + ((warp >> 1) * 32 + lane) * 4 + (warp & 1) * 2;
+  int pst = -1;
+#pragma unroll 1
+  for (int kc = 0; kc < 64; ++kc) {
+    const char* sb = smem + st * STRIDE;
+    if (kc) mbar_wait(&full[st], ph);
+    const uint4 wv = reinterpret_cast<const uint4*>(sb + XB)[warp * 32 + lane];
+    const uint32_t word = *reinterpret_cast<const uint16_t*>(sb + so);
+    uint32_t s0, s1;
+    if (SA) {
+      s0 = sca<0>(word); s1 = sca<1>(word);
+    } else {
+      s0 = slut[word & 0xFF]; s1 = slut[word >> 8];
+    }
+    const uint64_t d0 = sw128_desc(sb);
+#pragma unroll
+    for (int j0 = 0; j0 < 4; ++j0) {
+      const bool odd = j0 & 1;
+      if (odd) dq(u4get(wv, j0), s0, s1, afB);
+      else dq(u4get(wv, j0), s0, s1, afA);
+      wg_fence();
+      wgmma_bf16<N>(acc[0], odd ? afB : afA, d0 + j0 * 2);
+      wg_commit();
+      wg_wait<1>();
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        if (odd) fence_r(afA[i]);
+        else fence_r(afB[i]);
+      }
+      if (j0 == 0 && pst >= 0) mbar_arrive(&empty[pst]);
+    }
+    pst = st;
+    if (++st == NSTG) { st = 0; ph ^= 1; }
+  }
+  wg_wait<0>();
+#pragma unroll
+  for (int i = 0; i < 4; ++i) { fence_r(afA[i]); fence_r(afB[i]); }
+#pragma unroll
+  for (int i = 0; i < NA; ++i) fence_f(acc[0][i]);
+  if (g2) {
+    mbar_arrive(&empty[pst]);
+    tw_epi<1, N, false, 8>(acc, lane, warp, nv, off, rb2, gsc, sroutes, Out);
+    return;
+  }
+  float* x = reinterpret_cast<float*>(const_cast<char*>(smem) + pst * STRIDE) + (warp >> 1) * 32 * NA;
+  asm volatile("bar.sync 1, 256;" ::: "memory");  // the other warpgroup's MMAs may still read this slot's x tile
+  if (warp & 1) {
+#pragma unroll
+    for (int i = 0; i < NA; ++i) x[i * 32 + lane] = acc[0][i];
+  }
+  asm volatile("bar.sync %0, 64;" ::"r"(2 + (warp >> 1)) : "memory");
+  if (!(warp & 1)) {
+    const int g = lane >> 2, t = lane & 3, tile = rb2 * 4 + (warp >> 1);
+#pragma unroll
+    for (int gi = 0; gi < N / 8; ++gi)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const int tok = gi * 8 + t * 2 + (q & 1);
+        if (tok < nv) {
+          const int col = tile * 16 + g + ((q & 2) ? 8 : 0);
+          const float v = acc[0][gi * 4 + q] * gsc;
+          const float u = x[(gi * 4 + q) * 32 + lane] * gsc;
+          const int c = col & 63;
+          const int lc = (col & ~63) | (((c >> 2) & 3) << 4) | (((c >> 1) & 1) << 3) | ((c >> 4) << 1) | (c & 1);
+          Out[(size_t)(off + tok) * NOUT + lc] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+        }
+      }
+  }
+  asm volatile("bar.sync %0, 64;" ::"r"(2 + (warp >> 1)) : "memory");
+  mbar_arrive(&empty[pst]);  // the slot held the exchange: release it only now
+}
+
 template <int NSTG, bool SA = false>
 __global__ void __launch_bounds__(384, 1) moe_twm(
     const char* __restrict__ W13, const char* __restrict__ S13, const float* __restrict__ gs13,
@@ -2312,8 +2400,8 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   // pass-minor items (rb-major: all passes of a row block adjacent: L2 reuse), bits 3-4 = merge the big (> 32 token)
   // experts' items evenly into the first W = phi * N positions of each phase (phi 1, .85, .7), light ones between;
   // bit 5: merge in gemm13 only; bit 6: merged set = multi-pass (> 64 token) experts only
-  const int tail = nsplit < 0 ? (-nsplit) & 4095 : 0, tail13 = nsplit < 0 ? ((-nsplit) >> 12) & 4095 : 0;
-  const int order = nsplit < 0 ? (-nsplit) >> 24 : 0;
+  const int tail = nsplit < 0 ? (-nsplit) & 4095 : 0, tail13 = nsplit < 0 ? ((-nsplit) >> 12) & 2047 : 0;
+  const int order = nsplit < 0 ? (-nsplit) >> 24 : 0, hot = nsplit < 0 ? ((-nsplit) >> 23) & 1 : 0;
   nsplit = nsplit < 0 ? 0 : nsplit;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
@@ -2331,8 +2419,9 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     const int e = tid < nact ? meta[1 + sl] : 0;
     s_e[tid] = e;
     const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0, big = nt > 32;
-    const int npass = big ? (nt + 63) / 64 : (nt + 31) / 32;
-    int c2 = big, c13 = big;
+    const int hc = hot && nt > 64 && nt <= 96;  // s17 hot class: one pass, 1 tile per warp
+    const int npass = hc ? 1 : big ? (nt + 63) / 64 : (nt + 31) / 32;
+    int c2 = hc ? 3 : big, c13 = hc ? 3 : big;
     if (tail | tail13) {
       int sfx = big ? 1 << 20 : npass;
 #pragma unroll
@@ -2348,7 +2437,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
 #pragma unroll
     for (int gq = 0; gq < 2; ++gq) {
       const int c = gq ? c2 : c13;
-      int incl = npass * (c ? (gq ? HN::NRB : HG::NRB) : (gq ? CN::NRB : CG::NRB));
+      int incl = npass * (c ? (gq ? HN::NRB : HG::NRB) * (c == 3 ? 2 : 1) : (gq ? CN::NRB : CG::NRB));
 #pragma unroll
       for (int o = 1; o < 32; o <<= 1) {
         const int v = __shfl_up_sync(0xffffffffu, incl, o);
@@ -2400,7 +2489,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     }
     a = 0;
     while (cum[a + 1] <= it) ++a;
-    const int nrb = s_big[g2][a] ? (g2 ? HN::NRB : HG::NRB) : (g2 ? CN::NRB : CG::NRB);
+    const int nrb = s_big[g2][a] ? (g2 ? HN::NRB : HG::NRB) * (s_big[g2][a] == 3 ? 2 : 1) : (g2 ? CN::NRB : CG::NRB);
     const int rem = it - cum[a];
     if (ob & 4) {
       const int np = (cum[a + 1] - cum[a]) / nrb;
@@ -2425,19 +2514,23 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
       }
       int g2, a, p, rb, h, j;
       decode(item, g2, a, p, rb, h, j);
-      const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 1 ? 64 : 32;
+      const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? 64 : 32;
       const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
       const int k0 = h < 0 ? 0 : h * 32, k1 = h < 0 ? 64 : k0 + 32;
-      const int mi = nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
+      const int mi = cl == 3 ? 4 : nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
       const int nrb = big ? (g2 ? HN::NRB : HG::NRB) : (g2 ? CN::NRB : CG::NRB);
       const int WB = big ? HG::WB : CG::WB, SB = big ? HG::SB : CG::SB;
-      const char* wsrc = (big ? (g2 ? W2h : W13h) : (g2 ? W2 : W13)) + ((size_t)e * nrb + rb) * 64 * WB;
-      const char* ssrc = (big ? (g2 ? S2h : S13h) : (g2 ? S2 : S13)) + ((size_t)e * nrb + rb) * 64 * SB;
+      // hot class: item rb = 2 * (RT 2 row block) + half; the half's slots are the 2nd half of each k chunk's block
+      const int rbp = cl == 3 ? rb >> 1 : rb, hh = cl == 3 ? rb & 1 : 0;
+      const char* wsrc = (big ? (g2 ? W2h : W13h) : (g2 ? W2 : W13)) + ((size_t)e * nrb + rbp) * 64 * WB + hh * (WB / 2);
+      const char* ssrc = (big ? (g2 ? S2h : S13h) : (g2 ? S2 : S13)) + ((size_t)e * nrb + rbp) * 64 * SB + hh * (SB / 2);
       const CUtensorMap* map = g2 ? &maps2.m[mi] : &maps13.m[mi];
-      const int bytes = WB + SB + (1024 << mi);
+      const int xbytes = cl == 3 ? 96 * 128 : 1024 << mi, wbytes = cl == 3 ? WB / 2 : WB, sbytes = cl == 3 ? SB / 2 : SB;
+      const int xo = cl == 3 ? 96 * 128 : CG::XB;  // weights' offset in the stage
+      const int bytes = wbytes + sbytes + xbytes;
       if (g2) {
-        const int b13 = s_big[0][a], PS13 = b13 == 1 ? 64 : 32;
-        const int need = ((s_off[e + 1] - s_off[e] + PS13 - 1) / PS13) * (b13 ? HG::NRB : CG::NRB);
+        const int b13 = s_big[0][a], PS13 = b13 == 3 ? 128 : b13 == 1 ? 64 : 32;
+        const int need = ((s_off[e + 1] - s_off[e] + PS13 - 1) / PS13) * (b13 ? HG::NRB * (b13 == 3 ? 2 : 1) : CG::NRB);
         int v;
         for (;;) {
           asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(v) : "l"(done + e) : "memory");
@@ -2452,8 +2545,8 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
         if (kc == k0) s_item[st] = item;
         mbar_expect_tx(&full[st], bytes);
         tma2d(sb, map, kc * 64, off, &full[st]);
-        bulk_g2s(sb + CG::XB, wsrc + (size_t)kc * WB, WB, &full[st]);
-        bulk_g2s(sb + CG::XB + WB, ssrc + (size_t)kc * SB, SB, &full[st]);
+        bulk_g2s(sb + xo, wsrc + (size_t)kc * WB, wbytes, &full[st]);
+        bulk_g2s(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, &full[st]);
         if (++st == NSTG) { st = 0; ph ^= 1; }
       }
     }
@@ -2480,14 +2573,17 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     if (item < 0) break;
     int g2, a, p, rb, h, j;
     decode(item, g2, a, p, rb, h, j);
-    const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 1 ? 64 : 32;
+    const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? 64 : 32;
     const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
     float* pt = h < 0 ? nullptr : part + (size_t)(2 * j + h) * 16384;
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
     __nv_bfloat16* out = g2 ? Y : Inter;
 #define TWI(RT, NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
                                                         h < 0 ? 64 : 32, pt, tick + j, &s_flag, h ? -16384 : 16384)
-    if (!big) {
+    if (cl == 3) {
+      if (nv <= 80) tw_hot<80, NSTG, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
+      else tw_hot<96, NSTG, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
+    } else if (!big) {
       switch ((nv + 7) >> 3) {
         case 1: TWI(4, 8); break;
         case 2: TWI(4, 16); break;
@@ -4017,7 +4113,7 @@ int64_t moe_norm3_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw,
 
 def _gen_wgmma():
     out = ["template <int N> __device__ __forceinline__ void wgmma_bf16(float* d, const uint32_t* a, uint64_t desc);"]
-    for n in range(8, 72, 8):
+    for n in range(8, 104, 8):
         na = n // 2
         dl = ", ".join(f"%{i}" for i in range(na))
         al = ", ".join(f"%{na + i}" for i in range(4))
@@ -4252,6 +4348,8 @@ TWM_TAIL13_M = {}
 TWM_ORDER = 0  # s14: moe_twm item order (bits, see moe_twm): 76 = pass-minor + multi-pass experts' items merged evenly
 #   over both phases (H100 layer v32 248.8 -> 239.9 us without TWM_TAIL (with it: 247), v16 = 0); 2 = timeline stamps
 TWM_ORDER_M = {256: 76}  # s14: per-M override
+TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
+TWM_HOT_M = {}  # s17: per-M override
 TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline)
 TWQ_M = {}  # s17: per-M override, e.g. {128: 4} (proxy: v16 -6.5 proxy-us, v32 +4.6)
 TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
@@ -4502,6 +4600,7 @@ def kernel_fn(data, st):
                                    meta, sroutes, inter, y, part, q)
             elif TWF_MIX and "w2b2" in st:
                 tl = TWM_TAIL_M.get(M, TWM_TAIL) + 4096 * TWM_TAIL13_M.get(M, TWM_TAIL13) + (TWM_ORDER_M.get(M, TWM_ORDER) << 24)
+                tl += (1 << 23) if TWM_HOT_M.get(M, TWM_HOT) else 0
                 ns = -tl if tl else ns
                 if DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)
                 lib.moe_twm_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["w13b2"],
