@@ -2,6 +2,8 @@
 
 Updated 2026-10-26 10:05Z (session 21; real clock: earlier sessions' stamps ran ~30 min ahead, use `date -u`).
 
+**s22: main = v51 (1e457c2) = v50 + generic GEMV config alternatives as TUNE options (`G10_ALT/G13_ALT/G14_ALT`, `_cfg`, option "<kind>alt:<key>" = 1-based index): T=1 g10alt:o (U 4, 132 blocks), T=8 g14alt:qkv_gate 1 (PF 8) / 2 (bk 48). H100: all ties (g10 o PF2/264 +11 us: dropped). Forced: scored decode/verify 1 x3 ok, replay 0/30. NOT CHECKED; plan unchanged (last check ~14:30Z on main, read the H200 "layer tune" lines; submit by 17:30Z if >= 1.9558, else v45).**
+
 **s21: main = v50 = v49 + TUNE option g13alt:qkv_gate at T=1 (g13 PF 2 = 2 qkv rows in flight per virtual block; 62 regs, no spill; H100 +1.3/+2 us sliding/full, kept only as a free H200 A/B: H200 m=1 GEMVs run ~2.5 TB/s). Tests 13/13, forced scored decode 1 ok. Still NOT CHECKED; same plan as s20 below (last check ~14:30Z real UTC, submit by 17:30Z).**
 
 **s20: main = v49 (b564697) = v48 + proj gemv22 as TUNE options at T=128 (qkv/pooler/unpool; H100 keeps default).

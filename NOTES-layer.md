@@ -563,3 +563,11 @@
 - v50: g13 PF=2 instantiation (2,4,1,2) as TUNE option g13alt:qkv_gate at T=1 (qkv = 2304 rows = 4.36 rows per
   virtual block, one row in flight each at PF 1: latency-bound). REG 62 (PF 1: 60), no spill. H100 tuner: sliding
   115.1 default vs 116.4, full 80.7 vs 82.7 (loses); a free H200 A/B in the last check. Forced: scored decode 1/16 x3 ok.
+
+## Session 22 (2026-10-26 10:05Z-)
+- Budget at start: 1 submit, 1 check. Board #53 1.956x (#1 2.380x). No new proj/moe handoffs.
+- v51 (1e457c2): GEMV config alternatives generalized: `G10_ALT`, `G13_ALT`, `G14_ALT` lists, `_cfg(state, T, kind, key, cfg)`
+  picks TUNE option "<kind>alt:<key>" (1-based index). New options: T=1 g10alt:o = (1024, 4, 4, 1, 1, 132); T=8
+  g14alt:qkv_gate = (2, 2, 8, 32, 1) / (2, 2, 4, 48, 1). H100 tuner (us, sliding/full): T=1 default 114.4/80.4, g10alt o
+  114.7/82.2 (PF 2 on 264 blocks: 125.5/91.3, dropped); T=8 default 147.2/169.5, g14alt 1 147.0/169.9, 2 147.3/170.3.
+  Forced each: scored decode 1 + verify 1 x3 ok, replay_test 30 inputs " 1 " 0/30 on all four. Free H200 A/B in the last check.
