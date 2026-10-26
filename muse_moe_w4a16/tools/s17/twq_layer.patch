@@ -229,7 +229,7 @@
        switch ((nv + 7) >> 3) {
          case 1: TWI(4, 8); break;
          case 2: TWI(4, 16); break;
-@@ -2548,6 +2648,264 @@
+@@ -2548,6 +2648,270 @@
    return (g_sa & 1) ? twm_go<true>(TWMA) : twm_go<false>(TWMA);
  #undef TWMA
  }
@@ -367,8 +367,14 @@
 +    a = 0;
 +    while (cum[a + 1] <= it) ++a;
 +    const int nrb = g2 ? NR2 : NR13, rem = it - cum[a];
-+    p = rem / nrb;
-+    rb = rem - p * nrb;
++    if (flags & 8) {  // pass-minor: all passes of a row block adjacent (later passes read the weights from L2)
++      const int np = (cum[a + 1] - cum[a]) / nrb;
++      rb = rem / np;
++      p = rem - rb * np;
++    } else {
++      p = rem / nrb;
++      rb = rem - p * nrb;
++    }
 +  };
 +  if (warp >= 16) {
 +    asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(TWQ_PREG) : "memory");
@@ -494,7 +500,7 @@
  // ---- moe_tk2f: the decode gemm13 and gemm2 in ONE launch (moe_tk2 rows, one routing, one ring). Phase 1 = gemm13
  // rows, phase 2 = gemm2 rows (each split over the CTAs as in moe_tk2); the producer streams phase-2 weights as soon
  // as its phase-1 copies are issued. A CTA publishes the phase-1 rows it finished of each (expert, group) segment in
-@@ -3659,7 +4017,7 @@
+@@ -3659,7 +4023,7 @@
  
  def _gen_wgmma():
      out = ["template <int N> __device__ __forceinline__ void wgmma_bf16(float* d, const uint32_t* a, uint64_t desc);"]
@@ -503,7 +509,7 @@
          na = n // 2
          dl = ", ".join(f"%{i}" for i in range(na))
          al = ", ".join(f"%{na + i}" for i in range(4))
-@@ -3713,6 +4071,8 @@
+@@ -3713,6 +4077,8 @@
          "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, "
          "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, torch::Tensor, torch::Tensor, "
          "torch::Tensor, double);"
@@ -512,7 +518,7 @@
          "int64_t moe_set_pdl(int64_t, int64_t);"
          "int64_t moe_set_blk(int64_t);"
          "int64_t moe_set_sa(int64_t);")
-@@ -3725,7 +4085,7 @@
+@@ -3725,7 +4091,7 @@
          h = hashlib.sha256(CUDA_SRC.encode()).hexdigest()[:12]
          _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=CUDA_SRC,
                             functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
@@ -521,18 +527,19 @@
                                        "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa"],
                             extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                             extra_cflags=["-O3"], verbose=False)
-@@ -3892,6 +4252,10 @@
+@@ -3892,6 +4258,11 @@
  TWM_ORDER = 0  # s14: moe_twm item order (bits, see moe_twm): 76 = pass-minor + multi-pass experts' items merged evenly
  #   over both phases (H100 layer v32 248.8 -> 239.9 us without TWM_TAIL (with it: 247), v16 = 0); 2 = timeline stamps
  TWM_ORDER_M = {256: 76}  # s14: per-M override
 +TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
 +TWM_HOT_M = {}  # s17: per-M override
-+TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline)
++TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline,
++#   bit 3 = pass-minor item order; use 4 for plain on)
 +TWQ_M = {}  # s17: per-M override, e.g. {128: 4} (proxy: v16 -6.5 proxy-us, v32 +4.6)
  TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
  TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
  _CFGS = (10, 11, 22, 118)
-@@ -4133,8 +4497,14 @@
+@@ -4133,8 +4504,14 @@
              lib.moe_set_sa((1 if TWSA and st["sa"] else 0) | (2 if trt == 2 else 0))
              ns = TWF_SPLIT_M.get(M, TWF_SPLIT)
              part = (torch.full if TWF_DBG else torch.empty)((max(ns, 1) * 32768,), *((float("nan"),) if TWF_DBG else ()), dtype=torch.float32, device=dev)
@@ -572,7 +579,118 @@
                                             "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
                                             "moe_set_upf", "moe_set_ss"],
                                  extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
-@@ -1768,7 +1774,7 @@
+@@ -1435,11 +1441,7 @@
+ // h = BF16(sum_s f_s y_s w1) (moe_norm3's math, slot order and rounding; thread = k) for the 8 tokens, then
+ // mma.m16n8k16 (W rows as M, tokens as N, FP32 accumulate): warp = (m tile, k quarter), quarters summed in smem.
+ // FP32 partials to slab kc (out [8][8][1024]); the boundary adds the slabs and rounds to BF16 as the GEMM would.
+-// X (s26): no moe_tk2f change (cfg 84204): blocks 0..7 (row group 0, k chunk = blockIdx) add their chunk's partial
+-// sums of squares of the local slots to y32 row 64 (zeroed with the counter at row 64 col 128 by the pre-expert
+-// _rmsnorm_gain), then bump the counter; every block waits for 8 (blocks 0..7 are dispatched first and wait only on
+-// each other: no deadlock while 8 SMs are free).
+-template <int KB, bool X = false>
++template <int KB>
+ __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const int* __restrict__ ids,
+                                            const float* __restrict__ tw, const float* __restrict__ w1, int start,
+                                            int count, float eps, const __nv_bfloat16* __restrict__ w,
+@@ -1450,7 +1452,7 @@
+     __nv_bfloat16* sw = reinterpret_cast<__nv_bfloat16*>(nu8_smem);              // [RB][LD]
+     __nv_bfloat16* sh = sw + RB * LD;                                            // [8][LD]
+     float* ys = reinterpret_cast<float*>(sh + 8 * LD);                           // [nl][KB], later the k-quarter sums
+-    __shared__ float sf[64], s_f0[64];  // sf: f by local list position
++    __shared__ float sf[64];
+     __shared__ int sl[64], s_list[64], s_tb[9];
+     __shared__ unsigned s_m[2];
+     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+@@ -1471,7 +1473,7 @@
+         const bool loc = e >= 0 && e < count;
+         const unsigned m = __ballot_sync(0xffffffffu, loc);
+         if (lane == 0) s_m[warp] = m;
+-        s_f0[tid] = tw[tid];
++        sf[tid] = loc ? tw[tid] : 0.f;
+         sl[tid] = loc;
+     }
+     __syncthreads();
+@@ -1490,49 +1492,13 @@
+     }
+     asm volatile("cp.async.commit_group;" ::: "memory");
+     const float wv = __ldg(w1 + k0 + tid);
+-    int tb[9];
+-#pragma unroll
+-    for (int t = 0; t <= 8; ++t) tb[t] = s_tb[t];
+-    if constexpr (X) {
+-        __shared__ float s_q[16][64];
+-        int* ctr = reinterpret_cast<int*>(const_cast<float*>(Y) + 64 * K + 128);
+-        asm volatile("cp.async.wait_all;" ::: "memory");
+-        __syncthreads();
+-        if (blockIdx.x < NKC) {
+-            for (int i = 0; i < nl; ++i) {
+-                float q = ys[i * KB + tid] * wv;
+-                q *= q;
+-#pragma unroll
+-                for (int o = 16; o; o >>= 1) q += __shfl_xor_sync(0xffffffffu, q, o);
+-                if (lane == 0) s_q[warp][i] = q;
+-            }
+-            __syncthreads();
+-            if (tid < nl) {
+-                float q = 0.f;
+-#pragma unroll
+-                for (int ww = 0; ww < 16; ++ww) q += s_q[ww][tid];
+-                atomicAdd(const_cast<float*>(Y) + 64 * K + s_list[tid], q);
+-            }
+-            __threadfence();
+-            __syncthreads();
+-            if (tid == 0) atomicAdd(ctr, 1);
+-        }
+-        if (tid < 64) {
+-            int c_;
+-            do { asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c_) : "l"(ctr) : "memory"); } while (c_ < NKC);
+-            if (sl[tid]) sf[__popcll(m64 & ((1ull << tid) - 1))] = s_f0[tid] * rsqrtf(__ldcg(Y + 64 * K + tid) / K + eps);
+-        }
+-        __syncthreads();
+-    } else {
+-        if (tid < 64 && sl[tid])  // f of local slot tid, at its list position
+-            sf[__popcll(m64 & ((1ull << tid) - 1))] = s_f0[tid] * rsqrtf(__ldcg(Y + 64 * K + tid) / K + eps);
+-        asm volatile("cp.async.wait_all;" ::: "memory");
+-        __syncthreads();
+-    }
++    if (tid < 64 && sl[tid]) sf[tid] = sf[tid] * rsqrtf(__ldcg(Y + 64 * K + tid) / K + eps);
++    asm volatile("cp.async.wait_all;" ::: "memory");
++    __syncthreads();
+ #pragma unroll
+     for (int t = 0; t < 8; ++t) {
+         float acc = 0.f;
+-        for (int i = tb[t]; i < tb[t + 1]; ++i) acc += sf[i] * (ys[i * KB + tid] * wv);
++        for (int i = s_tb[t]; i < s_tb[t + 1]; ++i) acc += sf[s_list[i]] * (ys[i * KB + tid] * wv);
+         sh[t * LD + tid] = __float2bfloat16(acc);
+     }
+     __syncthreads();
+@@ -1565,10 +1531,9 @@
+ void nu8_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1, int64_t start, int64_t count,
+                 double eps, torch::Tensor w, torch::Tensor out, torch::Tensor zc, int64_t kb, int64_t pdl) {
+     TORCH_CHECK(y32.size(0) >= 65 && ids.numel() == 64 && w.size(0) >= 1024 && w.size(1) == 4096 &&
+-                out.numel() == (4096 / (kb % 1000)) * 8 * 1024, "nu8: shape");
+-    const int kb_ = (int)(kb % 1000);  // + 1000: X
+-    cudaLaunchConfig_t lc = {}; lc.gridDim = (1024 / 64) * (4096 / kb_); lc.blockDim = 512;
+-    lc.dynamicSmemBytes = 72 * (kb_ + 8) * 2 + 64 * kb_ * 4;
++                out.numel() == (4096 / kb) * 8 * 1024, "nu8: shape");
++    cudaLaunchConfig_t lc = {}; lc.gridDim = (1024 / 64) * (4096 / kb); lc.blockDim = 512;
++    lc.dynamicSmemBytes = 72 * (kb + 8) * 2 + 64 * kb * 4;
+     lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
+     la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+     la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0;
+@@ -1578,11 +1543,9 @@
+     static bool init = false;
+     if (!init) {
+         cudaFuncSetAttribute(nu8::nu8<512>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 512 * 4);
+-        cudaFuncSetAttribute(nu8::nu8<512, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 512 * 4);
+         init = true;
+     }
+     if (kb == 512) cudaLaunchKernelEx(&lc, nu8::nu8<512>, NU8_ARGS);
+-    else if (kb == 1512) cudaLaunchKernelEx(&lc, nu8::nu8<512, true>, NU8_ARGS);
+     else TORCH_CHECK(false, "nu8: kb");
+     C10_CUDA_KERNEL_LAUNCH_CHECK();
+ }
+@@ -1811,7 +1774,7 @@
  # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
  # ctx 80000 like the scored ones). Options (defaults = no entry):
  # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
@@ -581,17 +699,63 @@
  # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
  TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
              {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}),
-@@ -1781,10 +1787,11 @@
+@@ -1822,13 +1785,13 @@
+              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
+              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
               {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}),
-         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3}),
+-        8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
+-            {"nu8": True}, {"nu8": True, "nu8x": False}, {"nu8": True, "g14alt:qkv_gate": 1}),
++        8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3}),
          128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
 -              {"twm_order": 76}),
-+              {"twm_order": 76}, {"twq": 4}),
++              {"twm_order": 76}, {"twq": 4}, {"twq": 12}),
          256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
                {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
 -              {"twm_order": 4}, {"twm_tail": 32})}
-+              {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
++              {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
 +              {"twm_hot": 1, "twm_order": 76, "lt:unpool": True})}
  TUNE_REPS = 40
  TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
  TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
+@@ -2079,7 +2042,6 @@
+ # Replaces moe_norm3 + gemv17 (H100 v1 tail tk2f end -> norm3 3.7 -> g17 4.6 -> boundary 3.3 us). TUNE option "nu8".
+ NU8_DEFAULT = False
+ NU8_KB = 512
+-NU8_X = True  # sums of squares in nu8 (blocks 0..7 + a counter) instead of moe_tk2f PF 20 (H100: its epilogue +2.4 us)
+ 
+ 
+ def _nu8_on(state, tokens):
+@@ -2087,10 +2049,6 @@
+             and _moe__tk2f_cfg(tokens, state["moe"]) % 100000 == 84204 and _opt(state, tokens, "nu8", NU8_DEFAULT))
+ 
+ 
+-def _nu8_x(state, tokens):
+-    return _opt(state, tokens, "nu8x", NU8_X)
+-
+-
+ def _experts_nu8(x, topk_weights, local_ids, state, y32):
+     """T = 8: moe_tk2f (PF 20) -> nu8: the unpool slice as FP32 split-K slabs [D_EXPERT / NU8_KB, 8, 1024]. y32 [65, 4096]:
+     row 64 (the slots' sums of squares) was zeroed by the pre-expert _rmsnorm_gain."""
+@@ -2106,11 +2064,11 @@
+     lib.moe_set_ss(st["w1"].data_ptr())
+     lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"],
+                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"],
+-                        _moe__tk2f_cfg(8, st) + (0 if _nu8_x(state, 8) else 1000))
++                        _moe__tk2f_cfg(8, st) + 1000)
+     lib.moe_set_ss(0)
+     f = torch.empty((D_EXPERT // NU8_KB, 8, UNPOOL_SLICE), dtype=torch.float32, device=dev)
+     _G10["lib"].nu8_launch(y32, ids, tw, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, state["unpool_slice"], f, st["cnt"],
+-                           NU8_KB + 1000 * _nu8_x(state, 8), 1)
++                           NU8_KB, 1)
+     return f
+ 
+ 
+@@ -2276,7 +2234,7 @@
+     y32 = torch.empty((65, D_EXPERT), dtype=torch.float32, device=dev) if nu8 else None
+     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl and not tk2_pdl,
+                              TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
+-                             launch_pdl=pdl and not tk2_pdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 else 0)
++                             launch_pdl=pdl and not tk2_pdl, z_ptr=y32[64] if nu8 else None, ZN=64 if nu8 else 0)
+     if not pr1:
+         main_stream.wait_stream(side_stream)
+     if not pr1 and not torch.cuda.is_current_stream_capturing():
