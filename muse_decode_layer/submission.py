@@ -4591,7 +4591,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     // n4s1 (NORM_EARLY): wait only for the experts of this token's routes (flagged by moe_twm / moe_hot after their
     // last gemm2 item of the expert): CTAs run on the SMs twm's drain frees. Y then read through L2 (ld.cg).
     if (tid < 8) {
-      const int e = ids[tok * 8 + tid] - start;
+      const int e = __ldcg(ids + tok * 8 + tid) - start;
       if (e >= 0 && e < count) {
         int fv;
         for (;;) {
@@ -4609,7 +4609,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
   bool loc[8];
 #pragma unroll
   for (int s = 0; s < 8; ++s) {
-    const int e = ids[tok * 8 + s] - start;
+    const int e = __ldcg(ids + tok * 8 + s) - start;
     loc[s] = e >= 0 && e < count;
     ss[s] = 0.f;
     if (loc[s]) {
@@ -4645,7 +4645,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     float tot = 0.f;
 #pragma unroll
     for (int w = 0; w < 16; ++w) tot += ssum[w][s];
-    const float f = tw[tok * 8 + s] * rsqrtf(tot / NOUT + eps);
+    const float f = __ldcg(tw + tok * 8 + s) * rsqrtf(tot / NOUT + eps);
 #pragma unroll
     for (int k = 0; k < 8; ++k) acc[k] += f * v[s][k];
   }
@@ -5131,11 +5131,11 @@ __global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y, co
   bool loc[8];
 #pragma unroll
   for (int s = 0; s < 8; ++s) {
-    const int e = ids[tok * 8 + s] - start;
+    const int e = __ldcg(ids + tok * 8 + s) - start;
     loc[s] = e >= 0 && e < count;
     ss[s] = 0.f;
     if (loc[s]) {
-      const float4* p = reinterpret_cast<const float4*>(Y + (size_t)(SLOT ? tok * 8 + s : inv[tok * 8 + s]) * NOUT + tid * 8);
+      const float4* p = reinterpret_cast<const float4*>(Y + (size_t)(SLOT ? tok * 8 + s : __ldcg(inv + tok * 8 + s)) * NOUT + tid * 8);
       const float4 a = p[0], b = p[1];
       const float f[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
       if (SLOT) {
@@ -5170,7 +5170,7 @@ __global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y, co
     float tot = 0.f;
 #pragma unroll
     for (int w = 0; w < 16; ++w) tot += ssum[w][s];
-    const float f = tw[tok * 8 + s] * rsqrtf(tot / NOUT + eps);
+    const float f = __ldcg(tw + tok * 8 + s) * rsqrtf(tot / NOUT + eps);
 #pragma unroll
     for (int k = 0; k < 8; ++k) acc[k] += f * v[s][k];
   }

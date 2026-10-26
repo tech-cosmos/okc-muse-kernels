@@ -1064,3 +1064,9 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - H100 ab_files tuner off (variants/v89_nt, v90_nt: TUNE = {}, TUNE_BASE T=256 {hot 32, rg, twf_split 1022}, T=128 sl
   {twf_split 1022}), 3 runs x 8-12 rounds, both orders, v90 - v89 us: v32 sl -1.0/-1.3/-2.0, full -3.0/-3.8/-3.9;
   v16 sl +3.1/-2.1/-2.0 (position-sensitive), full -3.2/+0.4/+0.2; v1 tie (unchanged path). => main v90.
+
+## s54 (2026-10-26 19:33Z-, sandbox okc-night4, session 3): v91 = v90 + __ldcg in moe_norm / moe_norm2 (moe n4s2 request)
+- moe's SASS audit (r-moe 5960afc): moe_norm read ids via LDG.E.CONSTANT hoisted above griddepcontrol.wait (ACQBULK).
+  layer's moe_src had the same code: ids/tw (moe_norm, moe_norm2) and inv (moe_norm2) now __ldcg. SASS after: in
+  moe_norm/moe_norm2/gathern/routegathern only prepared w1 loads precede the wait. Cache-op only (bitwise same math).
+- Tests: bench test 13/13, scored_test verify x3 seeds 0 bad, replay_test 0 fails.
