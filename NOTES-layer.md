@@ -996,3 +996,13 @@
   i.e. a T=1 megakernel (o GEMV -> grid barrier -> bnd -> pooler/router, pooler W preloaded into SMEM during the o phase).
   Est. upper bound: ~20-28 MB of spare HBM in the csl/o/bnd window (~13.7 us H100) = -5..7 us d1 sl/full (~+1% layer
   score) minus the grid-barrier cost (~1-2 us). Multi-session build; not started.
+
+## s46 (2026-10-26 17:07Z-): v88 = v87 + proj s36 pr8 bulk L2 prefetch (no judge runs: layer budget for 10-26 spent)
+- `git apply -p1 muse_bf16_proj/dev/s36/pr8_bpf_layer.patch` (clean on v87): pr8_src.cu gets bulk_pf (one
+  cp.async.bulk.prefetch.L2 per (row group, WS/WN) of atoms [PF, PF+12) issued after the wait), PR8_CFG {8: npf 212};
+  probes (PRED/NOW/NOMATH/RLAST/RMID) are compile-time off. build.py rebuilt.
+- H100: bench test 13/13 (tuner picks unchanged: T=1 g13o, T=8 nu8x off, T=256 twf_split). ab_files ABBA 6 rounds tuner
+  off (v87_nt v88_nt v88_nt v87_nt): v1 sliding 148.4/148.8 -> 146.6/146.8 (-1.9 us), full 161.2/162.0 -> 159.5/160.5
+  (-1.6 us), agrees with proj's 7-round -1.6/-1.6. replay_test 10 x seeds 11,23 verify 1: 0/40; route_judge same 0 fails
+  (worst gap 0.013, drop-lead 0.009).
+- FIRST CHECK OF THE NEXT SANDBOX = main (v88).

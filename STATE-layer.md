@@ -1,12 +1,12 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 17:05Z (session 45). **main = v87 (r-layer 1b9743e), NOT judge-checked** (layer budget for 10-26 spent:
+Updated 2026-10-26 17:50Z (session 46). **main = v88 (v87 + proj s36 pr8 npf 212), NOT judge-checked** (layer budget for 10-26 spent:
 20/20 checks, 10/10 submits). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x (9,505 us/step), #10 2.180x.
 
 ## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
-1. `okc check muse_decode_layer/submission.py --json` on main (v87). Compare per shape vs 703d3a7e (d1 69.6/77.8,
+1. `okc check muse_decode_layer/submission.py --json` on main (v88). Compare per shape vs 703d3a7e (d1 69.6/77.8,
    d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5; tools/ckparse.py). Expected:
-   v32 -8..14 us (moe_hot), g19 shapes -0.5..1.5 us (DEC3/DEC4), d1 -1..2 (evict_last, g13o). Submit if > 1.9954x.
+   v32 -8..14 us (moe_hot), v1 -1.6..1.9 (pr8 npf 212), g19 shapes -0.5..1.5 us (DEC3/DEC4), d1 -1..2 (evict_last, g13o). Submit if > 1.9954x.
 2. Copy the profile's 'layer tune' lines into NOTES (T=1 g13o for proj; T=256 hot 0/24/32/40 for moe; T=8 g19 picks).
 3. If v87's check loses on some shape vs 703d3a7e, bisect with ONE check of a DIAG build that forces the suspect
    options per shape (the tuner lines in the log already A/B every TUNE option on the H200: read them first).
@@ -16,7 +16,8 @@ Mains since the board best (v70), all H100-validated (bench test 13/13, replay_t
 NOTES s32-s44: v71 BND_SPLIT | v72 O_PF (d32/v16 sl) | v73 moe TK2F_L2H | v74 pr1_npf 0 at T=1 | v75 TUNE_BASE (H200-agreed
 per-(T, sliding) defaults) | v76 moe TWM_L2H | v77 fused pooler+router GEMM at T=256 | v78-v80 g19 M=8 + T=8 candidates +
 proj evict_last on all L2 prefetches | v81-v83 PDL edges in the routing glue | v84 proj g13o (T=1 o 12-bit, TUNE) | v85 proj
-DEC4 | v86 proj DEC3 (12-bit decode 3 instr/pair) | v87 moe_hot at T=256 (TUNE_BASE hot 32; H100 v32 -14 sl / -11 full).
+DEC4 | v86 proj DEC3 (12-bit decode 3 instr/pair) | v87 moe_hot at T=256 (TUNE_BASE hot 32; H100 v32 -14 sl / -11 full) |
+v88 proj s36 pr8 bulk L2 prefetch after the wait (PR8_CFG npf 212; H100 ABBA 6 rounds v1 -1.9 sl / -1.6 full).
 
 ## s45 (16:48Z): no build. H200 703d3a7e profile per shape re-read: every phase streams near its bare rate; what is left
 is latency chains between phases (d1: g13 qkv 11.4 | csl 4.2 | o 6.7 | bnd ~4.3 | pr1 20.8 | tk2f 28.7 | n2u 5.6 | bnd) and
