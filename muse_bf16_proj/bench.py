@@ -1,6 +1,7 @@
 """Local harness for muse_bf16_proj, mirroring the judge.
 
   python bench.py test            # the 9 judge tests + the 30 scored shapes, against reference.py
+  python bench.py esc             # adversarial escapes: 12-bit compression round trip + outputs
   python bench.py bench [filter]  # scored shapes as CUDA-graph replays, cold L2 (read 512 MB), median,
                                   # minus an empty replay; the lock /tmp/okc-gpu.lock only around timing
 SUB=other.py python bench.py ...  selects another submission file.
@@ -46,6 +47,46 @@ def test():
         ok, msg = reference.check_implementation(data, out, w)
         bad += not ok
         print(f"{'PASS' if ok else 'FAIL'} m={m} {layer} {dist}: {msg[:110]}", flush=True)
+    return bad
+
+
+def test_esc():
+    """Weights with nasty escapes (zeros, -0, BF16 denormals, values far below the 12-bit window, just below it), 2-3 per row in 3/4 of the rows: prepare() must round-trip them bit-exactly (else fall back) and outputs must pass."""
+    global _W, _STATE
+    w = reference.generate_weights(reference.WEIGHTS_SEED)
+    g = torch.Generator(device="cuda").manual_seed(7)
+    C = {}  # escapes go to 32 fixed columns per layer, so spike rows of x can probe them exactly
+    for name in ["qkv_gate", "o", "pooler", "unpooler"]:
+        t = w[name]
+        n, k = t.shape
+        mx = t.float().abs().max().item()
+        vals = torch.tensor([0.0, -0.0, 2.0 ** -133, -3 * 2.0 ** -131, 2.0 ** -100, -1.37 * 2.0 ** -60,
+                             mx * 2.0 ** -17, -mx * 1.9 * 2.0 ** -18, 1.5 * 2.0 ** -126], device="cuda").to(torch.bfloat16)
+        C[name] = torch.randperm(k, device="cuda", generator=g)[:32]
+        for j in range(2 if k == 8192 else 3):  # + natural escapes (up to 6 per row at k = 8192) <= G13_ESC = 8
+            rows = torch.arange(n, device="cuda")[torch.rand(n, device="cuda", generator=g) < 0.75]
+            cols = C[name][torch.randint(0, 32, (len(rows),), device="cuda", generator=g)]
+            t[rows, cols] = vals[torch.randint(0, len(vals), (len(rows),), device="cuda", generator=g)]
+    from_sub = submission._compress
+    for name in ["qkv_gate", "o", "pooler", "unpooler"]:
+        print(name, "compressed" if from_sub(w[name]) is not None else "FALLBACK (uncompressed)", flush=True)
+    _W, _STATE = w, submission.prepare(w)
+    torch.cuda.synchronize()
+    bad = 0
+    for i, (m, layer) in enumerate([(m, l) for m in (1, 8, 16, 32) for l in LAYERS[:4]]):
+        data = reference.generate_input(m, layer, seed=99 + i, dist="normal")
+        sp = list(range(0, m, max(1, m // 8)))  # spike rows: x = 8 at an escape column -> out = 8 * W[:, col] exactly
+        for j, r in enumerate(sp):
+            data["x"][r] = 0
+            data["x"][r, C[layer][(j + i) % 32]] = 8
+        out = submission.kernel_fn(data, _STATE)
+        torch.cuda.synchronize()
+        ok, msg = reference.check_implementation(data, out, w)
+        ref = reference.ref_kernel(data, w)
+        exact = torch.equal(out[sp].view(torch.int16), ref[sp].view(torch.int16))
+        ok = ok and exact
+        bad += not ok
+        print(f"{'PASS' if ok else 'FAIL'} esc m={m} {layer}: spike rows exact {exact}; {msg}", flush=True)
     return bad
 
 
@@ -122,4 +163,6 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "test":
         sys.exit(test())
+    if cmd == "esc":
+        sys.exit(test_esc())
     bench(sys.argv[2] if len(sys.argv) > 2 else "")

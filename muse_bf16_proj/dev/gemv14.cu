@@ -151,7 +151,10 @@ __global__ void __launch_bounds__(1024, 1) gemm(const uint2* __restrict__ WS, co
 #pragma unroll
         for (int e = 0; e < ESC; ++e) {
             const int col = __float_as_int(he[e].x) - ks * KC;
-            if (col >= 0 && col < KC) s = fmaf(__bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2)), he[e].y, s);
+            if (col >= 0 && col < KC) {  // two fmas: exact when the dot holds only this weight (probe rows)
+                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2));
+                s = fmaf(xv, he[e].y, fmaf(xv, -0x1p-15f, s));
+            }
         }
         return s;
     };

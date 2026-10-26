@@ -29,6 +29,7 @@ def pack13(w):
     nib = torch.where(nib >= 2 ** 31, nib - 2 ** 32, nib).int()
     D = 2.0 ** (base - 127)
     hdr = torch.zeros(n, ESC, 2, dtype=torch.float32, device=w.device)
+    hdr[:, :, 1] = 2.0 ** -15  # empty slot (format of sub_template._compress)
     rows, cols = esc.nonzero(as_tuple=True)
     if len(rows):
         slot = torch.zeros_like(rows)
@@ -37,7 +38,7 @@ def pack13(w):
         rows, cols = rows[order], cols[order]
         first = torch.searchsorted(rows, rows, right=False)
         slot = torch.arange(len(rows), device=w.device) - first
-        delta = (w[rows, cols].float() - D) / 2.0 ** (base - 112)  # in the kernel's scaled domain
+        delta = w[rows, cols].float() / 2.0 ** (base - 112)  # exact; the kernel subtracts D / scale = 2^-15
         hdr[rows, slot, 0] = cols.int().view(torch.float32)
         hdr[rows, slot, 1] = delta
     return sm, nib, hdr, 2.0 ** (base - 112)
@@ -64,13 +65,13 @@ if __name__ == "__main__":
         pk = pack13(W)
         assert pk is not None
         sm, nib, hdr, scale = pk
-        print(nm, "escapes", int((hdr[:, :, 1] != 0).sum()), "scale", scale, flush=True)
+        print(nm, "escapes", int((hdr[:, :, 1] != 2.0 ** -15).sum()), "scale", scale, flush=True)
         x = torch.randn(1, k, device="cuda").bfloat16()
         ref = x.double() @ W.double().T
         tc = bench.time_graph(lambda: F.linear(x, W)) - e
         line = f"{nm:5s} m1: cublas {tc:6.2f}"
         # exactness: x = single power of two picks a column, incl. escaped columns
-        er = (hdr[:, :, 1] != 0).nonzero()
+        er = (hdr[:, :, 1] != 2.0 ** -15).nonzero()
         probe_cols = [0, 5] + ([int(hdr[er[0, 0], er[0, 1], 0].view(torch.int32))] if len(er) else [])
         for (u, nv, mb, pf) in cfgs:
             if (u * 4096) % k: continue

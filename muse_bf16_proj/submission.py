@@ -645,7 +645,7 @@ _G13_SRC = r'''// gemv13: gemv10 (grid-stride GEMV, m = 1) over losslessly compr
 // prepare() splits W [n, KK] into a sign|mantissa byte plane (flat, row-major) and a 4-bit exponent code plane:
 // code c = e - base (base = max exponent - 15), so the decoded exponent is 112 | c (exact power-of-2 rescale of the
 // sum by 2^(base - 112)). Weights with e < base (zeros, tiny values: ~1 per 8K) are escapes: code 0, byte 0 (decodes
-// to D = 2^(base - 127) in true scale) and a per-row header of ESC (col, (true - D) / scale) pairs fixes the sum.
+// to D = 2^(base - 127) in true scale) and a per-row header of ESC (col, true / scale) pairs (exact) fixes the sum: + x[col] * (true / scale - 2^-15).
 // Nibble layout: 32-bit word f/8 holds weights f..f+7 (f % 8 == 0); weight 2p + h at bits 4p + 16h, so pair p's
 // exponents land at BF16 bits 7..10 / 23..26 with one shift. Decode per pair: prmt (sign replicate), shift, 2 lop3.
 // Chunk = U * 4096 weights (whole rows); thread t takes the 16 weights at u * 4096 + t * 16 (one uint4 of bytes and
@@ -714,8 +714,7 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
     int c = blockIdx.x * NV + vg;
     uint4 s[PF][U];
     uint2 nb[PF][U];
-    // escapes: the first warp of each row (u, wp with (u * 4096 + wp * 512) % KK == 0), lanes e < ESC, add
-    // x[col] * (delta / scale) of the row's entry e to their partial sum before the warp reduction
+    // escapes: the row's reducing thread adds x[col] * (value - 2^-15) per header entry to the row's sum
     auto load = [&](int p, int ch) {
 #pragma unroll
         for (int u = 0; u < U; ++u) {
@@ -766,12 +765,6 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
 #pragma unroll
                 for (int u = 0; u < U; ++u) {
                     acc[u] = dot16(s[p][u], nb[p][u], xs + XI((u * 4096 + t * 16) % KK));
-#ifndef NOESC
-                    if ((u * 4096 + wp * 512) % KK == 0 && lane < ESC) {
-                        const float2 h = hs_[vg][((j + p) * RPC + (u * 4096 + wp * 512) / KK) * ESC + lane];
-                        acc[u] = fmaf(xs[XI(__float_as_int(h.x))], h.y, acc[u]);
-                    }
-#endif
                 }
                 const int cn = cc + PF * G;
                 if (cn < nch) load(p, cn);
@@ -790,6 +783,16 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
 #pragma unroll
                         for (int w = 0; w < 8; ++w)
                             if ((u * 4096 + w * 512) / KK == t) sum += red[par][u * 8 + w];
+#ifndef NOESC
+                    // escapes on the row's full sum, two fmas each: exact when the row holds only that weight (probes)
+                    const float2* he = hs_[vg] + ((j + p) * RPC + t) * ESC;
+                    for (int e = 0; e < ESC; ++e) {
+                        const float2 h = he[e];
+                        if (h.y == 0x1p-15f) break;  // slots fill in order; empty = 2^-15 (real: |value| < 2^-15)
+                        const float xe = xs[XI(__float_as_int(h.x))];
+                        sum = fmaf(xe, h.y, fmaf(xe, -0x1p-15f, sum));
+                    }
+#endif
                     out[(long)cc * RPC + t] = __float2bfloat16(sum * scale);
                 }
                 par ^= 1;
@@ -967,7 +970,10 @@ __global__ void __launch_bounds__(1024, 1) gemm(const uint2* __restrict__ WS, co
 #pragma unroll
         for (int e = 0; e < ESC; ++e) {
             const int col = __float_as_int(he[e].x) - ks * KC;
-            if (col >= 0 && col < KC) s = fmaf(__bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2)), he[e].y, s);
+            if (col >= 0 && col < KC) {  // two fmas: exact when the dot holds only this weight (probe rows)
+                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2));
+                s = fmaf(xv, he[e].y, fmaf(xv, -0x1p-15f, s));
+            }
         }
         return s;
     };
@@ -1168,7 +1174,10 @@ __global__ void __launch_bounds__(1024, 1) gemm(const uint2* __restrict__ WS, co
 #pragma unroll
         for (int e = 0; e < ESC; ++e) {
             const int col = __float_as_int(he[e].x) - ks * KC;
-            if (col >= 0 && col < KC) s = fmaf(__bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2)), he[e].y, s);
+            if (col >= 0 && col < KC) {  // two fmas: exact when the dot holds only this weight (probe rows)
+                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2));
+                s = fmaf(xv, he[e].y, fmaf(xv, -0x1p-15f, s));
+            }
         }
         return s;
     };
@@ -1398,11 +1407,14 @@ __global__ void __launch_bounds__(LB, 1) gemm(const uint4* __restrict__ WS, cons
         for (int q = 0; q < WG; ++q) s += base[q * NT * 128];
         const float2* he = hs + (rgl * 16 + row16) * ESC;
 #ifndef G16_NOESC
-        for (int e2 = 0; e2 < ESC; ++e2) {  // slots fill in order; an empty slot has value 0
+        for (int e2 = 0; e2 < ESC; ++e2) {  // slots fill in order; an empty slot has value 2^-15 (real escapes: |value| < 2^-15)
             const float2 h = he[e2];
-            if (h.y == 0.f) break;
+            if (h.y == 0x1p-15f) break;
             const int col = __float_as_int(h.x) - ks * KC;
-            if (col >= 0 && col < KC) s = fmaf(__bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2)), h.y, s);
+            if (col >= 0 && col < KC) {  // two fmas: exact when the dot holds only this weight (probe rows)
+                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2));
+                s = fmaf(xv, h.y, fmaf(xv, -0x1p-15f, s));
+            }
         }
 #endif
         if (S == 1) out[(long)tok * n + (rg0 + rgl) * 16 + row16] = __float2bfloat16(s * scale);
@@ -1647,7 +1659,7 @@ def _compress(w):
     """Lossless 12-bit BF16 (gemv13/gemv14): sign|mantissa byte and 4-bit exponent code c = e - base per weight
     (base = max exponent - 15; decoded exponent 112 | c, so sums are rescaled by scale = 2^(base - 112)); weights below
     the window (zeros, tiny values) are escapes: code 0, byte 0 (decodes to 2^(base - 127)) plus a per-row header of
-    G13_ESC (col, (true - 2^(base - 127)) / scale) entries. None if a row has more than G13_ESC escapes."""
+    G13_ESC (col, true / scale) entries (exact; kernels subtract 2^-15 = 2^(base - 127) / scale). None if a row has more than G13_ESC escapes."""
     n, k = w.shape
     b = w.contiguous().view(torch.int16).int() & 0xFFFF
     e = (b >> 7) & 0xFF
@@ -1661,12 +1673,26 @@ def _compress(w):
     code = torch.where(esc, 0, code)
     sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F))
     scale = 2.0 ** (base - 112)
+    # empty slots: col 0, value 2^-15 (the kernels add x[col] * (value - 2^-15): exactly 0)
     hdr = torch.zeros(n, G13_ESC, 2, dtype=torch.float32, device=w.device)
+    hdr[:, :, 1] = 2.0 ** -15
     rows, cols = esc.nonzero(as_tuple=True)  # row-major order
     if len(rows):
         slot = torch.arange(len(rows), device=w.device) - torch.searchsorted(rows, rows)
         hdr[rows, slot, 0] = cols.int().view(torch.float32)
-        hdr[rows, slot, 1] = (w[rows, cols].float() - 2.0 ** (base - 127)) / scale
+        hdr[rows, slot, 1] = w[rows, cols].float() / scale  # BF16 over a power of two: exact in FP32
+    # round trip: every weight decodes to its original bits (else no compression for this weight)
+    dec = torch.where(esc, 0, (((sm & 0x80) << 8) | ((code + base) << 7) | (sm & 0x7F)))
+    dec = dec.to(torch.int32).where(dec < 32768, dec - 65536).to(torch.int16).view(torch.bfloat16)
+    if len(rows):
+        fix = (hdr[rows, slot, 1] * scale).to(torch.bfloat16)
+        if not torch.equal(fix.view(torch.int16), w[rows, cols].contiguous().view(torch.int16)):
+            return None
+        dec[rows, cols] = fix
+        if not torch.equal(hdr[rows, slot, 1] * scale, w[rows, cols].float()):
+            return None
+    if not torch.equal(dec.view(torch.int16), w.contiguous().view(torch.int16)):
+        return None
     return code, sm, hdr, scale
 
 

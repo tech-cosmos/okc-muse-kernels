@@ -182,11 +182,14 @@ __global__ void __launch_bounds__(LB, 1) gemm(const uint4* __restrict__ WS, cons
         for (int q = 0; q < WG; ++q) s += base[q * NT * 128];
         const float2* he = hs + (rgl * 16 + row16) * ESC;
 #ifndef G16_NOESC
-        for (int e2 = 0; e2 < ESC; ++e2) {  // slots fill in order; an empty slot has value 0
+        for (int e2 = 0; e2 < ESC; ++e2) {  // slots fill in order; an empty slot has value 2^-15 (real escapes: |value| < 2^-15)
             const float2 h = he[e2];
-            if (h.y == 0.f) break;
+            if (h.y == 0x1p-15f) break;
             const int col = __float_as_int(h.x) - ks * KC;
-            if (col >= 0 && col < KC) s = fmaf(__bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2)), h.y, s);
+            if (col >= 0 && col < KC) {  // two fmas: exact when the dot holds only this weight (probe rows)
+                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2));
+                s = fmaf(xv, h.y, fmaf(xv, -0x1p-15f, s));
+            }
         }
 #endif
         if (S == 1) out[(long)tok * n + (rg0 + rgl) * 16 + row16] = __float2bfloat16(s * scale);

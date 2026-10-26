@@ -37,11 +37,12 @@ def pack16(w, kc):
     N = torch.where(N >= 2 ** 31, N - 2 ** 32, N).int().contiguous()
     scale = 2.0 ** (base - 112)
     hdr = torch.zeros(n, ESC, 2, dtype=torch.float32, device=w.device)
+    hdr[:, :, 1] = 2.0 ** -15  # empty slot (format of sub_template._compress)
     rows, cols = esc.nonzero(as_tuple=True)
     if len(rows):
         slot = torch.arange(len(rows), device=w.device) - torch.searchsorted(rows, rows)
         hdr[rows, slot, 0] = cols.int().view(torch.float32)
-        hdr[rows, slot, 1] = (w[rows, cols].float() - 2.0 ** (base - 127)) / scale
+        hdr[rows, slot, 1] = w[rows, cols].float() / scale
     return S, N, hdr, scale
 
 
@@ -71,7 +72,7 @@ for nm, layer, n in SH:
             if u not in packs: packs[u] = pack16(W, 1024 * u)
             S, N, hdr, scale = packs[u]
             # probe: last token = one power of two at an escaped column (exact column of W expected)
-            er = (hdr[:, :, 1] != 0).nonzero()
+            er = (hdr[:, :, 1] != 2.0 ** -15).nonzero()
             col = int(hdr[er[0, 0], er[0, 1], 0].view(torch.int32)) if len(er) else 3
             xp_ = x.clone(); xp_[M - 1, col] = 16.0
             refp = xp_.double() @ W.double().T

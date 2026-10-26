@@ -2,7 +2,7 @@
 // prepare() splits W [n, KK] into a sign|mantissa byte plane (flat, row-major) and a 4-bit exponent code plane:
 // code c = e - base (base = max exponent - 15), so the decoded exponent is 112 | c (exact power-of-2 rescale of the
 // sum by 2^(base - 112)). Weights with e < base (zeros, tiny values: ~1 per 8K) are escapes: code 0, byte 0 (decodes
-// to D = 2^(base - 127) in true scale) and a per-row header of ESC (col, (true - D) / scale) pairs fixes the sum.
+// to D = 2^(base - 127) in true scale) and a per-row header of ESC (col, true / scale) pairs (exact) fixes the sum: + x[col] * (true / scale - 2^-15).
 // Nibble layout: 32-bit word f/8 holds weights f..f+7 (f % 8 == 0); weight 2p + h at bits 4p + 16h, so pair p's
 // exponents land at BF16 bits 7..10 / 23..26 with one shift. Decode per pair: prmt (sign replicate), shift, 2 lop3.
 // Chunk = U * 4096 weights (whole rows); thread t takes the 16 weights at u * 4096 + t * 16 (one uint4 of bytes and
@@ -71,8 +71,7 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
     int c = blockIdx.x * NV + vg;
     uint4 s[PF][U];
     uint2 nb[PF][U];
-    // escapes: the first warp of each row (u, wp with (u * 4096 + wp * 512) % KK == 0), lanes e < ESC, add
-    // x[col] * (delta / scale) of the row's entry e to their partial sum before the warp reduction
+    // escapes: the row's reducing thread adds x[col] * (value - 2^-15) per header entry to the row's sum
     auto load = [&](int p, int ch) {
 #pragma unroll
         for (int u = 0; u < U; ++u) {
@@ -123,12 +122,6 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
 #pragma unroll
                 for (int u = 0; u < U; ++u) {
                     acc[u] = dot16(s[p][u], nb[p][u], xs + XI((u * 4096 + t * 16) % KK));
-#ifndef NOESC
-                    if ((u * 4096 + wp * 512) % KK == 0 && lane < ESC) {
-                        const float2 h = hs_[vg][((j + p) * RPC + (u * 4096 + wp * 512) / KK) * ESC + lane];
-                        acc[u] = fmaf(xs[XI(__float_as_int(h.x))], h.y, acc[u]);
-                    }
-#endif
                 }
                 const int cn = cc + PF * G;
                 if (cn < nch) load(p, cn);
@@ -147,6 +140,16 @@ __global__ void __launch_bounds__(256 * NV, MINB) gemv(const uint4* __restrict__
 #pragma unroll
                         for (int w = 0; w < 8; ++w)
                             if ((u * 4096 + w * 512) / KK == t) sum += red[par][u * 8 + w];
+#ifndef NOESC
+                    // escapes on the row's full sum, two fmas each: exact when the row holds only that weight (probes)
+                    const float2* he = hs_[vg] + ((j + p) * RPC + t) * ESC;
+                    for (int e = 0; e < ESC; ++e) {
+                        const float2 h = he[e];
+                        if (h.y == 0x1p-15f) break;  // slots fill in order; empty = 2^-15 (real: |value| < 2^-15)
+                        const float xe = xs[XI(__float_as_int(h.x))];
+                        sum = fmaf(xe, h.y, fmaf(xe, -0x1p-15f, sum));
+                    }
+#endif
                     out[(long)cc * RPC + t] = __float2bfloat16(sum * scale);
                 }
                 par ^= 1;
