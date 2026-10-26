@@ -423,6 +423,7 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 # The moe agent's NVFP4 experts (moe_src.py) at these token counts, SGLang's Marlin path elsewhere. Their board
 # (H200, us, SGLang incl. its torch post-norm at small T / theirs): bs1 77.3/42.5, bs8 143/106, bs16 196/159,
 # bs32 204/211, bs128 466/340, bs256 617/471.
+GNORM_DEFAULT = True  # s27 GNORM (H100 ab_files 4 rounds: v16 309.2/457.9 -> 309.3/455.1, v32 400.5/649.6 -> 398.4/647.6): T > 32 pre-expert rmsnorm fused into moe_gather (moe_gathern)
 BKT_DEFAULT = True  # s27 (H100 ab_files 4 rounds: v32 404.2/652.6 -> 401.2/649.5, v16 tie; H200 router ends ~14 us before the pooler): T > 32: moe_route on the router's stream (before the join); moe_src kernel_fn takes data["bucket"]
 BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
 TK2_MAX_TOKENS = 32  # moe's TMA decode kernel (moe_tk2: route fused into gemm13, 3 launches) at T <= this
@@ -444,7 +445,7 @@ def _moe_bucket(state, local_ids):
     return meta, sroutes
 
 
-def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
+def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
     """moe_src's route -> gemm13 -> gemm2 -> norm, on local ids (-1 off this GPU: skipped as out of range)."""
     st = state["moe"]
     lib = st["lib"]
@@ -486,7 +487,8 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None):
             _moe_TWM_HOT_M[m] = 1
         out = _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                               "config": {"local_start": 0, "local_count": LOCAL_EXPERTS},
-                              "bucket": bucket if m > 32 else None}, st)
+                              "bucket": bucket if m > 32 else None,
+                              "gather_norm": (state["pre_expert"],) if gnorm else None, "gather_eps": RMS_EPS}, st)
         if upf:
             lib.moe_set_upf(0, 0, 0, 0)
         return out
@@ -1220,6 +1222,68 @@ _a = "\nstatic const char* g_upf = nullptr;"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "\nstatic int g_tk2fpdl = 0;\nint64_t moe_set_tk2fpdl(int64_t v) { g_tk2fpdl = (int)v; return 0; }" + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_set_tk2fpdl(int64_t);"
+# s27 GNORM (T > 32): the pre-expert rmsnorm fused into moe_gather: each gathered row (expert order, K-permuted as
+# moe_gather) normalizes its source token from the pooler output itself (FP32 input rounded to BF16 first, as
+# _rmsnorm_gain ROUND; r = rsqrt(mean(x^2) + eps), out = BF16(x * r * gain)): one launch and the p round trip fewer.
+_a = "int64_t moe_gather_launch(torch::Tensor x, torch::Tensor meta, torch::Tensor sroutes, torch::Tensor xg) {"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, r"""template <bool F32>
+__global__ void __launch_bounds__(256) moe_gathern(const void* __restrict__ X, const float* __restrict__ gain,
+                                                   const int* __restrict__ meta, const int* __restrict__ sroutes,
+                                                   uint32_t* __restrict__ XG, float eps) {
+  const int pos = blockIdx.x, tid = threadIdx.x;
+  __shared__ float s_r[8];
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  if (pos >= __ldcg(meta + 65)) return;
+  const size_t row = (size_t)(__ldcg(sroutes + pos) >> 3);
+  float v[KD / 2 / 256][2];
+  int sw[KD / 2 / 256];
+  float ss = 0.f;
+#pragma unroll
+  for (int i = 0; i < KD / 2 / 256; ++i) {
+    const int o = tid + 256 * i, w = o & 31, t = w & 3, jh = w >> 2;
+    sw[i] = (o & ~31) | (8 * t + jh);
+    float2 f;
+    if constexpr (F32) {
+      f = __ldcg(reinterpret_cast<const float2*>(X) + row * (KD / 2) + sw[i]);
+      f = __bfloat1622float2(__float22bfloat162_rn(f));
+    } else {
+      const uint32_t u = __ldcg(reinterpret_cast<const unsigned int*>(X) + row * (KD / 2) + sw[i]);
+      f = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u));
+    }
+    v[i][0] = f.x; v[i][1] = f.y;
+    ss = fmaf(f.x, f.x, fmaf(f.y, f.y, ss));
+  }
+#pragma unroll
+  for (int o = 16; o; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
+  if ((tid & 31) == 0) s_r[tid >> 5] = ss;
+  __syncthreads();
+  float tot = 0.f;
+#pragma unroll
+  for (int w = 0; w < 8; ++w) tot += s_r[w];
+  const float r = rsqrtf(tot / KD + eps);
+  uint32_t* dst = XG + (size_t)pos * (KD / 2);
+#pragma unroll
+  for (int i = 0; i < KD / 2 / 256; ++i) {
+    const float2 g = __ldg(reinterpret_cast<const float2*>(gain) + sw[i]);
+    const __nv_bfloat162 b = __floats2bfloat162_rn(v[i][0] * r * g.x, v[i][1] * r * g.y);
+    dst[tid + 256 * i] = *reinterpret_cast<const uint32_t*>(&b);
+  }
+}
+int64_t moe_gathern_launch(torch::Tensor x, torch::Tensor gain, torch::Tensor meta, torch::Tensor sroutes,
+                           torch::Tensor xg, double eps) {
+  TORCH_CHECK(x.size(1) == KD && x.is_contiguous() && gain.numel() == KD, "moe_gathern: shape");
+  if (x.scalar_type() == at::kFloat)
+    return launch_k(moe_gathern<true>, (int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+        (const void*)x.data_ptr(), (const float*)gain.data_ptr(), (const int*)meta.data_ptr(), (const int*)sroutes.data_ptr(),
+        (uint32_t*)xg.data_ptr(), (float)eps);
+  return launch_k(moe_gathern<false>, (int)sroutes.numel(), 256, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+      (const void*)x.data_ptr(), (const float*)gain.data_ptr(), (const int*)meta.data_ptr(), (const int*)sroutes.data_ptr(),
+      (uint32_t*)xg.data_ptr(), (float)eps);
+}
+""" + _a)
+_moe__CPP = _moe__CPP + "int64_t moe_gathern_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double);"
 
 
 def _moe__lib():  # = moe_src's _lib() + moe_set_upf
@@ -1231,7 +1295,7 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
-                                           "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl"],
+                                           "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch"],
                                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                                 extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
@@ -1842,7 +1906,7 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); bkt (bool) BKT (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
@@ -1859,11 +1923,13 @@ TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"nu8": True}, {"nu8": True, "nu8x": False}, {"nu8": True, "g14alt:qkv_gate": 1}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
-              {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}),
+              {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
+              {"gnorm": False, "twq": 4}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
-              {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True})}
+              {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
+              {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True})}
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
@@ -2324,7 +2390,12 @@ def kernel_fn(data, state):
         main_stream.wait_stream(side_stream)
     rpdl = pdl and not tk2_pdl and not tk2fj
     y32 = torch.empty((65, D_EXPERT), dtype=torch.float32, device=dev) if nu8 else None
-    _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=rpdl,
+    gnorm = (not pr1 and not nu8 and tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and pooled.dim() == 2
+             and pooled.is_contiguous() and _opt(state, tokens, "gnorm", GNORM_DEFAULT))
+    if gnorm:
+        p = pooled  # s27 GNORM: the rmsnorm runs inside the experts' gather
+    else:
+      _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=rpdl,
                              TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
                              launch_pdl=rpdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 else 0, TRIG2=tk2fx or tk2fj)
     if tk2fx or tk2fj:
@@ -2351,7 +2422,7 @@ def kernel_fn(data, state):
         f = _experts_nu8(p, topk_weights, local_ids, state, y32)
         return _tail(None, stream1, h, tokens, state, pdl, f=f) + (topk_ids,)
     if _use_moe(tokens):
-        moe = _experts_moe(p, topk_weights, local_ids, state, bucket)  # all-reduce: identity
+        moe = _experts_moe(p, topk_weights, local_ids, state, bucket, gnorm)  # all-reduce: identity
     else:
         moe = (_experts_marlin if HAVE_SGL else _experts_local)(p, topk_weights, local_ids, state)
     return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)

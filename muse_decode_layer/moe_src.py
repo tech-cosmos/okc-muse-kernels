@@ -4500,7 +4500,10 @@ def kernel_fn(data, st):
         # inter here holds gemm2's B in the K-permuted order (see moe_tw)
         rt = 2 if TW_CFG >= 1000 else TW_CFG // 100
         xg = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
-        lib.moe_gather_launch(x, meta, sroutes, xg)
+        if data.get("gather_norm") is None:
+            lib.moe_gather_launch(x, meta, sroutes, xg)
+        else:  # layer s27 GNORM: x = the pooler output; the pre-expert rmsnorm happens in the gather
+            lib.moe_gathern_launch(x, *data["gather_norm"], meta, sroutes, xg, data["gather_eps"])
         if TWF and rt == 4:
             trt = TWF_RT_M.get(M, TWF_RT)
             trt = trt if f"w2b{trt}" in st else 4
