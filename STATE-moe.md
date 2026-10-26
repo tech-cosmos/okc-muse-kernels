@@ -71,6 +71,15 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 5 (19:57-20:35Z, no judge runs) -- r-moe 1378d3e + 6dfa437: GS16 loss = row split (NOTES n4s5)
+- GS16 (tk2h TK2H 16) lost on the H200 because (a) count split overloads CTAs with 2-group rows (ncu: 10% of samples on
+  the gemm2 counter spin), (b) the weighted split tk2g_split cost 1.8-4.1 us per call (64-bit loops in every thread).
+  (b) fixed: tk2g_bound (warp 0, TK2G_PAR 1), bitwise. G88 proxy d32 h16w3 114.6 vs main 120.6 proxy-us, d16 tie.
+- The proxy misjudged the GS16 weight before (NOTES n4s5): only the H200 decides. Queued in the DIAG below: h16w0/2/3/4.
+- If the DIAG shows h16 within ~2 us of gs8 at d32: 2nd check = `python muse_moe_w4a16/tools/n4s5/mktl_h.py;
+  okc check /tmp/moe5tl/submission.py --json` (grep diagth: per-CTA ph1end/wait/end on the H200) to pick the weight.
+  If h16 wins: port PF 4 (norm3) into tk2h, then Handoff (layer port is big: see NOTES n4s5 last line).
+
 ## Night4 session 4 (19:49-20:25Z, no judge runs) -- paper only
 - Dead on paper (NOTES n4s4): lossless 5/6-bit block-scale packing (exp 11..15 = 5 octaves; 6-bit costs +4% consumer
   instr for -2.5% bytes) and an e4m3-cvt dequant (>= today's 12 instr / 8 weights). E2M1 codes uniform: incompressible.
@@ -83,25 +92,11 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - FIRST CHECK AT 00:00Z (unchanged plan + this): `sed 's/^DIAG = 0$/DIAG = 1/' muse_moe_w4a16/submission.py >
   /tmp/x/submission.py; okc check /tmp/x/submission.py --json`; grep "diag12 MEAN" in the job log. Report to layer:
   hot G (h24/32/40), RG, NORM_EARLY (h32ne0/offne0) at v32/v16, and L2H mode (l2h0/l2h1 vs gs8) at d1/d16/d32/v1.
+  n4s5: + h16w0/2/3/4 (GS16 at d16/d32) vs gs8.
 
-## Night4 session 2 (19:26-19:45Z, no judge runs) -- r-moe 5960afc
-- PDL .nc-hoist fix (layer s52 ask): moe_routegather (ids, X) and moe_norm (ids, tw) read producer outputs via __ldcg.
-  SASS had moe_norm's ids LDG.CONSTANT above ACQBULK (real in the layer; Request posted). Tests 15/15, bitwise same.
-  Audit recipe: cuobjdump -sass the built .so, per kernel count LDG.*CONSTANT before the first ACQBULK (NOTES n4s2).
-- First check at 00:00Z unchanged: the DIAG queue (h32ne0/offne0, h32rg0/1).
-
-## Night4 session 1 (19:15-20:10Z, no judge runs: moe checks 20/20 until 00:00Z) -- NORM_EARLY on main (9898def)
-- Sandbox okc-night4 verified: bench test 15/15, DIAG copy runs (v32 off 247.7 / h32 231.0 / h32rg1 230.5 us H100).
-- NORM_EARLY = 1 (compile-time #define, python global picks the launcher): moe_twm / moe_hot bump meta[100 + e] per gemm2
-  item end (+ 1 << 20 at the expert's last item; K-split halves both count); moe_norme_launch = moe_norm with rdy =
-  meta + 100: 8 threads spin (ld.acquire) on the token's experts, then Y via ld.cg, NO griddepcontrol.wait, so norm CTAs
-  run on the SMs twm's drain frees. meta is now 132 ints (route kernels zero [100, 132) when NORM_EARLY).
-  Why: moe_norm costs 3.4 (T=128) / 7.3 (T=256) us serial after twm (H100, graph with vs without it).
-  H100 layer routings: v32 -3.3 us (hot 32: 230.2 -> 226.7) / -5.1 (hot off), v16 tie..-2. Bitwise = NE 0
-  (tools/n4s1/ne_bitwise.py: 640 replays, hot off/on, K-split on/off), seeds_big 0 bad (hot off/on).
-- DIAG_VARIANTS big += h32ne0 / offne0 (NE 0 in the same build; others run NE 1). FIRST check at 00:00Z = this DIAG.
-- Handoff to layer posted (COORD): its route kernels (moe_route/moe_routegather/moe_gathern prologue) must zero
-  meta[100 + e], its meta allocations must be >= 132 ints, then call moe_norme_launch after twm at T = 128/256.
+## Night4 sessions 1-2 (19:15-19:45Z): NORM_EARLY on main (9898def: post-expert norm runs in twm's drain; H100 v32 -3.3
+  us; layer has it as v90) and the PDL .nc-hoist fix (5960afc: __ldcg for producer data in moe_routegather/moe_norm;
+  audit recipe NOTES n4s2). Both queued in the 00:00Z DIAG (h32ne0/offne0, h32rg0/1).
 
 ## Session 29: moe_hot (65..128-token experts, one N128 pass); layer has it as a T=256 TUNE option (NOTES s29).
 
@@ -141,7 +136,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - (s26) L2 prefetch of the unpool W from twm (spread over its main phase, evict_last): v32 +5..10 H100 us, unpool -1.
 - (s27) RSPLIT: weighted tk2f gemm13 split favouring CTAs that start early during pr1: +1.4..10 us (any imbalance costs).
 - (s14) tw_item next-stage weight/scale LDS prefetch: twm v32 +8, twf +9.5 us (H100). TWM_TAIL13; TWM_TAIL + merge order.
-- (s12, H200 diag on layer routings) GS16 in any form (old, merged one-body tk2h, split weights 2-6): +4..8 us at d16/d32;
+- (s12, H200 diag on layer routings; REOPENED n4s5: its weighted split was slow + count split imbalanced) GS16 in any form (old, merged one-body tk2h, split weights 2-6): +4..8 us at d16/d32;
   per-segment gemm13->gemm2 counters (PSC): 0; deeper tk2f rings: +1..5; DYN: +3..10; NC16: +1..2. Weighted static
   split (TK2W): H100 worse, and the H200 timeline shows balanced CTAs (nothing to fix).
 - (s10) GS16 16-token segments as default (judge bs32 135.7 vs 128.7; H100 layer d16/d32 +5..18 us); weighted row split for

@@ -923,3 +923,28 @@
 - Budget view (layer score weights per us: d1 .16, v1 .10, d16 .07, d32 .05, v16 .04, v32 .03 %): tk2f d1/v1 are at
   the HBM rate (4.06 TB/s per marginal expert vs a ~3.6-4.3 TB/s bare stream), big-M is dq-issue + last-wave bound
   (s17-s20). No H100-testable moe item with size left; the 00:00Z DIAG check (STATE n4s3) is the next real step.
+
+## Night4 session 5 (2026-10-26 19:57Z - ~20:35Z, no judge runs: moe checks 20/20 until 00:00Z) -- GS16 loss traced, split fixed
+- Question: why GS16 (tk2h TK2H 16: one dequant shared by 16 tokens, -13% instructions, fewer DRAM bytes) loses on the
+  H200 at d16/d32 (s12: +4.0/+7.1 us). The G88 proxy (tools/s16) reproduces it: h16w0 vs h8 d16 +5.5, d32 +6.6 proxy-us.
+- ncu (G88, d32 seed 7, tools/n4s5/ncu_h.py + top_sb.py): h16 34.6M instr vs h8 39.8M, DRAM 286 vs 301 MB, but 153.8 vs
+  141.9 us; long_scoreboard 0.90 vs 0.35 per issue: 10% of all warp samples sit on the gemm2 counter spin (LDG.STRONG.GPU
+  + CCTL.IVALL, 532k executions). => phase-1 IMBALANCE: count split puts the 2-group rows' extra work on a few CTAs.
+- Per-CTA timeline (tools/n4s5/mk_t.py + tl.py, G88 d32 s7; us min/med/max): h8 ph1end 71/74/76, end 114; h16w0 ph1end
+  62/62/81, wait med 19, end 114; h16w2 ph1end 64/66/70, end 104. But at d16 s99 (no expert > 8 tokens: same work) h16w2
+  is +7 us in the graph: the weighted split itself, tk2g_split, ran 64-bit loops + divisions in EVERY thread: consumers
+  started 1.8 (median) / 4.1 (max) us late.
+- FIX (r-moe 1378d3e): tk2g_bound = warp 0, one lane per active expert, 32-bit shuffles (like tk2w_bound), #define
+  TK2G_PAR 1. Same bounds; h_ab-style bitwise vs main 0/1600 (320 routings x W 0/2/3/4/9), bench test 15/15.
+  G88 proxy (2 rounds, 5 seeds): d16 h8 90.5 / h16w2 89.75 / h16w3 89.6 / main 89.3; d32 h8 122.1 / h16w2 115.4 /
+  h16w3 114.6 / main 120.6 (was h16w2 91.5 / 118.9 with the old split). => h16w3 ~ -4.4 H200 us at d32 IF the proxy holds.
+- CAUTION: the proxy got the s12 W effect wrong: H200 h16w0 95.5 -> h16w2 94.2 at d32 (-1.3), proxy -7 H200-us. Full-grid
+  H100 (DRAM-bound) is balanced at w0 (h16w0 beats h8 by 1-7 us at d32 on every seed; w2/w3 overshoot: heavy CTAs end
+  first). The right 2-group weight depends on how DRAM- vs issue-bound the GPU is: H200 must decide.
+- DIAG (00:00Z check) "dec" += h16w0/2/3/4 at M >= 9 (TK2H_MIN 9: d1/v1 stay main), DIAG builds compile TK2_EXP 1 (local
+  dry run 95 s, prints all variants). NOTE the h variants lack main's PF 4 (slot-ordered y32 + norm3: -0.5..0.9 us),
+  so a tie with gs8 = a ~0.7 us real win after a port.
+- tools/n4s5/mktl_h.py -> /tmp/moe5tl/submission.py: H200 tk2h timeline DIAG (diagth lines: c0/ph1end/wait/end per
+  variant per d16/d32 seed). Second check if the DIAG shows h16 within ~2 us of gs8.
+- If h16 wins on the H200: layer port is big (layer's tk2f has TK2FX/TK2FJ weights-before-wait, late PDL trigger,
+  x via __ldcg after griddepcontrol.wait): first port PF 4/norm3 into tk2h here, then hand off the GS16 consumer.
