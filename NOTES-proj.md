@@ -691,3 +691,13 @@
   m256 all +3..20 us. BW 128 (x/W 1) is SLOWER than BW 64 everywhere (unp c2 31.6 vs direct 27.9): not ingest-bound.
 - H200 proxy (GRID 88, x0.73): qkv m128 22.75 -> 16.6 vs judge lt ~15.9; pool m128 37.2 -> 27.1 vs ~21.4. Dead.
 - submission.py unchanged. No judge runs (proj checks 20/20 today).
+
+## Session 29 (2026-10-26 14:13-14:50Z): M=8 gemv19 for the layer's T=8 qkv (layer request s15): DEAD
+- No new lane from the lead yet; checks for 10-26 all spent. Built the item from the layer's list: gemv19 at M=8 (one
+  mma n8 token group; NT 1: one ldmatrix.x4 loads both k16 halves of x; dev/gemv19.cu static_assert relaxed, other M
+  unchanged). Correct (g19.py probe checks, MODE 2).
+- H100 standalone qkv m8 (graph, cold L2, us): g19 MODE 2 best 1024,4,4,2,0 r8 16.61 (r4 17.04, kc512 17.5, AP2 17.9+,
+  NS6 17.6; MODE 0 + tail 16.83); g14 (current pick) KC8W8P4 X1 b96x768 15.44 / X2 15.74; cuBLAS 18.2-18.3.
+  g19 loses ~1.2 us and qkv is the graph's first op (no PDL predecessor to hide g19's x arrival) -> dead.
+- Correction to the layer's s15 premise: gemv14 is NOT CUDA-core FMAs, it is gemv12's mma.sync structure + 12-bit decode.
+  On the H200 g14 qkv m8 is ~2.3 us over a bare 28 MB stream (tuner 15.39 vs 13.05): <= ~0.2% layer score of room.

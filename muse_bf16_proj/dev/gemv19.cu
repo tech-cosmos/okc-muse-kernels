@@ -95,7 +95,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     constexpr int NWC = RG;  // 16-row groups per tile (one stage covers RG x AP atoms)
     static_assert(RPW == 1 || TS == 1, "config");
     constexpr int NCW = NWC * TS / RPW, MT = M / TS, NT = MT / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * WB, XS = KC * 2 + 16, PBF = NWC * 16 * M;
-    static_assert(NA % AP == 0 && SPK % IS == 0 && NT % 2 == 0 && M <= 32, "config");  // NT even: x B fragments by ldmatrix.x4
+    static_assert(NA % AP == 0 && SPK % IS == 0 && (NT % 2 == 0 || NT == 1) && M <= 32, "config");  // NT even: x B fragments by ldmatrix.x4 (NT 1: one x4 = both k16 halves)
     extern __shared__ __align__(128) unsigned char smem[];
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
     float* pbuf = (float*)(smem + NS * SB + XB * M * XS);
@@ -363,7 +363,9 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     // ldmatrix row address: matrix q = lane / 8 (x4: n-tile pair member q / 2, k half q % 2), row = lane % 8
     // TS = 2: warps 2r, 2r + 1 share row group r (both decode it), tokens [th * MT, th * MT + MT)
     const int wr = (w / TS) * RPW, th = w % TS;  // wr: the warp's first row group in the tile
-    const unsigned xrow = (th * MT + (lane >> 4) * 8 + (lane & 7)) * XS + ((lane >> 3) & 1) * 16;
+    // NT 1 (M 8): matrix q = (k16 step s = q / 2, k half q % 2) of the single n-tile
+    const unsigned xrow = NT == 1 ? (th * MT + (lane & 7)) * XS + ((lane >> 3) & 1) * 16 + (lane >> 4) * 32
+                                  : (th * MT + (lane >> 4) * 8 + (lane & 7)) * XS + ((lane >> 3) & 1) * 16;
     int q = 0, st0 = 0, prev_end = 1, prev_xl = 1;
     unsigned xph[2] = {0, 0}, xpc[2] = {0, 0};
     float4 hd0[RPW], hd1[RPW];
@@ -461,6 +463,9 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                 }
 #endif
             unsigned bx[G][2][NT][2];
+#pragma unroll
+            for (int j = 0; j < G; ++j)
+                if (NT == 1) ldsm4(xbase + (st * AP + j0 + j) * 64, bx[j][0][0][0], bx[j][0][0][1], bx[j][1][0][0], bx[j][1][0][1]);
 #pragma unroll
             for (int j = 0; j < G; ++j)
 #pragma unroll

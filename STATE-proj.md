@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~14:30 UTC (end of session 28).
+Updated 2026-10-26 ~14:50 UTC (end of session 29).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -19,15 +19,7 @@ Updated 2026-10-26 ~14:30 UTC (end of session 28).
 ## (prepare() picks per GPU since a566ba9: ROUTER_R3_TUNE).
 ## Per-shape H200 (check 7ba50b0a, 21bec6b): m1 qkv 11.2 o 6.3 pool 15.8 unp 4.6 router 5.1; m8 qkv 13.3 o 6.8 pool 16.6
 ## unp 6.6 router 8.1; m16 qkv 13.6 pool 19.1 unp 17.9; m32 qkv 13.8 pool 18.9 unp 18.9 (m>=16 = cuBLASLt, uncompressed).
-## Older table (submit 22109e72, before compression):
-| load | qkv_gate | o | pooler | unpooler | router |
-|---|---|---|---|---|---|
-| decode 1 (m1) | 1.25 | 1.07 | 1.22 | 1.66 | 2.09 |
-| decode 16 | 1.01 | 1.07 | 1.16 | 1.03 | 2.11 |
-| decode 32 | 1.02 | 1.07 | 1.16 | 1.01 | 1.75 |
-| verify 1 (m8) | 1.03 | 1.05 | 1.16 | 1.13 | 3.42 |
-| verify 16 (m128) | 1.08 | 1.02 | 1.16 | 1.00 | 1.57 |
-| verify 32 (m256) | 1.14 | 1.03 | 1.19 | 1.02 | 1.56 |
+(Older per-shape speedup table, submit 22109e72: see git history.)
 Floors: qkv 7.9, o 3.5, pooler 14.0, unpooler 1.75 (m<=8) / 14.1, router 1.8; m256: 9.8/4.5/17.4/17.4/2.7.
 SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/24.8/30.7; unpooler 7 (m<=8) 18.7/20/24.
 
@@ -151,28 +143,12 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## leaves no room for tg2's smem). Don't hand it to the layer again. NOTES s27.
 ## Session 28: gemv23 (own BF16 SS-wgmma swap-AB GEMM for m128/256, packed W, cluster DSMEM split-K, BF16 out) DEAD:
 ## H100 loses 1-4 us at every m128 shape, m256 worse; H200 proxy (GRID 88 x0.73) loses too. Lead option (a) closed. NOTES s28.
+## Session 29: M=8 gemv19 (layer's T=8 qkv) DEAD: H100 16.6 vs g14 15.4 us (g14 is already mma.sync). NOTES s29.
 ## Next (ranked)
--17. (s28) Nothing proj-side with size left: tomorrow's first proj check = main (tg2 unpooler m8 tuner candidate, -15).
+-18. (s29) Same as -17: wait for the lead's new-lane answer (Requests proj s28); no proj GEMM item left.
+-17. (s28) Nothing proj-side with size left: tomorrow's first proj check = main (tg2 unpooler m8 tuner candidate: read "tune unpooler m8" in the judge log; submit if > 1.3110).
    Ask the lead for a new lane (moe sub-task or layer glue) instead of more GEMM variants.
--16. (s27) Tomorrow (fresh budget): -15's proj check (tg2 unpooler m8 standalone tuner pick) is the only open proj item;
-   for the layer, no proj option is pending. Measure any PDL idea against the real predecessor (layer harness), not g19_pred.
--15. (s26) Tomorrow's first proj check: main as is (tg2 at unpooler m8 in the tuner): read "tune unpooler m8" in the judge log;
-   submit if the check beats 1.3110. Add a PDL-pred diag for tg2 (o m1/m8, unp m1/m8 S8/S16 vs picks) in the same check if
-   the layer has not measured it. Read the layer's verdict on TG2 (COORD Requests/Results).
--14. (s25) Tomorrow's sandbox (fresh budget): one diag of flashinfer tinygemm_bf16 / trtllm_low_latency_gemm at m8/m16
-   (qkv, o, pooler, unpool) vs g14/lt via _diag_ext (signatures unknown: print help() first, guard everything).
-   Then read the layer's ~14:30Z check tuner lines (QSS pick at T=32) in NOTES-layer.
--13. (s24) Read COORD/NOTES-layer for the ~14:30Z layer check: was QSS in it, and its "layer tune T=32" line (qss vs
-   {qss: False}). Sandbox ends ~19:10Z; tomorrow's sandbox has a fresh budget. No proj item above ~0.3% layer score left.
--12. (s23) As -11. 1 proj check left today (sandbox ends ~19:10Z): keep it for an A/B the layer asks for.
--11. (s22) Check COORD for the layer's verdict on QSS (its check's d32 numbers + tuner line for {"qss": False}). If the
-   layer wants it at other T: v16/v32 qkv (T=128/256) is lt without split-K (no gain); d16 qkv is g19 (FP32 already).
-   Same slab idea for o at T=32 loses (H200 10.66 vs 10.24). Lane question to the lead still open.
--10. (s21) Layer's lt32f (FP32-out splitK=1 qkv T=32) is dead from H200 data (+1.0-1.5 us; NOTES s21). Same as -9: wait for the lead's lane pick.
--9. (s20) Same as -8: proj has no item above ~0.3% layer score left; wait for the lead's lane pick. Don't rebuild dead items.
--8. (s19) First read COORD Human decisions for the lead's lane pick (a/b/c in Requests s18) and the layer's 14:30Z
-   check tuner lines (which g19/lt options the H200 picked at T=16/32). With no answer, do not rebuild dead items (see NOTES s12-s19).
-(Older Next items s10-s18: see git history of this file; all built/measured or dead per NOTES.)
+(Older Next items -16..-8 and s10-s18: all built/measured or dead per NOTES; see git history of this file.)
 1. If the layer reports pr1/pr8 H200 numbers: tune rb/npf (pr1) on the judge via the layer's checks (layer owns them).
 2. m32 g19 fixed costs (flush, x arrival) after 0.
 
