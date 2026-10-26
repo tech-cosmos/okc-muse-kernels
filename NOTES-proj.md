@@ -200,7 +200,7 @@
   m8 6.50 -> 5.99 (g17 9.28 vs lt 9.63). submit 6d0fc4d42b4544b1 (405439e): 1.2742x = NEW BEST.
 - Budget 10-26 at session end: checks 3/20, scored 3/10.
 
-## Session 8 (2026-10-26 01:21 - UTC): router3 (router m9-128 in one kernel)
+## Session 8 (2026-10-26 01:21 - 02:10 UTC): router3 (router m9-128 in one kernel)
 - dev/router3.cu (+ dev/r3.py sweep: `python dev/r3.py "MT,NT,WM,WN,KC,NS;..." m...`): split-K mma.sync GEMM, x = A
   (MT tokens), W hi/lo rows = B (NT experts), hi and lo MMAs share the x fragments into one FP32 accumulator; cp.async
   ring of 64-k stages, 128-B rows XOR-swizzled for ldmatrix. Grid = (K/KC, 256/NT, m/MT) ~ 128 blocks.
@@ -214,3 +214,9 @@
   smaller tiles to cut red volume (L2->SM load traffic grows: (64,32,KC1024) 14 us at m128).
 - H100 (bench.py): m16 6.94 (was 8.9 g7), m32 7.04 (10.3), m128 9.78 (12.2 cuBLAS 3 kernels), m256 12.7 = cuBLAS (kept).
   m256 limits: red volume (2M floats ~4 us) and mma.sync compute (~3.5 us for 2.15 GFLOP).
+- check a478daeaa3d64100 (a1f0af7): 1.3137x; H200 router m16 7.38 -> 5.55, m32 8.66 -> 6.36, m128 10.24 -> 9.00 us.
+  submit 71145e34fe424844 (a1f0af7): 1.307x = NEW BEST (proj rank 196; prev 1.2742).
+- a566ba9: ROUTER_R3_TUNE: prepare() times router3 configs vs cuBLAS at m256 (_tune_router / _graph_medians). H200
+  (check 1a9781226b444d11, 3,698.5 us = tie): cuBLAS 14.21 vs r3 15.10-15.26 (incl. events) -> cuBLAS; not submitted.
+- H100 m256 sweep (no win): (256,32,4,2,512) 12.9, (256,32,8,1,512) 13.2, (256,64,8,2,256,3) 14.1, KC 1024 / NT64 KC512
+  18-20 (64 blocks). Budget 10-26 at session end: checks 5/20, scored 4/10.

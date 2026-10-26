@@ -1,18 +1,21 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~01:15 UTC (session 7).
+Updated 2026-10-26 ~02:00 UTC (session 8).
 
 ## Board
-- **Best: submit 6d0fc4d42b4544b1 = 405439e (main), 1.2742x** (router2 m<=8 + gemv17 at unpooler-1k m1/m8; its check
-  1be6c8f5 gave 1.2926). (#1 1.62x, #10 ~1.54x.)
-- Before: d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
+- **Best: submit 71145e34fe424844 = a1f0af7, 1.307x (3,695.6 us), proj rank 196** (router3 at router m9-128; its check
+  a478daea gave 1.3137). (#1 1.62x, #10 ~1.54x.) main = a566ba9 (+ m256 router tuner: H200 picks cuBLAS, check 1a978122 tie).
+- Before: 6d0fc4d4 (405439e) 1.2742x; d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 3/20, scored 3/10 (cap 9).
+- Budget 10-26 used: checks 5/20, scored 4/10 (cap 9).
 - H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
-## Router H200 now (check dd37685b): m1 3.47, m8 4.92 (router2), m16 7.38, m32 8.66 (g7 hi/lo), m128 10.24, m256 10.98
-## (cuBLAS splitK GEMM + splitKreduce + hi+lo add = 3 kernels: ~5.2 + 1.6 + 1.4 us at m128).
+## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
+## m256 11.18 (cuBLAS splitK GEMM 6.4 + splitKreduce 2.0 + hi+lo add 1.6). SGLang: 10.5/26.4/15.0/15.5/16.8/17.7.
+## router3 (dev/router3.cu, sweep dev/r3.py): split-K mma GEMM, hi+lo into one accumulator, partials -> float4 atomics
+## into out zeroed by a tiny PDL primary kernel. m256: red volume (2M floats ~4 us) + mma.sync compute: only ties cuBLAS
+## (prepare() picks per GPU since a566ba9: ROUTER_R3_TUNE).
 ## Per-shape H200 (check 7ba50b0a, 21bec6b): m1 qkv 11.2 o 6.3 pool 15.8 unp 4.6 router 5.1; m8 qkv 13.3 o 6.8 pool 16.6
 ## unp 6.6 router 8.1; m16 qkv 13.6 pool 19.1 unp 17.9; m32 qkv 13.8 pool 18.9 unp 18.9 (m>=16 = cuBLASLt, uncompressed).
 ## Older table (submit 22109e72, before compression):
@@ -72,9 +75,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   compression gives 28/32 bits only).
 
 ## Next (ranked)
--2. Router m128/m256 (10.2/11.0 vs floor 2.2/2.7): one kernel instead of cuBLAS's 3 (hi/lo mma with the add fused,
-   split K reduced in-kernel). g7 with token groups is far worse (24-66 us): needs a real GEMM tiling (64+ tokens per
-   block, W tile reused). Router m16/m32: router2 loses at m16 (x traffic: blocks x m x k x 2 B from L2).
+-2. Router m256 (11.2 vs floor 2.7) and m128 (9.0): needs less split-K red volume AND less L2->SM traffic: x by TMA
+   multicast to the n-tile blocks of a cluster of 2 (gemv16 has the machinery), or wgmma (compute ~3.5 us on mma.sync).
 -1. gemv16 on the H200 only ties lt: cut x staging further (the critical path is x latency at kernel start: W cannot
    start computing before x lands; ideas: start computing atoms whose x rows came first with per-row mbarriers; FP32->
    nothing: x must stay BF16) and the math cost (2 row groups per warp sharing the ldmatrix x fragments). m32: needs
