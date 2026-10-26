@@ -5,8 +5,9 @@ Updated 2026-10-26 ~02:40Z (end of session 8).
 ## Board
 - **Best scored: be766193 = v26 (45bb3ef), 1.927x, 11.74 ms/step (2026-10-26 ~02:10Z).** Board #1 2.360x, #10 2.167x
   (10-26 01:20Z). Check d3c8c88d (v26) 1.9152x.
-- main = v29 (9199ea7) = v26 + pooler split-K bmm at T=16/32 (H100 d16/d32 -2.3 us); check: see NOTES s8.
-- Budget 2026-10-26: 4 submits (81e501e9, ca8f833a, dae762e4, be766193), 5 checks used (as of 02:35Z).
+- main = v29 (9199ea7) = v26 + pooler split-K bmm at T=16/32 (H100 d16/d32 -2.3 us): check 0092b908 1.9492x, scored
+  3fca3609 1.9139x (noise). Do not resubmit unchanged.
+- Budget 2026-10-26: 5 submits (81e501e9, ca8f833a, dae762e4, be766193, 3fca3609), 6 checks used (02:50Z).
 - v26 scored per shape (H200 us sliding/full; SGLang in brackets): d1 75.9/83.3 (173/183), d16 152.1/234.1 (261/442),
   d32 194.1/339.6 (271/618), v1 121.5/130.8 (261/268), v16 283.0/365.2 (554/716), v32 371.9/547.4 (728/1091).
   Judge noise: identical code moves up to 4% per shape; total ~+-1%.
