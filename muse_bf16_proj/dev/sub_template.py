@@ -78,7 +78,9 @@ BF16_G13 = {"qkv_gate": [(1, 8192, 2, 4, 1, 1, 132, 256), (1, 8192, 2, 2, 1, 2, 
 BF16_G13C_S16 = {"qkv_gate": [(1, 8192, 2, 2, 1, 3, 132, 256), (1, 8192, 2, 2, 1, 4, 132, 256)],
              "pooler": [(1, 8192, 2, 2, 1, 3, 132, 256), (1, 8192, 2, 2, 1, 4, 132, 256)],
              "unpooler": [(1, 4096, 2, 2, 1, 3, 132, 256), (1, 4096, 2, 2, 1, 4, 132, 256)]}
-BF16_G13C = {}  # H100 tuner: ties gemv13 VT 512 (the gain was the tail); not worth a judge check
+# s17: H200 diag (bytes in flight: H200 needs ~40% more than H100 at the same latency); H100 ties/loses.
+BF16_G13C = {l: [(1, 8192, 2, 2, 1, 3, 132, 256), (1, 8192, 2, 2, 1, 4, 132, 256), (1, 8192, 2, 4, 1, 2, 132, 256),
+                 (1, 8192, 1, 2, 1, 4, 132, 512)] for l in ("qkv_gate", "pooler")}
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
 # BF16 tensor-core streaming GEMM over the same compressed weights (dev/gemv14.cu = gemv12 + decode), (m, kcu, wg, pf,
 # bk, xp), chosen on the H100 (dev/g14.py); tuned in prepare() like the others.
@@ -132,7 +134,7 @@ DIAG19 = {}  # s15 diag done (check ce84da07, NOTES-proj s15)
 DIAG19Q_S15 = {"qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (16, 1024, 8, 3, 3, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1),
                             (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
 DIAG19Q = {}
-DIAG19_STREAM = []  # (stage bytes, stages): 50 MB bare streams
+DIAG19_STREAM = [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
 # (m, ap, ns, E). H100: qkv m128 20.8 vs cuBLAS 20.6, others lose (H100 TMA stream ~2.9 TB/s); built for the H200.
@@ -729,12 +731,13 @@ def _diag20(st):
 def _diag19_stream():
     if _g19 is None:
         return
-    w = torch.zeros(50 << 20, dtype=torch.uint8, device="cuda")
-    o = torch.zeros(1, device="cuda")
-    med = _graph_medians([lambda: o.zero_()] + [(lambda c=c: _g19.g19_stream(w, c[0], c[1], o)) for c in DIAG19_STREAM])
-    print("diag19 bare TMA stream 50 MB, 132 blocks:", " ".join(f"{c}:{(t - med[0]) * 1e3:.2f}" for c, t in zip(DIAG19_STREAM, med[1:])),
-          f"(a 1-kernel graph, {med[0] * 1e3:.2f} us, subtracted)")
-    del w
+    for mb in (50, 28):
+        w = torch.zeros(mb << 20, dtype=torch.uint8, device="cuda")
+        o = torch.zeros(1, device="cuda")
+        med = _graph_medians([lambda: o.zero_()] + [(lambda c=c: _g19.g19_stream(w, c[0], c[1], o)) for c in DIAG19_STREAM])
+        print(f"diag19 bare TMA stream {mb} MB, 132 blocks:", " ".join(f"{c}:{(t - med[0]) * 1e3:.2f}" for c, t in zip(DIAG19_STREAM, med[1:])),
+              f"(a 1-kernel graph, {med[0] * 1e3:.2f} us, subtracted)")
+        del w
 
 
 def _graph_medians(fns, reps=25):
