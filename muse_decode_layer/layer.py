@@ -145,7 +145,7 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
               NB: tl.constexpr, N: tl.constexpr, BGAIN: tl.constexpr, H32: tl.constexpr,
               EPS_POST: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr, pf_ptr=None, PF: tl.constexpr = 0,
               PF_NT: tl.constexpr = 512, RB: tl.constexpr = False, TRIG: tl.constexpr = False,
-              NS: tl.constexpr = 1, SS: tl.constexpr = 0, SPL: tl.constexpr = 1):
+              NS: tl.constexpr = 1, SS: tl.constexpr = 0, SPL: tl.constexpr = 1, SEP: tl.constexpr = False):
     """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
     s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32).
     RB: the branch is FP32 (gemv19 output), rounded to BF16 first.
@@ -172,6 +172,36 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
     if BGAIN:
         bgain = tl.load(bgain_ptr + cols, mask=in_b, other=0.0)
     s = tl.load(s_ptr + row * N + cols)
+    if SEP:  # s57: the sliced branch (NB < N) as its own [NS, NB] tile over all threads (the N-wide masked load ran on the
+        jb = tl.arange(0, NB)  # ~2 warps covering cols < NB: 8 slabs there cost ~2 us at T=8)
+        mine_b = (jb // (N // SPL)) == tl.program_id(0) % SPL
+        alpha_b = tl.load(alpha_ptr + jb)
+        beta_b = tl.load(beta_ptr + jb)
+        gain_b = tl.load(gain_ptr + jb, mask=mine_b, other=0.0)
+        s_b = tl.load(s_ptr + row * N + jb)
+        if BGAIN:
+            bgain_b = tl.load(bgain_ptr + jb)
+        if PDL:
+            gdc_wait()
+        ks = tl.arange(0, NS)
+        bb = tl.sum(tl.load(br_ptr + ks[:, None] * SS + row * NB + jb[None, :]), 0) if NS > 1 else tl.load(br_ptr + row * NB + jb)
+        if RB:
+            bb = bb.to(tl.bfloat16)
+        bb = bb.to(tl.float32)
+        if BGAIN:
+            bb = bb * bgain_b
+        rb = tl.rsqrt(tl.sum(bb * bb, 0) / N + EPS_POST)
+        s_b = alpha_b * s_b + beta_b * (bb * rb)
+        s = tl.where(in_b, 0.0, alpha * s)
+        tl.store(s_out_ptr + row * N + cols, s, mask=mine & (cols >= NB))
+        tl.store(s_out_ptr + row * N + jb, s_b, mask=mine_b)
+        rs = tl.rsqrt((tl.sum(s * s, 0) + tl.sum(s_b * s_b, 0)) / N + EPS)
+        tl.store(h_ptr + row * N + cols, (s * rs * gain).to(tl.bfloat16), mask=mine & (cols >= NB))
+        tl.store(h_ptr + row * N + jb, (s_b * rs * gain_b).to(tl.bfloat16), mask=mine_b)
+        if H32:
+            tl.store(h32_ptr + row * N + cols, s * rs * gain, mask=mine & (cols >= NB))
+            tl.store(h32_ptr + row * N + jb, s_b * rs * gain_b, mask=mine_b)
+        return
     if PDL:
         gdc_wait()
     b = tl.load(br_ptr + row * NB + cols, mask=in_b, other=0.0)
@@ -2478,6 +2508,9 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
 _moe_TWM_ORDER_M = {}  # s15: moe's H200 proxy (s16): order 76 at T=256 (r-moe 499bde6 default) loses ~3.6 us at v32
 
 
+BND_SEP_TOKENS = (8,)  # s57 SEP: the T=8 second boundary loads nu8's 8 slabs as an [8, 1024] tile (H100 ab_flag v1 -1.0/-1.1 us; T=1 tie)
+
+
 def _tail(moe, stream1, h, tokens, state, pdl, f=None):
     """unpool -> second boundary: (next attention input, stream)."""
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
@@ -2492,7 +2525,8 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None):
     _boundary[(tokens * spl,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
                          NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
                          EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, RB=f.dtype == torch.float32, num_warps=16,
-                         launch_pdl=pdl, NS=f.shape[0] if f.dim() == 3 else 1, SS=tokens * UNPOOL_SLICE, SPL=spl)
+                         launch_pdl=pdl, NS=f.shape[0] if f.dim() == 3 else 1, SS=tokens * UNPOOL_SLICE, SPL=spl,
+                         SEP=sliced and tokens in BND_SEP_TOKENS)
     return hidden, stream2
 
 

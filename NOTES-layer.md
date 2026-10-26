@@ -1111,3 +1111,19 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Reviewed for a new layer-side lever, none found that isn't already measured dead: nds S 4/16 (attn s34), warm KV for
   nds (s16: -1.5 us at best, attention latency-bound), g19 m32 consumer bound (proj s12-s44), expert L2 prefetch beside
   the pooler (s55), qkv g19 at T=32 (tuner +2.6 H100). The remaining d32 gaps are tk2f (moe) and g19 m32 (proj).
+
+## s57 (2026-10-26 20:20Z-, sandbox okc-night4, session 6): v93 = v92 + BND_SEP at T=8 (no judge runs: budget resets 00:00Z)
+- Tail oracle (H100 ab_flag 6 rounds, same state; wrong outputs, timing bounds; /tmp/tail_oracle.sh recipe: monkeypatch
+  `_tail` to return (h, stream1) when f is given = no second boundary, and proxy `_G10["lib"]` with n2u/nu8_launch no-ops):
+  d1 sl/full 85.8/105.5 -> no bnd 84.3/104.0 -> no n2u+bnd 78.8/98.9; v1 143.9/155.1 -> 139.5/150.9 -> 132.8/143.8.
+  So the whole post-tk2f tail is 7.0 us at d1 and 11.1 us at v1 (H100); the T=8 boundary alone 4.3 us (d1 1.5).
+  A persistent experts->norm2->unpool->boundary kernel must still do the y32 L2 trip + norm + GEMV + 2 grid barriers
+  (~0.7 us each, vs PDL release ~0.9): on paper <= ~1-2 us at d1; not built (N2U_BOUNDARY / BND_SPIN already lost, s8/s14).
+- Oracle 2: the T=8 boundary reading only slab 0 of nu8's 8 FP32 slabs: v1 -2.0/-2.4 us. Cause: `_boundary` loaded the
+  branch with the N=8192-wide masked layout, so only the ~2 warps covering cols < 1024 issued all 8 slab loads.
+- v93: `_boundary` SEP constexpr (BND_SEP_TOKENS = (8,)): the sliced branch is its own [NS, NB] tile over all threads
+  (tl.sum over slabs), first NB columns as separate tensors, cols >= NB = alpha*s (bitwise as before there); the row sums
+  are now sum(rest) + sum(first NB) (FP32 order change only). H100 ab_flag 8 rounds: v1 143.70/155.12 -> 142.65/154.10
+  (T=8 only 142.74/153.82), d1 85.55/105.25 -> 85.65/105.33 (tie: kept off at T=1, d1 bitwise = v92).
+  SPL 1/2/4/8 at T=8 with SEP: noise (2 stays). Tests 13/13, scored verify x3 0 bad, replay verify 1/16 x seeds 11,23 0/80.
+  files_eq vs v92: d1 sl identical; d1 full diff = the tuner (v92's copy picked g13o; v92 vs v92 identical when both pick pr1).
