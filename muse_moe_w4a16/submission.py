@@ -2206,7 +2206,7 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
 
 template <int NRT, int NC, int NSTG, bool GATED>
 __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* __restrict__ gs,
-                                             const __nv_bfloat16* X, void* Out, int* cnt, int r0, int r1,
+                                             const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
                                              int& ph, int& rb) {
@@ -2227,11 +2227,11 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       off = s_off[e] + gi * 8;
       n = min(8, s_off[e + 1] - off);
       ci = a * 4 + gi;
-      if (!GATED) {  // all 256 gemm13 rows of this segment written (by any CTA)
+      if (!GATED) {  // all gemm13 rows written (by any CTA): see moe_tk2f
         int c;
         do {
-          asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt + ci) : "memory");
-        } while (c < 256);
+          asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt) : "memory");
+        } while (c < need);
       }
       const bool v = g < n;
       int row = 0;
@@ -2244,8 +2244,8 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
           xf[qq][0] = v ? __ldg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
           xf[qq][1] = v ? __ldg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
         } else {  // written in this kernel: L2 only
-          xf[qq][0] = v ? __ldcg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
-          xf[qq][1] = v ? __ldcg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
+          xf[qq][0] = v ? __ldg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
+          xf[qq][1] = v ? __ldg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
         }
       }
     }
@@ -2303,7 +2303,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
         if (tid == 0) {
           __threadfence();
-          atomicAdd(cnt + ci, R + 1 - max(seg_start, r0));
+          atomicAdd(cnt, R + 1 - max(seg_start, r0));
         }
       }
     } else {
@@ -2422,9 +2422,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     return;
   }
   int rb = 0;
-  tk2f_consume<512, NC, NSTG, true>(slut, gs13, X, inter, cnt, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
+  tk2f_consume<512, NC, NSTG, true>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
                                     empty, st, ph, rb);
-  tk2f_consume<256, NC, NSTG, false>(slut, gs2, inter, Y, cnt, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
+  tk2f_consume<256, NC, NSTG, false>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
                                      empty, st, ph, rb);
 }
 
