@@ -908,3 +908,14 @@
 - DEAD: BND_SPLIT 2/4 at T = 128/256 (both boundaries): v16 sl +3/+8, v32 sl +6/+21 us (the big-T boundaries are
   bandwidth-bound; split programs re-read the row).
 - All of v81-v83: tests 13/13, replay verify 0/120 + v16 0/80 + decode 0/90, route_judge v16 0/60 + decode 0/180, scored d32 2/2.
+
+## s40 (2026-10-26 15:49Z-): v84 = proj s33 g13o (no judge runs: budget for 10-26 spent)
+- v84 (00ce840): `git apply` of r-proj muse_bf16_proj/dev/s33/g13o_layer.patch (cut on v82, applies clean on v83):
+  T=1 o on gemv13 (12-bit W, 12.6 MB) as a PDL secondary (W prologue before griddepcontrol.wait, x by __ldcg after);
+  TUNE[1] option {"g13o": True}, default off. H100 ab_files tuner off 8 rounds: d1 sliding 87.13 -> 86.38, full
+  108.24 -> 106.34 us. Forced (variants/v84o_nt.py = TUNE_BASE g13o at T=1): tests 13/13, scored d1 x3 0 bad, replay
+  d1 0/20 + 0/20. Tuner on (H100): T=1 sliding picks g13o (86.6 vs 87.8), full picks pr1_rb 32 (g13o 90.0 vs 90.4 2nd).
+- H100 timelines (tuner off, g13o forced): d1 sl qkv g13 14.2 | csl 5.8 | o (g13) ends 4.4 after csl | bnd +3.2 | pr1
+  -> 45.8 | rmsnorm +1.1 | tk2f 46.1-81.0 | n2u +4.5 | bnd +1.9 = 87.4. v1 sl: tk2f 58.1-141.8 (83.7) | nu8 +6.5 | bnd
+  +4.0 (T=8 boundary 2x the d1 one: 8 FP32 slabs per row + SPL 2).
+- FIRST CHECK OF THE NEXT SANDBOX = main (v84): copy the 'layer tune T=1' lines (g13o vs default, sl and full) for proj.
