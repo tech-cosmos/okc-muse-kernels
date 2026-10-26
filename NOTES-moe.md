@@ -365,3 +365,36 @@
   (spills 194 LDL), twf (no spills) +9.5 us. The early mbar_wait inside the group pipeline hurts.
 - Spill note: twm sits at the 232-register limit (22 LDL/10 STL after s14's prologue additions, all in per-item
   prologue/epilogue, timing unchanged). Any extra live value in tw_item spills.
+
+## Session 15 (2026-10-26 06:30Z - 07:40Z) -- no new speedup; big-M characterized; tk2f FP option (off)
+- No moe checks left (sandbox ends ~19:10Z before the reset). Layer took 499bde6 (o76) as its v43 (928381a).
+- H200 standalone (s14 diag 20d0b9c5) v16 167 / v32 215 us vs H100 ~190 / ~240: the H200 is only ~12% faster with 1.43x
+  the HBM bandwidth => big-M twm is per-SM-rate bound on the H200, not HBM bound (v16 = 509 MB at ~3.0 TB/s).
+- Per-item intrinsic cost (H100, /tmp/moe15/warm2.py: 1-3 experts, 1 item per CTA, weights mostly L2): RT4 gemm13 item
+  (512 rows x 4096 k, 1.09 MB): N8 36 us, N32 49 us; RT2 N64 (0.55 MB) 32.5 us. H200 fair HBM share of 1.09 MB at
+  4 TB/s / 132 SMs = 36 us: so RT4 items are at/above it, RT2 items 2x above. Sum of item costs on v16 s7 = 132 us of
+  all-SM time vs 127 us HBM floor: co-bound; the rest (~25 us) = start + drain (exits spread 30-45 us on H100).
+- Ablations of tw_item (build flag TWX in /tmp/moe15/sub_x*.py; outputs garbage): no dq / no MMA / neither / + no wv LDS
+  / + fixed weight address (L2 hits) / no x TMA, us per item (RT4 N8, RT4 N32, RT2 N64):
+  full 36/49/32.5; no-dq 27.5/34.3/26.6; no-mma 34.2/39.4/23.2; no dq+mma+LDS 21.6/25.0/17.6; + same address 21.2/24.4/16.9;
+  no x TMA 25.9/29.4/15.3; no wgmma fences/commit/wait 26.2/31.4/15.4. NSTG 4 or 6 = 8. => a ~17-25 us per-item floor
+  from the ring itself (64 stages: ~250-400 ns per stage, ~70 GB/s per SM of TMA/bulk ingest, depth-independent);
+  dq adds ~8-15, MMA ~2-15 (N32 RT4 needs ~18 us of tensor time at peak). Not one bottleneck; a bigger win needs fewer
+  stages per byte (bigger/merged copies: W+S one bulk, 2 kc per stage, 3D x map) or a different item shape. Untested.
+- Dead: one empty-barrier arrive per warp in tw_item (mbar count 8, lane 0 arrives, branch or predicated asm): items
+  36 -> 54 us. A warp-wide mbarrier.arrive is already one op; never do this.
+- tk2f FP (cfg 96204 T=1 / 97204 T>1, PF & 16, off): the producer warp routes for itself (tk2f_proute: smem-atomic counts,
+  same rank/order and static split as the consumers), inits the ring, bar.arrive 3; consumers route with named barrier 4
+  and bar.sync 3 before the ring. First version: producer 0.8 us earlier but consumers' x loads queued behind the
+  weight burst (consumer ready 2.75 -> 4.5 us); fixed with an smem mbarrier xrdy: producer issues TK2F_EARLY = 1 stage,
+  waits until all consumers issued their first x loads. Plain smem atomics instead of 8 match_any rounds: T=32 producer
+  start 1.9 -> 1.3 us. Bitwise = 204/84204 (pf_ab 1240), 0/2000 repeats, sweep 0 fails, tests 15/15.
+  Standalone H100 (tk2f alone, hot inputs): d1 -0.2, v1 -0.4, d16 -0.25, d32 0; absolute stamps d1 -0.4, d16 -0.8.
+  IN THE LAYER HARNESS (copy of r-layer HEAD + this moe_src, tools/ab_flag.py 4 rounds): d1 +0.2/+0.85, d16 +1.5/+1.8,
+  d32 +1.0/+1.1 us (sliding/full): LOSES. Not understood (layer: rmsnorm/router before tk2f, late PDL trigger patch).
+  Lesson: A/B decode changes in the layer harness first (/tmp/moe15/layer: git archive of r-layer HEAD, cp moe_src,
+  python build.py, ab_flag.py), not standalone.
+- Dead: L2 bulk prefetch of a CTA's gemm2 rows when its producer finishes gemm13 issue (to keep HBM busy through the
+  phase barrier): d1 +1.3, v1/d16 +9, d32 +14 us standalone (as s7's row prefetch). cp.async.bulk.prefetch.L2 hurts here.
+- H100 tk2f stamps (hot ids/x, cold weights): routed 1.45-1.5 us after start (producer 0.5 us prologue, ids 0.16, the
+  32-step rank loop 0.45 (unroll: no change), scan 0.2), consumer ready ~2.8, first weight data ~4.2-4.3 us.

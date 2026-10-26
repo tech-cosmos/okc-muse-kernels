@@ -2,7 +2,7 @@
 
 ## Board
 - Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z). Board is a TEST BED only (lead 01:45Z): the layer counts.
-  Used 2026-10-26: checks 20 of 20 (all DIAG since s12, never submit those), submits 3. Sandbox ends ~19:10Z (no reset). s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
+  Used 2026-10-26: checks 20 of 20 (all DIAG since s12, never submit those), submits 3. s15: none left. Sandbox ends ~19:10Z (no reset). s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
   worse), d4909e24 2.170 (twm mixed: neutral). Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
   bs128 196-207, bs256 243-251 (judge noise +-4%).
 - **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.
@@ -83,6 +83,15 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 15 summary (no speedup; no moe checks left; see NOTES s15)
+- Big-M on the H200 is per-SM-rate bound (H200 only 12% faster than H100): per-item intrinsic cost RT4 N8 36 us, N32 49,
+  RT2 N64 32.5 (H100, L2-warm, alone) vs a 36 us fair HBM share; ~17-25 us/item floor from the ring (64 stages/item),
+  dq +8-15, MMA +2-15. Next big-M lever: fewer, bigger stages (W+S in one bulk copy, 2 kc per stage, 3D x tensor map),
+  then measure items with /tmp/moe15/warm2.py-style runs (1 item per CTA) before any judge use.
+- tk2f FP option (producer routes itself, x-first gate; cfg 96204/97204) = standalone -0.2..0.8 us but layer harness
+  +0.2..1.8 us: OFF. Always A/B decode changes in a copy of the layer harness (NOTES s15 recipe).
+- Main = 300bd2c: same kernels/defaults as 499bde6 (FP code added, off).
+
 ## Session 14 summary (big-M twm for the layer's v16/v32; NO moe checks left in this sandbox)
 - MAIN 499bde6: TWM_ORDER_M = {256: 76}: moe_twm items pass-minor + the multi-pass (> 64 token) experts' items merged
   evenly over each phase (keeps HBM busy in the first ~40 us, which heaviest-first wasted). H100 in r-layer harness:
@@ -117,19 +126,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
    only (phase 1 tied) with GS8 segments in gemm2 (needs inter rows of 16-token segments readable as 2 x 8: they are).
 -0. (s10) Cheaper dq is the only other lever (69%): ideas: fold the e4m3 scale into the x side per k16 block is impossible
    (per-row scale); 2-group sharing = GS16 above.
-00. (s9) Instructions still rule the H200 decode: tk2f gemm13 row loop = 1391 SASS instr/warp/row vs 832 for dq+mma
-   (before SA; SA took ~100 of the ~560 overhead). Next targets: ~137 address IMADs + 43 LEA (precompute smem
-   addresses per stage: NSTG=4 -> unroll the ring so stage offsets are constants), per-row reduce/epilogue (accumulate
-   2 rps before the cross-warp reduce), CS2R zeroing. Measure with tools/ncu_tk2f.sh (inst_executed), then judge.
-   bs1 (27-29 us vs 11.4 floor): routing prologue 2 us + first stage 2.4 us + norm2 4.4 us are fixed costs.
-0'. (s8) Cut consumer instructions further (that is what moved the H200): 16-token segments (idea 0 below, now
-   on top of the KPS loop: tk2f_consume), fewer scale-LUT ops (4 LDS + extracts per kc), per-row reduce.
-   bs1 (28 us vs 11.4 floor): 2-3 experts only, 2.1 TB/s locally; long_scoreboard stalls highest there: look at the
-   routing prologue (1.8 us) and the per-row epilogue; norm2 ~4 us is a PDL secondary already.
-0. (s7) 16-token segments in moe_tk2f (2 token groups share each dequantized A fragment, 2nd group's x in smem):
-   draft tools/tk2f_gs16_draft.cu (166 regs, no spill), apply on top of 128b11a's wait/__ldg scheme; sweep-test
-   at GS 16 with tools/sweep_routings.py. bs32 has 10% (up to 40%) extra-group rows: expect bs32 -5..8%.
-   Root-cause the s7 race (ld.global.cg first-row-after-reload errors) if time allows: it may hide elsewhere.
+00/0'/0. (s7-s9) older decode instruction-count ideas: see NOTES s7-s9.
 3. Big-M: gemm2 tail (only 8 items per expert at RT=4; 200 items / 132 CTAs at bs128): give the last items 2-tile
    halves or let idle CTAs start moe_norm rows whose experts are done (per-token flags); fuse moe_gather into
    moe_route (multi-CTA route) -1 launch (~3 us).
