@@ -55,6 +55,8 @@ ROUTER_F32 = [(1, (1, 2, 512)), (8, (8, 2, 512))]
 # Router hi/lo one-kernel split-K GEMM (dev/router3.cu: tiles MT x NT, WM x WN warps, KC, stages), chosen on the H100
 # (dev/r3.py): m9-16 6.9 (g7 8.5-8.9), m32 7.2-7.7 (g7 10.3), m128 9.6-10.9 (cuBLAS 3 kernels 12.2-12.6); m256 ties cuBLAS.
 ROUTER_R3 = [(32, (16, 64, 1, 4, 256, 4)), (128, (128, 64, 4, 4, 256, 4))]
+# router3 configs that prepare() times against the cuBLAS path per m (H100 m256: 12.9 vs 12.5-13.4, a tie).
+ROUTER_R3_TUNE = {256: [(256, 32, 4, 2, 512, 4), (256, 64, 4, 2, 256, 4)]}
 # Router hi/lo tensor-core configs (n, mt, nwr, nwk, stages, na, cluster, token groups), chosen on the H100 (dev/g5.py).
 ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
 # BF16 grid-stride GEMV configs per layer: (m, k, u, nv, minb, pf, blocks), chosen on the H100 (dev/g10.py).
@@ -102,7 +104,7 @@ _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for
         _G15_SRC.replace("G15_CONFIGS", " ".join("G15_CASE(%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G15.values() for c in v}))) + "\n" +
         _G16_SRC.replace("G16_CONFIGS", " ".join("G16_CASE(%d,%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G16.values() for c in v}))) + "\n" +
         _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d,%d)" % c for c in sorted({c + (_LAYER_K[l],) for l, v in BF16_G17.items() for c in v}))) + "\n" +
-        _R3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for _, c in ROUTER_R3)))
+        _R3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in [c for _, c in ROUTER_R3] + [c for v in ROUTER_R3_TUNE.values() for c in v])))
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
@@ -279,6 +281,7 @@ def prepare(weights):
     st["cnt12"] = torch.zeros(1024, dtype=torch.int32, device=r.device)
     st["ltws"] = torch.empty(LT_WS_BYTES, dtype=torch.uint8, device=r.device)
     st["pick"] = _tune(st)
+    st["rpick"] = _tune_router(st)
     return st
 
 
@@ -399,6 +402,64 @@ def _tune(st, reps=25):
     return picks
 
 
+def _graph_medians(fns, reps=25):
+    """Median time (ms) of each fn as a CUDA-graph replay after a 256 MB read flush (cold L2, as the judge)."""
+    flush = torch.zeros(256 << 20, dtype=torch.uint8, device="cuda").view(torch.int64)
+    sink = torch.zeros((), dtype=torch.int64, device="cuda")
+    graphs = []
+    for fn in fns:
+        gr = torch.cuda.CUDAGraph()
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            with torch.cuda.graph(gr, stream=s):
+                fn()
+        torch.cuda.current_stream().wait_stream(s)
+        graphs.append(gr)
+    torch.cuda.synchronize()
+    ev = [[(torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)) for _ in fns] for _ in range(reps)]
+    for r in range(reps):
+        for i, gr in enumerate(graphs):
+            torch.sum(flush, 0, out=sink)
+            ev[r][i][0].record()
+            gr.replay()
+            ev[r][i][1].record()
+    torch.cuda.synchronize()
+    del flush
+    return [sorted(ev[r][i][0].elapsed_time(ev[r][i][1]) for r in range(reps))[reps // 2] for i in range(len(fns))]
+
+
+def _tune_router(st):
+    """Per m in ROUTER_R3_TUNE: router3 configs vs the cuBLAS hi/lo path, timed on random x; keep the fastest."""
+    picks = {}
+    if _mod is None:
+        return picks
+    g = torch.Generator(device="cuda")
+    g.manual_seed(1)
+    for m, cfgs in ROUTER_R3_TUNE.items():
+        x = torch.randn(m, st["router"].shape[1], generator=g, device="cuda").to(torch.bfloat16)
+        ref = _router_cublas(x, st)
+        out = torch.empty((m, 256), dtype=torch.float32, device="cuda")
+        cands = [None]
+        for c in cfgs:
+            _mod.pj_router3(st["router_hl2"], x, out, *c)
+            torch.cuda.synchronize()
+            if ((out - ref).norm() / ref.norm()).item() < 1e-5:
+                cands.append(c)
+        med = _graph_medians([(lambda c=c: _router_cublas(x, st) if c is None else
+                               _mod.pj_router3(st["router_hl2"], x, out, *c)) for c in cands])
+        best = min(range(len(cands)), key=med.__getitem__)
+        picks[m] = cands[best]
+        print(f"tune router m{m}: best {cands[best]} {med[best] * 1e3:.2f} us; "
+              + " ".join(f"{'cublas' if c is None else c}:{t * 1e3:.2f}" for c, t in zip(cands, med)))
+    return picks
+
+
+def _router_cublas(x, st):
+    acc = torch.mm(x, st["router_hl_t"], out_dtype=torch.float32)
+    return acc[:, :256] + acc[:, 256:]
+
+
 def _router(x, st, m):
     if _mod is not None:
         for mmax, cfg in ROUTER_F32:
@@ -411,6 +472,11 @@ def _router(x, st, m):
                 out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
                 _mod.pj_router3(st["router_hl2"], x.contiguous(), out, *cfg)
                 return out
+        cfg = st["rpick"].get(m)
+        if cfg is not None:
+            out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
+            _mod.pj_router3(st["router_hl2"], x.contiguous(), out, *cfg)
+            return out
         for mmax, cfg in ROUTER_HL:
             if m <= mmax:
                 out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
@@ -418,8 +484,7 @@ def _router(x, st, m):
                 return out
     if m <= ROUTER_FP32_MAX_TOKENS:
         return F.linear(x.float(), st["router"])
-    acc = torch.mm(x, st["router_hl_t"], out_dtype=torch.float32)
-    return acc[:, :256] + acc[:, 256:]
+    return _router_cublas(x, st)
 
 
 def kernel_fn(data, st):
