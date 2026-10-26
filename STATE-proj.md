@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~16:35 UTC (end of session 34; s33's '17:15Z' stamps were a clock slip, s33 ended ~15:45Z).
+Updated 2026-10-26 ~16:25 UTC (end of session 34; s33's '17:15Z' stamps were a clock slip, s33 ended ~15:45Z).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).

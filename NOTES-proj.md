@@ -773,7 +773,7 @@
   with _pack13, +12.6 MB). Forced on: bench test 13/13, scored d1 x3 0 bad, replay d1 0/20 + 0/20; o output = the
   BF16 rounding of the float64 product (dev/s33/chk_o.py, 5 seeds). Est. H200: full d1 ~-1 us x 0.056%/us = ~+0.05%.
 
-## Session 34 (2026-10-26 15:50-~17:00Z): DEC4 = 12-bit decode in 4 instead of 5 instructions per BF16 pair: WIN (H200 proxy)
+## Session 34 (2026-10-26 15:50-16:25Z): DEC4 = 12-bit decode in 4 instead of 5 instructions per BF16 pair: WIN (H200 proxy)
 - No judge runs (proj checks 20/20 for 10-26; sandbox ends ~19:10Z). Layer's ask (Requests layer s38): g19 at M=32 on H200.
 - H200 proxy (H100 GRID 72, MODE 2, PRED 3000, NPRE 2) pool m32 (1024,8,2,xb1) = 29.6 us; configs AP4/NS4, KC512/NS3,
   AP4/NS3, AP2/NS8, RG16/AP4, TS2, RPW2: all tie or lose (as s16). Decomposition: consumer-only (G19_NOW) 27.1, NOW+NOMMA
