@@ -463,3 +463,5 @@
   G10_PFL2 (gemv10 o W bulk L2 prefetch before its wait, d1): H100 +1.8 (csl slowed). DIAG check b1ee542c (174fdf1)
   1.9476x: d32 ratio 1.460 -> 1.407 / 1.915 -> 1.830 (-4%), d16 -1.5%, d1 sliding 2.347 -> 2.333; controls flat.
   So the "spare HBM during issue-bound tk2f on H200" does not exist for prefetches (or L2 thrash). Flags kept, off.
+- DEAD BND_ROWS: _boundary with 2/4 rows per program at T=128/256 (weight vectors loaded once per program): H100 v16
+  +3.4/+3.3 (2 rows), +12/+10 (4 rows); v32 +0.5/+0.2, +5/+6. Fewer CTAs = less bandwidth; the L2 re-reads are free.
