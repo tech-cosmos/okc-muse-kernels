@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~14:40 UTC (end of session 30).
+Updated 2026-10-26 ~15:35 UTC (end of session 31).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -125,25 +125,24 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## re-estimated at ~3-7% bytes net (~0.2-0.3%): not worth it. Router FP32 weights have full mantissas.
 ## Session 19: review only. Every proj option for the layer's T=16/32/128 GEMMs is already a layer H200 TUNE option;
 ## posted a layer request (attention reads g19's FP32 qkv, drops the 1.3 us cast at d16). Lane question to the lead stands.
-## Session 20: dead: FP32-out cuBLASLt split-K (always + splitKreduce kernel); g19 qkv T=32 as first op (H100 21.8 vs
-## cuBLAS 18.7 us, so no gain even without the cast). NOTES s20.
 ## Session 22: QSS handoff (dev/qss_layer.patch): the layer's d32 qkv as 2 FP32 bmm slabs, attention sums them at load
 ## (no splitKreduce). H200 GEMM 16.03 vs lt 17.50 us; H100 layer d32 sliding/full -1.5 us each (TUNE pinned). NOTES s22.
-## Session 23: gemv13 for o at m=1: H100 -0.4 us but H200 +0.35 (check 2722e8c4): DEAD. Don't hand it to the layer.
 ## Session 24: QSS verified on layer v69 (+ Requests line for the ~14:30Z layer check). G19_RAW (plain BF16 g19, no
 ## decode) DEAD in the H100 proxy (+1.5..3.5 us at m32: stream-bound on the extra bytes). NOTES s24.
 ## Session 25: judge-image libs diag (check 5abb71f1): DeepGEMM bf16_gemm_nt ties/loses vs our lt picks at m16-256: DEAD.
 ## Image has flashinfer 0.7.0 (tinygemm_bf16, trtllm_low_latency_gemm), deep_gemm 0.2.1+muse, sgl_kernel 0.4.9 (NOTES s25).
 ## Session 26: tinygemm2 (flashinfer tinygemm_bf16 port, dev/tinygemm2.cu): tuner candidate at unpooler m8 (H100 6.53 vs
 ## g17 7.26), main 3addab4 (NOT judge-checked yet). After a PDL pred it wins o m1/m8 and unp m1/m8 by 0.8-3.7 us (H100): handoff.
-## Session 27: TG2 for the layer's o at T=1/8 DEAD in the layer harness (H100 +0.7..4 us; attention predecessor
-## leaves no room for tg2's smem). Don't hand it to the layer again. NOTES s27.
 ## Session 28: gemv23 (own BF16 SS-wgmma swap-AB GEMM for m128/256, packed W, cluster DSMEM split-K, BF16 out) DEAD:
 ## H100 loses 1-4 us at every m128 shape, m256 worse; H200 proxy (GRID 88 x0.73) loses too. Lead option (a) closed. NOTES s28.
 ## Session 29: M=8 gemv19 (layer's T=8 qkv) DEAD: H100 16.6 vs g14 15.4 us (g14 is already mma.sync). NOTES s29.
 ## Session 30: cuBLASLt splitKreduce DOES trigger PDL dependents (H100: successor -1.0..1.4 us), plain nvjet does not;
 ## but the layer has no split-K cuBLAS left (profile 703d3a7e), so nothing to apply. dev/pdl_cublas.py, NOTES s30.
+## Session 31: pr1 router-W L2 prefetch with evict_last = WIN at T=1 (H100 layer d1 ~-1.3/-1.1 us, bitwise same): handoff
+## dev/s31/pr1_evl_layer.patch; all layer prefetch sites evict_last (dev/s31/pf_last.py) d1 -1.8/-1.7. evict_first on W streams null. NOTES s31.
 ## Next (ranked)
+-20. (s31) Layer: confirm the pr1 evict_last patch on the H200 in the next sandbox's first layer check. Other evict_last
+   candidates: any prefetch issued before a PDL wait while a big stream runs (attention's own pf, moe upf already in pf_last).
 -19. (s30) Still waiting for a lane (Requests proj s28/s30). Proj checks 20/20 today.
 -17. (s28) Nothing proj-side with size left: tomorrow's first proj check = main (tg2 unpooler m8 tuner candidate: read "tune unpooler m8" in the judge log; submit if > 1.3110).
    Ask the lead for a new lane (moe sub-task or layer glue) instead of more GEMM variants.

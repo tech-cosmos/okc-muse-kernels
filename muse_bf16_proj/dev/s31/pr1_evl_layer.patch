@@ -1,0 +1,14 @@
+diff --git a/muse_decode_layer/pr1_src.cu b/muse_decode_layer/pr1_src.cu
+index e06c5ac..7396506 100644
+--- a/muse_decode_layer/pr1_src.cu
++++ b/muse_decode_layer/pr1_src.cu
+@@ -143,7 +143,8 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
+     };
+     auto pf = [&](int gg) {
+         if (t == 0 && gg < NG)
+-            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;"
++            asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0;\n"  // proj s31: keep it past the pooler stream
++                         "cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }"
+                          :: "l"(a.rw + (size_t)gg * R * (K / 4)), "r"(R * K * 4) : "memory");
+     };
+     if (g < NG) load(g);

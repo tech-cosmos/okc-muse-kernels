@@ -715,3 +715,22 @@
 - But the layer has no splitKreduce left (judge profile 703d3a7e: T<=32 qkv/pooler/unpool are g19 or QSS bmm; the
   remaining nvjet kernels (o at d16 full/d32, verify T=128/256) are non-split). Nothing to apply now; useful only if a
   future tuner pick brings a split-K cuBLAS back (then launch its successor with PDL). Not checked on the judge.
+
+## Session 31 (2026-10-26 14:40-15:35Z): L2 cache hints on proj kernels inside the layer (moe s21 idea): pr1 evict_last WIN
+- No judge runs (proj checks 20/20 today). All in a /tmp copy of r-proj's muse_decode_layer (v76 = r-layer 5c5329d), TUNE = {}
+  in every file, tools/ab_files.py interleaved, H100 medians us. Tools: dev/s31/l2h_patch.py (evict_first cache_hint on the
+  ld.global.nc W loads of g10/g12/g13/g14/g19(W bulk)/pr1/pr8, or g17(+n2u)), dev/s31/pf_last.py (evict_last cache_hint on
+  every cp.async.bulk.prefetch.L2 after `namespace g10 {`, optional site list), dev/s31/evl_survive.py.
+- evict_first on the weight streams (moe's idea for one-pass streams): NULL. proj kernels all hinted vs base, 2 runs: every
+  shape within +-1.3 us, no consistent sign. g17/n2u hinted: null too.
+- evict_last on the L2 PREFETCHES: WIN at T=1. Sites in order: 0 pr1 router-W next-group prefetch (FP32 rw, before the PDL
+  wait), 1-2 pr1 pooler npf chunks (inactive: npf 0 default), 3 g10 o pfl2, 4 g17, 5-6 upf in tk2f/norm, 7 n2u, 8 nu8.
+  d1 sliding / full deltas vs base (5 runs): all sites -1.75/-0.65, -1.1/-1.0, -1.9/-1.7, -1.8/-1.7; pr1 sites only
+  -1.7/-1.25, -1.1/-0.3; site 0 alone -0.85/-1.2, -0.6/-1.6 (= the pr1 part). v1 (no pr1) flat with site 0; all sites
+  v1 sl -0.2..-1.0. T>=128 all sites: v16 sl +3.3, +1.5, -4.0 (noise there is +-3), v32 -1.7/-2.6 once.
+  Why: pr1's router W prefetch for the next row group was being evicted by the pooler stream before use.
+- Not an artifact: evict_last-prefetched lines do NOT survive a 512 MB ordinary-read flush (evl_survive.py, 16 MB buffer:
+  cold 12.1, evict_last+flush 12.4, warm 10.5 us event-timed), so the cold-L2 timing stays cold.
+- Bitwise: decode 1 outputs identical to base (tools/files_eq.py, 3 seeds); tests 13/13 on every variant.
+- Dead: pr1_npf 4/8 WITH evict_last: d1 +0.7..+6 us (pinning pooler chunks hurts, like plain npf).
+- Handoff: dev/s31/pr1_evl_layer.patch (site 0, pr1_src.cu, `git apply` in r-layer), optional all sites via pf_last.py.
