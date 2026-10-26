@@ -140,7 +140,8 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const 
                                               unsigned char* kc, unsigned char* vc, const int* __restrict__ pt,
                                               const int* __restrict__ seqs, const long* __restrict__ loc,
                                               const float* __restrict__ ks, const float* __restrict__ vs,
-                                              __nv_bfloat16* __restrict__ out, int MP, float qk_scale, int spec) {
+                                              __nv_bfloat16* __restrict__ out, int MP, float qk_scale, int spec,
+                                              const unsigned char* __restrict__ pf, long long pfb) {
     __shared__ __align__(16) float racc[16][D];
     __shared__ __align__(16) float rml[16][2];
     __shared__ __align__(16) float lpart[2][4][8][D];
@@ -304,6 +305,11 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const 
              __byte_perm(t45, t67, 0x7632), pb0, pb1);
     }
 
+    if (pfb > 0 && warp == 1) {  // layer s34 (O_PF): K/V consumed: L2-prefetch this CTA's share of the next GEMM's weight
+        const long long per = ((pfb / gridDim.x) + 4095) & ~4095LL, end = min(pfb, per * (blockIdx.x + 1));
+        for (long long o = per * blockIdx.x + lane * 16384LL; o < end; o += 32 * 16384LL)
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(pf + o), "r"((int)min(16384LL, end - o)) : "memory");
+    }
     // Pre-merge the 4 warps of each KV head in shared memory, then push one partial per (head, row) to its owner.
     {
         float* lp = &lpart[h][wk][0][0];
@@ -369,7 +375,7 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const 
 
 void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor pt,
                 torch::Tensor seq, torch::Tensor loc, torch::Tensor ks, torch::Tensor vs, torch::Tensor out, int64_t page,
-                double qk_scale) {
+                double qk_scale, int64_t pf_ptr, int64_t pf_bytes) {
     int batch = seq.size(0), mp = pt.size(1);
     const int spec = (batch == 1 && page == 1 && CSL_SPEC) ? mp - 1 : -1;
     cudaLaunchConfig_t cfg = {};
@@ -383,7 +389,8 @@ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
     cfg.attrs = at; cfg.numAttrs = 1;
 #define CSL_ARGS(QT) (const QT*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
     (unsigned char*)vc.data_ptr(), pt.data_ptr<int>(), seq.data_ptr<int>(), loc.data_ptr<long>(), ks.data_ptr<float>(), \
-    vs.data_ptr<float>(), (__nv_bfloat16*)out.data_ptr(), mp, (float)qk_scale, spec
+    vs.data_ptr<float>(), (__nv_bfloat16*)out.data_ptr(), mp, (float)qk_scale, spec, \
+    (const unsigned char*)pf_ptr, (long long)pf_bytes
 #define CSL_LAUNCH(P, QT) { \
         static bool set = false; \
         if (!set) { cudaFuncSetAttribute(csl::decode<P, QT>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; } \
@@ -740,7 +747,7 @@ try:
     _CSL = _load_inline(
         name="muse_csl_s96",
         cpp_sources="void csl_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double);"
+                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t);"
                     "void vtk_verify(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double);",
         cuda_sources=_CSL_SRC, functions=["csl_decode", "vtk_verify"],
@@ -1301,7 +1308,7 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
                                               const long long* __restrict__ loc, const int* __restrict__ pt,
                                               const int* __restrict__ seq, float* __restrict__ pacc,
                                               float* __restrict__ pml, float qk_scale, int S, int ch, int maxp,
-                                              int qkv_w, int win) {
+                                              int qkv_w, int win, const uint8_t* __restrict__ pf, long long pfb) {
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
@@ -1319,6 +1326,11 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
     if (wg == 0) {
         asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(NV_PREGS));
         producer<NS, LAG>(sm, kc, vc, pt, r0, r1, H, maxp);
+        if (pfb > 0 && tid < 32) {  // layer s34 (O_PF): after this CTA's last KV load is issued, L2-prefetch its share of the next GEMM's weight
+            const long long per = ((pfb / gridDim.x) + 4095) & ~4095LL, end = min(pfb, per * (blockIdx.x + 1));
+            for (long long o = per * blockIdx.x + tid * 16384LL; o < end; o += 32 * 16384LL)
+                asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(pf + o), "r"((int)min(16384LL, end - o)) : "memory");
+        }
     } else {
         asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(NV_CREGS));
         consumer<NS>(sm, wg - 1, qkv, cs, wg == 1 ? r0 : r1, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc,
@@ -1329,6 +1341,11 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
     if (wg == 0) {
         asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(NV_PREGS));
         producer<NS, LAG>(sm, kc, vc, pt, rg, maxp);
+        if (pfb > 0 && tid < 32) {  // layer s34 (O_PF): after this CTA's last KV load is issued, L2-prefetch its share of the next GEMM's weight
+            const long long per = ((pfb / gridDim.x) + 4095) & ~4095LL, end = min(pfb, per * (blockIdx.x + 1));
+            for (long long o = per * blockIdx.x + tid * 16384LL; o < end; o += 32 * 16384LL)
+                asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(pf + o), "r"((int)min(16384LL, end - o)) : "memory");
+        }
     } else {
         asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(NV_CREGS));
         consumer<NS>(sm, wg - 1, qkv, cs, rg, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc, loc, ks[0], vsc[0], 0, 0);
@@ -1339,7 +1356,8 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
 
 void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor ks, torch::Tensor vsc,
          torch::Tensor loc, torch::Tensor pt,
-         torch::Tensor seq, torch::Tensor pacc, torch::Tensor pml, double qk_scale, int64_t S, int64_t ch, int64_t win) {
+         torch::Tensor seq, torch::Tensor pacc, torch::Tensor pml, double qk_scale, int64_t S, int64_t ch, int64_t win,
+         int64_t pf_ptr, int64_t pf_bytes) {
     // Producer lag NV_LAG (1) at every S: LAG 2 at 4 splits was H100 -0.18 us but H200 +0.2 (check 9249146d, verify 32).
     auto f = nv::nvs<NV_NS, NV_LAG>;
     const int smem = (int)sizeof(nv::Smem<NV_NS>) + 1024;
@@ -1354,7 +1372,7 @@ void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
         (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(),
         (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(),
         (const int*)seq.data_ptr(), (float*)pacc.data_ptr(), (float*)pml.data_ptr(), (float)qk_scale, (int)S, (int)ch,
-        (int)pt.size(1), (int)qkv.size(-1), (int)win);
+        (int)pt.size(1), (int)qkv.size(-1), (int)win, (const uint8_t*)pf_ptr, (long long)pf_bytes);
 }
 '''
 try:
@@ -1362,7 +1380,7 @@ try:
         name="muse_nvs_a2s13h",
         cpp_sources="void nvs(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, int64_t, "
-                    "int64_t);",
+                    "int64_t, int64_t, int64_t);",
         cuda_sources=_NVS_SRC, functions=["nvs"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
@@ -1919,7 +1937,8 @@ const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               const long long* __restrict__ loc, const int* __restrict__ pt,
                                               const int* __restrict__ seq, float* __restrict__ pacc,
                                               float* __restrict__ pml, float qk_scale, int S, int ch, int maxp,
-                                              int qkv_w, int win, __nv_bfloat16* __restrict__ out, int qss) {
+                                              int qkv_w, int win, __nv_bfloat16* __restrict__ out, int qss,
+                                              const uint8_t* __restrict__ pf, long long pfb) {
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
@@ -1934,6 +1953,11 @@ const QT* __restrict__ qkv, const float* __restrict__ cs,
     if (wg == 0) {
         asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" ::"n"(NV_PREGS));
         producer<NS>(sm, kc, vc, pt, rg, maxp);
+        if (pfb > 0 && tid < 32) {  // layer s34 (O_PF): after this CTA's last KV load is issued, L2-prefetch its share of the next GEMM's weight
+            const long long per = ((pfb / gridDim.x) + 4095) & ~4095LL, end = min(pfb, per * (blockIdx.x + 1));
+            for (long long o = per * blockIdx.x + tid * 16384LL; o < end; o += 32 * 16384LL)
+                asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(pf + o), "r"((int)min(16384LL, end - o)) : "memory");
+        }
     } else {
         asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(NV_CREGS));
         dconsumer<NS, QT>(sm, qkv, cs, rg, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc, loc, ks[0], vsc[0], out, qss);
@@ -1944,7 +1968,7 @@ const QT* __restrict__ qkv, const float* __restrict__ cs,
 void nds(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor ks, torch::Tensor vsc,
          torch::Tensor loc, torch::Tensor pt,
          torch::Tensor seq, torch::Tensor pacc, torch::Tensor pml, torch::Tensor out, double qk_scale, int64_t S, int64_t ch,
-         int64_t win, int64_t qss) {
+         int64_t win, int64_t qss, int64_t pf_ptr, int64_t pf_bytes) {
     const int smem = (int)sizeof(nv::Smem<NV_NS>) + 1024;
     const int B = (int)seq.size(0);
 #define NDS_LAUNCH(QT) { \
@@ -1957,7 +1981,8 @@ void nds(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
         (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(), \
         (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(), \
         (const int*)seq.data_ptr(), (float*)pacc.data_ptr(), (float*)pml.data_ptr(), (float)qk_scale, (int)S, (int)ch, \
-        (int)pt.size(1), (int)qkv.size(-1), (int)win, (__nv_bfloat16*)out.data_ptr(), (int)qss
+        (int)pt.size(1), (int)qkv.size(-1), (int)win, (__nv_bfloat16*)out.data_ptr(), (int)qss, \
+        (const uint8_t*)pf_ptr, (long long)pf_bytes
     if (qss) { TORCH_CHECK(qkv.scalar_type() == at::kFloat); NDS_LAUNCH(nv::qs2) }
     else if (qkv.scalar_type() == at::kFloat) NDS_LAUNCH(float) else NDS_LAUNCH(__nv_bfloat16)
 #undef NDS_LAUNCH
@@ -1969,7 +1994,7 @@ try:
         name="muse_nds_a2s10q2",
         cpp_sources="void nds(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
-                    "int64_t, int64_t, int64_t, int64_t);",
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
         cuda_sources=_NDS_SRC, functions=["nds"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
@@ -3860,7 +3885,7 @@ def _verify_nvs(data, cfg):
     out = torch.empty((batch, length, hq * d), dtype=torch.bfloat16, device=device)
     _NVS.nvs(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], data["k_scale"],
              data["v_scale"], data["cache_loc"], data["page_table"], data["seq_lens"], pacc, pml,
-             cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"])
+             cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], *data.get("o_pf", (0, 0)))
     _combine_hb[(batch * length, hq // 2)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=hq // hkv, L=length, M=rows, D=d, S=S, S_PAD=triton.next_power_of_2(S), SB=S, HB=2,
@@ -3872,7 +3897,7 @@ def _decode_nds(data, cfg):
     """Decode sliding (L 1, G 8, D 64, HKV 2, page 1) on the native nds kernel + _combine_hb."""
     batch, hq, hkv, d = cfg["batch"], cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     qkv, device = data["qkv"], data["qkv"].device
-    S = 8  # 256 CTAs at batch 32, 2 per SM
+    S = 8  # 256 CTAs at batch 32, 2 per SM (s34: 4 and 16 lose on H100)
     chunk = triton.cdiv(triton.cdiv(cfg["window"], S), 64) * 64
     rows = hq // hkv
     pacc = torch.empty((batch, hkv, S, rows, d), dtype=torch.float32, device=device)
@@ -3880,7 +3905,8 @@ def _decode_nds(data, cfg):
     out = torch.empty((batch, 1, hq * d), dtype=torch.bfloat16, device=device)
     _NDS.nds(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], data["k_scale"],
              data["v_scale"], data["cache_loc"], data["page_table"], data["seq_lens"], pacc, pml, out,
-             cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], data.get("qkv_ss", 0))
+             cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], data.get("qkv_ss", 0),
+             *data.get("o_pf", (0, 0)))
     _combine_hb[(batch, hq // 2)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=rows, L=1, M=rows, D=d, S=S, S_PAD=S, SB=S, HB=2,
@@ -3905,7 +3931,7 @@ def kernel_fn(data: Inputs) -> torch.Tensor:
         out = torch.empty((batch, 1, hq * d), dtype=torch.bfloat16, device=device)
         _CSL.csl_decode(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], page_table,
                         data["seq_lens"], data["cache_loc"], data["k_scale"], data["v_scale"], out, cfg["page_size"],
-                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E)
+                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, *data.get("o_pf", (0, 0)))
         return out
     if _CSL is not None and cfg["window"] == 2048 and length == 8 and batch <= VTK_MAX_BATCH and hq == 16 \
             and hkv == 2 and d == 64 and cfg["page_size"] in (1, 64) and cfg["rope_theta"]:
