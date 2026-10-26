@@ -1,0 +1,8 @@
+s29 moe_hot (65..128-token experts in one RT2 N128 pass, own launch, moe_twm as its PDL secondary skipping them).
+hot_t.py      : layer routings (verify 16/32) HOT on vs off: reference check + bitwise (run from muse_moe_w4a16/).
+hot_stress.py : N skewed synthetic T=128/256 routings with hot and >128-token experts, same checks.
+hot_moe_src.diff : applies to r-layer moe_src.py (checked vs r-layer 8a24599). Layer also needs "moe_set_hot",
+                "moe_hot_launch" in _moe__lib's functions list, then _moe_HOT_M = {256: 32}.
+H200 proxy with queued-CTA emulation: sed 's/^    grid = nsm;$/    grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;/'
+  submission.py | sed 's/^#define HOT_EMU 0 /#define HOT_EMU 32 /' > sub_e32.py; MOE_GRID=88 SUB=sub_e32 python tools/s22/proxy.py "verify 32" 'g32={"HOT_M":{256:32}}'
+  (HOT_EMU = hot grid: twm's last HOT_EMU CTAs start only as hot CTAs exit, so the total stays 88 SMs.)

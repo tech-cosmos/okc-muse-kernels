@@ -71,6 +71,13 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 29 (no judge runs): moe_hot BUILT (r-moe main, HOT_M default {} = board unchanged). Layer: _moe_HOT_M = {256: 32}
++ 2 function names (tools/s29/README, hot_moe_src.diff). Bitwise = off; 48 skewed routings 0 bad. Layer copy H100: v32 sliding
+395.2 -> 387.4, full 646.3 -> 644.0 us; H200 proxy (HOT_EMU queued-CTA emulation) -18 proxy-us (~-13 H200 us). NOTES s29.
+NEXT: H200 DIAG (moe check) of HOT_M {256: 24/32/40} on the layer routings (DIAG_VARIANTS = python globals: works), or let
+the layer's tuner pick it as a T=256 option. Then: same idea at the 33..64-token experts (N64 RT2 passes already single)?
+no: those are one pass already. Next lever: the twm drain at v16/v32 (STATE idea -5).
+
 ## Session 28 (no judge runs): hot-expert single pass is FEASIBLE (H100 microbench, NOTES s28): RT2 N128 with real streams
 = 1142 cyc per 8 KB vs 1454-1541 for twm's 2 passes of a 73-97-token expert (-21..26%); est. -5..7 H200 us at v32 (~0.25%).
 Needs its own launch (2 N variants in one kernel serialize wgmma; 128 acc regs > twm). x multicast not needed. Design in NOTES s28.

@@ -773,3 +773,29 @@
   griddepcontrol.wait before exiting so moe_norm (twm's secondary) sees hot's Y. x tile = a 128-row tensor-map box of xg
   (twm has 8/16/32/64/96 boxes: add 128). Weights: reuse twm's w*b2 RT2 packing (same item rows as the RT2 class).
   With no hot expert (most T=128 routings) moe_hot exits at once: keep it off at T=128.
+
+## Session 29 (2026-10-26 16:25Z - ~17:15Z) -- moe_hot BUILT: hot experts in one N128 pass, layer v32 sliding -8 H100 us
+- moe_hot<NSTG 8, SA> (submission.py, after tw_hot/moe_twm): 384 thr (producer warp + 2 consumer WGs, setmaxnreg 40/232),
+  experts with 65..128 tokens (ballot over meta's active list), items = all gemm13 RT2 row blocks (HG::NRB 32 per expert),
+  then gemm2 (HN::NRB 16; producer spins on done[e] == 32 like twm), own counter meta[67] (zeroed by moe_route). Stage =
+  x 128-row TMA box (new TMaps m[5]) 16 KB + w*b2 weights 8 KB (+ scales 1 KB, evict_first), 25 KB x 8 stages. Consumer =
+  tw_item<2,1,128,...,STRIDE,XBO=16384> (new XBO template param = weights' offset in the stage; default unchanged).
+  SASS: 8 HGMMA 64x128x16 in the loop, gsb0 0x1 waits, 168 regs, spills only in the epilogue (8 LDL/STL).
+- moe_twm gets `hx` (= g_hot, set by moe_set_hot from kernel_fn): skips experts with 65..128 tokens (nt = 0), does NOT
+  griddepcontrol.wait at entry (moe_hot, its PDL primary, waited for moe_gather and triggers at start), thread 0 waits at
+  the end so moe_norm (twm's secondary) sees hot's Y. Python: HOT_M = {M: grid} (default {}: the board's bs256 has no
+  expert > 49 tokens; the layer's v32 has 2 of 73..98).
+- Outputs bitwise identical to HOT off (per-column FP32 accumulation order is the same at any N): hot_t.py on the
+  layer routings, hot_stress.py 48 skewed T=128/256 routings (up to 9 hot + >128-token experts): 0 bad, 0 non-bitwise.
+  bench.py test 15/15. Checked that twm really skips (dropping the hot launch -> reference check fails).
+- H100 standalone (layer routings, verify 32, full grid): off 243.3 | G16 336 | G24 253.6 | G28 241 | G32 235.6 | G36 238
+  | G40 238 | G48 239.8 | G64 242.3 us. G16 too few CTAs (96 items x ~37 us); G32 = one item round per phase.
+- H200 proxy: the old MOE_GRID=88 cap is unfair here (hot's CTAs come on top). New emulation HOT_EMU (compile-time, tests
+  only): twm grid 88, its last G CTAs spin until G hot CTAs have exited (exit count in meta[67] >> 20; hot's producer masks
+  & 0xFFFFF). Proxy-us: off 307.0 | g20 288.8 | g24 289.2 | g28 291.7 | g32 287.1 => -18..20 proxy-us = ~-13..15 H200 us
+  per v32 call (x 0.73). Pessimistic variant (twm grid 88-G, no refill): g20 294.5.
+- Layer harness copy (r-layer 8a24599 + diff, tuner on (picked twm_order 76 + lt:unpool at T=256), tools/ab_flag.py, 4
+  rounds): v32 sliding off 395.2 | G32 387.4 | G24 386.8 | G40 388.9; full 646.3 | 644.0 | 644.5 | 645.5 us.
+  => recommend _moe_HOT_M = {256: 32} in the layer (est. H200 -8..13 us sliding, -2..5 full = ~+0.3% layer score).
+- Not done: hot at T=128 (layer v16 experts <= ~49 tokens: no hot experts, launch would cost ~2 us); weighting the hot
+  grid by the number of hot experts (shape-only rule: grid can't depend on routing).
