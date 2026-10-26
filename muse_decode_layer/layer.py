@@ -505,6 +505,9 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
         _moe_TWM_HOT_M.clear()
         if _opt(state, m, "twm_hot", 0):  # moe s17: moe_twm one-pass class for 65..96-token experts; proxy v32 -3..5 H200 us
             _moe_TWM_HOT_M[m] = 1
+        _moe_HOT_M.clear()
+        if _opt(state, m, "hot", 0):  # moe s29: moe_hot (65..128-token experts in one N128 pass) on that many CTAs before moe_twm
+            _moe_HOT_M[m] = _opt(state, m, "hot", 0)
         _moe_TWF_SPLIT_M.clear()
         if _opt(state, m, "twf_split", 0):  # moe s19: K-split tail of moe_twm (light experts only; combinable with order)
             _moe_TWF_SPLIT_M[m] = _opt(state, m, "twf_split", 0)
@@ -1389,7 +1392,8 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
-                                           "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch"],
+                                           "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch",
+                                           "moe_set_hot", "moe_hot_launch"],
                                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                                 extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
@@ -2032,11 +2036,12 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
               {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
               {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True}, {"twf_split": 66},
               {"twf_split": 66, "twm_order": 76}, {"twf_split": 1022}, {"twf_split": 1022, "twm_order": 76}, {"fr": False},
-              {"fr": False, "twm_order": 76}, {"fr": False, "twm_order": 76, "lt:unpool": True})}
+              {"fr": False, "twm_order": 76}, {"fr": False, "twm_order": 76, "lt:unpool": True}, {"hot": 0}, {"hot": 24}, {"hot": 40})}
 # s35: per-(T, sliding) defaults under the tuner (the tune pick overrides them; {} = these): the picks both logged H200
 # tuners of 909010f (0f065691, 703d3a7e) agreed on, so a noisy judge tuner can't fall back to the slower setting.
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
-TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True}}
+TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True},
+             (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run

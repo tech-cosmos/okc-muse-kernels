@@ -1,6 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 (session 43: main = v86, NOT judge-checked; budget for 10-26 spent).
+Updated 2026-10-26 (session 44: main = v87, NOT judge-checked; budget for 10-26 spent).
+**s44: main = v87** = v86 + moe s29 moe_hot (65..128-token experts in one N128 pass before moe_twm) at T=256: TUNE_BASE
+(256, *) {"hot": 32}, tuner candidates hot 0/24/40. H100 tuner: hot0 vs hot32 +14 us v32 sliding, +11 full. Tests 13/13,
+replay/route_judge 0 fails (all shapes 10 x 2 seeds; v32 20 x 3 seeds; tuner-off and +twm_order 76 variants v32 0/40).
+FIRST CHECK OF THE NEXT SANDBOX = main (v87): compare per shape vs 703d3a7e; submit if it beats 1.9954x.
 **s43: main = v86** = v85 + proj s35 DEC3 (12-bit decode 3 instr per BF16 pair; packers via proj's _dec3 with round-trip
 check; g22 keeps the old layout). H100: tests 13/13, T=1/8 bit-identical to v85, replay 0/240, route_judge 0/240, ab_files
 ABBA 4 rounds tie (d1 -0.3/-0.4). FIRST CHECK OF THE NEXT SANDBOX = main (v86): compare per shape vs 703d3a7e.

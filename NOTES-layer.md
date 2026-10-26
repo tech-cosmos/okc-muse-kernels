@@ -964,3 +964,19 @@
   route_judge 0/240. ab_files ABBA 4 rounds (v85_nt v86_nt v86_nt v85_nt): d1 -0.3/-0.4 us, every other shape +-0.2
   (H100 is bandwidth-bound here; proj's H200 proxy says -0.5..-1.6 us per g19 call at m16, -0.2..-0.5 at m32).
 - FIRST CHECK OF THE NEXT SANDBOX = main (v86); compare per shape vs 703d3a7e.
+
+## s44 (2026-10-26 16:42Z-): v87 = moe s29 moe_hot at T=256 (no judge runs: budget for 10-26 spent)
+- v87: `patch -p1` of muse_moe_w4a16/tools/s29/hot_moe_src.diff on moe_src.py (clean, offsets only) + "moe_set_hot",
+  "moe_hot_launch" in _moe__lib's list + `_moe_HOT_M` from `_opt(state, m, "hot", 0)` (beside twm_hot) + TUNE_BASE
+  (256, True/False) {"hot": 32} + T=256 tuner candidates {"hot": 0}, {"hot": 24}, {"hot": 40}. moe_hot runs the 65..128-token
+  experts (v32 has 2 of 73..98) in one N128 pass before moe_twm (its PDL secondary, which skips them); bitwise = hot off.
+- H100 tuner (in bench.py test): T=256 sliding hot32 411.8 | hot0 425.8 | hot24 415.8 | hot40 411.0 -> picks twf_split
+  1022 (+hot32 from base) 406.5; full hot32 647.7 | hot0 658.9 | hot24 643.9 | hot40 646.9 -> twf_split 1022. So hot G32
+  = -14 us sliding / -11 us full on H100 (moe's H200 proxy -13..15 per v32 call). bench test 13/13.
+- Validation (H100): tuner on (picks twf_split 1022 + base hot32 at T=256): replay_test 10 x seeds 11,23 all 12 shapes 0
+  fails, route_judge same 0 fails; v32 only 20 x seeds 11,23,37: replay 0/120, route_judge 0/120 (worst drop-lead 0.018).
+  Tuner off (variants/v87_nt = hot32 alone) and hot32 + twm_order 76 (v87o_nt): v32 replay 0/40 each.
+- Not done: no tuner-off ab_files A/B (the in-tuner hot0 vs hot32 numbers above are interleaved in one prepare and agree
+  with moe's 4-round layer A/B, -8 us sliding). Hot at T=128 left out (v16 experts <= ~49 tokens: launch would cost ~2 us).
+- FIRST CHECK OF THE NEXT SANDBOX = main (v87); compare per shape vs 703d3a7e (v32 sliding/full should drop ~8-14 us on
+  the H200), and read the T=256 tune lines (hot 0/24/32/40).
