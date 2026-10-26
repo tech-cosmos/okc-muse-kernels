@@ -1,7 +1,7 @@
 # STATE-moe (muse_moe_w4a16)
 
 ## Board
-- Best submit: ee945887cdb34d17 @60d4a66, **2.131x** (2026-10-26 00:20Z; check 68739792 same code 2.140x).
+- Best submit: ee945887cdb34d17 @128b11a, **2.131x** (2026-10-26 00:20Z; check 68739792 same code 2.140x).
   Previous: 52169da1 2.061x @fa39ed7, 4f0ae2c7 2.033x @a0531b2. Top of board 2.55x (#10 2.37x).
   Used 2026-10-26: checks 1 of 20, submits 1 (lead cap 9).
   | load | bs | SGLang | ours | x | floor | s6 (fa39ed7) |
@@ -21,7 +21,7 @@
   (tensor maps!) in the state. bench.py test runs a cloned state now.
 
 ## What's on main (submission.py)
-M <= 32 (decode, bs8), TK2F = 1 (s7, 60d4a66): 2 launches, `moe_tk2f<8, 8>` (gemm13 rows then gemm2 rows in ONE
+M <= 32 (decode, bs8), TK2F = 1 (s7, 128b11a): 2 launches, `moe_tk2f<8, 8>` (gemm13 rows then gemm2 rows in ONE
 persistent launch: one routing prologue, the ring continues, so the producer streams w2 while gemm13 drains) + moe_norm2.
 gemm13 consumers add their finished rows to cnt[0] (bar.sync 2 + thread-0 threadfence + atomicAdd); gemm2 consumers
 spin (ld.acquire) until cnt[0] == n13, then load inter with __ldg. cnt = st["cnt"] (int32[160], zeroed in prepare,
@@ -87,7 +87,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
 ## Ranked ideas
 0. (s7) 16-token segments in moe_tk2f (2 token groups share each dequantized A fragment, 2nd group's x in smem):
-   draft tools/tk2f_gs16_draft.cu (166 regs, no spill), apply on top of 60d4a66's wait/__ldg scheme; sweep-test
+   draft tools/tk2f_gs16_draft.cu (166 regs, no spill), apply on top of 128b11a's wait/__ldg scheme; sweep-test
    at GS 16 with tools/sweep_routings.py. bs32 has 10% (up to 40%) extra-group rows: expect bs32 -5..8%.
    Root-cause the s7 race (ld.global.cg first-row-after-reload errors) if time allows: it may hide elsewhere.
 1. Decode bs32 (1.49x) / bs16 (1.83x) are now the weakest. s6 SASS (tk2<512,8,8,true>): 130 instr per stage
