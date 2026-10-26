@@ -645,15 +645,17 @@ G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4,
            ("pooler", 32): (32, 1024, 8, 2, 2, 1), ("unpool", 32): (32, 1024, 8, 2, 2, 1),
            ("qkv_gate", 16): (16, 1024, 4, 4, 4, 2),
            # s19: H200-tuned in prepare (TUNE): qkv T=32 and o T=16/32 on g19 (configs already built for other picks)
-           ("qkv_gate", 32): (32, 1024, 8, 2, 2, 1), ("o", 16): (16, 1024, 4, 4, 2, 2), ("o", 32): (32, 1024, 8, 2, 2, 1)}
+           ("qkv_gate", 32): (32, 1024, 8, 2, 2, 1), ("o", 16): (16, 1024, 4, 4, 2, 2), ("o", 32): (32, 1024, 8, 2, 2, 1),
+           # s38: M = 8 (g19 with one n8 token group) for T=8 (verify 1) qkv / o / pooler, TUNE options g19:<key>
+           ("qkv_gate", 8): (8, 1024, 4, 4, 4, 2), ("o", 8): (8, 1024, 4, 4, 2, 2), ("pooler", 8): (8, 1024, 8, 3, 3, 1)}
 # proj's H200 diag (after a 3 us PDL predecessor): m16 pooler AP8 15.7 vs 19.0, unpool tie, o +0.8, every m32 loses
 # (+1.5..5): m32 stays on cuBLAS / the bmm pooler. Was (H100 picks, s10 v35): pooler m16 (16, 1024, 4, 4, 2, 2),
 # m32 (32, 1024, 4, 4, 2, 1), unpool the same, o m16 (16, 512, 4, 3, 2, 2).
 G19_BUILD = [(16, 1024, 4, 4, 2, 2)]  # also compiled (A/B)
 BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
 G19_ON = {"pooler", "unpool", "qkv_gate", "o"}  # o: H100 tie (cuBLAS after attention)
-G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32)}  # prepared, used only if TUNE picks them (H100: tie/+3 us)
-G19_GRID = {("pooler", 16): 108, ("pooler", 32): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
+G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32), ("qkv_gate", 8), ("o", 8), ("pooler", 8)}  # prepared, used only if TUNE picks them (H100: tie/+3 us)
+G19_GRID = {("pooler", 16): 108, ("pooler", 32): 108, ("pooler", 8): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
 _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _GPR3_SRC = None  # @@GPR3@@
 KV_PF = True  # s9: the qkv gemv13 L2-prefetches the window's KV rows for csl (d1 sliding; H100 csl 6.1-7.3 -> ~4 us)
@@ -1930,7 +1932,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"o_pf": 0}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
-            {"tk2fx": False, "g14alt:qkv_gate": 1}),
+            {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
               {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
@@ -2207,6 +2209,7 @@ QSS_DEFAULT = {32: True}  # tokens -> default of TUNE option qss (H100 layer, op
 # 0.5: -1.0/-1.3 us (1.0 -0.2, prefetch at nds START: o -2.2 but nds +3 = zero-sum), v16 sliding 0.5: -1.6/-1.7;
 # losers: d16 (csl, o on g19) 0.5 +0.6, 1.0 +1.6; v32 tie. TUNE option o_pf (0 = off).
 O_PF = {32: 0.5, 128: 0.5}
+VTK_QF32 = True  # s38: the T=8 sliding attention (vtk) takes the g19 m8 qkv in FP32 too (TUNE option g19:qkv_gate at T=8)
 QF32_NDS = True  # s29: also at T=32 (nds sliding templated on the qkv type; full = the same Gluon path as T=16)
 RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 -> 109.9 (8 rounds), 112.3 -> 110.7 (4)
 TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
@@ -2300,7 +2303,9 @@ def kernel_fn(data, state):
         qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf)
     elif not qss and not (length == 1 and HAVE_GLUON and USE_GDEC and _opt(state, tokens, "qf32", QF32)
               and (batch <= CSL_MAX_BATCH and _CSL is not None
-                   or batch >= NDS_MIN_BATCH and (_NDS is not None or cfg["window"] == 0) and QF32_NDS)):
+                   or batch >= NDS_MIN_BATCH and (_NDS is not None or cfg["window"] == 0) and QF32_NDS)
+              or length == 8 and VTK_QF32 and _CSL is not None and cfg["window"] == 2048 and batch <= VTK_MAX_BATCH
+              and cfg["page_size"] in (1, 64) and cfg["rope_theta"]):
         qkv = qkv.to(torch.bfloat16)
     o_pf = (0, 0)
     pf_frac = _opt(state, tokens, "o_pf", O_PF.get(tokens, 0)) if cfg["window"] > 0 else 0

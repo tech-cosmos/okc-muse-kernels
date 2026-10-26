@@ -43,6 +43,9 @@ __device__ __forceinline__ void ldsm4(unsigned addr, unsigned& d0, unsigned& d1,
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
                  : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3) : "r"(addr));
 }
+__device__ __forceinline__ void ldsm2(unsigned addr, unsigned& d0, unsigned& d1) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];" : "=r"(d0), "=r"(d1) : "r"(addr));
+}
 __device__ __forceinline__ void bar_init(unsigned b, int count) {
     asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(b), "r"(count));
 }
@@ -60,7 +63,7 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
     asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                  :: "r"(dst), "l"(src), "r"(bytes), "r"(b) : "memory");
 }
-// M tokens (16/32), KC k per chunk, AP atoms (32 k) per warp per stage, NS ring stages, IS stages per tail item.
+// M tokens (8/16/32), KC k per chunk, AP atoms (32 k) per warp per stage, NS ring stages, IS stages per tail item.
 // out FP32 [M, n] (zeroed by the primary), ctr int (zeroed by the primary). tail: stages left for dynamic items.
 // smem: ring [NS][SB] | x [2][M][XS] | pbuf [2][128 rows][M] f32 | barriers | tag [NS] int | ptag [2] int
 template <int M, int KC, int AP, int NS, int IS, int PRE, int XB>
@@ -242,6 +245,11 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                     ldsm4(xbase + jj * 8 * XS + kb + s * 32, b0, b1, b2, b3);
                     mma(s ? acc2[jj] : acc[jj], af, b0, b1);
                     mma(s ? acc2[jj + 1] : acc[jj + 1], af, b2, b3);
+                }
+                if constexpr (NT & 1) {  // layer s38: M = 8 (one n8 token group; lanes 0-15 address it)
+                    unsigned b0, b1;
+                    ldsm2(xbase + (NT - 1) * 8 * XS + kb + s * 32, b0, b1);
+                    mma(s ? acc2[NT - 1] : acc[NT - 1], af, b0, b1);
                 }
             }
         }

@@ -447,8 +447,9 @@ __device__ __forceinline__ void sa2(unsigned addr, unsigned mbar, float a, float
 }
 __device__ __forceinline__ float bf(unsigned short x) { return __uint_as_float((unsigned)x << 16); }
 
-template <int PAGE>
-__global__ void __launch_bounds__(128) verify(const unsigned short* __restrict__ qkv, const float* __restrict__ cs,
+// layer s38: QT float = the FP32 qkv of the layer's g19 at T=8, rounded to BF16 (RN) at each load (as csl's QF32)
+template <int PAGE, typename QT>
+__global__ void __launch_bounds__(128) verify(const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               unsigned char* kc, unsigned char* vc, const int* __restrict__ pt,
                                               const int* __restrict__ seqs, const long* __restrict__ loc,
                                               const float* __restrict__ ks, const float* __restrict__ vs,
@@ -475,11 +476,12 @@ __global__ void __launch_bounds__(128) verify(const unsigned short* __restrict__
 
     // Every load that doesn't need the page table goes out first (warps issue in order, and the gathers' addresses
     // wait for the page-table trip): queries, the new token, the gate, scales; then cos/sin (needs seq).
-    const unsigned short* qp = qkv + (long)tok * QKV_W + (h * 8 + g) * D + 16 * c;
-    const uint4 qa = *(const uint4*)qp, qb = *(const uint4*)(qp + 8);
+    const QT* qp = qkv + (long)tok * QKV_W + (h * 8 + g) * D + 16 * c;
+    uint4 qa, qb;
+    csl::ld16(qp, qa, qb);
     // The block's new tokens 0..jt (only the new-token warp needs them).
     const bool newer = rank == 15 && wk == 3;
-    const unsigned gw = *(const unsigned*)(qkv + (long)tok * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
+    const unsigned gw = csl::ld2(qkv + (long)tok * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
     const long nloc = loc[tok];
     const float kscale = *ks, vscale = *vs;
     const float rks = 1.f / kscale, rvs = 1.f / vscale;
@@ -495,8 +497,8 @@ __global__ void __launch_bounds__(128) verify(const unsigned short* __restrict__
     for (int n = 0; n < L; ++n) {
         // Predicated (not branched) so they stay in the first basic block, issued with the gathers.
         const int nn = min(n, jt);
-        const unsigned short* kp = qkv + (long)(b * L + nn) * QKV_W + (HQ + h) * D + 2 * lane;
-        nkw[n] = newer ? *(const unsigned*)kp : 0u; nvw[n] = newer ? *(const unsigned*)(kp + HKV * D) : 0u;
+        const QT* kp = qkv + (long)(b * L + nn) * QKV_W + (HQ + h) * D + 2 * lane;
+        nkw[n] = newer ? csl::ld2(kp) : 0u; nvw[n] = newer ? csl::ld2(kp + HKV * D) : 0u;
         nco[n] = newer ? cs[(long)(seq + nn) * D + lane] : 0.f; nsi[n] = newer ? cs[(long)(seq + nn) * D + 32 + lane] : 0.f;
     }
     int pos;
@@ -727,19 +729,21 @@ void vtk_verify(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
     at[0].id = cudaLaunchAttributeClusterDimension;
     at[0].val.clusterDim.x = 16; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
     cfg.attrs = at; cfg.numAttrs = 1;
-#define VTK_ARGS (const unsigned short*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
+#define VTK_ARGS(QT) (const QT*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
     (unsigned char*)vc.data_ptr(), pt.data_ptr<int>(), seq.data_ptr<int>(), loc.data_ptr<long>(), ks.data_ptr<float>(), \
     vs.data_ptr<float>(), (__nv_bfloat16*)out.data_ptr(), mp, (float)qk_scale, spec
+#define VTK_LAUNCH(P, QT) { \
+        static bool set = false; \
+        if (!set) { cudaFuncSetAttribute(vtk::verify<P, QT>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; } \
+        cudaLaunchKernelEx(&cfg, vtk::verify<P, QT>, VTK_ARGS(QT)); }
+    const bool f32 = qkv.scalar_type() == at::kFloat;
+    TORCH_CHECK(page == 1 || page == 64, "vtk: page 1 or 64");
     if (page == 1) {
-        static bool set = false;
-        if (!set) { cudaFuncSetAttribute(vtk::verify<1>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; }
-        cudaLaunchKernelEx(&cfg, vtk::verify<1>, VTK_ARGS);
+        if (f32) VTK_LAUNCH(1, float) else VTK_LAUNCH(1, unsigned short)
     } else {
-        static bool set = false;
-        if (!set) { cudaFuncSetAttribute(vtk::verify<64>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; }
-        TORCH_CHECK(page == 64, "vtk: page 1 or 64");
-        cudaLaunchKernelEx(&cfg, vtk::verify<64>, VTK_ARGS);
+        if (f32) VTK_LAUNCH(64, float) else VTK_LAUNCH(64, unsigned short)
     }
+#undef VTK_LAUNCH
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 '''

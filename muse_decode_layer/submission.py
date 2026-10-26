@@ -498,8 +498,9 @@ __device__ __forceinline__ void sa2(unsigned addr, unsigned mbar, float a, float
 }
 __device__ __forceinline__ float bf(unsigned short x) { return __uint_as_float((unsigned)x << 16); }
 
-template <int PAGE>
-__global__ void __launch_bounds__(128) verify(const unsigned short* __restrict__ qkv, const float* __restrict__ cs,
+// layer s38: QT float = the FP32 qkv of the layer's g19 at T=8, rounded to BF16 (RN) at each load (as csl's QF32)
+template <int PAGE, typename QT>
+__global__ void __launch_bounds__(128) verify(const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               unsigned char* kc, unsigned char* vc, const int* __restrict__ pt,
                                               const int* __restrict__ seqs, const long* __restrict__ loc,
                                               const float* __restrict__ ks, const float* __restrict__ vs,
@@ -527,11 +528,12 @@ __global__ void __launch_bounds__(128) verify(const unsigned short* __restrict__
 
     // Every load that doesn't need the page table goes out first (warps issue in order, and the gathers' addresses
     // wait for the page-table trip): queries, the new token, the gate, scales; then cos/sin (needs seq).
-    const unsigned short* qp = qkv + (long)tok * QKV_W + (h * 8 + g) * D + 16 * c;
-    const uint4 qa = *(const uint4*)qp, qb = *(const uint4*)(qp + 8);
+    const QT* qp = qkv + (long)tok * QKV_W + (h * 8 + g) * D + 16 * c;
+    uint4 qa, qb;
+    csl::ld16(qp, qa, qb);
     // The block's new tokens 0..jt (only the new-token warp needs them).
     const bool newer = rank == 15 && wk == 3;
-    const unsigned gw = *(const unsigned*)(qkv + (long)tok * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
+    const unsigned gw = csl::ld2(qkv + (long)tok * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
     const long nloc = loc[tok];
     const float kscale = *ks, vscale = *vs;
     const float rks = 1.f / kscale, rvs = 1.f / vscale;
@@ -547,8 +549,8 @@ __global__ void __launch_bounds__(128) verify(const unsigned short* __restrict__
     for (int n = 0; n < L; ++n) {
         // Predicated (not branched) so they stay in the first basic block, issued with the gathers.
         const int nn = min(n, jt);
-        const unsigned short* kp = qkv + (long)(b * L + nn) * QKV_W + (HQ + h) * D + 2 * lane;
-        nkw[n] = newer ? *(const unsigned*)kp : 0u; nvw[n] = newer ? *(const unsigned*)(kp + HKV * D) : 0u;
+        const QT* kp = qkv + (long)(b * L + nn) * QKV_W + (HQ + h) * D + 2 * lane;
+        nkw[n] = newer ? csl::ld2(kp) : 0u; nvw[n] = newer ? csl::ld2(kp + HKV * D) : 0u;
         nco[n] = newer ? cs[(long)(seq + nn) * D + lane] : 0.f; nsi[n] = newer ? cs[(long)(seq + nn) * D + 32 + lane] : 0.f;
     }
     int pos;
@@ -779,19 +781,21 @@ void vtk_verify(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
     at[0].id = cudaLaunchAttributeClusterDimension;
     at[0].val.clusterDim.x = 16; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
     cfg.attrs = at; cfg.numAttrs = 1;
-#define VTK_ARGS (const unsigned short*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
+#define VTK_ARGS(QT) (const QT*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
     (unsigned char*)vc.data_ptr(), pt.data_ptr<int>(), seq.data_ptr<int>(), loc.data_ptr<long>(), ks.data_ptr<float>(), \
     vs.data_ptr<float>(), (__nv_bfloat16*)out.data_ptr(), mp, (float)qk_scale, spec
+#define VTK_LAUNCH(P, QT) { \
+        static bool set = false; \
+        if (!set) { cudaFuncSetAttribute(vtk::verify<P, QT>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; } \
+        cudaLaunchKernelEx(&cfg, vtk::verify<P, QT>, VTK_ARGS(QT)); }
+    const bool f32 = qkv.scalar_type() == at::kFloat;
+    TORCH_CHECK(page == 1 || page == 64, "vtk: page 1 or 64");
     if (page == 1) {
-        static bool set = false;
-        if (!set) { cudaFuncSetAttribute(vtk::verify<1>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; }
-        cudaLaunchKernelEx(&cfg, vtk::verify<1>, VTK_ARGS);
+        if (f32) VTK_LAUNCH(1, float) else VTK_LAUNCH(1, unsigned short)
     } else {
-        static bool set = false;
-        if (!set) { cudaFuncSetAttribute(vtk::verify<64>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; }
-        TORCH_CHECK(page == 64, "vtk: page 1 or 64");
-        cudaLaunchKernelEx(&cfg, vtk::verify<64>, VTK_ARGS);
+        if (f32) VTK_LAUNCH(64, float) else VTK_LAUNCH(64, unsigned short)
     }
+#undef VTK_LAUNCH
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 '''
@@ -10118,6 +10122,9 @@ __device__ __forceinline__ void ldsm4(unsigned addr, unsigned& d0, unsigned& d1,
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
                  : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3) : "r"(addr));
 }
+__device__ __forceinline__ void ldsm2(unsigned addr, unsigned& d0, unsigned& d1) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];" : "=r"(d0), "=r"(d1) : "r"(addr));
+}
 __device__ __forceinline__ void bar_init(unsigned b, int count) {
     asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(b), "r"(count));
 }
@@ -10135,7 +10142,7 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
     asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                  :: "r"(dst), "l"(src), "r"(bytes), "r"(b) : "memory");
 }
-// M tokens (16/32), KC k per chunk, AP atoms (32 k) per warp per stage, NS ring stages, IS stages per tail item.
+// M tokens (8/16/32), KC k per chunk, AP atoms (32 k) per warp per stage, NS ring stages, IS stages per tail item.
 // out FP32 [M, n] (zeroed by the primary), ctr int (zeroed by the primary). tail: stages left for dynamic items.
 // smem: ring [NS][SB] | x [2][M][XS] | pbuf [2][128 rows][M] f32 | barriers | tag [NS] int | ptag [2] int
 template <int M, int KC, int AP, int NS, int IS, int PRE, int XB>
@@ -10317,6 +10324,11 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                     ldsm4(xbase + jj * 8 * XS + kb + s * 32, b0, b1, b2, b3);
                     mma(s ? acc2[jj] : acc[jj], af, b0, b1);
                     mma(s ? acc2[jj + 1] : acc[jj + 1], af, b2, b3);
+                }
+                if constexpr (NT & 1) {  // layer s38: M = 8 (one n8 token group; lanes 0-15 address it)
+                    unsigned b0, b1;
+                    ldsm2(xbase + (NT - 1) * 8 * XS + kb + s * 32, b0, b1);
+                    mma(s ? acc2[NT - 1] : acc[NT - 1], af, b0, b1);
                 }
             }
         }
@@ -11274,15 +11286,17 @@ G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4,
            ("pooler", 32): (32, 1024, 8, 2, 2, 1), ("unpool", 32): (32, 1024, 8, 2, 2, 1),
            ("qkv_gate", 16): (16, 1024, 4, 4, 4, 2),
            # s19: H200-tuned in prepare (TUNE): qkv T=32 and o T=16/32 on g19 (configs already built for other picks)
-           ("qkv_gate", 32): (32, 1024, 8, 2, 2, 1), ("o", 16): (16, 1024, 4, 4, 2, 2), ("o", 32): (32, 1024, 8, 2, 2, 1)}
+           ("qkv_gate", 32): (32, 1024, 8, 2, 2, 1), ("o", 16): (16, 1024, 4, 4, 2, 2), ("o", 32): (32, 1024, 8, 2, 2, 1),
+           # s38: M = 8 (g19 with one n8 token group) for T=8 (verify 1) qkv / o / pooler, TUNE options g19:<key>
+           ("qkv_gate", 8): (8, 1024, 4, 4, 4, 2), ("o", 8): (8, 1024, 4, 4, 2, 2), ("pooler", 8): (8, 1024, 8, 3, 3, 1)}
 # proj's H200 diag (after a 3 us PDL predecessor): m16 pooler AP8 15.7 vs 19.0, unpool tie, o +0.8, every m32 loses
 # (+1.5..5): m32 stays on cuBLAS / the bmm pooler. Was (H100 picks, s10 v35): pooler m16 (16, 1024, 4, 4, 2, 2),
 # m32 (32, 1024, 4, 4, 2, 1), unpool the same, o m16 (16, 512, 4, 3, 2, 2).
 G19_BUILD = [(16, 1024, 4, 4, 2, 2)]  # also compiled (A/B)
 BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
 G19_ON = {"pooler", "unpool", "qkv_gate", "o"}  # o: H100 tie (cuBLAS after attention)
-G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32)}  # prepared, used only if TUNE picks them (H100: tie/+3 us)
-G19_GRID = {("pooler", 16): 108, ("pooler", 32): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
+G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32), ("qkv_gate", 8), ("o", 8), ("pooler", 8)}  # prepared, used only if TUNE picks them (H100: tie/+3 us)
+G19_GRID = {("pooler", 16): 108, ("pooler", 32): 108, ("pooler", 8): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
 _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _GPR3_SRC = r'''// Router at m >= 9 as SGLang's BF16 hi + lo split with FP32 accumulation, in ONE GEMM kernel: split-K tensor-core
 // GEMM (mma.sync m16n8k16, x = A, W rows = B), hi and lo MMAs into the same FP32 accumulators (sharing x fragments).
@@ -13136,7 +13150,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"o_pf": 0}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
-            {"tk2fx": False, "g14alt:qkv_gate": 1}),
+            {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
               {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
@@ -13413,6 +13427,7 @@ QSS_DEFAULT = {32: True}  # tokens -> default of TUNE option qss (H100 layer, op
 # 0.5: -1.0/-1.3 us (1.0 -0.2, prefetch at nds START: o -2.2 but nds +3 = zero-sum), v16 sliding 0.5: -1.6/-1.7;
 # losers: d16 (csl, o on g19) 0.5 +0.6, 1.0 +1.6; v32 tie. TUNE option o_pf (0 = off).
 O_PF = {32: 0.5, 128: 0.5}
+VTK_QF32 = True  # s38: the T=8 sliding attention (vtk) takes the g19 m8 qkv in FP32 too (TUNE option g19:qkv_gate at T=8)
 QF32_NDS = True  # s29: also at T=32 (nds sliding templated on the qkv type; full = the same Gluon path as T=16)
 RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 -> 109.9 (8 rounds), 112.3 -> 110.7 (4)
 TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
@@ -13506,7 +13521,9 @@ def kernel_fn(data, state):
         qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf)
     elif not qss and not (length == 1 and HAVE_GLUON and USE_GDEC and _opt(state, tokens, "qf32", QF32)
               and (batch <= CSL_MAX_BATCH and _CSL is not None
-                   or batch >= NDS_MIN_BATCH and (_NDS is not None or cfg["window"] == 0) and QF32_NDS)):
+                   or batch >= NDS_MIN_BATCH and (_NDS is not None or cfg["window"] == 0) and QF32_NDS)
+              or length == 8 and VTK_QF32 and _CSL is not None and cfg["window"] == 2048 and batch <= VTK_MAX_BATCH
+              and cfg["page_size"] in (1, 64) and cfg["rope_theta"]):
         qkv = qkv.to(torch.bfloat16)
     o_pf = (0, 0)
     pf_frac = _opt(state, tokens, "o_pf", O_PF.get(tokens, 0)) if cfg["window"] > 0 else 0
