@@ -8233,7 +8233,8 @@ UNPOOL_PDL = True
 # tokens -> split-K slabs: the pooler as a strided batched GEMM with FP32 out, summed in the rmsnorm (no cuBLAS
 # split-K reduce kernel). H100 standalone m16/m32: 25.8/26.1 vs F.linear 28.0/28.1 us.
 POOLER_BMM = {16: 2, 32: 2}
-GEMV_PDL_SECONDARY = {(1, True): ("unpool_slice", "o"), (1, False): ("unpool_slice", "o"), (8, True): ("o",)}
+GEMV_PDL_SECONDARY = {(1, True): ("unpool_slice", "o"), (1, False): ("unpool_slice", "o"), (8, True): ("o", "unpool_slice"),
+                      (8, False): ("unpool_slice",)}
 LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference experts (tests of the Marlin-side glue)  # PDL after a cuBLAS producer: no gain (H100 o GEMM + boundary 12.64 vs 12.74 us)
 
 
@@ -10969,6 +10970,10 @@ __global__ void __launch_bounds__(T) gemv(const uint4* __restrict__ w, const __n
     __shared__ float red[NW][R * M];
     const int t = threadIdx.x, lane = t & 31, warp = t >> 5, r0 = blockIdx.x * R;
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    // s14: ptxas may sink the W register loads below griddepcontrol.wait (an acquire), so the block's R contiguous W
+    // rows are also bulk-prefetched into L2 first (kept before ACQBULK in SASS).
+    if (t == 0)
+        asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(w + (size_t)r0 * (K / 8)), "r"(R * K * 2) : "memory");
     uint4 a[R][J];
 #pragma unroll
     for (int r = 0; r < R; ++r)
@@ -10980,7 +10985,9 @@ __global__ void __launch_bounds__(T) gemv(const uint4* __restrict__ w, const __n
     for (int i = 0; i < M; ++i)
 #pragma unroll
         for (int j = 0; j < J; ++j)
-            xr[i][j] = i < m ? __ldg(reinterpret_cast<const uint4*>(x + (size_t)i * K) + t + T * j) : make_uint4(0, 0, 0, 0);
+            // __ldcg, not __ldg: ptxas hoists .nc loads above griddepcontrol.wait (s14: SASS showed x loaded before
+            // ACQBULK; as a PDL secondary that read stale x: the s8 'race')
+            xr[i][j] = i < m ? __ldcg(reinterpret_cast<const uint4*>(x + (size_t)i * K) + t + T * j) : make_uint4(0, 0, 0, 0);
     float acc[R][M];
 #pragma unroll
     for (int r = 0; r < R; ++r)
@@ -11044,6 +11051,8 @@ void g17_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mp, i
 # BF16 (as moe_norm2's output) and dots it with its R rows. Bitwise the same as moe_norm2 -> gemv17. Block 0 zeroes
 # moe_tk2f's segment counters (moe_norm2's other job). Saves the norm2 launch + its serial latency.
 N2U_TOKENS = (1,)
+N2U_PFW = True  # s14: n2u bulk-prefetches its W rows into L2 before griddepcontrol.wait (see n2u)
+N2U_SLOT = True  # s14: tk2f at T=1 with PF & 4 (84204: y32 in slot order, pre-scaled; bitwise = 204) + n2u<8, SLOT>
 N2U_CFG = (8, 1)  # rows per block, PDL secondary of moe_tk2f (s13: which triggers at its CTAs' gemm2 rows, TK2F_LATE_TRIG)
 N2U_BOUNDARY = False  # the last block also does the second boundary: H100 d1 +2.7 us vs the PDL _boundary (dead, s8)
 # s13: TK2F_LATE_TRIG (T = 1 tk2f instantiation only, PF == 0): 0 = trigger PDL dependents at the kernel's start (moe's),
@@ -11066,7 +11075,10 @@ if TK2F_LATE_TRIG:
         assert _moe_CUDA_SRC.count(_a) == 1
         _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "static int g_pdl = 6,")
 _N2U_SRC = r'''namespace n2u {
-template <int R>
+// SLOT (s14, moe_tk2f PF & 4): y32 row = route slot s, pre-scaled by gs2 * 256 (no inv / gs loads); the routing (ids, tw:
+// pr1's, complete before tk2f passed its own griddepcontrol.wait) is read before griddepcontrol.wait, so only the y32
+// loads stay behind it (H100 stamps: 3 dependent L2 round trips after the wait cost ~2.5-3 us).
+template <int R, bool SLOT = false, bool PFW = false>
 __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const int* __restrict__ inv,
                                            const int* __restrict__ ids, const float* __restrict__ tw,
                                            const float* __restrict__ w1, const float* __restrict__ gs, int start,
@@ -11081,6 +11093,10 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
     __shared__ float red[NW][R];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, r0 = blockIdx.x * R;
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    // s14: ptxas sinks the W register loads below griddepcontrol.wait (an acquire: earlier loads may move after it;
+    // SASS: every LDG of W after ACQBULK), so the block's R contiguous W rows are bulk-prefetched into L2 first.
+    if (PFW && tid == 0)
+        asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(w + (size_t)r0 * (K / 8)), "r"(R * K * 2) : "memory");
     uint4 a[R];
 #pragma unroll
     for (int r = 0; r < R; ++r) a[r] = g17::ldw(w + (size_t)(r0 + r) * (K / 8) + tid);
@@ -11095,22 +11111,40 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
         const int per = (256 + gridDim.x - 1) / gridDim.x, a_ = tid / per, l = blockIdx.x * per + tid % per;
         if (a_ < 5 && l < 256) asm volatile("prefetch.global.L2 [%0];" :: "l"(vecs[a_] + l * 32));
     }
+    bool loc[8];
+    float twv[8];
+    if (SLOT) {
+#pragma unroll
+        for (int s = 0; s < 8; ++s) {
+            const int e = ids[s] - start;
+            loc[s] = e >= 0 && e < count;
+            twv[s] = tw[s];
+        }
+    }
     asm volatile("griddepcontrol.wait;" ::: "memory");
     if (blockIdx.x == 0 && tid < 128) zc[tid] = 0;
     float v[8][8], ss[8];
-    bool loc[8];
 #pragma unroll
     for (int s = 0; s < 8; ++s) {
-        const int e = ids[s] - start;
-        loc[s] = e >= 0 && e < count;
+        int e = 0;
+        if (!SLOT) {
+            e = ids[s] - start;
+            loc[s] = e >= 0 && e < count;
+            twv[s] = tw[s];
+        }
         ss[s] = 0.f;
         if (loc[s]) {
-            const float gsc = gs[e] * 256.0f;
-            const float4* p = reinterpret_cast<const float4*>(Y + (size_t)inv[s] * K + tid * 8);
+            const float gsc = SLOT ? 1.0f : gs[e] * 256.0f;
+            const float4* p = reinterpret_cast<const float4*>(Y + (size_t)(SLOT ? s : inv[s]) * K + tid * 8);
             const float4 c = p[0], d = p[1];
             const float f[8] = {c.x, c.y, c.z, c.w, d.x, d.y, d.z, d.w};
+            if (SLOT) {
 #pragma unroll
-            for (int k = 0; k < 8; ++k) v[s][k] = f[k] * gsc * wv[k];
+                for (int k = 0; k < 8; ++k) v[s][k] = f[k] * wv[k];
+            } else {
+#pragma unroll
+                for (int k = 0; k < 8; ++k) v[s][k] = f[k] * gsc * wv[k];
+            }
 #pragma unroll
             for (int k = 0; k < 8; ++k) ss[s] += v[s][k] * v[s][k];
         } else {
@@ -11135,7 +11169,7 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
         float tot = 0.f;
 #pragma unroll
         for (int q = 0; q < NW; ++q) tot += ssum[q][s];
-        const float f = tw[s] * rsqrtf(tot / K + eps);
+        const float f = twv[s] * rsqrtf(tot / K + eps);
 #pragma unroll
         for (int k = 0; k < 8; ++k) acc[k] += f * v[s][k];
     }
@@ -11240,8 +11274,9 @@ void n2u_launch(torch::Tensor y32, torch::Tensor inv, torch::Tensor ids, torch::
     const bool B = bnd.size() == 8;
     auto P = [&](int i) { return B ? bnd[i].data_ptr() : nullptr; };
     const int n = (int)out.size(1);
-    TORCH_CHECK(out.size(0) == 1 && w.size(1) == 4096 && n % rr == 0, "n2u: shape");
-    cudaLaunchConfig_t lc = {}; lc.gridDim = n / rr; lc.blockDim = 512; lc.dynamicSmemBytes = 0;
+    const int R_ = (int)(rr % 1000);  // rr + 1000: SLOT, + 3000: SLOT + PFW
+    TORCH_CHECK(out.size(0) == 1 && w.size(1) == 4096 && n % R_ == 0, "n2u: shape");
+    cudaLaunchConfig_t lc = {}; lc.gridDim = n / R_; lc.blockDim = 512; lc.dynamicSmemBytes = 0;
     lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
     la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0;
@@ -11250,7 +11285,9 @@ void n2u_launch(torch::Tensor y32, torch::Tensor inv, torch::Tensor ids, torch::
         (float)eps, (const uint4*)w.data_ptr(), (__nv_bfloat16*)out.data_ptr(), (int*)zc.data_ptr(), n, \
         (const float*)P(0), (const float*)P(1), (const float*)P(2), (const float*)P(3), (const float*)P(4), (float*)P(5), \
         (__nv_bfloat16*)P(6), (int*)P(7), (float)eps_post, (float)eps_h
-    if (rr == 4) cudaLaunchKernelEx(&lc, n2u::n2u<4>, N2U_ARGS);
+    if (rr == 3008) cudaLaunchKernelEx(&lc, n2u::n2u<8, true, true>, N2U_ARGS);
+    else if (rr == 1008) cudaLaunchKernelEx(&lc, n2u::n2u<8, true>, N2U_ARGS);
+    else if (rr == 4) cudaLaunchKernelEx(&lc, n2u::n2u<4>, N2U_ARGS);
     else if (rr == 8) cudaLaunchKernelEx(&lc, n2u::n2u<8>, N2U_ARGS);
     else if (rr == 16) cudaLaunchKernelEx(&lc, n2u::n2u<16>, N2U_ARGS);
     else TORCH_CHECK(false, "n2u: rows");
@@ -11509,12 +11546,13 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     inv = torch.empty(TOP_K, dtype=torch.int32, device=dev)
     y32 = torch.empty((TOP_K, D_EXPERT), dtype=torch.float32, device=dev)
     ids = local_ids.contiguous()
+    slot = N2U_SLOT and _moe_TK2F == 204 and N2U_CFG[0] == 8
     lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"],
-                        _moe_TK2F + (100000 if _moe_TK2SA and st["sa"] else 0))
+                        (84204 if slot else _moe_TK2F) + (100000 if _moe_TK2SA and st["sa"] else 0))
     f = torch.empty((1, UNPOOL_SLICE), dtype=torch.bfloat16, device=dev)
     _G10["lib"].n2u_launch(y32, inv, ids, topk_weights.float().contiguous(), st["w1"], st["gs2"], 0, LOCAL_EXPERTS,
-                           POST_NORM_EPS, state["unpool_slice"], f, st["cnt"], *N2U_CFG, list(bnd), POST_NORM_EPS, RMS_EPS)
+                           POST_NORM_EPS, state["unpool_slice"], f, st["cnt"], N2U_CFG[0] + (1000 + 2000 * N2U_PFW) * slot, N2U_CFG[1], list(bnd), POST_NORM_EPS, RMS_EPS)
     return f
 
 
