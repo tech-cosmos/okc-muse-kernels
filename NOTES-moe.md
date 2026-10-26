@@ -774,7 +774,7 @@
   (twm has 8/16/32/64/96 boxes: add 128). Weights: reuse twm's w*b2 RT2 packing (same item rows as the RT2 class).
   With no hot expert (most T=128 routings) moe_hot exits at once: keep it off at T=128.
 
-## Session 29 (2026-10-26 16:25Z - ~17:15Z) -- moe_hot BUILT: hot experts in one N128 pass, layer v32 sliding -8 H100 us
+## Session 29 (2026-10-26 16:25Z - 16:45Z) -- moe_hot BUILT: hot experts in one N128 pass, layer v32 sliding -8 H100 us
 - moe_hot<NSTG 8, SA> (submission.py, after tw_hot/moe_twm): 384 thr (producer warp + 2 consumer WGs, setmaxnreg 40/232),
   experts with 65..128 tokens (ballot over meta's active list), items = all gemm13 RT2 row blocks (HG::NRB 32 per expert),
   then gemm2 (HN::NRB 16; producer spins on done[e] == 32 like twm), own counter meta[67] (zeroed by moe_route). Stage =
@@ -802,4 +802,4 @@
 - Layer copy with _moe_HOT_M = {256: 32}: bench test 13/13, tools/scored_test.py "verify 32" 6 seeds 0 bad,
   replay_test 4 inputs x rs 3 0/8 fails. The layer tuner (skewed synthetic T=256 loads, H100) with hot on: default full
   619.6 vs 655.4 us with hot off (s29 first A/B run), and it then picks {'twf_split': 66, 'twm_order': 76}.
-- COORD: Handoffs + Requests (layer: patch + 2 names + _moe_HOT_M = {256: 32}) posted 16:50Z.
+- COORD: Handoffs + Requests (layer: patch + 2 names + _moe_HOT_M = {256: 32}) posted 16:43Z.
