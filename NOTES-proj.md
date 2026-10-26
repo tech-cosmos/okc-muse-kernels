@@ -1016,3 +1016,17 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   HPF vs main (R 8): +0.38/+0.62 m32, +0.88/+0.35 m16: LOSS (run-start register copy waits on the prefetch / extra loads) -> DEAD.
 - Left over: <= ~1 us/call (proxy) of escape fixups at m32 (~0.7 H200, 4 calls at d32 = ~0.2% layer). Only a different escape
   scheme (no per-run fixup: e.g. escapes as a tiny extra mma operand, or escape-free per-atom bases) could take it; not cheap.
+
+## s49 (2026-10-26 20:08-20:30Z, sandbox okc-night4, session 6): "fewer bytes at m=1" bounded on paper: CLOSED
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z). STATE Next 2's last untried proj item (entropy-coded weights).
+- dev/s49_entropy.py on the judge's distribution (randn/sqrt(k) -> BF16): sign + 7 mantissa bits are uniform (8 bits),
+  exponent entropy 2.54 bits => 10.54 bits/weight is the lossless floor; 12-bit is within 1.46 bits (-12% bytes max).
+  Fixed-rate windows below 16 codes escape far too often: 8 codes (11-bit) 3.5% of weights = 288 per 8192-row (a sparse
+  side list at ~48 bits each costs more than the 1 bit saved), 6 codes 14%. So below 12 bits only variable-length coding
+  works. Cheapest GPU-friendly VL scheme I found: per 4-weight group a 1-bit flag, 2-bit codes if all 4 exponents are in
+  the top-4 window (p = 0.855^4 = 53%), else 4-bit: 11.2 bits avg = -6.7% bytes; needs per-warp prefix sums for offsets
+  in g13/pr1/g14 (g13 already needs its whole register file). Upside at d1 ~ -6.7% of ~71 MB (qkv 21 + o 12.6 + pooler
+  37.5) ~ -1.3 H200 us per d1 layer (~0.25% layer) if decode stays free, which it would not at m=1. Not worth a multi-
+  session build. Closed. Also: _compress uses ONE base per matrix (global max exponent); other weights (zeros, outlier
+  rows, NaN/Inf) only add escapes -> per-layer BF16 fallback, so correctness on reviewers' weights is not at risk.
+- With this, every proj-lane item on the list is measured or bounded below ~0.3% layer. Request to lead for a new lane.

@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~20:25 UTC (s48: g19 m32 header/fixup cost measured, FIX2/HPF dead; s47, sandbox okc-night4: PDL .nc-hoist SASS audit of proj kernels in layer v91 = no live hazard; unpool T=32 grid tie; checks 20/20 until 00:00Z; main unchanged).
+Updated 2026-10-26 ~20:30 UTC (s49: 'fewer bytes at m=1' bounded: exponent entropy 2.54 bits -> 10.54-bit floor, no fixed-rate format < 12 bits; closed; lane request to lead. s48: g19 m32 header/fixup cost measured, FIX2/HPF dead; s47, sandbox okc-night4: PDL .nc-hoist SASS audit of proj kernels in layer v91 = no live hazard; unpool T=32 grid tie; checks 20/20 until 00:00Z; main unchanged).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -148,5 +148,6 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
    judge log (profiles/*.log); submit if > 1.3110. Layer's first check = its main v88 (carries DEC3, pr8 npf 212, g19 s15).
 2. Ask layer for a fresh H200 idle budget from v88's profile; take the proj-owned rows (T<=8 GEMV ramps, T>=16 cuBLAS
    gaps without PDL triggers). (npre 2 vs 3: dead s45; T=1 pooler pre-fill beside csl/o/bnd: dead s46.)
-   Biggest untried proj item: fewer bytes at m=1 (entropy-coded ~10.5-bit weights, s17 est. ~0.3% layer; big format change).
+   (s49) fewer bytes at m=1 CLOSED: floor 10.54 bits (exp entropy 2.54), fixed-rate < 12 bits escapes 3.5%+, VL 11.2 bits
+   ~ -1.3 us d1 at best (dev/s49_entropy.py, NOTES s49). All proj items now <= ~0.3% layer: asked lead for a new lane.
 3. Below the line: pr8 K-split tail balancing (~0.1%), 11-bit format (~0.2-0.3%), g22/g23/DeepGEMM at m128/256 (dead).
