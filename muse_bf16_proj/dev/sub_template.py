@@ -47,6 +47,7 @@ _G14_SRC = r'''@@GEMV14@@'''
 _G15_SRC = r'''@@GEMV15@@'''
 _G16_SRC = r'''@@GEMV16@@'''
 _G19_SRC = r'''@@GEMV19@@'''
+_G24_SRC = r'''@@GEMV24@@'''
 _G20_SRC = r'''@@GEMV20@@'''
 _G22_SRC = r'''@@GEMV22@@'''
 _TG2_SRC = r'''@@TG2@@'''
@@ -153,6 +154,15 @@ DIAG19D = {"pooler": [(32, 1024, 8, 2, 2, 1, 1, 8, 1), (16, 1024, 8, 3, 2, 1, 1,
 # full kernel tie (W-bound on H100). The H200 decides whether it goes to the layer.
 DIAG19D_DEFS = ["", "G19_NOW", "G19_NOW G19_NOMMA", "G19_NOW G19_NOX", "G19_NOFIX", "G19_NOTM", "G19_NOTM G19_TAG2"]
 DIAG19D_GRIDS = (132, 108)
+# s53: _diag24 only (print): gemv24 (dev/s53/gemv24.cu: per-warp TMA rings, no producer warp / stage barriers; pack19 with
+# rg 1) vs diag19d's g19 main, same harness (3 us PDL predecessor, npre = ns), grids 132/108. (m, kc, ap, ns, wpb, xb, r).
+# H100 G132 us (g24 | g19 layer-like): pool m16 18.6 | 19.1, m32 21.1 | 21.6, unp m16 18.8 | 19.7, m32 20.2 | 21.2.
+# H200 proxy G72 (g24 best | g19 best): m32 pool 24.8 | 26.6, unp 23.9 | 24.7, o 8.7 | 9.9, qkv 16.1 | 16.4; m16 pool 20.4 | 19.1.
+DIAG24 = {"pooler": [(16, 1024, 2, 4, 16, 2, 1), (16, 1024, 4, 3, 12, 2, 1), (32, 512, 2, 4, 16, 2, 1), (32, 512, 4, 3, 12, 2, 1)],
+          "unpooler": [(16, 1024, 2, 4, 16, 2, 1), (16, 1024, 4, 3, 12, 2, 1), (32, 512, 2, 4, 16, 2, 1), (32, 512, 4, 3, 12, 2, 1)],
+          "qkv_gate": [(16, 512, 2, 4, 16, 2, 1), (16, 1024, 2, 4, 16, 2, 1), (32, 512, 2, 4, 16, 2, 1)],
+          "o": [(16, 512, 2, 4, 16, 2, 1), (32, 512, 2, 4, 16, 2, 1)]}
+DIAG24_GRIDS = (132, 108)
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
@@ -521,6 +531,7 @@ def prepare(weights):
     _diag20(st)
     _diag19_stream()
     _diag19d(st)
+    _diag24(st)
     _diag_slab(st)
     _diag_ext(st)
     st["rpick"] = _tune_router(st)
@@ -755,6 +766,52 @@ def _diag19d(st):
                     continue
                 print(f"diag19d {layer} m{m} {c} G{grid} (pred {med[0] * 1e3:.2f}):", " | ".join(
                     f"{nm_} +{(t - med[0]) * 1e3:.2f}" for nm_, t in zip(names, med[1:])))
+
+
+def _diag24(st):
+    """Print only: gemv24 per DIAG24 config and grid, us over the 3 us predecessor (as _diag19d), + max rel err."""
+    if _g19 is None or not DIAG24:
+        return
+    try:
+        mod = load_inline(name="muse_proj_g24", cpp_sources="void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, "
+                          "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                          cuda_sources=_G24_SRC.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(
+                              {c for v in DIAG24.values() for c in v}))),
+                          functions=["g24_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+    except Exception as e:  # noqa: BLE001
+        print("diag24 build failed:", e)
+        return
+    g = torch.Generator(device="cuda")
+    g.manual_seed(5)
+    for layer, cfgs in DIAG24.items():
+        w = st[layer]
+        c_ = _compress(w)
+        if c_ is None:
+            continue
+        for c in cfgs:
+            m, kc, ap, ns, wpb, xb, r = c
+            if w.shape[1] % kc:
+                continue
+            xs = torch.randn(m, w.shape[1], generator=g, device="cuda").to(torch.bfloat16)
+            x = xs.clone()
+            P, hdr, scale = _pack19(c_, kc, ap, r)
+            o32 = torch.empty(m, w.shape[0], dtype=torch.float32, device="cuda")
+            try:
+                ref = x.float() @ w.float().T
+                ctr = torch.zeros(2, dtype=torch.int32, device="cuda")
+                mod.g24_gemm(P, hdr, scale, x, o32, ctr, kc, ap, ns, wpb, xb, _SMS, ns, r)
+                torch.cuda.synchronize()
+                err = ((o32 - ref).norm() / ref.norm()).item()
+                fns = [lambda: _g19.g19_pred(xs, x, 3000)]
+                for grid in DIAG24_GRIDS:
+                    ctr = torch.zeros(2, dtype=torch.int32, device="cuda")  # one epoch counter per grid
+                    fns.append(lambda ctr=ctr, grid=grid: (_g19.g19_pred(xs, x, 3000), mod.g24_gemm(P, hdr, scale, x, o32, ctr, kc, ap, ns, wpb, xb, grid, ns, r)))
+                med = _graph_medians(fns)
+            except Exception as e:  # noqa: BLE001
+                print("diag24", layer, c, "failed:", e)
+                continue
+            print(f"diag24 {layer} m{m} {c} (pred {med[0] * 1e3:.2f}, rel err {err:.1e}):", " | ".join(
+                f"G{grid} +{(t - med[0]) * 1e3:.2f}" for grid, t in zip(DIAG24_GRIDS, med[1:])))
 
 
 def _diag19q(st):

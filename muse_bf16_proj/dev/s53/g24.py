@@ -1,0 +1,86 @@
+# s53 gemv24 (per-warp TMA rings) sweep: python dev/s53/g24.py "M,KC,AP,NS,WPB,XB;..."  env SH=qkv,o,pool,unp,
+# GRID (default #SMs), PRED (ns; predecessor writes x and triggers PDL at start, as g19.py MODE 2), NPRE, DEFS (G24_NOW).
+# Times = graph(pred + gemm) - graph(pred), cold L2 (bench.time_graph). Check: vs x @ W'^T, W' = W with escaped weights
+# set to 2^-15 * scale (the prototype has no escape fixups); skipped for G24_NOW.
+import os, sys, torch, hashlib, torch.nn.functional as F
+D = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(D)))
+sys.path.insert(0, os.path.join(os.path.dirname(D), "s35"))
+from torch.utils.cpp_extension import load_inline
+import bench, reference, dec3
+_g18 = open(os.path.join(os.path.dirname(D), "g18.py")).read()
+exec(_g18[_g18.index("def pack16"):_g18.index("def pack18")])
+ESC = 8
+cfgs = [tuple(map(int, c.split(","))) for c in sys.argv[1].split(";")]
+cfgs = [c + (1,)[len(c) - 6:] for c in cfgs]  # R (row groups per task) 1 by default
+DEFS = [d_ for d_ in os.environ.get("DEFS", "").split(",") if d_]
+src = "".join("#define %s\n" % d_.replace("=", " ") for d_ in DEFS) + open(os.path.join(D, "gemv24.cu")).read()
+src = src.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(cfgs))))
+mod = load_inline(name="pj_g24_" + hashlib.md5(src.encode()).hexdigest()[:10],
+                  cpp_sources="void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g24_pred(torch::Tensor, torch::Tensor, int64_t);",
+                  cuda_sources=src, functions=["g24_gemm", "g24_pred"],
+                  extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"] + (["-Xptxas", "-v"] if os.environ.get("PTXV") else []))
+
+
+def pack24(w, kc, ap, r):
+    """stage (ks, tile of r row groups, st) = [r][ap atoms][32 lanes x 16 B sign|mantissa] [r][ap][32 x 8 B codes], DEC3."""
+    S, N, hdr, scale = pack16(w, kc)
+    n, k = w.shape
+    ks, ntr, spk = k // kc, n // (16 * r), kc // 32 // ap
+    S = S.reshape(ks, ntr, r, spk, ap * 512).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, r * ap * 512)
+    N = N.view(torch.uint8).reshape(ks, ntr, r, spk, ap * 256).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, r * ap * 256)
+    P = dec3.tr3_packed(torch.cat([S, N], 1).contiguous(), r * ap * 512)
+    return P, hdr, scale
+
+
+SH = [("qkv", "qkv_gate", 2304), ("o", "o", 8192), ("pool", "pooler", 4096), ("unp", "unpooler", 8192)]
+only = os.environ.get("SH")
+GRID = int(os.environ.get("GRID", torch.cuda.get_device_properties(0).multi_processor_count))
+PRED = int(os.environ.get("PRED", 3000))
+NPRE = int(os.environ.get("NPRE", 99))
+NOW = "G24_NOW" in DEFS
+NOFIX = "G24_NOFIX" in DEFS
+Wr = reference.generate_weights(reference.WEIGHTS_SEED)
+ctr = torch.zeros(4, dtype=torch.int32, device="cuda")
+for nm, layer, n in SH:
+    if only and nm not in only.split(","): continue
+    W = Wr[layer][:n].contiguous()
+    k = W.shape[1]
+    packs = {}
+    for M in sorted({c[0] for c in cfgs}):
+        x = torch.randn(M, k, device="cuda").bfloat16()
+        xsrc = x.clone()
+        pre = lambda: mod.g24_pred(xsrc, x, PRED)
+        e = bench.time_graph(pre)
+        tc = bench.time_graph(lambda: (pre(), F.linear(x, W))) - e
+        line = f"{nm:5s} m{M}: pred {e:6.2f} cublas {tc:6.2f}"
+        out = torch.empty(M, n, device="cuda")
+        for (m_, kc, ap, ns, wpb, xb, r) in cfgs:
+            if m_ != M or k % kc: continue
+            if (kc, ap, r) not in packs:
+                P, hdr, scale = pack24(W, kc, ap, r)
+                Wp = W.clone()
+                er = (hdr[:, :, 1] != 2.0 ** -15).nonzero()
+                if NOFIX and len(er):
+                    cols = hdr[er[:, 0], er[:, 1], 0].view(torch.int32).long()
+                    Wp[er[:, 0], cols] = torch.tensor(2.0 ** -15 * scale, dtype=torch.bfloat16, device="cuda")
+                col = int(hdr[er[0, 0], er[0, 1], 0].view(torch.int32)) if len(er) else 3
+                packs[(kc, ap, r)] = (P, hdr, scale, Wp, col)
+            P, hdr, scale, Wp_, col = packs[(kc, ap, r)]
+            xp_ = x.clone(); xp_[M - 1].zero_(); xp_[M - 1, col] = 16.0  # probe row: one escaped weight x 16, exact
+            ref = xp_.double() @ Wp_.double().T
+            cf = (kc, ap, ns, wpb, xb, GRID, min(NPRE, ns), r)
+            try:
+                for rep in range(3):
+                    out.fill_(1.0); mod.g24_gemm(P, hdr, scale, xp_, out, ctr, *cf); torch.cuda.synchronize()
+                    err = ((out.double() - ref).norm() / ref.norm()).item()
+                    if not NOW:
+                        assert err < 1e-5, (err, nm, m_, cf)
+                        pw_ = (Wp_[:, col].double() * 16).float()
+                        assert NOFIX or torch.equal(out[M - 1], torch.where(pw_.abs() < 2.0 ** -126, 0 * pw_, pw_)), ("probe", nm, col)
+            except RuntimeError as ex:
+                line += f" | {kc},{ap},{ns},{wpb},{xb},r{r} ERR {str(ex).splitlines()[0][:60]}"; continue
+            dt = bench.time_graph(lambda: (pre(), mod.g24_gemm(P, hdr, scale, x, out, ctr, *cf))) - e
+            line += f" | {kc},{ap},{ns},{wpb},{xb},r{r} {dt:6.2f}"
+        print(line, flush=True)
+    del W, packs

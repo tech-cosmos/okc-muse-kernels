@@ -2578,6 +2578,285 @@ void g19_gemm_ob(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor 
     TORCH_CHECK(false, "g19: no config");
 }
 '''
+_G24_SRC = r'''// gemv24 (s53): m = 16/32 GEMM over lossless 12-bit weights (DEC3 layout) with PER-WARP TMA rings: no producer warp,
+// no block-wide stage barriers. Every warp streams its own split-K tasks (16 rows x KC k = KC/32 atoms, contiguous:
+// pack19 with rg 1) through its own NS-slot ring (lane 0 issues one bulk copy per slot, refills a slot right after
+// consuming it), so a slow warp never gates the others (g19's per-stage producer/consumer handoff is the target).
+// Tasks: t = ks * (n / 16) + row group; block b owns tasks [T b / G, T (b + 1) / G) (static), warp w every WPB-th;
+// the block's x chunks (<= XB) are loaded once after griddepcontrol.wait. out FP32 [M, n] zeroed in the kernel
+// (epoch-counter grid barrier before the first red), partials by red.global.add.v4 through a per-warp smem tile.
+// Escape fixups at each task end (g19's register path); G24_NOFIX skips them (x @ W'^T, escaped weights = 2^-15 * scale).
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+namespace g24 {
+constexpr int WB = 768, ESC = 8;  // bytes per 16 x 32 atom
+__device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
+    return r;
+}
+template <int P>
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel3) {
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+}
+__device__ __forceinline__ uint4 dec8(unsigned s0, unsigned s1, unsigned nw) {
+    uint4 r;
+    r.x = decw<0>(s0, nw, 0x4140u);
+    r.y = decw<1>(s0, nw, 0x4342u);
+    r.z = decw<2>(s1, nw, 0x4140u);
+    r.w = decw<3>(s1, nw, 0x4342u);
+    return r;
+}
+__device__ __forceinline__ void mma(float* c, const uint4& a, unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b0), "r"(b1));
+}
+__device__ __forceinline__ void ldsm4(unsigned addr, unsigned& d0, unsigned& d1, unsigned& d2, unsigned& d3) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];" : "=r"(d0), "=r"(d1), "=r"(d2), "=r"(d3) : "r"(addr));
+}
+__device__ __forceinline__ void bar_init(unsigned b, int count) { asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(b), "r"(count)); }
+__device__ __forceinline__ void bar_expect(unsigned b, int bytes) {
+    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(b), "r"(bytes) : "memory");
+}
+__device__ __forceinline__ void bar_arrive(unsigned b) { asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" :: "r"(b) : "memory"); }
+__device__ __forceinline__ void bar_wait(unsigned b, unsigned parity) {
+    asm volatile("{\n.reg .pred p;\nW24_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra W24_%=;\n}"
+                 :: "r"(b), "r"(parity) : "memory");
+}
+__device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, unsigned b) {
+    asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                 :: "r"(dst), "l"(src), "r"(bytes), "r"(b) : "memory");
+}
+// smem: ring [WPB][NS][SB] | x [XB][M][XS] | stage [WPB][M][STR] f32 | full [WPB][NS] | xfull [XB] | target
+// R: row groups per task (one x fragment load feeds R atoms); stage (ks, tile of R row groups, st) =
+// [R][AP][32 lanes x 16 B sign|mantissa] [R][AP][32 x 8 B codes] (pack19 with rg = R).
+template <int M, int KC, int AP, int NS, int WPB, int XB, int R>
+__global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H, float scale, const __nv_bfloat16* __restrict__ x,
+                                                    float* __restrict__ out, int* __restrict__ ctr, int n, int k, int npre) {
+    constexpr int NT = M / 8, NA = KC / 32, SPK = NA / AP, SB = R * AP * WB, XS = KC * 2 + 16, STR = 16 * R + 4;
+    static_assert(NA % AP == 0 && NT % 2 == 0 && M <= 32, "config");
+    extern __shared__ __align__(128) unsigned char smem[];
+    const int t = threadIdx.x, lane = t & 31, w = t >> 5, g = lane >> 2, c = lane & 3;
+    const unsigned ring = (unsigned)__cvta_generic_to_shared(smem) + w * NS * SB, xs = (unsigned)__cvta_generic_to_shared(smem) + WPB * NS * SB;
+    float* stg = (float*)(smem + WPB * NS * SB + XB * M * XS) + w * M * STR;
+    const unsigned fb = (unsigned)__cvta_generic_to_shared(smem + WPB * NS * SB + XB * M * XS + WPB * M * STR * 4) + w * NS * 8;
+    const unsigned xfb = (unsigned)__cvta_generic_to_shared(smem + WPB * NS * SB + XB * M * XS + WPB * M * STR * 4) + WPB * NS * 8;
+    int* tgt = (int*)(smem + WPB * NS * SB + XB * M * XS + WPB * M * STR * 4 + WPB * NS * 8 + XB * 8);
+    const int nrt = n / (16 * R), S = k / KC, T = S * nrt;
+    const int ta = (int)((long)T * blockIdx.x / gridDim.x), tb = (int)((long)T * (blockIdx.x + 1) / gridDim.x);
+    const int ks0 = ta / nrt;
+    const int nq = tb - ta > w ? (tb - ta - w + WPB - 1) / WPB : 0, total = nq * SPK;
+    auto issue = [&](int j) {  // lane 0: this warp's sequence element j -> slot j % NS
+        const int tq = ta + w + (j / SPK) * WPB, st = j % SPK, sl = j % NS;
+#ifdef G24_NOW
+        bar_arrive(fb + 8 * sl);
+#else
+        bar_expect(fb + 8 * sl, SB);
+        bulk(ring + sl * SB, WP + ((long)tq * SPK + st) * SB, SB, fb + 8 * sl);
+#endif
+    };
+    int jn = 0;  // next sequence element to issue
+    if (lane == 0) {
+        for (int i = 0; i < NS; ++i) bar_init(fb + 8 * i, 1);
+        if (w == 0) for (int b = 0; b < XB; ++b) bar_init(xfb + 8 * b, 1);
+        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+        for (; jn < total && jn < npre; ++jn) issue(jn);  // W only, before the predecessor is done
+    }
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    if (t == 0) {  // the block's x chunks
+        const int ksl = (tb - 1) / nrt;
+        for (int b = 0; b < XB && ks0 + b <= ksl; ++b) {
+            bar_expect(xfb + 8 * b, M * KC * 2);
+            for (int qq = 0; qq < M; ++qq) bulk(xs + b * M * XS + qq * XS, x + (long)qq * k + (long)(ks0 + b) * KC, KC * 2, xfb + 8 * b);
+        }
+    }
+    if (lane == 0) for (; jn < total && jn < NS; ++jn) issue(jn);
+    jn = __shfl_sync(0xffffffffu, jn, 0);
+    {  // zero this block's slice of out, then arrive on the epoch counter ctr[1] (+gridDim.x per launch, never reset)
+        float4* o4 = (float4*)out;
+        for (int i = blockIdx.x * WPB * 32 + t; i < M * n / 4; i += gridDim.x * WPB * 32) o4[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+        __threadfence();
+        __syncthreads();
+        if (t == 0) {
+            const unsigned old = atomicAdd((unsigned*)ctr + 1, 1u);
+            *tgt = (int)(old - old % gridDim.x + gridDim.x);
+        }
+        __syncthreads();
+    }
+    const int target = *tgt;
+    bool passed = false;
+    const unsigned xrow = ((lane >> 4) * 8 + (lane & 7)) * XS + ((lane >> 3) & 1) * 16;
+    float acc[R][NT][4], acc2[R][NT][4];
+    int j = 0;
+    for (int q = 0; q < nq; ++q) {
+        const int tq = ta + w + q * WPB, ks = tq / nrt, tr = tq % nrt, xb = ks - ks0;
+#ifndef G24_NOFIX
+        // escape headers of rows g, g + 8 of each row group (lane c: slots 2c, 2c + 1), loaded early: used at the task end
+        float4 hd[R][2];
+#pragma unroll
+        for (int r = 0; r < R; ++r)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) hd[r][h] = __ldg((const float4*)(H + (long)((tr * R + r) * 16 + g + 8 * h) * ESC) + c);
+#endif
+        bar_wait(xfb + 8 * xb, 0);
+#pragma unroll
+        for (int r = 0; r < R; ++r)
+#pragma unroll
+            for (int jj = 0; jj < NT; ++jj)
+#pragma unroll
+                for (int e = 0; e < 4; ++e) acc[r][jj][e] = acc2[r][jj][e] = 0.f;
+        const unsigned xbase = xs + xb * M * XS + xrow;
+        for (int st = 0; st < SPK; ++st, ++j) {
+            const int sl = j % NS;
+            bar_wait(fb + 8 * sl, (j / NS) & 1);
+            const unsigned sb = ring + sl * SB + lane * 16, nb = ring + sl * SB + R * AP * 512 + lane * 8;
+            constexpr int G = R > 1 ? 1 : AP < 2 ? AP : 2;
+#pragma unroll
+            for (int j0 = 0; j0 < AP; j0 += G) {
+                uint4 sv[G][R];
+                uint2 nv[G][R];
+#pragma unroll
+                for (int a = 0; a < G; ++a)
+#pragma unroll
+                    for (int r = 0; r < R; ++r) {
+                        asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(sv[a][r].x), "=r"(sv[a][r].y), "=r"(sv[a][r].z), "=r"(sv[a][r].w) : "r"(sb + (r * AP + j0 + a) * 512));
+                        asm volatile("ld.shared.v2.u32 {%0,%1}, [%2];" : "=r"(nv[a][r].x), "=r"(nv[a][r].y) : "r"(nb + (r * AP + j0 + a) * 256));
+                    }
+                unsigned bx[G][2][NT][2];
+#pragma unroll
+                for (int a = 0; a < G; ++a)
+#pragma unroll
+                    for (int s = 0; s < 2; ++s)
+#pragma unroll
+                        for (int jj = 0; jj < NT; jj += 2)
+                            ldsm4(xbase + jj * 8 * XS + (st * AP + j0 + a) * 64 + s * 32, bx[a][s][jj][0], bx[a][s][jj][1], bx[a][s][jj + 1][0], bx[a][s][jj + 1][1]);
+#pragma unroll
+                for (int a = 0; a < G; ++a)
+#pragma unroll
+                    for (int r = 0; r < R; ++r)
+#pragma unroll
+                        for (int s = 0; s < 2; ++s) {
+                            const uint4 af = dec8(s ? sv[a][r].z : sv[a][r].x, s ? sv[a][r].w : sv[a][r].y, s ? nv[a][r].y : nv[a][r].x);
+#pragma unroll
+                            for (int jj = 0; jj < NT; ++jj) mma(s ? acc2[r][jj] : acc[r][jj], af, bx[a][s][jj][0], bx[a][s][jj][1]);
+                        }
+            }
+            __syncwarp();
+            if (jn < total) {  // refill the slot just read (generic-proxy reads before the async-proxy write)
+                if (lane == 0) {
+                    asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+                    issue(jn);
+                }
+                ++jn;
+            }
+        }
+        // task end: partials (16 R rows x M tokens) -> stage tile [tok][row] -> red.add.v4 into out [tok][n]
+#pragma unroll
+        for (int r = 0; r < R; ++r)
+#pragma unroll
+            for (int jj = 0; jj < NT; ++jj)
+#pragma unroll
+                for (int e = 0; e < 4; ++e) acc[r][jj][e] += acc2[r][jj][e];
+#ifndef G24_NOFIX
+        {  // escape fixups (g19's register path): escaped weights were decoded as 2^-15 (scale units); add x * (true - 2^-15)
+            const int klo = ks * KC, khi = klo + KC;
+#pragma unroll
+            for (int r = 0; r < R; ++r)
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const float4 hq = hd[r][h];
+                unsigned f0 = __ballot_sync(0xffffffffu, hq.y != 0x1p-15f && __float_as_int(hq.x) >= klo && __float_as_int(hq.x) < khi);
+                unsigned f1 = __ballot_sync(0xffffffffu, hq.w != 0x1p-15f && __float_as_int(hq.z) >= klo && __float_as_int(hq.z) < khi);
+                if (!(f0 | f1)) continue;
+                f0 |= f0 >> 16; f0 |= f0 >> 8; f0 |= f0 >> 4;
+                f1 |= f1 >> 16; f1 |= f1 >> 8; f1 |= f1 >> 4;
+#pragma unroll
+                for (int e2 = 0; e2 < ESC; ++e2) {
+                    if (!((((e2 & 1) ? f1 : f0) >> (e2 >> 1)) & 1u)) continue;
+                    const int src = (lane & ~3) | (e2 >> 1);
+                    const float hx = __shfl_sync(0xffffffffu, (e2 & 1) ? hq.z : hq.x, src);
+                    const float hy = __shfl_sync(0xffffffffu, (e2 & 1) ? hq.w : hq.y, src);
+                    const int col = __float_as_int(hx);
+                    if (hy != 0x1p-15f && col >= klo && col < khi) {
+                        const unsigned char* xc = smem + WPB * NS * SB + xb * M * XS + (col - klo) * 2;
+#pragma unroll
+                        for (int jj = 0; jj < NT; ++jj)
+#pragma unroll
+                            for (int b = 0; b < 2; ++b) {
+                                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xc + (jj * 8 + 2 * c + b) * XS));
+                                acc[r][jj][2 * h + b] = fmaf(xv, hy, fmaf(xv, -0x1p-15f, acc[r][jj][2 * h + b]));
+                            }
+                    }
+                }
+            }
+        }
+#endif
+#pragma unroll
+        for (int r = 0; r < R; ++r)
+#pragma unroll
+            for (int jj = 0; jj < NT; ++jj)
+#pragma unroll
+                for (int e = 0; e < 4; ++e) stg[(jj * 8 + 2 * c + (e & 1)) * STR + r * 16 + g + 8 * (e >> 1)] = acc[r][jj][e] * scale;
+        if (!passed) {  // every block has zeroed its slice of out
+            if (lane == 0) {
+                unsigned v;
+                do { asm volatile("ld.acquire.gpu.u32 %0, [%1];" : "=r"(v) : "l"(ctr + 1) : "memory"); } while ((int)(v - (unsigned)target) < 0);
+            }
+            passed = true;
+        }
+        __syncwarp();
+#pragma unroll
+        for (int i = lane; i < M * 4 * R; i += 32) {
+            const int tok = i / (4 * R), r4 = (i % (4 * R)) * 4;
+            const float4 a = *(const float4*)(stg + tok * STR + r4);
+            asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(out + (long)tok * n + tr * 16 * R + r4), "f"(a.x), "f"(a.y), "f"(a.z), "f"(a.w) : "memory");
+        }
+        __syncwarp();
+    }
+}
+__global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int n8, int ns_) {
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n8; i += gridDim.x * blockDim.x) dst[i] = src[i];
+    unsigned long long t0, t1;
+    asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t0));
+    do { asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t1)); } while (t1 - t0 < (unsigned long long)ns_);
+}
+}  // namespace g24
+void g24_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
+    g24::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_);
+}
+void g24_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out, torch::Tensor ctr,
+              int64_t kc, int64_t ap, int64_t ns, int64_t wpb, int64_t xb, int64_t grid, int64_t npre, int64_t rr) {
+    const int m = x.size(0), k = x.size(1), n = out.size(1);
+    const int sm = wpb * ns * rr * ap * g24::WB + xb * m * (kc * 2 + 16) + wpb * m * (16 * rr + 4) * 4 + wpb * ns * 8 + xb * 8 + 16;
+    const int nrg = n / (16 * rr), T = (k / kc) * nrg;
+    for (int b = 0; b < grid; ++b) {  // x chunks per block <= xb
+        const int ta = (int)((long)T * b / grid), tb = (int)((long)T * (b + 1) / grid);
+        TORCH_CHECK(tb == ta || (tb - 1) / nrg - ta / nrg < xb, "g24: block spans more than xb x chunks");
+    }
+    TORCH_CHECK(n % (16 * rr) == 0 && k % kc == 0 && sm <= 227 * 1024, "g24: shape/smem ", sm);
+    auto stream = c10::cuda::getCurrentCUDAStream();
+#define G24_CASE(M_, KC_, AP_, NS_, WPB_, XB_, R_) \
+    if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && wpb == WPB_ && xb == XB_ && rr == R_) { \
+        auto kern = g24::gemm<M_, KC_, AP_, NS_, WPB_, XB_, R_>; \
+        cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        cudaLaunchConfig_t cfg = {}; \
+        cfg.gridDim = dim3(grid); cfg.blockDim = dim3(WPB_ * 32); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
+        cudaLaunchAttribute attr[1]; \
+        attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1; \
+        cfg.attrs = attr; cfg.numAttrs = 1; \
+        cudaLaunchKernelEx(&cfg, kern, (const unsigned char*)wp.data_ptr(), (const float2*)h.data_ptr(), (float)scale, (const __nv_bfloat16*)x.data_ptr(), \
+                           out.data_ptr<float>(), ctr.data_ptr<int>(), n, k, (int)npre); \
+        C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
+    G24_CONFIGS
+    TORCH_CHECK(false, "g24: no config");
+}
+'''
 _G20_SRC = r'''// gemv19: gemv18's TMA-ring streamer over lossless 12-bit weights (m = 16/32, same _pack18 stage layout), FP32 output
 // only, with load balancing. Per-SM HBM bandwidth varies by ~10% (gemv18 blocks ended 21-27 us at pooler m16 with
 // equal static ranges), so: each block first streams a static stream-K range of the first U - TAIL stages, then grabs
@@ -4841,6 +5120,15 @@ DIAG19D = {"pooler": [(32, 1024, 8, 2, 2, 1, 1, 8, 1), (16, 1024, 8, 3, 2, 1, 1,
 # full kernel tie (W-bound on H100). The H200 decides whether it goes to the layer.
 DIAG19D_DEFS = ["", "G19_NOW", "G19_NOW G19_NOMMA", "G19_NOW G19_NOX", "G19_NOFIX", "G19_NOTM", "G19_NOTM G19_TAG2"]
 DIAG19D_GRIDS = (132, 108)
+# s53: _diag24 only (print): gemv24 (dev/s53/gemv24.cu: per-warp TMA rings, no producer warp / stage barriers; pack19 with
+# rg 1) vs diag19d's g19 main, same harness (3 us PDL predecessor, npre = ns), grids 132/108. (m, kc, ap, ns, wpb, xb, r).
+# H100 G132 us (g24 | g19 layer-like): pool m16 18.6 | 19.1, m32 21.1 | 21.6, unp m16 18.8 | 19.7, m32 20.2 | 21.2.
+# H200 proxy G72 (g24 best | g19 best): m32 pool 24.8 | 26.6, unp 23.9 | 24.7, o 8.7 | 9.9, qkv 16.1 | 16.4; m16 pool 20.4 | 19.1.
+DIAG24 = {"pooler": [(16, 1024, 2, 4, 16, 2, 1), (16, 1024, 4, 3, 12, 2, 1), (32, 512, 2, 4, 16, 2, 1), (32, 512, 4, 3, 12, 2, 1)],
+          "unpooler": [(16, 1024, 2, 4, 16, 2, 1), (16, 1024, 4, 3, 12, 2, 1), (32, 512, 2, 4, 16, 2, 1), (32, 512, 4, 3, 12, 2, 1)],
+          "qkv_gate": [(16, 512, 2, 4, 16, 2, 1), (16, 1024, 2, 4, 16, 2, 1), (32, 512, 2, 4, 16, 2, 1)],
+          "o": [(16, 512, 2, 4, 16, 2, 1), (32, 512, 2, 4, 16, 2, 1)]}
+DIAG24_GRIDS = (132, 108)
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
@@ -5228,6 +5516,7 @@ def prepare(weights):
     _diag20(st)
     _diag19_stream()
     _diag19d(st)
+    _diag24(st)
     _diag_slab(st)
     _diag_ext(st)
     st["rpick"] = _tune_router(st)
@@ -5462,6 +5751,52 @@ def _diag19d(st):
                     continue
                 print(f"diag19d {layer} m{m} {c} G{grid} (pred {med[0] * 1e3:.2f}):", " | ".join(
                     f"{nm_} +{(t - med[0]) * 1e3:.2f}" for nm_, t in zip(names, med[1:])))
+
+
+def _diag24(st):
+    """Print only: gemv24 per DIAG24 config and grid, us over the 3 us predecessor (as _diag19d), + max rel err."""
+    if _g19 is None or not DIAG24:
+        return
+    try:
+        mod = load_inline(name="muse_proj_g24", cpp_sources="void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, "
+                          "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                          cuda_sources=_G24_SRC.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(
+                              {c for v in DIAG24.values() for c in v}))),
+                          functions=["g24_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+    except Exception as e:  # noqa: BLE001
+        print("diag24 build failed:", e)
+        return
+    g = torch.Generator(device="cuda")
+    g.manual_seed(5)
+    for layer, cfgs in DIAG24.items():
+        w = st[layer]
+        c_ = _compress(w)
+        if c_ is None:
+            continue
+        for c in cfgs:
+            m, kc, ap, ns, wpb, xb, r = c
+            if w.shape[1] % kc:
+                continue
+            xs = torch.randn(m, w.shape[1], generator=g, device="cuda").to(torch.bfloat16)
+            x = xs.clone()
+            P, hdr, scale = _pack19(c_, kc, ap, r)
+            o32 = torch.empty(m, w.shape[0], dtype=torch.float32, device="cuda")
+            try:
+                ref = x.float() @ w.float().T
+                ctr = torch.zeros(2, dtype=torch.int32, device="cuda")
+                mod.g24_gemm(P, hdr, scale, x, o32, ctr, kc, ap, ns, wpb, xb, _SMS, ns, r)
+                torch.cuda.synchronize()
+                err = ((o32 - ref).norm() / ref.norm()).item()
+                fns = [lambda: _g19.g19_pred(xs, x, 3000)]
+                for grid in DIAG24_GRIDS:
+                    ctr = torch.zeros(2, dtype=torch.int32, device="cuda")  # one epoch counter per grid
+                    fns.append(lambda ctr=ctr, grid=grid: (_g19.g19_pred(xs, x, 3000), mod.g24_gemm(P, hdr, scale, x, o32, ctr, kc, ap, ns, wpb, xb, grid, ns, r)))
+                med = _graph_medians(fns)
+            except Exception as e:  # noqa: BLE001
+                print("diag24", layer, c, "failed:", e)
+                continue
+            print(f"diag24 {layer} m{m} {c} (pred {med[0] * 1e3:.2f}, rel err {err:.1e}):", " | ".join(
+                f"G{grid} +{(t - med[0]) * 1e3:.2f}" for grid, t in zip(DIAG24_GRIDS, med[1:])))
 
 
 def _diag19q(st):
