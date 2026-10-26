@@ -191,3 +191,11 @@
   R4/T512 6.5, R1/T256 5.6; m8 R2/T512 6.5, R2/T256 6.75, R1/T512 8.4. At m16 it loses (10.8 vs hi/lo g7 9.0), m32 far.
 - Dead: g7 (hi/lo mma) with token groups at router m128/256: 24-66 us vs cuBLAS 3-kernel path 11.8/13.6 (H100).
   The cuBLAS path on H200 = splitK GEMM 5.2 + splitKreduce 1.6 + hi+lo add 1.4 us (m128).
+- check dd37685bc1b440b7 (e605717, router2): 1.2853x; H200 router m1 5.13 -> 3.47, m8 8.02 -> 4.92.
+  submit d8160f04086d4406 (e605717): 1.2636x (new best then; check/submit gap = judge noise, same content hash).
+- gemv17 (dev/gemv17.cu, dev/g17.py): router2's structure for BF16 (uint4 W/x loads, k = 8 (t + T j)). H100: unpooler-1k
+  m1 (1,4,512) 5.66 / (1,4,256) 5.76 vs 6.24; m8 (8,4,256) 7.65 vs 8.67; o (n=8192, k=1024) loses at m1 (9.3 vs 8.8)
+  and m8 (13.8 vs 9.1): too few threads per row / too many blocks. Tuner candidate (BF16_G17) at unpooler m1/m8.
+- check 1be6c8f5278b41eb (405439e): 1.2926x; H200 unpooler m1 4.67 -> 3.75 (tune: g17 7.20 vs g10 7.81 incl. events),
+  m8 6.50 -> 5.99 (g17 9.28 vs lt 9.63). submit 6d0fc4d42b4544b1 (405439e): 1.2742x = NEW BEST.
+- Budget 10-26 at session end: checks 3/20, scored 3/10.
