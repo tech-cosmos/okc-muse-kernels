@@ -854,3 +854,33 @@
 - Next ideas from this session's timelines: T=256 glue after the fused GEMM is routing 3.7 + moe_route 2.4 + gathern
   6.2 us H100 (serial, small grids: a PDL chain could save ~1 us); qkv at T=128/256 is 2x its bytes floor but proj
   closed that lane (s16/s28: own GEMMs lose to cuBLASLt).
+
+## s38 (2026-10-26 14:53Z-): v78-v80 (no judge runs: budget for 10-26 spent; sandbox ends ~19:10Z)
+- DEAD moe TK2F_L2H mode 4 (evict_last on every group of a multi-group expert; moe Handoffs s21 UPDATE 2) in the layer:
+  H100 ab_files tuner off, 2 interleaved pairs vs mode 1 (v77): d16 sl 204.5/205.2 -> 206.7/208.0, d32 sl 200.7/201.4 ->
+  202.4/203.1, d16 full -1, rest tie. moe s23 measured mode 4 = mode 1 in its copy. Kept mode 1.
+- DEAD (upper bound measured): L2-prefetching the routed experts' weights during the d1 pooler (pr1). Oracle hack
+  (variants/hack_pf.py: side-stream Triton cp.async.bulk.prefetch.L2 of the KNOWN local experts' w13q/w2q, forked
+  after the boundary; ids from an eager run): best -1.2 us (30% of w13 of 3 experts = 15 MB: 88.74 -> 87.50); all of w13 of
+  3 experts +3.6, 1 expert w13+w2 -0.9. HBM is ~saturated during pr1 (proj: g13/pr1 run at bare-TMA-stream speed), so a
+  real version (router before the pooler) cannot pay.
+- v78 (5c27e0a): g19_src.cu supports M = 8 (odd NT: one ldmatrix.x2 + mma per atom for the last n8 token group);
+  G19_CFG (qkv_gate|o|pooler, 8) in G19_DEFAULT_OFF; TUNE[8] candidate {"g19:qkv_gate": True}. vtk::verify (T=8 sliding
+  attention) templated on QT (float: BF16 RN at each load via csl::ld16/ld2, like csl's QF32); layer.py VTK_QF32 skips
+  the cast when vtk will run. files_eq vs the cast: 0 diff. H100 v1 sliding: g14 qkv 15.8 vs g19 m8 16.7 us (+0.8 with
+  the cast dropped; cast alone 1.2-1.6 us); configs swept (AP8 NS3/NS2, AP4 NS6, KC2048): (8,1024,4,4,4,2) best.
+  (proj s29 had built an M=8 g19 too, also +1.2 on H100: g14 is mma.sync already.) H200 decides via the tuner.
+  H100 o g19 m8: +2.9/+6 us (not a candidate); pooler g19 m8 = g14 pooler, but without pr8's fusion +3.4 us.
+- v79 (b1f7a33): TUNE[8] += {pr1 off, g19:pooler}, {pr1 off, g19:pooler, g19:qkv_gate} (H200 decides; H100 +3.4).
+  attn_src.py: csl/nvs/nds load_inline names now carry a source hash. REASON: proj's /tmp copy of r-layer built
+  muse_csl_s96 from the OLD source into the shared ~/.cache/torch_extensions at the same time; my timeline run printed
+  "csl build failed, using Triton" (template mismatch from the mixed build dir). Local-only hazard (judge = 1 process).
+- v80 (e598e41): proj s32 evl_all_layer.patch (evict_last on all 9 layer L2 prefetch sites + KV_PF). H100 ab_files
+  tuner off 5 rounds: d1 sl 88.66 -> 86.69, full 107.82 -> 107.01, v1 tie. Tests 13/13, scored d1 x3 0 bad, replay T=1/8 0/20.
+- Looked at, nothing to build: (a) boundary at d16 "exposed 7.4 us" on the H100 timeline: BND_SPLIT (16,1) 2/8 and
+  BOUNDARY_TRIG off are all noise (+-1.5 us). (b) csl alone (graph, cold L2): batch 1 5.2-5.3, 16 9.3-9.8, 32 (nds) 13.7 us
+  (8/16 MB of random 64 B KV gathers + latency chain; attention lane). (c) verify full: _new_tokens/_combine_bal end 0.6/3.8
+  us after _gw_verify on H100 (PDL-hidden; the H200 profile's 19-28 us rows are mostly waits). (d) n2u (d1 tail) is
+  already W-in-registers + routing before the wait.
+- H200 budget (profile 703d3a7e): biggest non-expert item = g19 m32 pooler+unpool at d32 (2 calls 50.2 us, ~2.0 TB/s;
+  standalone 19.7/call vs bare 13.9): asked proj (Requests s38).

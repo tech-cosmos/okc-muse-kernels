@@ -1,34 +1,21 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 (session 37: main = v77, NOT judge-checked; budget for 10-26 spent).
+Updated 2026-10-26 (session 38: main = v80, NOT judge-checked; budget for 10-26 spent).
 
-**s37: main = v77 (b66a869)** = v76 + fused pooler+router GEMM at T=256 (FUSED_ROUTER_TOKENS (256,), moe_gathern
-reads its strided FP32 pooler rows; TUNE option fr at T=128/256): H100 tuner-off v32 sl -6.2/-2.4, full -1.9/-2.5 us
-(2 runs); T=128 loses (tuner candidate only). Tests 13/13 (also fr forced at all T>8), scored verify x3, replay, route_judge
-0 bad. FIRST CHECK OF THE NEXT SANDBOX = main (v77); read the T=256 "layer tune" lines (fr False should lose).
+**s38: main = v80 (e598e41)** = v77 + g19 M=8 + vtk FP32 qkv (v78, T=8 TUNE candidate g19:qkv_gate) + T=8 candidates
+{pr1 off, g19:pooler} (v79) + proj s32 evict_last on all layer L2 prefetches (v80: H100 d1 -2.0/-0.8 us). Attention libs
+have source-hashed names (another agent's copy built into the shared extension dir). Dead: moe TK2F_L2H mode 4 in the
+layer (d16/d32 sl +2), expert-weight L2 prefetch during the pooler (oracle upper bound -1.2 us). FIRST CHECK OF THE NEXT
+SANDBOX = main (v80): read the T=8 and T=256 "layer tune" lines (g19:qkv_gate, g19:pooler, fr).
 
-**s36: v76 (5c5329d)** = v75 + moe s21 TWM_L2H (T>32): H100 v16 full -3.2, v32 sl -1.3 us.
+Mains since the board best (details NOTES s32-s37): v71 BND_SPLIT (boundary row over SPL programs; H100 d1-d32 -0.5..1.9)
+| v72 O_PF {32: 0.5, 128: 0.5} (sliding attention L2-prefetches half of o's W) | v73 moe TK2F_L2H 1 (d16 -3.2/-4.6, v1 -3.6/-6.3)
+| v74 pr1_npf 0 at T=1 | v75 TUNE_BASE (per-(T, sliding) defaults the H200 tuners agreed on: T=8 nu8 (+ g14alt 1 full),
+T=16 sl g19:o) | v76 moe TWM_L2H (v16 full -3.2) | v77 fused pooler+router GEMM at T=256 (FUSED_ROUTER_TOKENS (256,), v32
+sl -2.4..6.2; TUNE fr at T=128/256). Compare the first check per shape vs 703d3a7e (d1 69.6/77.8, d16 143.3/227.7,
+d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5); submit if it beats 1.9954x.
 
-**s35: main = v75 (482a3b6)** = v72 + moe s21 TK2F_L2H (v73: H100 d16 -3.2/-4.6, v1 -3.6/-6.3 us) + pr1_npf default 0
-at T=1 (v74: H200 tuners picked it twice) + TUNE_BASE (v75: per-(T, sliding) defaults = picks both H200 tuner logs agreed on:
-T=8 nu8 (+ g14alt 1 full), T=16 sl g19:o). Tests 13/13 (v73), scored all 0 bad, replay 0/20.
-FIRST CHECK OF THE NEXT SANDBOX: main (now v76) as-is; compare per shape vs 703d3a7e (d1 69.6/77.8, d16 143.3/227.7,
-d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5); read the "layer tune" lines in the log (tuner
-picks swing d1 by ~1.5 us between identical files). Submit if it beats 1.9954x.
-
-**s34: main = v72 (6baba9e)** = v71 + O_PF {32: 0.5, 128: 0.5}: sliding attention (nds at d32, nvs at v16) L2-prefetches
-half of o's W after each CTA's last K/V load (TUNE option {"o_pf": 0} at T=32/128). H100 ab_flag d32 sl -1.3/-1.5,
-v16 sl -0.8/-1.5 us; d16/v32/full layers lose or tie (off). Tests 13/13, scored all x3 0 bad, replay all 0/20 x2 seeds.
-Dead this session (NOTES s34): prefetch at nds start (zero-sum), POOL_PF (boundary prefetching the cuBLAS pooler at
-T=128), O_PF on _gd_full (full layers), NDS splits 4/16, split qkv/gate (d1 ~zero, only d16 could gain).
-
-**s33: main = v71 (a47269b)** = v70 + BND_SPLIT (_boundary row over SPL programs, redundant norms, sliced stores;
-bit-identical). H100 ab_flag: d1 -0.5/-1.0, v1 -1.1/-0.1, d16 -1.5/-1.9, d32 -1.5/-1.4 us; T=128/256 off (loses).
-
-**s32: main = v70 (909010f)** = v69 + proj QSS (qkv T=32 as 2 FP32 bmm slabs, summed in attention; TUNE qss, default on)
-+ moe s20 twm AUTO K-split (TUNE twf_split 1022 at T=128/256). Check 0f065691 1.9754x; **submit 703d3a7e 1.9954x = board
-best** (d1 69.6/77.8, d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5). H200 tuner
-lines in NOTES s32. Sandbox ends ~19:10Z: no judge runs left today; next sandbox (after 00:00Z) starts from main.
+**s32: v70 (909010f)** = proj QSS + moe twm AUTO K-split: check 0f065691 1.9754x; **submit 703d3a7e 1.9954x = board best**.
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
 option sets on synthetic inputs (shapes only) and keeps the fastest in state["tune"]; `_opt()` reads it at trace time.
