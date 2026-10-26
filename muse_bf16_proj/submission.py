@@ -1435,6 +1435,97 @@ void g16_gemm(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double scale
     TORCH_CHECK(false, "g16: no config");
 }
 '''
+_G17_SRC = r'''// gemv17: BF16 out[m, n] = x[m, K] @ W[n, K]^T for small m, router2's structure: block = R whole rows, T threads,
+// thread t owns k = 8 (t + T j), j < J = K / (8 T): its x slice goes straight to registers, all R * J uint4 W loads
+// are issued up front, FP32 FMA, warp shuffle + one smem pass. No split K, no workspace.
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+
+namespace g17 {
+__device__ __forceinline__ uint4 ldw(const uint4* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ float lo(unsigned v) { return __uint_as_float(v << 16); }
+__device__ __forceinline__ float hi(unsigned v) { return __uint_as_float(v & 0xffff0000u); }
+
+template <int M, int R, int T, int K>
+__global__ void __launch_bounds__(T) gemv(const uint4* __restrict__ w, const __nv_bfloat16* __restrict__ x,
+                                          __nv_bfloat16* __restrict__ out, int m, int n) {
+    constexpr int J = K / (8 * T), NW = T / 32;
+    static_assert(K % (8 * T) == 0, "k split");
+    __shared__ float red[NW][R * M];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5, r0 = blockIdx.x * R;
+    uint4 xr[M][J];
+#pragma unroll
+    for (int i = 0; i < M; ++i)
+#pragma unroll
+        for (int j = 0; j < J; ++j)
+            xr[i][j] = i < m ? __ldg(reinterpret_cast<const uint4*>(x + (size_t)i * K) + t + T * j) : make_uint4(0, 0, 0, 0);
+    uint4 a[R][J];
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int j = 0; j < J; ++j) a[r][j] = ldw(w + (size_t)(r0 + r) * (K / 8) + t + T * j);
+    float acc[R][M];
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int i = 0; i < M; ++i) acc[r][i] = 0.f;
+#pragma unroll
+    for (int j = 0; j < J; ++j)
+#pragma unroll
+        for (int i = 0; i < M; ++i) {
+            const unsigned xv[4] = {xr[i][j].x, xr[i][j].y, xr[i][j].z, xr[i][j].w};
+#pragma unroll
+            for (int r = 0; r < R; ++r) {
+                const unsigned wv[4] = {a[r][j].x, a[r][j].y, a[r][j].z, a[r][j].w};
+#pragma unroll
+                for (int q = 0; q < 4; ++q) {
+                    acc[r][i] = fmaf(lo(wv[q]), lo(xv[q]), acc[r][i]);
+                    acc[r][i] = fmaf(hi(wv[q]), hi(xv[q]), acc[r][i]);
+                }
+            }
+        }
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int i = 0; i < M; ++i) {
+            float v = acc[r][i];
+#pragma unroll
+            for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+            if (lane == 0) red[warp][r * M + i] = v;
+        }
+    __syncthreads();
+    for (int e = t; e < R * M; e += T) {
+        const int r = e / M, i = e % M;
+        float s = 0.f;
+#pragma unroll
+        for (int q = 0; q < NW; ++q) s += red[q][e];
+        if (i < m) out[(size_t)i * n + r0 + r] = __float2bfloat16(s);
+    }
+}
+}  // namespace g17
+
+#define G17_CASE(M, R, T, K)                                                                                        \
+    if (mp == M && rr == R && tt == T && k == K) {                                                                  \
+        g17::gemv<M, R, T, K><<<n / R, T, 0, c10::cuda::getCurrentCUDAStream()>>>(                                   \
+            reinterpret_cast<const uint4*>(w.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()),     \
+            reinterpret_cast<__nv_bfloat16*>(out.data_ptr()), m, n);                                                \
+        C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                             \
+        return;                                                                                                     \
+    }
+
+void g17_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mp, int64_t rr, int64_t tt) {
+    const int m = (int)x.size(0), k = (int)x.size(1), n = (int)out.size(1);
+    TORCH_CHECK(m <= mp && n % rr == 0, "g17: shape");
+    G17_CONFIGS
+    TORCH_CHECK(false, "g17: no such config");
+}
+'''
 _LT_SRC = r'''// cuBLASLt BF16 GEMM with an explicit algo config: out[m,n] = x[m,k] @ W[n,k]^T, FP32 compute and accumulation.
 // Same library and kernel family SGLang's F.linear reaches (algo 66 on sm90), but with the tile / split-K / cluster
 // config picked per shape in prepare() (timed on the judge's own GPU) instead of cuBLAS's heuristic.
@@ -1533,6 +1624,10 @@ BF16_G15 = {"pooler": [(16, 4, 4, 4, 64, 1)]}
 # over DSMEM) 25.2 vs 27.5. H200 (check ae0e03fa, unpooler only): 21.8 vs lt 21.4, not picked.
 BF16_G16 = {"unpooler": [(16, 4, 4, 4, 128, 1, 2), (16, 4, 8, 2, 128, 1, 2)],
             "qkv_gate": [(16, 4, 4, 4, 48, 1, 2), (16, 4, 4, 4, 36, 1, 2)], "pooler": [(16, 4, 4, 4, 64, 1, 1)]}
+# BF16 small-m GEMV with router2's structure (dev/gemv17.cu: R whole rows per block, x in registers, no split K),
+# (m, R, T), H100 (dev/g17.py): unpooler-1k m1 5.66 vs 6.24 (gemv10), m8 7.65 vs 8.67; o loses (n = 8192).
+BF16_G17 = {"unpooler": [(1, 4, 512), (1, 4, 256), (8, 4, 256), (8, 4, 128)]}
+_LAYER_K = {"qkv_gate": 8192, "o": 1024, "pooler": 8192, "unpooler": 4096}
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
 BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32, 1, 1)], "pooler": [(8, 8, 8, 4, 128, 1, 1), (16, 8, 8, 4, 128, 8, 2)],
             "o": [(8, 1, 2, 8, 128, 1, 1)], "unpooler": [(8, 4, 4, 4, 32, 1, 1)]}  # unpooler m8: H200 5.7-7.3 (noisy)
@@ -1568,11 +1663,12 @@ _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for
         _G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d)" % c[1:6] for c in sorted({c for v in BF16_G13.values() for c in v}))) + "\n" +
         _G14_SRC.replace("G14_CONFIGS", " ".join("G14_CASE(%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G14.values() for c in v}))) + "\n" +
         _G15_SRC.replace("G15_CONFIGS", " ".join("G15_CASE(%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G15.values() for c in v}))) + "\n" +
-        _G16_SRC.replace("G16_CONFIGS", " ".join("G16_CASE(%d,%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G16.values() for c in v}))))
+        _G16_SRC.replace("G16_CONFIGS", " ".join("G16_CASE(%d,%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G16.values() for c in v}))) + "\n" +
+        _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d,%d)" % c for c in sorted({c + (_LAYER_K[l],) for l, v in BF16_G17.items() for c in v}))))
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v12",
+        name="muse_proj_v13",
         cpp_sources="void pj_router2(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
@@ -1586,9 +1682,10 @@ try:
                     "void g15_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
                     "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                     "void g16_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                    "void g17_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);",
         cuda_sources=_SRC, functions=["pj_router2", "g7_gemv", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "g15_gemm",
-                                      "g16_gemm"],
+                                      "g16_gemm", "g17_gemv"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -1765,6 +1862,8 @@ def _run(st, layer, x, out, cand):
     elif kind == "g16":
         sw, nw, hdr, scale = st[("g16", layer, c[1])]
         _mod.g16_gemm(sw, nw, hdr, scale, x, out, out.shape[1] // 16, *c[1:])
+    elif kind == "g17":
+        _mod.g17_gemv(st[layer], x, out, *c)  # W[:n] prefix rows, in place
     elif kind == "g12":
         _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
     else:
@@ -1806,6 +1905,9 @@ def _tune(st, reps=25):
         for layer, cfgs in BF16_G12.items():
             for c in cfgs:
                 shapes.setdefault((layer, c[0]), []).append(("g12", c))
+        for layer, cfgs in BF16_G17.items():
+            for c in cfgs:
+                shapes.setdefault((layer, c[0]), []).append(("g17", c))
     if _lt is not None:
         for key, cfgs in BF16_LT.items():
             shapes.setdefault(key, []).extend(("lt", c) for c in cfgs)
