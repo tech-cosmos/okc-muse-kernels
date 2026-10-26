@@ -63,12 +63,14 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 // M tokens (16/32), KC k per chunk, AP atoms (32 k) per warp per stage, NS ring stages, IS stages per tail item.
 // out FP32 [M, n] (zeroed by the primary), ctr int (zeroed by the primary). tail: stages left for dynamic items.
 // smem: ring [NS][SB] | x [2][M][XS] | pbuf [2][128 rows][M] f32 | barriers | tag [NS] int | ptag [2] int
-template <int M, int KC, int AP, int NS, int IS, int PRE, int XB>
-__global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H,
+template <int M, int KC, int AP, int NS, int IS, int PRE, int XB, int TS, int RG, int RPW>
+__global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H,
                                                          float scale, const __nv_bfloat16* __restrict__ x,
                                                          float* __restrict__ out, int* __restrict__ ctr, int n, int k, int tail, int npre) {
-    constexpr int NT = M / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * 768, XS = KC * 2 + 16, PBF = NWC * 16 * M;
-    static_assert(NA % AP == 0 && SPK % IS == 0, "config");
+    constexpr int NWC = RG;  // 16-row groups per tile (one stage covers RG x AP atoms)
+    static_assert(RPW == 1 || TS == 1, "config");
+    constexpr int NCW = NWC * TS / RPW, MT = M / TS, NT = MT / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * 768, XS = KC * 2 + 16, PBF = NWC * 16 * M;
+    static_assert(NA % AP == 0 && SPK % IS == 0 && NT % 2 == 0, "config");  // NT even: x B fragments by ldmatrix.x4
     extern __shared__ __align__(128) unsigned char smem[];
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
     float* pbuf = (float*)(smem + NS * SB + XB * M * XS);
@@ -81,9 +83,9 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
     const int nrg = n / 16, ntr = nrg / NWC, S = k / KC, KA = k / 32;
     const int U = S * ntr * SPK, US = U - tail;
     if (t == 0) {
-        for (int i = 0; i < NS; ++i) { bar_init(bars + 8 * i, 1); bar_init(bars + 8 * (NS + i), NWC); }
+        for (int i = 0; i < NS; ++i) { bar_init(bars + 8 * i, 1); bar_init(bars + 8 * (NS + i), NCW); }
         for (int i = 0; i < 2; ++i) {
-            bar_init(xfull + 8 * i, 1); bar_init(xempty + 8 * i, NWC); bar_init(pfull + 8 * i, NWC); bar_init(pempty + 8 * i, 1);
+            bar_init(xfull + 8 * i, 1); bar_init(xempty + 8 * i, NCW); bar_init(pfull + 8 * i, NCW); bar_init(pempty + 8 * i, 1);
         }
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
@@ -92,7 +94,7 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
 #ifdef G19_TRACE
     if (t == 0) { unsigned sm_; asm volatile("mov.u32 %0, %%smid;" : "=r"(sm_)); trace[blockIdx.x * 64 + 10] = sm_; }
 #endif
-    if (w == NWC) {  // producer: one lane walks the static range, then the tail items
+    if (w == NCW) {  // producer: one lane walks the static range, then the tail items
         if (lane == 0) {
             int ra = (int)((long)US * blockIdx.x / gridDim.x), rb = (int)((long)US * (blockIdx.x + 1) / gridDim.x);
             int xks[2] = {-1, -1}, xuse[2] = {0, 0}, xb = 1, i = 0;
@@ -135,9 +137,14 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                     const bool xl = u + 1 == rb || (u + 1) / (ntr * SPK) != ks;
                     if (xl) xks[xb] = -1;  // released by the consumers after this stage: reload even if the next run has this ks
                     tag[slot] = u | xb << 29 | (xl ? 1 << 30 : 0) | (end ? 1 << 31 : 0);
+                    if (i < 24) TR(40 + i);
                     const unsigned full = bars + 8 * slot;
+#ifdef G19_NOW
+                    bar_arrive(full);  // consumers compute on stale smem: their throughput alone
+#else
                     bar_expect(full, SB);
                     bulk(ring + slot * SB, WP + (long)u * SB, SB, full);
+#endif
                 }
                 ra = rb;
             }
@@ -149,7 +156,7 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
         }
         return;
     }
-    if (w == NWC + 1) {  // finisher: pbuf [128 rows][M] -> out [M][n] by red.global.add.v4 (lane = token, 4 rows)
+    if (w == NCW + 1) {  // finisher: pbuf [128 rows][M] -> out [M][n] by red.global.add.v4 (lane = token, 4 rows)
         asm volatile("griddepcontrol.wait;" ::: "memory");
         unsigned target = 0;
         if (PRE == 2) {  // zero a slice of out, then arrive on the epoch counter ctr[1] (+gridDim.x per launch, never reset)
@@ -189,18 +196,26 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
         return;
     }
     asm volatile("griddepcontrol.wait;" ::: "memory");
-    float acc[NT][4], acc2[NT][4];
+    // RPW = 2: warp w owns row groups 2w, 2w + 1 of the tile (one x fragment load feeds both: half the ldmatrix traffic)
+    float acc[RPW][NT][4], acc2[RPW][NT][4];
 #pragma unroll
-    for (int j = 0; j < NT; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = acc2[j][0] = acc2[j][1] = acc2[j][2] = acc2[j][3] = 0.f;
+    for (int r = 0; r < RPW; ++r)
+#pragma unroll
+        for (int j = 0; j < NT; ++j)
+#pragma unroll
+            for (int e = 0; e < 4; ++e) acc[r][j][e] = acc2[r][j][e] = 0.f;
     // ldmatrix row address: matrix q = lane / 8 (x4: n-tile pair member q / 2, k half q % 2), row = lane % 8
-    const unsigned xrow = ((lane >> 4) * 8 + (lane & 7)) * XS + ((lane >> 3) & 1) * 16;
+    // TS = 2: warps 2r, 2r + 1 share row group r (both decode it), tokens [th * MT, th * MT + MT)
+    const int wr = (w / TS) * RPW, th = w % TS;  // wr: the warp's first row group in the tile
+    const unsigned xrow = (th * MT + (lane >> 4) * 8 + (lane & 7)) * XS + ((lane >> 3) & 1) * 16;
     int q = 0, st0 = 0, prev_end = 1, prev_xl = 1;
     unsigned xph[2] = {0, 0};
-    float4 hd0, hd1;
+    float4 hd0[RPW], hd1[RPW];
     for (int i = 0;; ++i) {
         const int slot = i % NS;
         bar_wait(bars + 8 * slot, (i / NS) & 1);
         const int tg = tag[slot];
+        if (t == 0 && i < 24) TR(16 + i);
         if (tg == -1) break;
         const int u = tg & 0x1FFFFFFF, xb = (tg >> 29) & 1;
         const bool end = tg < 0, xl = (tg >> 30) & 1;
@@ -210,15 +225,20 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
             xph[xb] ^= 1;
         }
         prev_xl = xl;
-        if (prev_end) {  // run start: its escape headers (rows g, g + 8 of the warp's row group; lane c: slots 2c, 2c + 1)
+        if (prev_end) {  // run start: its escape headers (rows g, g + 8 of the warp's row groups; lane c: slots 2c, 2c + 1)
             st0 = st;
-            const float2* hp0 = H + (long)((tr * NWC + w) * 16 + g) * ESC;
-            hd0 = __ldg((const float4*)hp0 + c);
-            hd1 = __ldg((const float4*)(hp0 + 8 * ESC) + c);
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr) {
+                const float2* hp0 = H + (long)((tr * NWC + wr + rr) * 16 + g) * ESC;
+                hd0[rr] = __ldg((const float4*)hp0 + c);
+                hd1[rr] = __ldg((const float4*)(hp0 + 8 * ESC) + c);
+            }
         }
         prev_end = end;
         const unsigned xbase = xs + xb * M * XS + xrow;
-        const unsigned sb = ring + slot * SB + w * AP * 512 + lane * 16, nb = ring + slot * SB + NWC * AP * 512 + w * AP * 256 + lane * 8;
+        const unsigned sb = ring + slot * SB + wr * AP * 512 + lane * 16, nb = ring + slot * SB + NWC * AP * 512 + wr * AP * 256 + lane * 8;
+#if defined(G19_OLDLOOP) || defined(G19_NOMMA) || defined(G19_NOX)
+        static_assert(RPW == 1, "diagnostic loops: RPW 1 only");
 #pragma unroll
         for (int j = 0; j < AP; ++j) {
             uint4 sv;
@@ -227,11 +247,11 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
             asm volatile("ld.shared.v2.u32 {%0,%1}, [%2];" : "=r"(nv.x), "=r"(nv.y) : "r"(nb + j * 256));
             const unsigned kb = (st * AP + j) * 64;  // byte offset of the atom's k within the chunk
 #ifdef G19_NOMMA
-            acc[0][j & 3] += __uint_as_float(sv.x ^ sv.y ^ sv.z ^ sv.w ^ nv.x ^ nv.y); continue;
+            acc[0][0][j & 3] += __uint_as_float(sv.x ^ sv.y ^ sv.z ^ sv.w ^ nv.x ^ nv.y); continue;
 #endif
 #ifdef G19_NOX
             { const uint4 af = dec8(sv.x, sv.y, nv.x), af2 = dec8(sv.z, sv.w, nv.y);
-              acc[0][j & 3] += __uint_as_float(af.x ^ af.y ^ af.z ^ af.w ^ af2.x ^ af2.y ^ af2.z ^ af2.w); continue; }
+              acc[0][0][j & 3] += __uint_as_float(af.x ^ af.y ^ af.z ^ af.w ^ af2.x ^ af2.y ^ af2.z ^ af2.w); continue; }
 #endif
 #pragma unroll
             for (int s = 0; s < 2; ++s) {
@@ -240,26 +260,64 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                 for (int jj = 0; jj + 1 < NT; jj += 2) {
                     unsigned b0, b1, b2, b3;
                     ldsm4(xbase + jj * 8 * XS + kb + s * 32, b0, b1, b2, b3);
-                    mma(s ? acc2[jj] : acc[jj], af, b0, b1);
-                    mma(s ? acc2[jj + 1] : acc[jj + 1], af, b2, b3);
+                    mma(s ? acc2[0][jj] : acc[0][jj], af, b0, b1);
+                    mma(s ? acc2[0][jj + 1] : acc[0][jj + 1], af, b2, b3);
                 }
             }
         }
+#else
+        // groups of G atoms: all shared loads of the group first, then the x fragments, then decode + mma (the asm
+        // statements are volatile: issued in program order, so independent loads must come first to overlap)
+        constexpr int G = NT * RPW == 2 ? AP : AP < 2 ? AP : 2;
+#pragma unroll
+        for (int j0 = 0; j0 < AP; j0 += G) {
+            uint4 sv[RPW][G];
+            uint2 nv[RPW][G];
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr)
+#pragma unroll
+                for (int j = 0; j < G; ++j) {
+                    asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(sv[rr][j].x), "=r"(sv[rr][j].y), "=r"(sv[rr][j].z), "=r"(sv[rr][j].w) : "r"(sb + rr * AP * 512 + (j0 + j) * 512));
+                    asm volatile("ld.shared.v2.u32 {%0,%1}, [%2];" : "=r"(nv[rr][j].x), "=r"(nv[rr][j].y) : "r"(nb + rr * AP * 256 + (j0 + j) * 256));
+                }
+            unsigned bx[G][2][NT][2];
+#pragma unroll
+            for (int j = 0; j < G; ++j)
+#pragma unroll
+                for (int s = 0; s < 2; ++s)
+#pragma unroll
+                    for (int jj = 0; jj + 1 < NT; jj += 2)
+                        ldsm4(xbase + jj * 8 * XS + (st * AP + j0 + j) * 64 + s * 32, bx[j][s][jj][0], bx[j][s][jj][1], bx[j][s][jj + 1][0], bx[j][s][jj + 1][1]);
+#pragma unroll
+            for (int j = 0; j < G; ++j)
+#pragma unroll
+                for (int rr = 0; rr < RPW; ++rr)
+#pragma unroll
+                    for (int s = 0; s < 2; ++s) {
+                        const uint4 af = dec8(s ? sv[rr][j].z : sv[rr][j].x, s ? sv[rr][j].w : sv[rr][j].y, s ? nv[rr][j].y : nv[rr][j].x);
+#pragma unroll
+                        for (int jj = 0; jj < NT; ++jj) mma(s ? acc2[rr][jj] : acc[rr][jj], af, bx[j][s][jj][0], bx[j][s][jj][1]);
+                    }
+        }
+#endif
         __syncwarp();
         if (lane == 0) bar_arrive(bars + 8 * (NS + slot));
         if (!end) continue;  // (a last x use always ends a run: released below, after the escape fixups read x)
         // run end: rows rg*16 + g (+8), tokens jj*8 + 2c (+1), k in [klo, khi)
-        const int rg = tr * NWC + w, nat = (st - st0 + 1) * AP;
+        const int nat = (st - st0 + 1) * AP;
         const int klo = ks * KC + st0 * AP * 32, khi = ks * KC + (st + 1) * AP * 32;
-        float v[NT][4];
+        float v[RPW][NT][4];
 #pragma unroll
-        for (int jj = 0; jj < NT; ++jj)
+        for (int rr = 0; rr < RPW; ++rr)
 #pragma unroll
-            for (int e = 0; e < 4; ++e) { v[jj][e] = acc[jj][e] + acc2[jj][e]; acc[jj][e] = acc2[jj][e] = 0.f; }
-        {
+            for (int jj = 0; jj < NT; ++jj)
+#pragma unroll
+                for (int e = 0; e < 4; ++e) { v[rr][jj][e] = acc[rr][jj][e] + acc2[rr][jj][e]; acc[rr][jj][e] = acc2[rr][jj][e] = 0.f; }
+#pragma unroll
+        for (int rr = 0; rr < RPW; ++rr)
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
-                const float4 hq = h ? hd1 : hd0;
+                const float4 hq = h ? hd1[rr] : hd0[rr];
 #pragma unroll
                 for (int e2 = 0; e2 < ESC; ++e2) {  // empty slot = (col 0, 2^-15): skipped (real escapes: |value| < 2^-15)
                     const int src = (lane & ~3) | (e2 >> 1);
@@ -272,32 +330,36 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                         for (int jj = 0; jj < NT; ++jj)
 #pragma unroll
                             for (int b = 0; b < 2; ++b) {
-                                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xc + (jj * 8 + 2 * c + b) * XS));
-                                v[jj][2 * h + b] = fmaf(xv, hy, fmaf(xv, -0x1p-15f, v[jj][2 * h + b]));
+                                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xc + (th * MT + jj * 8 + 2 * c + b) * XS));
+                                v[rr][jj][2 * h + b] = fmaf(xv, hy, fmaf(xv, -0x1p-15f, v[rr][jj][2 * h + b]));
                             }
                     }
                 }
             }
-        }
         if (xl) {  // done with this x buffer (the fixups above were its last reads)
             __syncwarp();
             if (lane == 0) bar_arrive(xempty + 8 * xb);
         }
-        const int row0 = rg * 16 + g;
         if (nat == KA && PRE != 2) {  // the whole dot: plain stores (PRE 2: out is being zeroed by other blocks)
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr)
+#pragma unroll
+                for (int jj = 0; jj < NT; ++jj)
+#pragma unroll
+                    for (int e = 0; e < 4; ++e)
+                        out[(long)(th * MT + jj * 8 + 2 * c + (e & 1)) * n + (tr * NWC + wr + rr) * 16 + g + 8 * (e >> 1)] = v[rr][jj][e] * scale;
+            continue;
+        }
+        const int pb = q & 1;  // hand the partials to the finisher: pbuf[pb][row group * 16 + row16][tok]
+        if (q >= 2) bar_wait(pempty + 8 * pb, ((q >> 1) - 1) & 1);
+#pragma unroll
+        for (int rr = 0; rr < RPW; ++rr) {
+            float* pw = pbuf + pb * PBF + ((wr + rr) * 16 + g) * M + th * MT + 2 * c;
 #pragma unroll
             for (int jj = 0; jj < NT; ++jj)
 #pragma unroll
-                for (int e = 0; e < 4; ++e) out[(long)(jj * 8 + 2 * c + (e & 1)) * n + row0 + 8 * (e >> 1)] = v[jj][e] * scale;
-            continue;
+                for (int h = 0; h < 2; ++h) *(float2*)(pw + 8 * h * M + jj * 8) = make_float2(v[rr][jj][2 * h], v[rr][jj][2 * h + 1]);
         }
-        const int pb = q & 1;  // hand the partials to the finisher: pbuf[pb][w * 16 + row16][tok]
-        if (q >= 2) bar_wait(pempty + 8 * pb, ((q >> 1) - 1) & 1);
-        float* pw = pbuf + pb * PBF + (w * 16 + g) * M + 2 * c;
-#pragma unroll
-        for (int jj = 0; jj < NT; ++jj)
-#pragma unroll
-            for (int h = 0; h < 2; ++h) *(float2*)(pw + 8 * h * M + jj * 8) = make_float2(v[jj][2 * h], v[jj][2 * h + 1]);
         if (t == 0) ptag[pb] = tr;
         __syncwarp();
         if (lane == 0) bar_arrive(pfull + 8 * pb);
@@ -398,30 +460,33 @@ torch::Tensor g19_trace() {
 #endif
 // mode 0: a zero kernel (out, ctr) first, the gemm its PDL dependent. mode 1: out (and ctr if tail) already zero
 // (stream-ordered before the previous kernel), the gemm a PDL dependent of the previous kernel, streaming W early.
+// rpw: row groups per consumer warp (2: one x fragment load feeds two row groups; consumer warps = rg * ts / rpw).
+// rg: 16-row groups per tile = consumer warps (x ts); the packed stage layout depends on it (pack19 rg).
+// ts: consumer warps per 16-row group (2: each takes half the tokens; the W decode is done twice).
 // xb: x buffers (2: the next k-chunk's x loads while the current one is in use; 1: less smem, the load waits).
 // npre (modes 1, 2): weight stages streamed before griddepcontrol.wait (0: wait first, x first; use 0 when the
 // previous kernel leaves nothing to overlap). mode 2: as 1, but the gemm zeroes out itself (grid barrier on the epoch counter ctr[1]: one int per call site
 // and grid size, any initial multiple of the grid, e.g. 0; tail must be 0).
 // out: FP32 [m, n] (overwritten), ctr: int32 [>= 1] scratch. grid: blocks (<= #SMs, 1 per SM). tail: dynamic stages.
 void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out, torch::Tensor ctr,
-              int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode, int64_t npre, int64_t xb) {
+              int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode, int64_t npre, int64_t xb, int64_t ts, int64_t rg, int64_t rpw) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
-    const int sm = ns * g19::NWC * ap * 768 + xb * m * (kc * 2 + 16) + 2 * g19::NWC * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
-    TORCH_CHECK(n % (16 * g19::NWC) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0) && npre <= ns, "g19: shape");
+    const int sm = ns * rg * ap * 768 + xb * m * (kc * 2 + 16) + 2 * rg * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
+    TORCH_CHECK(n % (16 * rg) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0) && npre <= ns, "g19: shape");
     auto stream = c10::cuda::getCurrentCUDAStream();
     if (!mode) g19::zero<<<32, 256, 0, stream>>>((float4*)out.data_ptr(), m * n / 4, ctr.data_ptr<int>());
 #ifdef G19_ONLY2
     TORCH_CHECK(mode == 2, "g19: built for mode 2 only");
-#define G19_KERN(M_, KC_, AP_, NS_, IS_, XB_) g19::gemm<M_, KC_, AP_, NS_, IS_, 2, XB_>
+#define G19_KERN(M_, KC_, AP_, NS_, IS_, XB_, TS_, RG_, RPW_) g19::gemm<M_, KC_, AP_, NS_, IS_, 2, XB_, TS_, RG_, RPW_>
 #else
-#define G19_KERN(M_, KC_, AP_, NS_, IS_, XB_) (mode == 2 ? g19::gemm<M_, KC_, AP_, NS_, IS_, 2, XB_> : mode ? g19::gemm<M_, KC_, AP_, NS_, IS_, 1, XB_> : g19::gemm<M_, KC_, AP_, NS_, IS_, 0, XB_>)
+#define G19_KERN(M_, KC_, AP_, NS_, IS_, XB_, TS_, RG_, RPW_) (mode == 2 ? g19::gemm<M_, KC_, AP_, NS_, IS_, 2, XB_, TS_, RG_, RPW_> : mode ? g19::gemm<M_, KC_, AP_, NS_, IS_, 1, XB_, TS_, RG_, RPW_> : g19::gemm<M_, KC_, AP_, NS_, IS_, 0, XB_, TS_, RG_, RPW_>)
 #endif
-#define G19_CASE(M_, KC_, AP_, NS_, IS_, XB_) \
-    if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && is == IS_ && xb == XB_) { \
-        auto kern = G19_KERN(M_, KC_, AP_, NS_, IS_, XB_); \
+#define G19_CASE(M_, KC_, AP_, NS_, IS_, XB_, TS_, RG_, RPW_) \
+    if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && is == IS_ && xb == XB_ && ts == TS_ && rg == RG_ && rpw == RPW_) { \
+        auto kern = G19_KERN(M_, KC_, AP_, NS_, IS_, XB_, TS_, RG_, RPW_); \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
         cudaLaunchConfig_t cfg = {}; \
-        cfg.gridDim = dim3(grid); cfg.blockDim = dim3((g19::NWC + 2) * 32); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
+        cfg.gridDim = dim3(grid); cfg.blockDim = dim3((RG_ * TS_ / RPW_ + 2) * 32); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
         cudaLaunchAttribute attr[1]; \
         attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1; \
         cfg.attrs = attr; cfg.numAttrs = 1; \

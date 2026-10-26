@@ -89,12 +89,15 @@ BF16_G17 = {"unpooler": [(1, 4, 512), (1, 4, 256), (8, 4, 256), (8, 4, 128)]}
 # gemv19 (dev/gemv19.cu, dev/g19_lib.py): TMA-ring streamer over the 12-bit weights, FP32 out zeroed in-kernel + red.add
 # split-K partials, then a BF16 copy (g19_cvt). (m, kc, ap, ns, npre). Built for the layer (PDL W prefetch during the
 # previous kernel); standalone (no predecessor) H100 it ties cuBLAS at m16 (pooler 24.8 vs 28.0) and loses at m32.
-# (m, kc, ap, ns, npre, xb): xb = x buffers (1: m32 can use kc 1024: H100 pooler m32 22.9 vs 24.3 with (512, xb 2)).
-BF16_G19 = {"qkv_gate": [(16, 1024, 4, 4, 2, 2), (32, 1024, 4, 4, 2, 1)], "pooler": [(16, 1024, 4, 4, 2, 2), (32, 1024, 4, 4, 2, 1)],
-            "unpooler": [(16, 1024, 4, 4, 2, 2), (32, 1024, 4, 4, 2, 1)], "o": [(16, 512, 4, 3, 2, 2)]}
-# _diag19 only (print, no picks): H200 behaviour of ring depth / stage size in the layer case
-DIAG19 = {"pooler": [(16, 1024, 4, 6, 6, 1), (16, 1024, 8, 3, 3, 1), (16, 1024, 2, 8, 8, 2), (16, 2048, 4, 4, 4, 1),
-                     (32, 1024, 4, 3, 3, 1), (32, 1024, 8, 2, 2, 1), (32, 512, 4, 6, 6, 1), (32, 512, 4, 4, 4, 2)]}
+# (m, kc, ap, ns, npre, xb, ts, rg, rpw): xb x buffers, ts warps per row group, rg row groups per tile, rpw row groups per
+# warp (dev/gemv19.cu). H200 diag (check 60ddb481): pooler m16 (1024, 8, 3, xb 1) 15.65 us vs pick 19.0 after a PDL predecessor.
+BF16_G19 = {"qkv_gate": [(16, 1024, 8, 3, 2, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1)],
+            "pooler": [(16, 1024, 8, 3, 2, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1)],
+            "unpooler": [(16, 1024, 8, 3, 2, 1, 1, 8, 1), (32, 1024, 8, 2, 2, 1, 1, 8, 1)], "o": [(16, 512, 8, 3, 2, 1, 1, 8, 1)]}
+# _diag19 only (print, no picks): H200 behaviour of other configs in the layer case
+DIAG19 = {"pooler": [(16, 2048, 8, 2, 2, 1, 1, 8, 1), (16, 1024, 4, 3, 3, 1, 1, 16, 2), (32, 1024, 2, 3, 3, 1, 1, 16, 2),
+                     (32, 512, 2, 4, 4, 1, 1, 16, 2), (32, 1024, 4, 4, 4, 1, 1, 8, 1)],
+          "unpooler": [(32, 1024, 2, 3, 3, 1, 1, 16, 2)], "qkv_gate": [(32, 1024, 2, 3, 3, 1, 1, 16, 2)]}
 DIAG19_STREAM = [(24576, 3), (24576, 4), (24576, 8), (49152, 4), (12288, 8)]  # (stage bytes, stages): 50 MB bare streams
 _SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _LAYER_K = {"qkv_gate": 8192, "o": 1024, "pooler": 8192, "unpooler": 4096}
@@ -149,10 +152,10 @@ try:
     _g19 = load_inline(
         name="muse_proj_g19a",
         cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_cvt(torch::Tensor, torch::Tensor); "
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_cvt(torch::Tensor, torch::Tensor); "
                     "void g19_pred(torch::Tensor, torch::Tensor, int64_t); void g19_stream(torch::Tensor, int64_t, int64_t, torch::Tensor);",
         cuda_sources="#define G19_ONLY2\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
-            "G19_CASE(%d,%d,%d,%d,1,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in list(BF16_G19.values()) + list(DIAG19.values()) for c in v}))),
+            "G19_CASE(%d,%d,%d,%d,1,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in list(BF16_G19.values()) + list(DIAG19.values()) for c in v}))),
         functions=["g19_gemm", "g19_cvt", "g19_pred", "g19_stream"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
 except Exception as _e:  # noqa: BLE001
     print("muse_proj gemv19 build failed:", _e)
@@ -265,7 +268,7 @@ def _pack16(w, kc):
     return sw, nw, hdr, scale
 
 
-def _pack19(c, kc, ap):
+def _pack19(c, kc, ap, rg=8):
     """_compress output -> gemv19 stages: stage (ks, 128-row tile, st) = [8 row groups x ap atoms x 32 lanes x 16 B of
     sign|mantissa][same x 8 B of codes], one contiguous block (one bulk copy)."""
     code, sm, hdr, scale = c
@@ -273,9 +276,9 @@ def _pack19(c, kc, ap):
     perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()
     S = perm(sm).to(torch.uint8).reshape(k // kc, n // 16, kc // 32, 32, 16)
     N = _nib(perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8)).contiguous()
-    ks, ntr, spk = k // kc, n // 128, kc // 32 // ap
-    S = S.view(ks, ntr, 8, spk, ap * 512).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, 8 * ap * 512)
-    N = N.view(torch.uint8).view(ks, ntr, 8, spk, ap * 256).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, 8 * ap * 256)
+    ks, ntr, spk = k // kc, n // (16 * rg), kc // 32 // ap
+    S = S.view(ks, ntr, rg, spk, ap * 512).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, rg * ap * 512)
+    N = N.view(torch.uint8).view(ks, ntr, rg, spk, ap * 256).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, rg * ap * 256)
     return torch.cat([S, N], 1).contiguous(), hdr, scale
 
 
@@ -288,8 +291,8 @@ def prepare(weights):
             if c is None:
                 continue
             for cf in cfgs:
-                if ("g19", name, cf[1], cf[2]) not in st:
-                    st[("g19", name, cf[1], cf[2])] = _pack19(c, cf[1], cf[2])
+                if ("g19", name, cf[1], cf[2], cf[7]) not in st:
+                    st[("g19", name, cf[1], cf[2], cf[7])] = _pack19(c, cf[1], cf[2], cf[7])
         st["ws19"] = torch.zeros(32 * 8192, dtype=torch.float32, device=weights["o"].device)
         st["ctr19"] = torch.zeros(2, dtype=torch.int32, device=weights["o"].device)  # [1] = gemv19's epoch counter
     for name, cfgs in BF16_G12.items():
@@ -359,9 +362,9 @@ def _run(st, layer, x, out, cand):
         sw, nw, hdr, scale = st[("g16", layer, c[1])]
         _mod.g16_gemm(sw, nw, hdr, scale, x, out, out.shape[1] // 16, *c[1:])
     elif kind == "g19":
-        P, hdr, scale = st[("g19", layer, c[1], c[2])]
+        P, hdr, scale = st[("g19", layer, c[1], c[2], c[7])]
         o32 = st["ws19"][:out.numel()].view(out.shape)
-        _g19.g19_gemm(P, hdr, scale, x, o32, st["ctr19"], c[1], c[2], c[3], 1, _SMS, 0, 2, c[4], c[5])
+        _g19.g19_gemm(P, hdr, scale, x, o32, st["ctr19"], c[1], c[2], c[3], 1, _SMS, 0, 2, c[4], *c[5:])
         _g19.g19_cvt(o32, out)
     elif kind == "g17":
         _mod.g17_gemv(st[layer], x, out, *c)  # W[:n] prefix rows, in place
@@ -412,7 +415,7 @@ def _tune(st, reps=25):
     if _g19 is not None:
         for layer, cfgs in BF16_G19.items():
             for c in cfgs:
-                if ("g19", layer, c[1], c[2]) in st:
+                if ("g19", layer, c[1], c[2], c[7]) in st:
                     shapes.setdefault((layer, c[0]), []).append(("g19", c))
     if _lt is not None:
         for key, cfgs in BF16_LT.items():
@@ -473,18 +476,18 @@ def _diag19(st):
     g.manual_seed(3)
     for layer, cfgs in BF16_G19.items():
         for c in cfgs + DIAG19.get(layer, []):
-            if ("g19", layer, c[1], c[2]) not in st:
+            if ("g19", layer, c[1], c[2], c[7]) not in st:
                 continue
             m, w = c[0], st[layer]
             xs = torch.randn(m, w.shape[1], generator=g, device="cuda").to(torch.bfloat16)
             x = xs.clone()
             out = torch.empty(m, w.shape[0], dtype=torch.bfloat16, device="cuda")
-            P, hdr, scale = st[("g19", layer, c[1], c[2])]
+            P, hdr, scale = st[("g19", layer, c[1], c[2], c[7])]
             o32 = st["ws19"][:out.numel()].view(out.shape)
             pick = st["pick"].get((layer, m))
             med = _graph_medians([lambda: _g19.g19_pred(xs, x, 3000),
                                   lambda: (_g19.g19_pred(xs, x, 3000), _run(st, layer, x, out, pick)),
-                                  lambda: (_g19.g19_pred(xs, x, 3000), _g19.g19_gemm(P, hdr, scale, x, o32, st["ctr19"], c[1], c[2], c[3], 1, _SMS, 0, 2, c[3], c[5]))])
+                                  lambda: (_g19.g19_pred(xs, x, 3000), _g19.g19_gemm(P, hdr, scale, x, o32, st["ctr19"], c[1], c[2], c[3], 1, _SMS, 0, 2, c[3], *c[5:]))])
             if c not in cfgs:
                 med[1] = float("nan")
             print(f"diag19 {layer} m{m} {c}: after a 3 us PDL predecessor ({med[0] * 1e3:.2f}): pick {pick} +{(med[1] - med[0]) * 1e3:.2f} us, "
