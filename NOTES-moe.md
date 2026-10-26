@@ -720,3 +720,23 @@
   do not survive ~500 MB of expert stream through L2 even with evict_last (twm's own evict_first hints notwithstanding).
   Gain bound ~1 us even if twm lost nothing => dead on any GPU. Not sent to layer.
 - No judge runs (moe checks 20/20 used today; sandbox ends ~19:10Z).
+
+## Session 27 (2026-10-26 15:53Z - 17:05Z) -- RFLAG (tk2f launched during pr1, spins on a routing flag): marginal, parked; RSPLIT dead
+- H100 d1 sliding layer timeline (copy of r-layer 00ce840 = v84, /tmp/moe27/tl.py: per-kernel median start/end over 15 cold
+  profiled replays): pr1 22.0-46.0, rmsnorm 30.8-47.0 (PDL-waiting), tk2f 46.2-80.5, n2u 76.7-86.1, boundary -> 88.0.
+  pr1's 26 router blocks finish (and the last one routes) long before its pooler blocks: ids are ready ~15 us before pr1 ends,
+  but tk2f launched only at pr1's end (rmsnorm TRIG2 after its wait).
+- RFLAG (tools/s27/rflag_patch.py <layer dir>, edits layer.py + pr1_src.cu): pr1's routing warp release-stores a flag at moe
+  st["cnt"][97] (its ticket moves to cnt[96]: call-time view of the cloned state; n2u already zeroes cnt[0..127] after tk2f);
+  rmsnorm triggers at its START at T=1, so tk2f launches during pr1 (CTAs land on freed SMs) and thread 0 spins
+  (ld.acquire.gpu) on the flag before the routing; the flag pointer reaches tk2f through its unused non-FN `tw` arg
+  (moe_set_rflag, one-shot). Tests 13/13. Timeline: tk2f starts 32.0 (was 46.2), pr1 not slowed (ends 45.5), tk2f ends 79.0.
+  ab_files TUNE {} (A = v84, B = RFLAG), 8 rounds A/B/A/B: d1 sliding 87.42/87.18/87.19/87.08, full 107.94/107.40/107.53/106.52;
+  earlier 6-round A/B/A: 87.68/87.31/87.53, 108.24/107.62/107.94. => -0.1..-0.4 us (~0.05% layer score on the H200 at best).
+  NOT handed off: the gain is about the launch + routing prologue only (the early CTAs' 74 KB rings hold ~2 MB in total),
+  and a cross-kernel spin that hangs if the flag protocol ever breaks is not worth 0.05%. Matches layer s38's oracle
+  (L2 prefetch of the experts during pr1: -1.2 us at best): HBM is saturated during pr1.
+- RSPLIT (same patch, `RSPLIT = Q*1000 + W`): the first Q = 26 tk2f CTAs (on pr1's early-free router SMs) get W/100 of a
+  normal CTA's gemm13 rows. d1 sliding: W 150 +3.0, 200 +6.9, 300 +10.5, 50 +3.2, 80 +1.4 us vs uniform. DEAD: any
+  imbalance costs; tk2f is HBM-bound globally and the phase barrier waits for the slowest CTA.
+- No judge runs (moe checks 20/20 used on 10-26; sandbox ends ~19:10Z).
