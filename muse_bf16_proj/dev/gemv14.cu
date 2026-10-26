@@ -45,12 +45,24 @@ __device__ __forceinline__ unsigned expo(unsigned nw) {
     asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
     return r;
 }
+template <int P>  // s35 DEC3: one prmt (exponent constant 0x38 from a register) + one lop3 per BF16 pair
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel4, unsigned sel3) {
+#ifdef PJ_DEC4  // s34 layout (sign in the byte, code nibbles): for A/B builds only
+    return lop_aob(prmt(sw, sel4), 0x807f807fu, expo<P>(nw));
+#else
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);  // opaque register (== the constant)
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+#endif
+}
 __device__ __forceinline__ uint4 dec8(uint2 s, unsigned nw) {
     uint4 r;
-    r.x = lop_aob(prmt(s.x, 0x9180u), 0x807f807fu, expo<0>(nw));
-    r.y = lop_aob(prmt(s.x, 0xB3A2u), 0x807f807fu, expo<1>(nw));
-    r.z = lop_aob(prmt(s.y, 0x9180u), 0x807f807fu, expo<2>(nw));
-    r.w = lop_aob(prmt(s.y, 0xB3A2u), 0x807f807fu, expo<3>(nw));
+    r.x = decw<0>(s.x, nw, 0x9180u, 0x4140u);
+    r.y = decw<1>(s.x, nw, 0xB3A2u, 0x4342u);
+    r.z = decw<2>(s.y, nw, 0x9180u, 0x4140u);
+    r.w = decw<3>(s.y, nw, 0xB3A2u, 0x4342u);
     return r;
 }
 __device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned b0, unsigned b1) {

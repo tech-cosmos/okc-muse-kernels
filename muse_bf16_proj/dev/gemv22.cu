@@ -33,17 +33,37 @@ __device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
     asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
     return r;
 }
+__device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {  // s34: (a & b) | c
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
+    return r;
+}
 template <int P>
 __device__ __forceinline__ unsigned expo(unsigned nw) {
     const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
-    return (s & 0x07800780u) | 0x38003800u;
+    const unsigned z = gridDim.y >> 16, m2 = 0x07800780u >> z, cc = 0x38003800u >> z;  // s34 DEC4: opaque (== the immediates)
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
+    return r;
+}
+template <int P>  // s35 DEC3: one prmt (exponent constant 0x38 from a register) + one lop3 per BF16 pair
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel4, unsigned sel3) {
+#ifdef PJ_DEC4  // s34 layout (sign in the byte, code nibbles): for A/B builds only
+    return lop_aob(prmt(sw, sel4), 0x807f807fu, expo<P>(nw));
+#else
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);  // opaque register (== the constant)
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+#endif
 }
 __device__ __forceinline__ uint4 dec8(unsigned s0, unsigned s1, unsigned nw) {
     uint4 r;
-    r.x = (prmt(s0, 0x9180u) & 0x807f807fu) | expo<0>(nw);
-    r.y = (prmt(s0, 0xB3A2u) & 0x807f807fu) | expo<1>(nw);
-    r.z = (prmt(s1, 0x9180u) & 0x807f807fu) | expo<2>(nw);
-    r.w = (prmt(s1, 0xB3A2u) & 0x807f807fu) | expo<3>(nw);
+    r.x = decw<0>(s0, nw, 0x9180u, 0x4140u);
+    r.y = decw<1>(s0, nw, 0xB3A2u, 0x4342u);
+    r.z = decw<2>(s1, nw, 0x9180u, 0x4140u);
+    r.w = decw<3>(s1, nw, 0xB3A2u, 0x4342u);
     return r;
 }
 __device__ __forceinline__ void mma(float* c, const uint4& a, unsigned b0, unsigned b1) {

@@ -81,7 +81,10 @@ for nm, layer, n in SH:
         for (m_, kc, ap, ns, is_, tpb, xb_, ts_, rg_, rpw_) in cfgs:
             if m_ != M or k % kc: continue
             if (kc, ap, rg_) not in packs: packs[(kc, ap, rg_)] = (pack19raw if RAW else pack19r)(W, kc, ap, rg_)
-            P, hdr, scale = packs[(kc, ap, rg_)]
+            if "G19_DEC3" in os.environ.get("DEFS", "") and len(packs[(kc, ap, rg_)]) == 3:  # s35: DEC3 layout
+                sys.path.insert(0, os.path.join(d, "s35")); import dec3
+                P_, h_, sc_ = packs[(kc, ap, rg_)]; packs[(kc, ap, rg_)] = (dec3.tr3_packed(P_, rg_ * ap * 512), h_, sc_, 0)
+            P, hdr, scale = packs[(kc, ap, rg_)][:3]
             tail = tpb * GRID // is_ * is_
             er = (hdr[:, :, 1] != 2.0 ** -15).nonzero()
             col = int(hdr[er[0, 0], er[0, 1], 0].view(torch.int32)) if len(er) else 3

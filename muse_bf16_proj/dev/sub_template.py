@@ -343,13 +343,32 @@ def _nib(code):
     return torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
 
 
+def _dec3(sm, code):
+    """s35 DEC3 layout over groups of 8 weights (last dim = the kernels' dec8 unit: 8 bytes + 1 word): byte = c0 << 7 |
+    mantissa; word: weight 2P + h's sign, c1, c2, c3 at bits (15, 8, 9, 10) + 16h + (0, -4, -8, 4)[P] (mod 32). Kernels
+    (decw in dev/gemv*.cu): prmt with 0x38 for the exponent's top bits + one lop3 per BF16 pair. Checked lossless here."""
+    sm, code = sm.long(), code.long()
+    i = torch.arange(8, device=sm.device)
+    off = 16 * (i % 2) + torch.tensor([0, -4, -8, 4], device=sm.device)[i // 2]
+    pos = [(b + off) % 32 for b in (15, 8, 9, 10)]
+    bits = [(sm >> 7) & 1, (code >> 1) & 1, (code >> 2) & 1, (code >> 3) & 1]
+    v = sum(b << q for b, q in zip(bits, pos)).sum(-1)
+    b3 = ((code & 1) << 7) | (sm & 0x7F)
+    back = [(v.unsqueeze(-1) >> q) & 1 for q in pos]  # round trip: every bit lands in its own place
+    if not (torch.equal(back[0], bits[0]) and torch.equal(back[1] | back[2] << 1 | back[3] << 2, code >> 1)
+            and torch.equal(b3 >> 7, code & 1) and torch.equal(b3 & 0x7F, sm & 0x7F)):
+        raise RuntimeError("DEC3 packing round trip failed")
+    return b3.to(torch.uint8), torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
+
+
 def _pack13(w):
     """gemv13 layout: flat byte plane, code words over 8 consecutive weights."""
     c = _compress(w)
     if c is None:
         return None
     code, sm, hdr, scale = c
-    return sm.to(torch.uint8).flatten().contiguous(), _nib(code.flatten().view(-1, 8)).contiguous(), hdr, scale
+    s3, n3 = _dec3(sm.flatten().view(-1, 8), code.flatten().view(-1, 8))
+    return s3.flatten().contiguous(), n3.contiguous(), hdr, scale
 
 
 def _pack14(w, kc):
@@ -360,7 +379,8 @@ def _pack14(w, kc):
     code, sm, hdr, scale = c
     n, k = w.shape
     perm = lambda t: t.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
-    return perm(sm).to(torch.uint8), _nib(perm(code)).contiguous(), hdr, scale
+    s3, n3 = _dec3(perm(sm), perm(code))
+    return s3, n3.contiguous(), hdr, scale
 
 
 def _pack16(w, kc):
@@ -373,8 +393,9 @@ def _pack16(w, kc):
     n, k = w.shape
     # [rg, h, g, ks, atom, s, hk, c, e] -> [ks, rg, atom, g, c, s, hk, h, e]
     perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()
-    sw = perm(sm).to(torch.uint8).reshape(k // kc, n // 16, kc // 32, 32, 16).contiguous()
-    nw = _nib(perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8)).contiguous()
+    s3, nw = _dec3(perm(sm).reshape(k // kc, n // 16, kc // 32, 32, 2, 8), perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8))
+    sw = s3.reshape(k // kc, n // 16, kc // 32, 32, 16).contiguous()
+    nw = nw.contiguous()
     return sw, nw, hdr, scale
 
 
@@ -384,8 +405,9 @@ def _pack19(c, kc, ap, rg=8, tm=0):
     code, sm, hdr, scale = c
     n, k = code.shape
     perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()
-    S = perm(sm).to(torch.uint8).reshape(k // kc, n // 16, kc // 32, 32, 16)
-    N = _nib(perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8)).contiguous()
+    S, N = _dec3(perm(sm).reshape(k // kc, n // 16, kc // 32, 32, 2, 8), perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8))
+    S = S.reshape(k // kc, n // 16, kc // 32, 32, 16)
+    N = N.contiguous()
     ks, ntr, spk = k // kc, n // (16 * rg), kc // 32 // ap
     pm = (1, 0, 3, 2, 4) if tm else (0, 1, 3, 2, 4)  # tm: tile-major stages (tile, ks, st) for mode 3
     S = S.view(ks, ntr, rg, spk, ap * 512).permute(*pm).reshape(ks * ntr * spk, rg * ap * 512)

@@ -37,10 +37,15 @@ for nm, layer in SH:
     W = Wr[layer].contiguous(); n, k = W.shape
     for (M, kc, ap, ns, xb) in cfgs:
         P, hdr, scale = pack19r(W, kc, ap)
+        PB = {b: P for b in "AB"}
+        for b in "AB":  # s35: DEC3 layout for a build with G19_DEC3
+            if "G19_DEC3" in os.environ.get("DEFS_" + b, ""):
+                sys.path.insert(0, os.path.join(d, "s35")); import dec3
+                PB[b] = dec3.tr3_packed(P, 8 * ap * 512)
         x = torch.randn(M, k, device="cuda").bfloat16(); xs = x.clone()
         out = torch.empty(M, n, device="cuda")
         ref = (x.double() @ W.double().T)
-        run = {key: (lambda m_=m_: (m_.g19_pred(xs, x, PRED), m_.g19_gemm(P, hdr, scale, x, out, ctr, kc, ap, ns, 1, GRID, 0, 2, ns, xb, 1, 8, 1)))
+        run = {key: (lambda m_=m_, key_=key: (m_.g19_pred(xs, x, PRED), m_.g19_gemm(PB[key_], hdr, scale, x, out, ctr, kc, ap, ns, 1, GRID, 0, 2, ns, xb, 1, 8, 1)))
                for key, m_ in mods.items()}
         for key in run:
             for _ in range(2):

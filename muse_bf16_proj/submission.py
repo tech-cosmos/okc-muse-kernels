@@ -651,11 +651,23 @@ __device__ __forceinline__ unsigned expo(unsigned nw) {
     asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
     return r;
 }
+template <int P>  // s35 DEC3: one prmt (exponent constant 0x38 from a register) + one lop3 per BF16 pair
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel4, unsigned sel3) {
+#ifdef PJ_DEC4  // s34 layout (sign in the byte, code nibbles): for A/B builds only
+    return lop_aob(prmt(sw, sel4), 0x807f807fu, expo<P>(nw));
+#else
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);  // opaque register (== the constant)
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+#endif
+}
 // 4 weights (bytes of sw) -> 2 BF16 pairs; nibble word nw, pairs P0, P0 + 1
 template <int P0>
 __device__ __forceinline__ void dec4(unsigned sw, unsigned nw, float* f) {
-    const unsigned q0 = lop_aob(prmt(sw, 0x9180u), 0x807f807fu, expo<P0>(nw));
-    const unsigned q1 = lop_aob(prmt(sw, 0xB3A2u), 0x807f807fu, expo<P0 + 1>(nw));
+    const unsigned q0 = decw<P0>(sw, nw, 0x9180u, 0x4140u);
+    const unsigned q1 = decw<P0 + 1>(sw, nw, 0xB3A2u, 0x4342u);
     f[0] = __uint_as_float(q0 << 16); f[1] = __uint_as_float(q0 & 0xffff0000u);
     f[2] = __uint_as_float(q1 << 16); f[3] = __uint_as_float(q1 & 0xffff0000u);
 }
@@ -923,12 +935,24 @@ __device__ __forceinline__ unsigned expo(unsigned nw) {
     asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
     return r;
 }
+template <int P>  // s35 DEC3: one prmt (exponent constant 0x38 from a register) + one lop3 per BF16 pair
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel4, unsigned sel3) {
+#ifdef PJ_DEC4  // s34 layout (sign in the byte, code nibbles): for A/B builds only
+    return lop_aob(prmt(sw, sel4), 0x807f807fu, expo<P>(nw));
+#else
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);  // opaque register (== the constant)
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+#endif
+}
 __device__ __forceinline__ uint4 dec8(uint2 s, unsigned nw) {
     uint4 r;
-    r.x = lop_aob(prmt(s.x, 0x9180u), 0x807f807fu, expo<0>(nw));
-    r.y = lop_aob(prmt(s.x, 0xB3A2u), 0x807f807fu, expo<1>(nw));
-    r.z = lop_aob(prmt(s.y, 0x9180u), 0x807f807fu, expo<2>(nw));
-    r.w = lop_aob(prmt(s.y, 0xB3A2u), 0x807f807fu, expo<3>(nw));
+    r.x = decw<0>(s.x, nw, 0x9180u, 0x4140u);
+    r.y = decw<1>(s.x, nw, 0xB3A2u, 0x4342u);
+    r.z = decw<2>(s.y, nw, 0x9180u, 0x4140u);
+    r.w = decw<3>(s.y, nw, 0xB3A2u, 0x4342u);
     return r;
 }
 __device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned b0, unsigned b1) {
@@ -1123,17 +1147,37 @@ __device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
     asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
     return r;
 }
+__device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {  // s34: (a & b) | c
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
+    return r;
+}
 template <int P>
 __device__ __forceinline__ unsigned expo(unsigned nw) {
     const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
-    return (s & 0x07800780u) | 0x38003800u;
+    const unsigned z = gridDim.y >> 16, m2 = 0x07800780u >> z, cc = 0x38003800u >> z;  // s34 DEC4: opaque (== the immediates)
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
+    return r;
+}
+template <int P>  // s35 DEC3: one prmt (exponent constant 0x38 from a register) + one lop3 per BF16 pair
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel4, unsigned sel3) {
+#ifdef PJ_DEC4  // s34 layout (sign in the byte, code nibbles): for A/B builds only
+    return lop_aob(prmt(sw, sel4), 0x807f807fu, expo<P>(nw));
+#else
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);  // opaque register (== the constant)
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+#endif
 }
 __device__ __forceinline__ uint4 dec8(uint2 s, unsigned nw) {
     uint4 r;
-    r.x = (prmt(s.x, 0x9180u) & 0x807f807fu) | expo<0>(nw);
-    r.y = (prmt(s.x, 0xB3A2u) & 0x807f807fu) | expo<1>(nw);
-    r.z = (prmt(s.y, 0x9180u) & 0x807f807fu) | expo<2>(nw);
-    r.w = (prmt(s.y, 0xB3A2u) & 0x807f807fu) | expo<3>(nw);
+    r.x = decw<0>(s.x, nw, 0x9180u, 0x4140u);
+    r.y = decw<1>(s.x, nw, 0xB3A2u, 0x4342u);
+    r.z = decw<2>(s.y, nw, 0x9180u, 0x4140u);
+    r.w = decw<3>(s.y, nw, 0xB3A2u, 0x4342u);
     return r;
 }
 __device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned b0, unsigned b1) {
@@ -1317,17 +1361,37 @@ __device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
     asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
     return r;
 }
+__device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {  // s34: (a & b) | c
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
+    return r;
+}
 template <int P>
 __device__ __forceinline__ unsigned expo(unsigned nw) {
     const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
-    return (s & 0x07800780u) | 0x38003800u;
+    const unsigned z = gridDim.y >> 16, m2 = 0x07800780u >> z, cc = 0x38003800u >> z;  // s34 DEC4: opaque (== the immediates)
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
+    return r;
+}
+template <int P>  // s35 DEC3: one prmt (exponent constant 0x38 from a register) + one lop3 per BF16 pair
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel4, unsigned sel3) {
+#ifdef PJ_DEC4  // s34 layout (sign in the byte, code nibbles): for A/B builds only
+    return lop_aob(prmt(sw, sel4), 0x807f807fu, expo<P>(nw));
+#else
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);  // opaque register (== the constant)
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+#endif
 }
 __device__ __forceinline__ uint4 dec8(unsigned s0, unsigned s1, unsigned nw) {
     uint4 r;
-    r.x = (prmt(s0, 0x9180u) & 0x807f807fu) | expo<0>(nw);
-    r.y = (prmt(s0, 0xB3A2u) & 0x807f807fu) | expo<1>(nw);
-    r.z = (prmt(s1, 0x9180u) & 0x807f807fu) | expo<2>(nw);
-    r.w = (prmt(s1, 0xB3A2u) & 0x807f807fu) | expo<3>(nw);
+    r.x = decw<0>(s0, nw, 0x9180u, 0x4140u);
+    r.y = decw<1>(s0, nw, 0xB3A2u, 0x4342u);
+    r.z = decw<2>(s1, nw, 0x9180u, 0x4140u);
+    r.w = decw<3>(s1, nw, 0xB3A2u, 0x4342u);
     return r;
 }
 __device__ __forceinline__ void mma(float* c, const uint4& a, unsigned b0, unsigned b1) {
@@ -1579,12 +1643,24 @@ __device__ __forceinline__ unsigned expo(unsigned nw) {
     asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
     return r;
 }
+template <int P>  // s35 DEC3: one prmt (exponent constant 0x38 from a register) + one lop3 per BF16 pair
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel4, unsigned sel3) {
+#ifdef PJ_DEC4  // s34 layout (sign in the byte, code nibbles): for A/B builds only
+    return lop_aob(prmt(sw, sel4), 0x807f807fu, expo<P>(nw));
+#else
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);  // opaque register (== the constant)
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+#endif
+}
 __device__ __forceinline__ uint4 dec8(unsigned s0, unsigned s1, unsigned nw) {
     uint4 r;
-    r.x = lop_aob(prmt(s0, 0x9180u), 0x807f807fu, expo<0>(nw));
-    r.y = lop_aob(prmt(s0, 0xB3A2u), 0x807f807fu, expo<1>(nw));
-    r.z = lop_aob(prmt(s1, 0x9180u), 0x807f807fu, expo<2>(nw));
-    r.w = lop_aob(prmt(s1, 0xB3A2u), 0x807f807fu, expo<3>(nw));
+    r.x = decw<0>(s0, nw, 0x9180u, 0x4140u);
+    r.y = decw<1>(s0, nw, 0xB3A2u, 0x4342u);
+    r.z = decw<2>(s1, nw, 0x9180u, 0x4140u);
+    r.w = decw<3>(s1, nw, 0xB3A2u, 0x4342u);
     return r;
 }
 __device__ __forceinline__ void mma(float* c, const uint4& a, unsigned b0, unsigned b1) {
@@ -2354,17 +2430,37 @@ __device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
     asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
     return r;
 }
+__device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {  // s34: (a & b) | c
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
+    return r;
+}
 template <int P>
 __device__ __forceinline__ unsigned expo(unsigned nw) {
     const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
-    return (s & 0x07800780u) | 0x38003800u;
+    const unsigned z = gridDim.y >> 16, m2 = 0x07800780u >> z, cc = 0x38003800u >> z;  // s34 DEC4: opaque (== the immediates)
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
+    return r;
+}
+template <int P>  // s35 DEC3: one prmt (exponent constant 0x38 from a register) + one lop3 per BF16 pair
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel4, unsigned sel3) {
+#ifdef PJ_DEC4  // s34 layout (sign in the byte, code nibbles): for A/B builds only
+    return lop_aob(prmt(sw, sel4), 0x807f807fu, expo<P>(nw));
+#else
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);  // opaque register (== the constant)
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+#endif
 }
 __device__ __forceinline__ uint4 dec8(unsigned s0, unsigned s1, unsigned nw) {
     uint4 r;
-    r.x = (prmt(s0, 0x9180u) & 0x807f807fu) | expo<0>(nw);
-    r.y = (prmt(s0, 0xB3A2u) & 0x807f807fu) | expo<1>(nw);
-    r.z = (prmt(s1, 0x9180u) & 0x807f807fu) | expo<2>(nw);
-    r.w = (prmt(s1, 0xB3A2u) & 0x807f807fu) | expo<3>(nw);
+    r.x = decw<0>(s0, nw, 0x9180u, 0x4140u);
+    r.y = decw<1>(s0, nw, 0xB3A2u, 0x4342u);
+    r.z = decw<2>(s1, nw, 0x9180u, 0x4140u);
+    r.w = decw<3>(s1, nw, 0xB3A2u, 0x4342u);
     return r;
 }
 __device__ __forceinline__ void mma(float* c, const uint4& a, unsigned b0, unsigned b1) {
@@ -2917,17 +3013,37 @@ __device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
     asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
     return r;
 }
+__device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {  // s34: (a & b) | c
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
+    return r;
+}
 template <int P>
 __device__ __forceinline__ unsigned expo(unsigned nw) {
     const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
-    return (s & 0x07800780u) | 0x38003800u;
+    const unsigned z = gridDim.y >> 16, m2 = 0x07800780u >> z, cc = 0x38003800u >> z;  // s34 DEC4: opaque (== the immediates)
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
+    return r;
+}
+template <int P>  // s35 DEC3: one prmt (exponent constant 0x38 from a register) + one lop3 per BF16 pair
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel4, unsigned sel3) {
+#ifdef PJ_DEC4  // s34 layout (sign in the byte, code nibbles): for A/B builds only
+    return lop_aob(prmt(sw, sel4), 0x807f807fu, expo<P>(nw));
+#else
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);  // opaque register (== the constant)
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+#endif
 }
 __device__ __forceinline__ uint4 dec8(unsigned s0, unsigned s1, unsigned nw) {
     uint4 r;
-    r.x = (prmt(s0, 0x9180u) & 0x807f807fu) | expo<0>(nw);
-    r.y = (prmt(s0, 0xB3A2u) & 0x807f807fu) | expo<1>(nw);
-    r.z = (prmt(s1, 0x9180u) & 0x807f807fu) | expo<2>(nw);
-    r.w = (prmt(s1, 0xB3A2u) & 0x807f807fu) | expo<3>(nw);
+    r.x = decw<0>(s0, nw, 0x9180u, 0x4140u);
+    r.y = decw<1>(s0, nw, 0xB3A2u, 0x4342u);
+    r.z = decw<2>(s1, nw, 0x9180u, 0x4140u);
+    r.w = decw<3>(s1, nw, 0xB3A2u, 0x4342u);
     return r;
 }
 __device__ __forceinline__ void mma(float* c, const uint4& a, unsigned b0, unsigned b1) {
@@ -3972,15 +4088,35 @@ __device__ __forceinline__ unsigned prmt(unsigned a, unsigned sel) {
     asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(a), "r"(sel));
     return r;
 }
+__device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {  // s34: (a & b) | c
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
+    return r;
+}
 template <int P>
 __device__ __forceinline__ unsigned expo(unsigned nw) {
     const unsigned s = P == 0 ? nw << 7 : P == 1 ? nw << 3 : P == 2 ? nw >> 1 : nw >> 5;
-    return (s & 0x07800780u) | 0x38003800u;
+    const unsigned z = gridDim.y >> 16, m2 = 0x07800780u >> z, cc = 0x38003800u >> z;  // s34 DEC4: opaque (== the immediates)
+    unsigned r;
+    asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(s), "r"(m2), "r"(cc));  // (s & m2) | cc
+    return r;
+}
+template <int P>  // s35 DEC3: one prmt (exponent constant 0x38 from a register) + one lop3 per BF16 pair
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel4, unsigned sel3) {
+#ifdef PJ_DEC4  // s34 layout (sign in the byte, code nibbles): for A/B builds only
+    return lop_aob(prmt(sw, sel4), 0x807f807fu, expo<P>(nw));
+#else
+    const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+    const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);  // opaque register (== the constant)
+    unsigned p;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+    return lop_aob(sh, 0x87008700u, p);
+#endif
 }
 template <int P0>
 __device__ __forceinline__ void dec4(unsigned sw, unsigned nw, float* f) {
-    const unsigned q0 = (prmt(sw, 0x9180u) & 0x807f807fu) | expo<P0>(nw);
-    const unsigned q1 = (prmt(sw, 0xB3A2u) & 0x807f807fu) | expo<P0 + 1>(nw);
+    const unsigned q0 = decw<P0>(sw, nw, 0x9180u, 0x4140u);
+    const unsigned q1 = decw<P0 + 1>(sw, nw, 0xB3A2u, 0x4342u);
     f[0] = __uint_as_float(q0 << 16); f[1] = __uint_as_float(q0 & 0xffff0000u);
     f[2] = __uint_as_float(q1 << 16); f[3] = __uint_as_float(q1 & 0xffff0000u);
 }
@@ -4740,13 +4876,32 @@ def _nib(code):
     return torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
 
 
+def _dec3(sm, code):
+    """s35 DEC3 layout over groups of 8 weights (last dim = the kernels' dec8 unit: 8 bytes + 1 word): byte = c0 << 7 |
+    mantissa; word: weight 2P + h's sign, c1, c2, c3 at bits (15, 8, 9, 10) + 16h + (0, -4, -8, 4)[P] (mod 32). Kernels
+    (decw in dev/gemv*.cu): prmt with 0x38 for the exponent's top bits + one lop3 per BF16 pair. Checked lossless here."""
+    sm, code = sm.long(), code.long()
+    i = torch.arange(8, device=sm.device)
+    off = 16 * (i % 2) + torch.tensor([0, -4, -8, 4], device=sm.device)[i // 2]
+    pos = [(b + off) % 32 for b in (15, 8, 9, 10)]
+    bits = [(sm >> 7) & 1, (code >> 1) & 1, (code >> 2) & 1, (code >> 3) & 1]
+    v = sum(b << q for b, q in zip(bits, pos)).sum(-1)
+    b3 = ((code & 1) << 7) | (sm & 0x7F)
+    back = [(v.unsqueeze(-1) >> q) & 1 for q in pos]  # round trip: every bit lands in its own place
+    if not (torch.equal(back[0], bits[0]) and torch.equal(back[1] | back[2] << 1 | back[3] << 2, code >> 1)
+            and torch.equal(b3 >> 7, code & 1) and torch.equal(b3 & 0x7F, sm & 0x7F)):
+        raise RuntimeError("DEC3 packing round trip failed")
+    return b3.to(torch.uint8), torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
+
+
 def _pack13(w):
     """gemv13 layout: flat byte plane, code words over 8 consecutive weights."""
     c = _compress(w)
     if c is None:
         return None
     code, sm, hdr, scale = c
-    return sm.to(torch.uint8).flatten().contiguous(), _nib(code.flatten().view(-1, 8)).contiguous(), hdr, scale
+    s3, n3 = _dec3(sm.flatten().view(-1, 8), code.flatten().view(-1, 8))
+    return s3.flatten().contiguous(), n3.contiguous(), hdr, scale
 
 
 def _pack14(w, kc):
@@ -4757,7 +4912,8 @@ def _pack14(w, kc):
     code, sm, hdr, scale = c
     n, k = w.shape
     perm = lambda t: t.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
-    return perm(sm).to(torch.uint8), _nib(perm(code)).contiguous(), hdr, scale
+    s3, n3 = _dec3(perm(sm), perm(code))
+    return s3, n3.contiguous(), hdr, scale
 
 
 def _pack16(w, kc):
@@ -4770,8 +4926,9 @@ def _pack16(w, kc):
     n, k = w.shape
     # [rg, h, g, ks, atom, s, hk, c, e] -> [ks, rg, atom, g, c, s, hk, h, e]
     perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()
-    sw = perm(sm).to(torch.uint8).reshape(k // kc, n // 16, kc // 32, 32, 16).contiguous()
-    nw = _nib(perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8)).contiguous()
+    s3, nw = _dec3(perm(sm).reshape(k // kc, n // 16, kc // 32, 32, 2, 8), perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8))
+    sw = s3.reshape(k // kc, n // 16, kc // 32, 32, 16).contiguous()
+    nw = nw.contiguous()
     return sw, nw, hdr, scale
 
 
@@ -4781,8 +4938,9 @@ def _pack19(c, kc, ap, rg=8, tm=0):
     code, sm, hdr, scale = c
     n, k = code.shape
     perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()
-    S = perm(sm).to(torch.uint8).reshape(k // kc, n // 16, kc // 32, 32, 16)
-    N = _nib(perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8)).contiguous()
+    S, N = _dec3(perm(sm).reshape(k // kc, n // 16, kc // 32, 32, 2, 8), perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8))
+    S = S.reshape(k // kc, n // 16, kc // 32, 32, 16)
+    N = N.contiguous()
     ks, ntr, spk = k // kc, n // (16 * rg), kc // 32 // ap
     pm = (1, 0, 3, 2, 4) if tm else (0, 1, 3, 2, 4)  # tm: tile-major stages (tile, ks, st) for mode 3
     S = S.view(ks, ntr, rg, spk, ap * 512).permute(*pm).reshape(ks * ntr * spk, rg * ap * 512)
