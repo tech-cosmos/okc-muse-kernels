@@ -3757,7 +3757,7 @@ def _plan(cfg, max_pages, device):
 @triton.jit
 def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ: tl.constexpr, HKV: tl.constexpr,
              G: tl.constexpr, D: tl.constexpr, M: tl.constexpr, S: tl.constexpr, NR: tl.constexpr,
-             SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False):
+             SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False, TRIG: tl.constexpr = False):
     """plan red's merge (one KV head pair, M = 2 G rows = query heads; program b = request b): the NR replicas of
     the sums at reference max 0, merged exactly with any listed out-of-range partials (slot ids in rcnt[2:]); then
     RMSNorm and sigmoid(gate). Leaves the sums and the list count zeroed for the next call. Batched (s103): request
@@ -3775,6 +3775,8 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
     gate = tl.load(qkv_ptr + (HQ + 2 * HKV) * D + col).to(tl.float32)
     vs = tl.load(vs_ptr)
     gdc_wait()
+    if TRIG:  # layer s27 RF_TRIG: the o GEMV (PDL secondary, W preload before its wait) launches only now
+        gdc_launch_dependents()
     a = tl.zeros([M, D], tl.float32)
     l = tl.zeros([M], tl.float32)
     for k in tl.static_range(NR):
@@ -4058,13 +4060,15 @@ def _red_args(batch, group, d, sl, device, out):
 # _red_fin warps: batch 1 (decode 1 full) 16 instead of 4 (fewer loads per thread on the post-wait L2 trip): H100 paired
 # -0.27/-0.34 us (15/15 twice), bit-identical; 8 -0.14..-0.28, 32 tie, 1-2 +0.6..+1.7. Batched decode full: 8/16 tie/lose.
 RF_NW1 = 16
+RF_TRIG = True  # layer s27 (TUNE option rf_trig at T=1; H100 d1 full -1.5..-3.1 us): batch 1: trigger the dependents right after the wait (s4's +2.5 us was a trigger at entry)
 RF_NW = 4
 
 
 def _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, sl, bal):
     red, rcnt, rcw = _red_bufs(batch, group, d, sl, qkv.device)
     _red_fin[(batch,)](qkv, red, rcnt, pacc, pml, data["v_scale"], out, HQ=hq, HKV=hkv, G=group, D=d, M=2 * group,
-                       S=splits, NR=4 if batch == 1 else BNR, SL=0 if batch == 1 else sl, RCW=rcw, BAL=bal, num_warps=RF_NW1 if batch == 1 else RF_NW, launch_pdl=True)
+                       S=splits, NR=4 if batch == 1 else BNR, SL=0 if batch == 1 else sl, RCW=rcw, BAL=bal, num_warps=RF_NW1 if batch == 1 else RF_NW, launch_pdl=True,
+                       TRIG=RF_TRIG and batch == 1)
 
 
 def _decode_gluon(data, cfg, plan):
@@ -12865,10 +12869,11 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
-            {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False}),
+            {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
+            {"rf_trig": False}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}),
@@ -13135,6 +13140,7 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
 # the unpool slice split over k into NU8_KB-wide FP32 slabs, PDL secondary of moe_tk2f) -> the boundary adds the slabs.
 # Replaces moe_norm3 + gemv17 (H100 v1 tail tk2f end -> norm3 3.7 -> g17 4.6 -> boundary 3.3 us). TUNE option "nu8".
 NU8_DEFAULT = False
+RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 -> 109.9 (8 rounds), 112.3 -> 110.7 (4)
 TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
 TK2FJ_TOKENS = (16, 32)  # s27: the same at T = 16/32 after joining the router's side stream before the rmsnorm
 TK2FJ_DEFAULT = True  # H100 ab_files 5 rounds: d16 212.4/313.3 -> 209.9/313.8, d32 205.7/433.8 -> 203.7/432.0 us
@@ -13208,6 +13214,8 @@ def kernel_fn(data, state):
         # the window's page-table entries (csl's speculative range: the table's last W + 1 columns)
         n_pf = min(pt.shape[1], cfg["window"] + 1)
         kv_pf = (pt[0, pt.shape[1] - n_pf:], kc, vc, n_pf, kc.stride(0) * kc.element_size())
+    global RF_TRIG
+    RF_TRIG = _opt(state, tokens, "rf_trig", RF_TRIG_DEFAULT)  # s27: attention's _red_fin (decode 1 full) triggers o after its wait
     qkv = _g19(data["attn_input"], "qkv_gate", state)  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
     qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf) if qkv is None else qkv.to(torch.bfloat16)
     o = attn_kernel_fn({

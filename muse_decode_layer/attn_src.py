@@ -3705,7 +3705,7 @@ def _plan(cfg, max_pages, device):
 @triton.jit
 def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ: tl.constexpr, HKV: tl.constexpr,
              G: tl.constexpr, D: tl.constexpr, M: tl.constexpr, S: tl.constexpr, NR: tl.constexpr,
-             SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False):
+             SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False, TRIG: tl.constexpr = False):
     """plan red's merge (one KV head pair, M = 2 G rows = query heads; program b = request b): the NR replicas of
     the sums at reference max 0, merged exactly with any listed out-of-range partials (slot ids in rcnt[2:]); then
     RMSNorm and sigmoid(gate). Leaves the sums and the list count zeroed for the next call. Batched (s103): request
@@ -3723,6 +3723,8 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
     gate = tl.load(qkv_ptr + (HQ + 2 * HKV) * D + col).to(tl.float32)
     vs = tl.load(vs_ptr)
     gdc_wait()
+    if TRIG:  # layer s27 RF_TRIG: the o GEMV (PDL secondary, W preload before its wait) launches only now
+        gdc_launch_dependents()
     a = tl.zeros([M, D], tl.float32)
     l = tl.zeros([M], tl.float32)
     for k in tl.static_range(NR):
@@ -4006,13 +4008,15 @@ def _red_args(batch, group, d, sl, device, out):
 # _red_fin warps: batch 1 (decode 1 full) 16 instead of 4 (fewer loads per thread on the post-wait L2 trip): H100 paired
 # -0.27/-0.34 us (15/15 twice), bit-identical; 8 -0.14..-0.28, 32 tie, 1-2 +0.6..+1.7. Batched decode full: 8/16 tie/lose.
 RF_NW1 = 16
+RF_TRIG = True  # layer s27 (TUNE option rf_trig at T=1; H100 d1 full -1.5..-3.1 us): batch 1: trigger the dependents right after the wait (s4's +2.5 us was a trigger at entry)
 RF_NW = 4
 
 
 def _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, sl, bal):
     red, rcnt, rcw = _red_bufs(batch, group, d, sl, qkv.device)
     _red_fin[(batch,)](qkv, red, rcnt, pacc, pml, data["v_scale"], out, HQ=hq, HKV=hkv, G=group, D=d, M=2 * group,
-                       S=splits, NR=4 if batch == 1 else BNR, SL=0 if batch == 1 else sl, RCW=rcw, BAL=bal, num_warps=RF_NW1 if batch == 1 else RF_NW, launch_pdl=True)
+                       S=splits, NR=4 if batch == 1 else BNR, SL=0 if batch == 1 else sl, RCW=rcw, BAL=bal, num_warps=RF_NW1 if batch == 1 else RF_NW, launch_pdl=True,
+                       TRIG=RF_TRIG and batch == 1)
 
 
 def _decode_gluon(data, cfg, plan):
