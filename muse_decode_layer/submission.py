@@ -9047,9 +9047,12 @@ def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, 
 
 @triton.jit
 def _router_split(h_ptr, w_ptr, wlo_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr,
-                  BT: tl.constexpr, BE: tl.constexpr, BK: tl.constexpr, KS: tl.constexpr, HILO: tl.constexpr):
+                  BT: tl.constexpr, BE: tl.constexpr, BK: tl.constexpr, KS: tl.constexpr, HILO: tl.constexpr,
+                  TRIG: tl.constexpr = False):
     """part[ks, t, e] = sum over this split's K of h[t, k] w[e, k]. HILO: h BF16, w = hi + lo (BF16 pair, both
-    [E, K]), FP32 accumulation; else h and w FP32 in FP32 FMA (ieee)."""
+    [E, K]), FP32 accumulation; else h and w FP32 in FP32 FMA (ieee). TRIG (s39): let the PDL dependent (_routing) launch."""
+    if TRIG:
+        gdc_launch_dependents()
     pe = tl.program_id(0)
     ks = tl.program_id(1)
     pt = tl.program_id(2)
@@ -9147,6 +9150,8 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     pr3 = _G10.get("lib") if not fp32 and tokens in PR3_CFG else None
     if lib is not None or pr3 is not None:
         ks = 1  # no split K: part = the logits
+    rpdl = ((pr3 is not None or not fp32 and lib is None and tokens in ROUTE_PDL_SPLIT_TOKENS)
+            and _opt(state, tokens, "route_pdl", ROUTE_PDL))
     part = torch.empty((ks, tokens, N_EXPERTS), dtype=torch.float32, device=dev)
     if lib is not None:
         lib.r3_router(state["router"], h32, part, *ROUTER3_CFG[tokens])
@@ -9158,11 +9163,10 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     else:
         _router_split[(N_EXPERTS // be, ks, triton.cdiv(tokens, bt))](
             h, state["router_hi"], state["router_lo"], part, tokens, K=HIDDEN, E=N_EXPERTS, BT=bt, BE=be, BK=bk,
-            KS=ks, HILO=True, num_warps=warps, launch_pdl=router_pdl)
+            KS=ks, HILO=True, TRIG=rpdl, num_warps=warps, launch_pdl=router_pdl)
     ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
     lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
     wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
-    rpdl = pr3 is not None and _opt(state, tokens, "route_pdl", ROUTE_PDL)
     _routing[(tokens,)](part, state["router_bias"], local_start, ids, lids, wts, tokens, E=N_EXPERTS, KS=ks,
                         TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, PDL=rpdl,
                         num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2, launch_pdl=rpdl)
@@ -9257,7 +9261,9 @@ def _experts_marlin(x, topk_weights, local_ids, state):
 GNORM_DEFAULT = True  # s27 GNORM (H100 ab_files 4 rounds: v16 309.2/457.9 -> 309.3/455.1, v32 400.5/649.6 -> 398.4/647.6): T > 32 pre-expert rmsnorm fused into moe_gather (moe_gathern)
 ROUTING_WARPS_1_MIN_TOKENS = 33  # s39: _routing on 1 warp (shuffle-only reductions) above this T: bit-identical, H100 -0.4 us per call (2.84 vs 3.26 us
 # standalone); in the layer d16/d32 sliding lost 1.3/2.2 us with 1 warp (side stream, beside the g19 pooler): 2 warps there
-ROUTE_PDL = True  # s39: moe_route as a PDL secondary of _routing at T > 32 (see the moe_route patch)
+ROUTE_PDL = True  # s39: moe_route as a PDL secondary of _routing at T > 32 (see the moe_route patch); _routing as a PDL
+# secondary of the router (pr3 at T=128; _router_split at ROUTE_PDL_SPLIT_TOKENS)
+ROUTE_PDL_SPLIT_TOKENS = (16, 32)
 BKT_DEFAULT = True  # s27 (H100 ab_files 4 rounds: v32 404.2/652.6 -> 401.2/649.5, v16 tie; H200 router ends ~14 us before the pooler): T > 32: moe_route on the router's stream (before the join); moe_src kernel_fn takes data["bucket"]
 BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
 TK2_MAX_TOKENS = 32  # moe's TMA decode kernel (moe_tk2: route fused into gemm13, 3 launches) at T <= this
