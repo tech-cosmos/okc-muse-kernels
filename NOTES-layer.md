@@ -1247,3 +1247,19 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - H100 timelines (main v96, tuner on): d1 sl 85.3 us = qkv g13 12.8 | csl 4.9 | o g13 -> 22.1 | bnd -> 25.2 | pr1 -> 44.1
   (58 MB at ~3.1 TB/s) | rmsnorm | tk2f 44.6-78.9 | n2u -> 83.4 | bnd -> 85.3. v1 sl 148.0 = g14 15.2 | vtk 6.6 | g12 o -> 29.0 |
   bnd -> 32.4 | pr8 -> 54.1 | tk2f 54.5-140.7 | nu8 -> 145.2 | bnd -> 148.0.
+
+## s62 (2026-10-26 21:38Z-21:55Z, sandbox okc-night4, session 11): v98/v99 = CSL_PW (no judge runs: budget resets 00:00Z)
+- Idea: the sliding attention's K/V gathers depend only on inputs (page table, cache, seq_lens), not on the qkv GEMM.
+  csl (decode sliding, B<=16) gets template PW: page-table/cos-sin/K/V gathers first, then griddepcontrol.wait, then the
+  qkv rows (q, new k/v, gate); launched with the PDL attribute; the g19 qkv at T=16 triggers at start (trig bit 16).
+  SASS (PW instances): 62-64 LDG before ACQBULK, the qkv loads after. vtk (verify 1 sliding) got the same (VTK_QLOADS).
+- H100 ab_flag (SEEDS 99,7,13, ABBA): d16 sliding 5-6 rounds: -0.7..-1.0 us every seed (195.4 -> 194.7, 162.5 -> 161.7,
+  162.9 -> 162.0) -> default CSL_PW_TOKENS (16,), TUNE[16] {cslpw: False}. d1 sliding (after g13): +1.3..1.7 us (off,
+  no TUNE). v1 sliding (vtk after g14): -0.3 / -0.2 / +0.0 -> TUNE[8] {cslpw: True}, default off.
+- Timeline d16 sl: csl starts 16.5 vs 17.3 (only ~1 us early): the g19 qkv (180 KB smem/CTA, 132 CTAs) leaves no room under
+  its default carveout. npre bit 17 (CSL_PW_CARVE / TUNE cslcarve) sets g19's PreferredSharedMemoryCarveout 100: then one
+  csl CTA/SM co-resides from 2.8 us, but its gathers slow g19 17.3 -> 20.6 us and csl still ends ~8-9.7 us after qkv
+  (only 132 of 512 CTAs early); qkv xb 1 (148 KB, 3 csl CTAs/SM) same picture. ab_flag: carve +0.3..0.6 vs no-carve PW.
+  On the H200 (more HBM headroom, g19 issue-bound) the tuner decides.
+- Tests: bench test 13/13; scored d16 x3 (forced) + x2 (default) 0 bad, scored d1/v1 sl x3 forced 0 bad; replay d16 0/160,
+  v1 0/160 (vtk PW forced) and default.
