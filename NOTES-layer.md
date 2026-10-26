@@ -354,3 +354,26 @@
   v1 125.0/138.3 (v37 126.0/131.5; profile: pr8 22.2-22.7 us vs g14 pooler 16.6 + r3 5.6 + routing 3.2 overlapped;
   tk2f full 55.4 -> 57.2), v16 279.7/367.3, v32 361.0/529.5. Unresolved by one check; kept on main (H100 says win).
   Not submitted (needs > 1.9459). Budget 2026-10-26 at 05:55Z: checks 12/20, submits 8/9.
+
+## Session 12 (2026-10-26 05:19-06:10Z)
+- H200 idle budget (lead 05:00Z ask), posted under COORD Requests "layer -> all (s12 05:30Z)". Per-shape gap to the
+  judge floor x score weight (%/us sliding|full: d1 .161|.056, d16 .072|.025, d32 .056|.020, v1 .096|.033,
+  v16 .041|.014, v32 .031|.011): every load is 8.0-9.4% of score from its floor (sum ~50%). Top items: (1) moe big-M
+  twm at v16/v32 (187/235 us vs ~124/140 bytes floor at 4.0 TB/s + drain) ~8%; (2) end-of-layer tail (norm2/n2u +
+  unpool + boundary) ~4%; (3) boundary 1 + rmsnorm glue ~3.5%; (4) tk2f d16/d32 ~2.7%; (5) T<=8 GEMV ramps ~2.5%,
+  T>=16 cuBLAS no-PDL gaps ~1.6%. H100 timelines of all 6 sliding shapes: /tmp/tl_all.py (3 cold replays, last one).
+- check e6e0a00b (9762bf6, v39 = v38 + XN below) 1.926x: d1 74.3/83.6, d16 153.7/233.1, d32 190.2/341.5, v1 120.5/137.7,
+  v16 284.9/374.2, v32 364.7/539.5 (SGLang d1 170.6: low this run). Noise-level; but see the XN lesson.
+- DEAD UPF: moe_tk2f L2-prefetches the 8.4 MB unpool slice (cp.async.bulk.prefetch.L2, 1/grid each) for n2u/g17:
+  from the producer after its last stage +0.6..1.5 us (competes with the tail stream); from tid 0 at CTA end: tie
+  (n2u 7.2 -> 6.2 us at most: n2u is not W-bound; it's launch/latency after tk2f frees the SMs).
+- DEAD XN: the pre-expert rmsnorm inside moe_tk2f (prologue: per-token row sums over all 8 consumer warps + gain to
+  smem while the producer's first copies fly; gemm13 x loads scale + round to BF16). Output = baseline up to its own
+  nondeterminism (pr1/pr8/tk2f sums: off vs off differs too, ~1 in 20 inputs). First version (in-consume barrier
+  per segment): +2.7 d1 / +8.8 v1. Prologue version vs the same binary with XN off: -0.4..-0.8 us, BUT adding the
+  XN code to the shared tk2f instantiation made the plain kernel 1-2 us slower at d16/d32 (H100 bench v38 vs v39,
+  2 rounds each: d32 216.2/444.0 -> 217.3/444.9, d16 216.7/318.7 -> 218.3/319.8; regs 160 -> 168). As a separate
+  template instantiation (plain kernel unchanged): XN +0.2..0.7 us at d1/v1. The rmsnorm launch is already hidden
+  (PDL after pr1); its ~1 us is not on the critical path the way the timeline suggests. Reverted: main = v38 code.
+  LESSON: A/B kernel-code changes against the ORIGINAL binary (variants/sub_vNN.py from git), not a flag inside the
+  modified binary: shared instantiations change for every T.

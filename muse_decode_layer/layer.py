@@ -1005,8 +1005,6 @@ void g17_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mp, i
 # BF16 (as moe_norm2's output) and dots it with its R rows. Bitwise the same as moe_norm2 -> gemv17. Block 0 zeroes
 # moe_tk2f's segment counters (moe_norm2's other job). Saves the norm2 launch + its serial latency.
 N2U_TOKENS = (1,)
-TK2F_XN_TOKENS = (1, 8)  # s12: the pre-expert rmsnorm inside moe_tk2f's x loads (build.py XN), BF16 pooler out only
-TK2F_UPF_TOKENS = ()  # s12: tk2f L2-prefetches the unpool slice (8.4 MB) at its end (build.py UPF). H100 d1/v1 tie (+0.1..0.5 us; from the producer after its last stage: +0.6..1.5): n2u is not W-bound
 N2U_CFG = (8, 0)  # rows per block, PDL secondary of moe_tk2f (which triggers at its start)
 N2U_BOUNDARY = False  # the last block also does the second boundary: H100 d1 +2.7 us vs the PDL _boundary (dead, s8)
 _N2U_SRC = r'''namespace n2u {
@@ -1544,12 +1542,7 @@ def kernel_fn(data, state):
         # (programmatic) predecessor is this rmsnorm, which has full edges from the pooler and the routing.
         main_stream.wait_stream(side_stream)
     nsp = pooled.shape[0] if pooled.dim() == 3 else 1  # bmm slabs [ns, T, n]
-    xn = (tokens in TK2F_XN_TOKENS and _use_moe(tokens) and tokens <= TK2_MAX_TOKENS and _moe_TK2F
-          and pooled.dtype == torch.bfloat16 and pooled.dim() == 2 and not tk2_pdl)
-    if xn:  # moe_tk2f normalizes the raw pooler output itself (build.py XN)
-        p = pooled
-    else:
-      _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl and not tk2_pdl,
+    _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl and not tk2_pdl,
                              TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
                              launch_pdl=pdl and not tk2_pdl)
     if not pr1:
@@ -1559,22 +1552,6 @@ def kernel_fn(data, state):
             t.record_stream(main_stream)
         for t in (h, h32):
             t.record_stream(side_stream)
-    upf = tokens in TK2F_UPF_TOKENS and _use_moe(tokens) and tokens <= min(SLICED_UNPOOL_MAX_TOKENS, TK2_MAX_TOKENS)
-    if upf:  # moe_tk2f's producers L2-prefetch the unpool slice after their last weight stage (see build.py UPF)
-        us = state["unpool_slice"]
-        state["moe"]["lib"].moe_set_upf(us, us.numel() * us.element_size())
-    if xn:
-        state["moe"]["lib"].moe_set_xn(state["pre_expert"], RMS_EPS, 1)
-    try:
-        return _ffn_tail(tokens, p, topk_ids, local_ids, topk_weights, bucket, stream1, h, state, pdl)
-    finally:
-        if upf:
-            state["moe"]["lib"].moe_set_upf(state["unpool_slice"], 0)
-        if xn:
-            state["moe"]["lib"].moe_set_xn(state["pre_expert"], RMS_EPS, 0)
-
-
-def _ffn_tail(tokens, p, topk_ids, local_ids, topk_weights, bucket, stream1, h, state, pdl):
     if (tokens in N2U_TOKENS and _use_moe(tokens) and _moe_TK2F and _G10.get("lib") is not None
             and tokens <= SLICED_UNPOOL_MAX_TOKENS):
         if N2U_BOUNDARY:

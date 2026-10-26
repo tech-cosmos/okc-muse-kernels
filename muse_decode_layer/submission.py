@@ -4216,12 +4216,6 @@ static int launch_k(void (*k)(KA...), int grid, int block, int smem, cudaStream_
   cudaLaunchKernelEx(&lc, k, ((KA)args)...);
   return (int)cudaGetLastError();
 }
-static const float* g_xng = nullptr;
-static float g_xeps = 0.f;
-int64_t moe_set_xn(torch::Tensor g, double eps, int64_t on) { g_xng = on ? (const float*)g.data_ptr() : nullptr; g_xeps = (float)eps; return 0; }
-static const char* g_upf = nullptr;
-static int g_upfb = 0;
-int64_t moe_set_upf(torch::Tensor t, int64_t bytes) { g_upf = bytes ? (const char*)t.data_ptr() : nullptr; g_upfb = (int)bytes; return 0; }
 int64_t moe_set_pdl(int64_t v, int64_t twpf) { g_pdl = (int)v; g_twpf = (int)twpf; return 0; }
 int64_t moe_set_blk(int64_t v) { g_blk = (int)v; return 0; }
 static int g_sa = 0;  // s9: moe_twf uses the arithmetic scale decode (set from kernel_fn: prepare() checked the scales)
@@ -6644,7 +6638,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
                                              const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
-                                             int& ph, int& rb, const float* xg_s = nullptr, const float* xr_s = nullptr) {
+                                             int& ph, int& rb) {
   constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   uint4 xf[NQ][2];
@@ -6681,25 +6675,6 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
         } else {  // written in this kernel: L2 only
           xf[qq][0] = v ? __ldg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
           xf[qq][1] = v ? __ldg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
-        }
-      }
-      if (GATED && xg_s != nullptr) {  // XN: x r[token] (1 + w), rounded to BF16 (r and the gain: kernel prologue, smem)
-        const float r = v ? xr_s[row] : 0.f;
-#pragma unroll
-        for (int qq = 0; qq < NQ; ++qq) {
-          const int kc = qq * NC + warp;
-#pragma unroll
-          for (int hh = 0; hh < 2; ++hh) {
-            const float* gv = xg_s + kc * 64 + 16 * t + 8 * hh;
-            uint32_t* u = reinterpret_cast<uint32_t*>(&xf[qq][hh]);
-#pragma unroll
-            for (int j = 0; j < 4; ++j) {
-              const float lo = __uint_as_float(u[j] << 16) * r * gv[2 * j];
-              const float hi = __uint_as_float(u[j] & 0xFFFF0000u) * r * gv[2 * j + 1];
-              const __nv_bfloat162 b = __floats2bfloat162_rn(lo, hi);
-              u[j] = *reinterpret_cast<const uint32_t*>(&b);
-            }
-          }
         }
       }
     }
@@ -7257,7 +7232,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     const float* __restrict__ gs2, const __nv_bfloat16* __restrict__ X, const int* __restrict__ ids, int nroutes,
     int start, int count, int* __restrict__ meta, int* __restrict__ sroutes, int* __restrict__ inv,
     __nv_bfloat16* inter, float* __restrict__ Y, int* cnt, int D, const float* __restrict__ tw,
-    const float* __restrict__ w1, __nv_bfloat16* __restrict__ out, int M, float eps, const char* __restrict__ upf, int upfb, const float* __restrict__ xng, float xeps) {
+    const float* __restrict__ w1, __nv_bfloat16* __restrict__ out, int M, float eps) {
   static_assert(NC % 8 == 0, "routing uses warps 0..7 x 32 ids");
   extern __shared__ __align__(128) uint4 smem[];
   __shared__ uint32_t slut[256];
@@ -7384,50 +7359,6 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     }
     return;
   }
-  __shared__ __align__(16) float s_xg[4096];
-  __shared__ float s_xr[32];
-  if (NC == 8 && xng != nullptr) {  // all NC warps: thread tid sums elements [8 tid, 8 tid + 8) and [8 (tid + 256), ...) of a token
-    float4 gq[4];
-#pragma unroll
-    for (int i = 0; i < 4; ++i) gq[i] = __ldg(reinterpret_cast<const float4*>(xng) + tid + i * NC * 32);
-    float* s_xp = s_red;  // [NC][32] partial sums (s_red is free until the first row's reduction)
-    for (int t0 = 0; t0 < M; t0 += 8) {
-      uint4 q[8][2];
-#pragma unroll
-      for (int k = 0; k < 8; ++k)
-#pragma unroll
-        for (int hh = 0; hh < 2; ++hh)
-          q[k][hh] = t0 + k < M ? __ldg(reinterpret_cast<const uint4*>(X + (size_t)(t0 + k) * KD) + tid + hh * NC * 32)
-                                : make_uint4(0, 0, 0, 0);
-#pragma unroll
-      for (int k = 0; k < 8; ++k) {
-        float ss = 0.f;
-#pragma unroll
-        for (int hh = 0; hh < 2; ++hh) {
-          const uint32_t u[4] = {q[k][hh].x, q[k][hh].y, q[k][hh].z, q[k][hh].w};
-#pragma unroll
-          for (int j = 0; j < 4; ++j) {
-            const float lo = __uint_as_float(u[j] << 16), hi = __uint_as_float(u[j] & 0xFFFF0000u);
-            ss = fmaf(lo, lo, ss);
-            ss = fmaf(hi, hi, ss);
-          }
-        }
-#pragma unroll
-        for (int o = 16; o; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
-        if (lane == 0) s_xp[warp * 32 + t0 + k] = ss;
-      }
-    }
-#pragma unroll
-    for (int i = 0; i < 4; ++i) reinterpret_cast<float4*>(s_xg)[tid + i * NC * 32] = gq[i];
-    asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
-    if (tid < M) {
-      float tot = 0.f;
-#pragma unroll
-      for (int w = 0; w < NC; ++w) tot += s_xp[w * 32 + tid];
-      s_xr[tid] = rsqrtf(tot / (float)KD + xeps);
-    }
-    asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
-  }
   float rt = 0.f, rg = 0.f;  // FN: route tid's topk weight and gs2 * 256 (0: not local), used by tk2f_norm
   if (FN && tid < nroutes) {
     const int e = ids[tid] - start;
@@ -7446,13 +7377,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     return;
   }
   tk2f_consume<512, NC, NSTG, true, KPS, SA>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
-                                    empty, st, ph, rb, NC == 8 && xng ? s_xg : nullptr, s_xr);
+                                    empty, st, ph, rb);
   tk2f_consume<256, NC, NSTG, false, KPS, SA>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
                                      empty, st, ph, rb);
-  if (upfb && tid == 0) {
-    const int c = (upfb / (int)gridDim.x + 15) & ~15, o = (int)blockIdx.x * c, n = min(c, upfb - o);
-    if (n > 0) prefetch_l2(upf + o, n);
-  }
   if constexpr (FN) {
     s_rt[tid] = rt;
     s_rg[tid] = rg;
@@ -7479,7 +7406,7 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
       (const float*)gs13, (const float*)gs2, (const __nv_bfloat16*)x, (const int*)ids, nr, start, count, (int*)meta,
       (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D, (const float*)tw, (const float*)w1,
-      (__nv_bfloat16*)out, nr / 8, eps, g_upf, g_upfb, g_xng, g_xeps);
+      (__nv_bfloat16*)out, nr / 8, eps);
 }
 
 // s9: moe_tk2f with the post-expert norm fused (FN): writes out [M, H] bf16 directly; no moe_norm2 after it.
@@ -7657,9 +7584,7 @@ _moe__CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::T
         "torch::Tensor, double);"
         "int64_t moe_set_pdl(int64_t, int64_t);"
         "int64_t moe_set_blk(int64_t);"
-        "int64_t moe_set_sa(int64_t);"
-        "int64_t moe_set_upf(torch::Tensor, int64_t);"
-        "int64_t moe_set_xn(torch::Tensor, double, int64_t);")
+        "int64_t moe_set_sa(int64_t);")
 
 
 def _moe__lib():
@@ -7670,7 +7595,7 @@ def _moe__lib():
         _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=_moe_CUDA_SRC,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                       "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch",
-                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_upf", "moe_set_xn"],
+                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
@@ -10830,8 +10755,6 @@ void g17_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mp, i
 # BF16 (as moe_norm2's output) and dots it with its R rows. Bitwise the same as moe_norm2 -> gemv17. Block 0 zeroes
 # moe_tk2f's segment counters (moe_norm2's other job). Saves the norm2 launch + its serial latency.
 N2U_TOKENS = (1,)
-TK2F_XN_TOKENS = (1, 8)  # s12: the pre-expert rmsnorm inside moe_tk2f's x loads (build.py XN), BF16 pooler out only
-TK2F_UPF_TOKENS = ()  # s12: tk2f L2-prefetches the unpool slice (8.4 MB) at its end (build.py UPF). H100 d1/v1 tie (+0.1..0.5 us; from the producer after its last stage: +0.6..1.5): n2u is not W-bound
 N2U_CFG = (8, 0)  # rows per block, PDL secondary of moe_tk2f (which triggers at its start)
 N2U_BOUNDARY = False  # the last block also does the second boundary: H100 d1 +2.7 us vs the PDL _boundary (dead, s8)
 _N2U_SRC = r'''namespace n2u {
@@ -11438,12 +11361,7 @@ def kernel_fn(data, state):
         # (programmatic) predecessor is this rmsnorm, which has full edges from the pooler and the routing.
         main_stream.wait_stream(side_stream)
     nsp = pooled.shape[0] if pooled.dim() == 3 else 1  # bmm slabs [ns, T, n]
-    xn = (tokens in TK2F_XN_TOKENS and _use_moe(tokens) and tokens <= TK2_MAX_TOKENS and _moe_TK2F
-          and pooled.dtype == torch.bfloat16 and pooled.dim() == 2 and not tk2_pdl)
-    if xn:  # moe_tk2f normalizes the raw pooler output itself (build.py XN)
-        p = pooled
-    else:
-      _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl and not tk2_pdl,
+    _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl and not tk2_pdl,
                              TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
                              launch_pdl=pdl and not tk2_pdl)
     if not pr1:
@@ -11453,22 +11371,6 @@ def kernel_fn(data, state):
             t.record_stream(main_stream)
         for t in (h, h32):
             t.record_stream(side_stream)
-    upf = tokens in TK2F_UPF_TOKENS and _use_moe(tokens) and tokens <= min(SLICED_UNPOOL_MAX_TOKENS, TK2_MAX_TOKENS)
-    if upf:  # moe_tk2f's producers L2-prefetch the unpool slice after their last weight stage (see build.py UPF)
-        us = state["unpool_slice"]
-        state["moe"]["lib"].moe_set_upf(us, us.numel() * us.element_size())
-    if xn:
-        state["moe"]["lib"].moe_set_xn(state["pre_expert"], RMS_EPS, 1)
-    try:
-        return _ffn_tail(tokens, p, topk_ids, local_ids, topk_weights, bucket, stream1, h, state, pdl)
-    finally:
-        if upf:
-            state["moe"]["lib"].moe_set_upf(state["unpool_slice"], 0)
-        if xn:
-            state["moe"]["lib"].moe_set_xn(state["pre_expert"], RMS_EPS, 0)
-
-
-def _ffn_tail(tokens, p, topk_ids, local_ids, topk_weights, bucket, stream1, h, state, pdl):
     if (tokens in N2U_TOKENS and _use_moe(tokens) and _moe_TK2F and _G10.get("lib") is not None
             and tokens <= SLICED_UNPOOL_MAX_TOKENS):
         if N2U_BOUNDARY:

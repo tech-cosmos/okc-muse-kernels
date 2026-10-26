@@ -1,11 +1,12 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~05:55Z (end of session 11).
+Updated 2026-10-26 ~06:10Z (end of session 12).
 
 ## Board
 - **Best scored: e5512e00 = v33 (bb6fb77), 1.9459x, 11,624 us/step**, overall #56 at 04:50Z (#1 2.360x, #10 2.176x,
   #50 ~1.953x). v33 contains moe's old tk2f race (lead asked about withdrawing it: see COORD Judge runs line).
-- main = **v38 (d664b23)** = v37 + proj pr8 at T=8 (same fusion with gemv14 pooler; H100 v1 -1.7/-1.8 us): check 0602febf
+- main = v38 code (s12 commits only add notes + a parse check in build.py; v39 9762bf6 XN reverted, check e6e0a00b 1.926x).
+- v38 (d664b23) = v37 + proj pr8 at T=8 (same fusion with gemv14 pooler; H100 v1 -1.7/-1.8 us): check 0602febf
   1.936x (noisy run; v1 full +6.8 vs v37 unexplained: re-check before trusting; T=8 off = PR1_TOKENS (1,)).
 - v37 (d411cf4) = v36 + proj pr1 at T=1 (pooler+router+top-8 one launch; H100 d1 -2.4/-1.9 us) + moe 2466fac
   (twm): check 7b02fb2c 1.947x = tie on H200 (d1 72.5/82.2), not submitted. PR1_BND (boundary fused into pr1): off, loses.
@@ -14,7 +15,7 @@ Updated 2026-10-26 ~05:55Z (end of session 11).
   543b6ca9 scored 1.9395x (noise). Per shape (H200 us ours, ratio): d1 72.1/83.7 (2.369/2.174), d16 150.1/225.4
   (1.747/1.912), d32 181.1/311.0 (1.443/1.974), v1 121.6/132.8 (2.133/2.043), v16 273.0/359.4, v32 351.8/527.1.
 - Budget 2026-10-26 (resets 00:00Z): submits 8 of 9 used (keep the last as spare unless a check clearly wins);
-  checks 12 of 20 used at 05:55Z.
+  checks 13 of 20 used at 05:50Z (s12).
 - Judge noise: SGLang's own per-shape times move 2-6% between runs; identical code's per-shape ratios spread ~+-1.5%,
   total ~+-1%: one check cannot resolve <2% changes. Decide on H100 interleaved A/Bs (tools/ab_flag.py), check to confirm.
 - SGLang per shape (H200 us sliding/full): d1 171/183, d16 262-271/431-444, d32 261-268/614-634, v1 259-261/271-280,
@@ -63,6 +64,12 @@ Updated 2026-10-26 ~05:55Z (end of session 11).
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
+-1. s12 idle budget (COORD Requests "layer -> all (s12 05:30Z)"): every load is 8-9% of score off its floor; biggest
+   = moe twm at v16/v32 (~8%, moe lane), then the end-of-layer tail (~4%) and glue (~3.5%) = layer's. The cheap
+   glue fusions are now measured dead (XN, UPF, PR1_BND, n2u boundary epilogue): the tail/glue costs are kernel
+   boundaries where the next kernel can't start until the 1-CTA/SM experts kernel drains. Remaining layer idea with
+   real size: one persistent kernel for experts -> norm2 -> unpool -> boundary at T<=8 (CTAs move on to unpool rows
+   as their expert rows finish, grid-wide counters; the boundary by the last finisher), est. -4..6 us d1/v1.
 0. Watch r-moe / r-proj Handoffs; re-copy + rebuild + test (bench.py test, tools/scored_test.py, tools/tk2f_stress.py N,
    tools/replay_test.py, tools/route_judge.py if upstream of the router changed) + H100 A/B (tools/ab_flag.py) + check.
    The layer calls moe_tk2f_launch directly at T=1 (`_experts_n2u`, cfg + 100000 for SA) and reimplements moe_norm2 in
@@ -78,6 +85,8 @@ Updated 2026-10-26 ~05:55Z (end of session 11).
 3. Experts are 50-60% of every T>=16 shape and 27 us of d1's 72 (moe lane: tk2f ~63% of H200 HBM peak at d1).
 
 ## Dead ends (details in NOTES)
+- s12: XN (pre-expert rmsnorm inside tk2f: +0.2..0.7 us as its own instantiation; in the shared one it slowed
+  d16/d32 by 1-2 us), UPF (tk2f L2-prefetches the unpool slice: tie). A/B kernel edits against the original binary.
 - s10: g19 at T=32 (H200: proj diag + check 5cf5247d); g19 pooler on all 132 SMs (router starved, +4 us H100); router3
   at T=16/32 beside g19 (tie); o g19 at T=16 (H100 tie); d1 g13 pooler on fewer blocks (+0.7..1.1 us).
 - s9: router3 at T=16/32 (+1..3 H100, crowds the pooler bmm); ROUTER_L2_PF (1,)/(8,) (noise); T=8 pooler g14 on 64
