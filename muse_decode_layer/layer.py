@@ -129,6 +129,9 @@ UNPOOL_PDL = True
 # GEMVs launched as PDL secondaries (they load W, then griddepcontrol.wait), per (tokens, sliding layer). H100:
 # T=1 o (after csl, patched to trigger) -1..-3 us, unpool (after norm2) -3; T=8 o after sliding attention -1.9,
 # after full attention +1.3; T=8 unpool tie.
+# tokens -> split-K slabs: the pooler as a strided batched GEMM with FP32 out, summed in the rmsnorm (no cuBLAS
+# split-K reduce kernel). H100 standalone m16/m32: 25.8/26.1 vs F.linear 28.0/28.1 us.
+POOLER_BMM = {16: 2, 32: 2}
 GEMV_PDL_SECONDARY = {(1, True): ("unpool_slice", "o"), (1, False): ("unpool_slice", "o"), (8, True): ("o",)}
 LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference experts (tests of the Marlin-side glue)  # PDL after a cuBLAS producer: no gain (H100 o GEMM + boundary 12.64 vs 12.74 us)
 
@@ -176,9 +179,11 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
 
 @triton.jit
 def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr,
-                  TRIG: tl.constexpr, XS: tl.constexpr = 0, ROUND: tl.constexpr = False):
+                  TRIG: tl.constexpr, XS: tl.constexpr = 0, ROUND: tl.constexpr = False, NS: tl.constexpr = 1,
+                  SS: tl.constexpr = 0):
     """One row: rmsnorm(x) (1 + w), BF16 in and out. TRIG: let the dependent (moe_tk2 gemm13) launch now.
-    XS: x row stride (0: N). ROUND: x is FP32, rounded to BF16 first (the pooler's output dtype)."""
+    XS: x row stride (0: N). ROUND: x is FP32, rounded to BF16 first (the pooler's output dtype).
+    NS > 1: x is the sum of NS FP32 split-K partials SS elements apart (then rounded with ROUND)."""
     if TRIG:
         gdc_launch_dependents()
     row = tl.program_id(0).to(tl.int64)
@@ -187,6 +192,8 @@ def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, 
     if PDL:
         gdc_wait()
     x = tl.load(x_ptr + row * (XS if XS else N) + cols)
+    for i in tl.static_range(1, NS):
+        x += tl.load(x_ptr + i * SS + row * (XS if XS else N) + cols)
     if ROUND:
         x = x.to(tl.bfloat16)
     x = x.to(tl.float32)
@@ -1312,16 +1319,25 @@ def kernel_fn(data, state):
         if not torch.cuda.is_current_stream_capturing():
             h.record_stream(hi)
             pooled.record_stream(main_stream)
+    elif tokens in POOLER_BMM:
+        # split K in NS slabs as one strided batched GEMM with FP32 out; the rmsnorm sums the slabs (no reduce kernel)
+        ns = POOLER_BMM[tokens]
+        kc = HIDDEN // ns
+        wp = dense["pooler"]
+        pooled = torch.bmm(h.view(tokens, ns, kc).permute(1, 0, 2), wp.view(D_EXPERT, ns, kc).permute(1, 2, 0),
+                           out_dtype=torch.float32)
     else:
         pooled = _linear(h, dense["pooler"], "pooler", state)
-    p = torch.empty_like(pooled)
+    p = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
     tk2_pdl = TK2_PDL13 and tokens <= TK2_MAX_TOKENS and _use_moe(tokens)
     if tk2_pdl:
         # moe_tk2 gemm13 reads the routing before its griddepcontrol.wait: join first, so that its only
         # (programmatic) predecessor is this rmsnorm, which has full edges from the pooler and the routing.
         main_stream.wait_stream(side_stream)
+    nsp = POOLER_BMM.get(tokens, 1) if tokens not in POOLER_HI_PRIORITY else 1
     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl and not tk2_pdl,
-                             TRIG=tk2_pdl, num_warps=8, launch_pdl=pdl and not tk2_pdl)
+                             TRIG=tk2_pdl, ROUND=nsp > 1, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
+                             launch_pdl=pdl and not tk2_pdl)
     main_stream.wait_stream(side_stream)
     if not torch.cuda.is_current_stream_capturing():
         for t in (topk_ids, local_ids, topk_weights) + (bucket or ()):
