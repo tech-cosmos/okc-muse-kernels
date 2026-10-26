@@ -1,6 +1,9 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 (session 40: main = v84, NOT judge-checked; budget for 10-26 spent).
+Updated 2026-10-26 (session 41: main = v84, NOT judge-checked; budget for 10-26 spent).
+
+**s41: main v84 re-validated (tuner on, H100): tests 13/13, replay 0/240, route_judge 0/240.** v1 sliding timeline in
+NOTES s41: tk2f 84 of 153 us; pr8 23.5 us (2.4 TB/s, m8 issue-bound). FIRST CHECK OF THE NEXT SANDBOX = main (v84).
 
 **s40: main = v84 (00ce840)** = v83 + proj s33 g13o (T=1 o on 12-bit gemv13 as PDL secondary; TUNE[1] option, off by
 default): H100 tuner off d1 sl -0.75, full -1.9 us; H100 tuner picks it at T=1 sliding. FIRST CHECK OF THE NEXT SANDBOX =

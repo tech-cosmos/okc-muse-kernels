@@ -922,3 +922,17 @@
 - DEAD: T=8 second-boundary BND_SPLIT (8,2) 1/2/4/8: H100 ab_files 6 rounds v1 149.0-149.8 / 161.7-162.8 us (noise):
   the 4 us after nu8 is the PDL release + latency chain, not the row work.
 - main (tuner on) replay T=1/T=8 shapes 0/10 each.
+
+## s41 (2026-10-26 15:55Z-): validation of main v84 + v1 timeline (no judge runs: budget for 10-26 spent)
+- main v84 (61fe6fe, submission.py == build.py output), tuner on, H100: bench.py test 13/13; tools/replay_test.py 10 reps x
+  seeds 11,23 x 12 scored shapes 0/240; tools/route_judge.py same 0/240 (worst drop-lead gap 0.02). Ready as the next
+  sandbox's first check.
+- H100 tuner picks this run: T=1 sl g13o (86.6 vs 87.8 confirm), T=1 full kv_pf off (noise, 90.2 vs 90.4), T=8 sl/full
+  nu8x off (149.4 vs 151.0 / 162.9 vs 163.7), T=128 full twf_split 66, T=256 twm_order 76.
+- H100 timeline v1 sliding (variants/v84_nt.py, tuner off): g14 qkv 0-15.9 | vtk 16.3-23.3 | g12 o ends 31.1 | bnd 34.9 |
+  pr8 58.4 (23.5 us for 48 MB 12-bit pooler + 8 MB FP32 router: 2.4 TB/s, ~4 us over the d1 pr1 rate; m8 decode is
+  issue-bound, proj's g14 lane) | rmsnorm 59.7 | tk2f 58.7-142.7 (84.0: moe's lane, ~55% of the shape) | nu8 149.0 | bnd 153.0.
+  No idle-HBM interval > 4 us in the front (o's W prologue already overlaps vtk).
+- Considered, not built: pre-expert rmsnorm fused into pr1/pr8's last pooler block with tk2f as pr1's PDL secondary:
+  tk2f already starts 0.3 us after pr1 ends (TK2FX hides the rmsnorm; tk2fx off costs only +0.2..1.2 us), and tk2f
+  would then have to read the routing after its wait: expected tie.
