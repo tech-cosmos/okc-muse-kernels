@@ -185,3 +185,9 @@
   (1,2,4,128,1) / (4,8,4,32,1): verify 1 +1.3 / +0.6 us H100.
 - Not done (small): proj's pj_router at T=8 takes BF16 x; our router deliberately reads the FP32 boundary output
   (routing-precision risk), and the win is ~2 us at v1 only (~0.25% total).
+- DEAD (tie): gemv13 for the T=1 unpool slice as a PDL secondary (patched: W prologue before griddepcontrol.wait,
+  x after; cudaLaunchKernelEx): 4 interleaved rounds -0.2..-0.5 us (round 2 -2.6 was noise). Lesson: a stale
+  cpp_sources declaration makes `_g10_lib` fall back to cuBLAS silently (tests still pass, d1 +24 us): always check
+  the kernel names in `bench.py prof` after touching the GEMV build.
+- 2026-10-26 00:11Z submit 81e501e9 (v20, 164ea45): **1.8815x, 12,023 us** (was 1.728x): d1 81.8/89.6, d16
+  162.6/238.9, d32 191.7/339.5, v1 138.4/148.0, v16 279.5/354.9, v32 349.7/527.5. Budget 10-26: 1 submit, 0 checks.

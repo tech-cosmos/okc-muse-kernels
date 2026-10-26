@@ -1,12 +1,11 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-25 ~23:35Z (session 6: main v20 checked 1.856x; submit main after 00:00Z).
+Updated 2026-10-26 00:15Z (end of session 6: v20 scored 1.8815x).
 
 ## Board
-- **Best scored: 5fc7a807 = v10 (64bfdcf), 1.728x, 13,094 us/step.** Board #1 2.285x (10-25 19:30Z).
-- **main = v20 (164ea45): check 85410ccd 1.856x, 12,188 us (best check). FIRST THING after 00:00Z 2026-10-26:
-  `okc submit muse_decode_layer/submission.py --json` (main = v20, code identical to check 85410ccd)** if not done
-  yet (see NOTES s6 end / COORD Judge runs).
+- **Best scored: 81e501e9 = v20 (164ea45), 1.8815x, 12,023 us/step (2026-10-26 00:11Z).** Board #1 2.285x (10-25 19:30Z).
+- main = v20 = the scored code (check 85410ccd 1.856x, submit 81e501e9 1.8815x). Budget 2026-10-26: 1 submit,
+  0 checks used.
 - v20 per shape, H200 check 85410ccd (ours, us; SGLang in brackets): d1 80.4/89.7 (172/182), d16 160.1/234.2
   (261/431), d32 195.4/349.4 (261/622), v1 135.9/147.0 (268/280), v16 272.4/369.0 (524/717), v32 360.1/539.4
   (722/1095). Per-shape speedup: d1 2.14/2.03, d16 1.63/1.84, **d32 1.34/1.78**, v1 1.97/1.90, v16 1.92/1.94,
@@ -43,7 +42,7 @@ Updated 2026-10-25 ~23:35Z (session 6: main v20 checked 1.856x; submit main afte
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
-0. Submit main after 00:00Z (see Board). Then watch r-moe / r-proj Handoffs: moe next = 256-thread moe_tw RT=4
+0. Watch r-moe / r-proj Handoffs: moe next = 256-thread moe_tw RT=4
    (big-M), gather fusion, PDL; proj = qkv m16/32 native kernel, router m<=8. Re-copy + rebuild + test +
    interleaved bench vs variants/sub_v17.py + check on every handoff. Judge noise: ~+-1% total, up to 4% per shape:
    only submit on a check that beats the board by more than that, and don't chase <1% local wins with checks.
