@@ -2,8 +2,7 @@
 
 ## Board
 - Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z). Board is a TEST BED only (lead 01:45Z): the layer counts.
-  Used 2026-10-26: checks 20 of 20 (all DIAG since s12, never submit those), submits 3. Budget resets 00:00Z (sandbox okc-night4). s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
-  worse), d4909e24 2.170 (twm mixed: neutral). Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
+  Checks 20/20 used on 10-26 (DIAGs since s12: never submit those); budget resets 00:00Z. Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
   bs128 196-207, bs256 243-251 (judge noise +-4%).
 - **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.
   USE THEM (they show the experts inside the layer). moe_norm's time there = mostly twf's tail (PDL secondary).
@@ -102,8 +101,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 ## Night4 sessions 1-2 (19:15-19:45Z): NORM_EARLY on main (9898def: post-expert norm runs in twm's drain; H100 v32 -3.3
   us; layer has it as v90) and the PDL .nc-hoist fix (5960afc: __ldcg for producer data in moe_routegather/moe_norm;
   audit recipe NOTES n4s2). Both queued in the 00:00Z DIAG (h32ne0/offne0, h32rg0/1).
-
-## Session 29: moe_hot (65..128-token experts, one N128 pass); layer has it as a T=256 TUNE option (NOTES s29).
 
 ## Ranked ideas
 -9. (s19) grid-aware twm tail by K-split: DONE s20, tie (halves) / dead (quarters). Tail needs cheaper items, not finer.
