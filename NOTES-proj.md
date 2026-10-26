@@ -752,3 +752,23 @@
 - Dead too: evict_last on the remaining CUDA `prefetch.global.L2` sites (pr8 router W WS/WN, g13 pb, upf, vecs) on top of
   D (v78, 6 rounds, A/D/F): d1 sl 88.20/86.92/87.05, full 109.09/107.71/107.61, v1 sl 148.73/148.36/148.68, full
   162.30/162.08/162.10: F = D. Repeat confirms D at d1 -1.3/-1.4 us.
+
+## Session 33 (2026-10-26 15:22-17:15Z): gemv13 (12-bit) for the layer's T=1 o as a PDL secondary: TUNE candidate
+- No judge runs (proj checks 20/20 for 10-26; sandbox ends ~19:10Z). Work in /tmp copies of r-layer v79, then v82 (f970e18).
+- Idea: in the layer, o at T=1 is gemv10 (BF16, 16.8 MB) launched as a PDL secondary of csl; s23's H200 diag only
+  compared g13 vs g10 standalone. g13 PDL mode: the W prologue (ld.global.nc) before griddepcontrol.wait, x by __ldcg
+  after it (SASS checked: LDG...CONSTANT before ACQBULK, x LDG.STRONG.GPU after). Script dev/s33/g13o.py (layer.py only).
+- Timelines (H100 d1 sliding): A (g10) csl 13.7-19.7, o ends 24.4 (4.7 after csl). Every g13 config leaves ~4.6 us after
+  csl. globaltimer stamps per block (dev/s33/dbg13.py): all 528 o blocks resident at entry; after the wait x arrives in
+  0.3-2 us (blocks with W still in flight get x late), then ~2.3-2.8 us of decode + FMA + reduction per block: the
+  post-wait part is ISSUE-bound (12-bit decode), not bytes.
+- g13p (dev/s33/g13p.py): every chunk loaded AND decoded to packed BF16 pairs before the wait (ptxas sank the decode
+  below ACQBULK until a branch on the XOR of all decoded words pinned it: 150 PRMT/LOP3 before, 55 after). Tail after
+  csl 4.7 -> 3.0 us, BUT loading all 12.6 MB beside csl stretches csl 6.0 -> 8.1 us: net +1..2 us. Half before / half
+  after the wait (pq variants): ties. Same zero-sum as the layer's prefetch-during-attention attempts. DEAD.
+- Plain g13 PDL (u2 nv1 minb4 pf1 528 blocks, half of W before the wait): ab_files tuner off (TUNE = {}), d1 full
+  -1.3, -1.0, -0.9, -1.2, -0.7, -0.9/-0.9 (v82) us over 6 runs; d1 sliding bimodal: -0.2, -0.1, -1.85, -0.35, -0.4/0.0.
+  Configs B (2,2,2,1,264) ~-0.3, C/G (pf 2: all W before the wait) +1..2, D (u4) +1.5, F (nv4 132) +1.
+- Handoff: dev/s33/g13o_layer.patch (on r-layer f970e18 = v82): TUNE option {"g13o": True} at T=1 (default off; packs o
+  with _pack13, +12.6 MB). Forced on: bench test 13/13, scored d1 x3 0 bad, replay d1 0/20 + 0/20; o output = the
+  BF16 rounding of the float64 product (dev/s33/chk_o.py, 5 seeds). Est. H200: full d1 ~-1 us x 0.056%/us = ~+0.05%.
