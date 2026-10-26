@@ -1,6 +1,11 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~12:50Z (session 30: no build; main = v68 unchanged, still THE code for the ~14:30Z last check; 1 check + 1 submit left).
+Updated 2026-10-26 ~13:05Z (session 31: main = v69; THE code for the ~14:30Z last check; 1 check + 1 submit left; board #56 1.956x).
+
+**s31: main = v69** = v68 + moe s19 (r-moe 20b864e) twm K-split diff in moe_src.py + TUNE option `twf_split` (T=128:
+{twf_split 66}; T=256: {twf_split 66}, {twf_split 66, twm_order 76}). Defaults unchanged (bit-identical path). Forced
+each: scored verify x2 0 bad, replay verify 0/20 per shape. THE ~14:30Z LAST CHECK RUNS MAIN = v69: copy its "layer tune
+T=128/256" lines into NOTES (moe asked for them).
 
 **s29: main = v68 (d196c9e)** = v67 + QF32_NDS (T=32 decode attention also takes FP32 qkv, bit-identical; default path
 unchanged since cuBLAS qkv is BF16; used if the tuner picks g19:qkv_gate@32, and ready for proj s20's FP32-out lt (wire

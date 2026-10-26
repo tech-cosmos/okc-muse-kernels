@@ -2400,9 +2400,11 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   // pass-minor items (rb-major: all passes of a row block adjacent: L2 reuse), bits 3-4 = merge the big (> 32 token)
   // experts' items evenly into the first W = phi * N positions of each phase (phi 1, .85, .7), light ones between;
   // bit 5: merge in gemm13 only; bit 6: merged set = multi-pass (> 64 token) experts only
-  const int tail = nsplit < 0 ? (-nsplit) & 4095 : 0, tail13 = nsplit < 0 ? ((-nsplit) >> 12) & 2047 : 0;
+  // s19: bit 22 set = bits 12-21 are a K-split count (TWF_SPLIT, combinable with order / hot; no tail classes then)
+  const int sx = nsplit < 0 ? ((-nsplit) >> 22) & 1 : 0;
+  const int tail = nsplit < 0 && !sx ? (-nsplit) & 4095 : 0, tail13 = nsplit < 0 && !sx ? ((-nsplit) >> 12) & 1023 : 0;
   const int order = nsplit < 0 ? (-nsplit) >> 24 : 0, hot = nsplit < 0 ? ((-nsplit) >> 23) & 1 : 0;
-  nsplit = nsplit < 0 ? 0 : nsplit;
+  nsplit = nsplit < 0 ? (sx ? ((-nsplit) >> 12) & 1023 : 0) : nsplit;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
   asm volatile("griddepcontrol.wait;" ::: "memory");
@@ -2454,8 +2456,10 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   const int n13 = s_cum[0][32], n2 = s_cum[1][32];
   int n2f = n2;
   if (nsplit > 0)
-    for (int a = 32; a >= 0; --a)
+    for (int a = 32; a >= 0; --a) {
+      if (a < 32 && s_big[1][a] != 0) break;  // s19: only light (RT 4) experts split (hot/big items take no K half)
       if (s_cum[1][a] >= n2 - nsplit) n2f = s_cum[1][a];
+    }
   const int ns = n2 - n2f, nitems = n13 + n2f + 2 * ns;
   if (tid == 0) {
     int nbig = 0;
@@ -2480,7 +2484,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     const int* cum = s_cum[g2];
     const int phx = s_ord[1], ob = s_ord[2];
     if (phx && h < 0 && !(g2 && (ob & 32))) {
-      const int nA = cum[s_ord[0]], N = cum[32];
+      const int nA = cum[s_ord[0]], N = g2 ? n2f : cum[32];  // s19: K-split items stay at the end
       if (nA > 0 && nA < N) {
         const int W = max(nA, N * phx / 100);
         const int ca = it < W ? it * nA / W : nA, ca1 = it + 1 <= W ? (it + 1) * nA / W : nA;
@@ -4518,6 +4522,8 @@ def kernel_fn(data, st):
             elif TWF_MIX and "w2b2" in st:
                 tl = TWM_TAIL_M.get(M, TWM_TAIL) + 4096 * TWM_TAIL13_M.get(M, TWM_TAIL13) + (TWM_ORDER_M.get(M, TWM_ORDER) << 24)
                 tl += (1 << 23) if TWM_HOT_M.get(M, TWM_HOT) else 0
+                if tl and ns:  # s19: K-split tail together with order / hot (tail classes off)
+                    tl = (tl & ~((1 << 23) - 1)) + (1 << 22) + 4096 * min(ns, 1023)
                 ns = -tl if tl else ns
                 if DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)
                 lib.moe_twm_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["w13b2"],

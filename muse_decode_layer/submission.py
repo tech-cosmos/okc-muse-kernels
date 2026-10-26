@@ -6583,9 +6583,11 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   // pass-minor items (rb-major: all passes of a row block adjacent: L2 reuse), bits 3-4 = merge the big (> 32 token)
   // experts' items evenly into the first W = phi * N positions of each phase (phi 1, .85, .7), light ones between;
   // bit 5: merge in gemm13 only; bit 6: merged set = multi-pass (> 64 token) experts only
-  const int tail = nsplit < 0 ? (-nsplit) & 4095 : 0, tail13 = nsplit < 0 ? ((-nsplit) >> 12) & 2047 : 0;
+  // s19: bit 22 set = bits 12-21 are a K-split count (TWF_SPLIT, combinable with order / hot; no tail classes then)
+  const int sx = nsplit < 0 ? ((-nsplit) >> 22) & 1 : 0;
+  const int tail = nsplit < 0 && !sx ? (-nsplit) & 4095 : 0, tail13 = nsplit < 0 && !sx ? ((-nsplit) >> 12) & 1023 : 0;
   const int order = nsplit < 0 ? (-nsplit) >> 24 : 0, hot = nsplit < 0 ? ((-nsplit) >> 23) & 1 : 0;
-  nsplit = nsplit < 0 ? 0 : nsplit;
+  nsplit = nsplit < 0 ? (sx ? ((-nsplit) >> 12) & 1023 : 0) : nsplit;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
   asm volatile("griddepcontrol.wait;" ::: "memory");
@@ -6637,8 +6639,10 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   const int n13 = s_cum[0][32], n2 = s_cum[1][32];
   int n2f = n2;
   if (nsplit > 0)
-    for (int a = 32; a >= 0; --a)
+    for (int a = 32; a >= 0; --a) {
+      if (a < 32 && s_big[1][a] != 0) break;  // s19: only light (RT 4) experts split (hot/big items take no K half)
       if (s_cum[1][a] >= n2 - nsplit) n2f = s_cum[1][a];
+    }
   const int ns = n2 - n2f, nitems = n13 + n2f + 2 * ns;
   if (tid == 0) {
     int nbig = 0;
@@ -6663,7 +6667,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     const int* cum = s_cum[g2];
     const int phx = s_ord[1], ob = s_ord[2];
     if (phx && h < 0 && !(g2 && (ob & 32))) {
-      const int nA = cum[s_ord[0]], N = cum[32];
+      const int nA = cum[s_ord[0]], N = g2 ? n2f : cum[32];  // s19: K-split items stay at the end
       if (nA > 0 && nA < N) {
         const int W = max(nA, N * phx / 100);
         const int ca = it < W ? it * nA / W : nA, ca1 = it + 1 <= W ? (it + 1) * nA / W : nA;
@@ -8701,6 +8705,8 @@ def _moe_kernel_fn(data, st):
             elif _moe_TWF_MIX and "w2b2" in st:
                 tl = _moe_TWM_TAIL_M.get(M, _moe_TWM_TAIL) + 4096 * _moe_TWM_TAIL13_M.get(M, _moe_TWM_TAIL13) + (_moe_TWM_ORDER_M.get(M, _moe_TWM_ORDER) << 24)
                 tl += (1 << 23) if _moe_TWM_HOT_M.get(M, _moe_TWM_HOT) else 0
+                if tl and ns:  # s19: K-split tail together with order / hot (tail classes off)
+                    tl = (tl & ~((1 << 23) - 1)) + (1 << 22) + 4096 * min(ns, 1023)
                 ns = -tl if tl else ns
                 if _moe_DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)
                 lib.moe_twm_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["w13b2"],
@@ -9172,6 +9178,9 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
         _moe_TWM_HOT_M.clear()
         if _opt(state, m, "twm_hot", 0):  # moe s17: moe_twm one-pass class for 65..96-token experts; proxy v32 -3..5 H200 us
             _moe_TWM_HOT_M[m] = 1
+        _moe_TWF_SPLIT_M.clear()
+        if _opt(state, m, "twf_split", 0):  # moe s19: K-split tail of moe_twm (light experts only; combinable with order)
+            _moe_TWF_SPLIT_M[m] = _opt(state, m, "twf_split", 0)
         out = _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                               "config": {"local_start": 0, "local_count": LOCAL_EXPERTS},
                               "bucket": bucket if m > 32 else None,
@@ -12982,7 +12991,7 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
@@ -13000,12 +13009,13 @@ TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"tk2fx": False, "g14alt:qkv_gate": 1}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
-              {"gnorm": False, "twq": 4}),
+              {"gnorm": False, "twq": 4}, {"twf_split": 66}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
               {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
-              {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True})}
+              {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True}, {"twf_split": 66},
+              {"twf_split": 66, "twm_order": 76})}
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run

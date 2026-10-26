@@ -720,3 +720,13 @@
   blocks 0..T-1 do one row each). Est. saving 0.5-1.5 us (launch + PDL release minus the barrier) = <0.2% score;
   the shared H100 cannot resolve it before 14:00Z, and the last-block form lost +2.7 in s8. Tomorrow's sandbox idea.
 - build.py on main reproduces submission.py byte for byte (v68, d196c9e). Plan unchanged (STATE).
+
+## s31 (2026-10-26 12:48Z-): v69 = v68 + moe s19 twf_split TUNE options
+- Board: layer #56 at 1.956x (#1 2.380x). Budget: 1 check + 1 submit left today (sandbox ends ~19:10Z).
+- moe_src.py: applied r-moe 20b864e tools/s19/twm_split_moe_src.diff (moe_twm K-split combinable with order/hot via
+  launch bit 22; split limited to light experts). Default path unchanged (TWF_SPLIT 0, order 0).
+- layer.py: `twf_split` option (-> _moe_TWF_SPLIT_M[m]); TUNE[128] += {twf_split 66}; TUNE[256] += {twf_split 66},
+  {twf_split 66, twm_order 76}. H200 tuner decides in the last check (moe proxy: 0-4 us either sign).
+- Tests: bench test 13 PASS; forced A (twf_split 66 at 128/256) and B (twf_split 66 + order 76 at 256): scored verify
+  x2 0 bad each, replay verify 0/20 per shape each. H100 tuner (forced, single candidate, shared GPU): A T=128 354.1/456.0,
+  T=256 424.7/656.9; B T=256 420.5/654.0 us. Not A/B'd on H100 (H200 tuner decides). Committed as v69.

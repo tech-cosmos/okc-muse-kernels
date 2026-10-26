@@ -485,6 +485,9 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
         _moe_TWM_HOT_M.clear()
         if _opt(state, m, "twm_hot", 0):  # moe s17: moe_twm one-pass class for 65..96-token experts; proxy v32 -3..5 H200 us
             _moe_TWM_HOT_M[m] = 1
+        _moe_TWF_SPLIT_M.clear()
+        if _opt(state, m, "twf_split", 0):  # moe s19: K-split tail of moe_twm (light experts only; combinable with order)
+            _moe_TWF_SPLIT_M[m] = _opt(state, m, "twf_split", 0)
         out = _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                               "config": {"local_start": 0, "local_count": LOCAL_EXPERTS},
                               "bucket": bucket if m > 32 else None,
@@ -1906,7 +1909,7 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
@@ -1924,12 +1927,13 @@ TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"tk2fx": False, "g14alt:qkv_gate": 1}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
-              {"gnorm": False, "twq": 4}),
+              {"gnorm": False, "twq": 4}, {"twf_split": 66}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
               {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
-              {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True})}
+              {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True}, {"twf_split": 66},
+              {"twf_split": 66, "twm_order": 76})}
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
