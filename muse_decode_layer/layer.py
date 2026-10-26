@@ -625,7 +625,17 @@ _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_p
 _GPR3_SRC = None  # @@GPR3@@
 KV_PF = True  # s9: the qkv gemv13 L2-prefetches the window's KV rows for csl (d1 sliding; H100 csl 6.1-7.3 -> ~4 us)
 G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv, minb, pf, blocks), k = 8192
-G13_ALT = {"qkv_gate": (2, 4, 1, 2, 132)}  # s21: TUNE option "g13alt:<key>" at T=1 (PF 2: 2 rows in flight per virtual block)
+# s21/s22: alternative GEMV configs, used only where TUNE picks them (option "<kind>alt:<key>" = index into the list, 1-based)
+G13_ALT = {"qkv_gate": [(2, 4, 1, 2, 132)]}  # s21: T=1 PF 2 (2 rows in flight per virtual block; H100 +1.3/+2 us)
+G10_ALT = {"o": [(1024, 4, 4, 1, 1, 132)]}  # s22: T=1 o (PDL secondary of csl): U 4 on 132 blocks (PF 2 on 264: H100 +11 us, dropped)
+G14_ALT = {"qkv_gate": [(2, 2, 8, 32, 1), (2, 2, 4, 48, 1)]}  # s22: T=8 qkv: PF 8 / 6 row groups per block (192 blocks)
+_ALTS = {"g10": G10_ALT, "g13": G13_ALT, "g14": G14_ALT}
+
+
+def _cfg(state, tokens, kind, key, cfg):
+    """key's config for that GEMV kind, or the TUNE-picked alternative."""
+    i = int(_opt(state, tokens, kind + "alt:" + key, 0)) if key in _ALTS[kind] else 0
+    return _ALTS[kind][key][i - 1] if i else cfg[key]
 G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, wg, pf, bk, xp), m = 8
 # s11: proj pr1 (r-proj dev/pr1.cu@149d115): T=1 pooler (gemv13 body) + FP32 router + routing top-8 in ONE launch,
 # PDL secondary of the boundary (which triggers at start). (u, nv, minb, r, rb, blocks, npf). H100 d1 sliding 95.1 -> 92.5.
@@ -727,7 +737,7 @@ def _g10_lib():
         try:
             import hashlib
             from torch.utils.cpp_extension import load_inline
-            cases = " ".join("G10_CASE(1,%d,%d,%d,%d,%d)" % c[:5] for c in sorted(set(G10_CFG.values())))
+            cases = " ".join("G10_CASE(1,%d,%d,%d,%d,%d)" % c[:5] for c in sorted(set(G10_CFG.values()) | {a for v in G10_ALT.values() for a in v}))
             cases12 = " ".join("G12_CASE(%d,%d,%d,%d)" % ((G12_TOKENS,) + c[:3]) for c in sorted(set(G12_CFG.values())))
             src = _G10_SRC.replace("G10_CONFIGS", cases) + "\n" + _G12_SRC.replace("G12_CONFIGS", cases12)
             if UNPOOL_PDL:  # gemv10 may launch as a PDL secondary: its first W loads issue before griddepcontrol.wait
@@ -780,9 +790,9 @@ def _g10_lib():
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src.count(anchor) == 1, anchor
                     src = src.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
-            src13 = (_G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(8192,%d,%d,%d,%d)" % c[:4] for c in sorted(set(G13_CFG.values()) | set(G13_ALT.values()))))
+            src13 = (_G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(8192,%d,%d,%d,%d)" % c[:4] for c in sorted(set(G13_CFG.values()) | {a for v in G13_ALT.values() for a in v})))
                      + "\n" + _G14_SRC.replace("G14_CONFIGS", " ".join("G14_CASE(%d,%d,%d,%d,%d)" % (G12_TOKENS, c[0], c[1], c[2], c[4])
-                                                                      for c in sorted(set(G14_CFG.values())))))
+                                                                      for c in sorted(set(G14_CFG.values()) | {a for v in G14_ALT.values() for a in v}))))
             if GEMV_PDL:
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src13.count(anchor) == 1, anchor
@@ -1546,10 +1556,11 @@ def _g19_prepare(state):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
 # kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T; lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
-TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": True}),
+TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
+            {"g10alt:o": 1}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}),
-        8: ({}, {"pr1": False}),
+        8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"g22:qkv_gate": True}, {"g22:pooler": True},
               {"g22:unpool": True}, {"g22:qkv_gate": True, "g22:pooler": True, "g22:unpool": True}), 256: ({}, {"lt:qkv_gate": False})}
 TUNE_REPS = 40
@@ -1696,10 +1707,10 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
             if x.shape[0] == 1:
                 pf = kv_pf if kv_pf is not None else (x, x, x, 0, 0)
                 lib.g13_gemv(pk[0], pk[1], pk[2], x.contiguous(), out, pk[3],
-                              *(G13_ALT[key] if key in G13_ALT and _opt(state, 1, "g13alt:" + key, False) else G13_CFG[key]), *pf)
+                              *_cfg(state, 1, "g13", key, G13_CFG), *pf)
             else:
                 lib.g14_gemm(pk[0], pk[1], pk[2], pk[3], x.contiguous(), out, state["g12_ws"], state["g12_cnt"],
-                             w.shape[0] // 8, *G14_CFG[key])
+                             w.shape[0] // 8, *_cfg(state, G12_TOKENS, "g14", key, G14_CFG))
             return out
     if lib is not None and key in G17_KEYS and x.shape[0] in G17_CFG:
         out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
@@ -1708,7 +1719,7 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
     if x.shape[0] == 1 and lib is not None and key in G10_CFG and x.shape[1] == G10_CFG[key][0]:
         out = torch.empty((1, w.shape[0]), dtype=torch.bfloat16, device=x.device)
         pdl = ((key in GEMV_PDL_SECONDARY.get((1, sliding), ())) * (1 + (key in G10_PFL2.get(sliding, ()))),) if UNPOOL_PDL else ()
-        lib.g10_gemv(w, x.contiguous(), out, *G10_CFG[key][1:], *pdl)
+        lib.g10_gemv(w, x.contiguous(), out, *(_cfg(state, 1, "g10", key, G10_CFG) if state is not None else G10_CFG[key])[1:], *pdl)
         return out
     if x.shape[0] == G12_TOKENS and state is not None and "g12" in state and key in G12_CFG:
         out = torch.empty((G12_TOKENS, w.shape[0]), dtype=torch.bfloat16, device=x.device)
