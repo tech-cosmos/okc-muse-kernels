@@ -5,15 +5,6 @@
   Previous: 9a73c24a 2.176x @9aa37e0. Top of board 2.55x (#10 2.37x, #20 2.31x).
   Used 2026-10-26: checks 9 of 20, submits 3 (lead cap 9). s10 checks: b25182e8 2.191 (GS16 bs32 135.7: dead), 66b5e104 2.183 (race fix only, noise). Per-shape (submit 6a92803a / check 64c725e6):
   bs1 28.8/27.1, bs16 93.9/94.5, bs32 128.7/128.8, bs8 67.0/71.0, bs128 197.4/203.0, bs256 248.0/246.5.
-  Table below = s7 (ee945887) for reference.
-  | load | bs | SGLang | ours | x | floor | s6 (fa39ed7) |
-  |---|---|---|---|---|---|---|
-  | decode 1 | 1 | 80.0 | 29.6 | 2.70 | 11.4 | 30.6 |
-  | decode 16 | 16 | 189.5 | 99.9 | 1.90 | 52.5 | 103.4 |
-  | decode 32 | 32 | 204.4 | 135.2 | 1.51 | 70.8 | 139.7 |
-  | verify 1 | 8 | 143.6 | 70.1 | 2.05 | 37.3 | 72.9 |
-  | verify 16 | 128 | 463.9 | 199.5 | 2.32 | 101.3 | 198.0 |
-  | verify 32 | 256 | 619.9 | 244.1 | 2.54 | 108.9 | 252.2 |
   Decode shapes vary +-4% between identical-code checks (bs16 99.8-107.2): A/B decode changes against 2-3 checks.
 - One expert = 18.9 MB w13 + 9.4 MB w2 (incl. scales).
 - **H200 proxy**: ncu kernel durations x 0.72 works for DECODE (moe_tk2). For big-M it does NOT rank changes:
@@ -23,7 +14,7 @@
   (tensor maps!) in the state. bench.py test runs a cloned state now.
 
 ## What's on main (submission.py)
-s10 (e2fd3cd): RACE FIX in tk2f_consume: a consumer arrives on empty[stage] only AFTER the stage's dq/mma (was: right
+s10 (c33acae): RACE FIX in tk2f_consume: a consumer arrives on empty[stage] only AFTER the stage's dq/mma (was: right
 after issuing the LDS -> the producer could overwrite the stage before the LDS read it; = the s7 race). Never move the
 arrive back up. moe_tk / moe_tk2 / tk2d (DYN) still have the early arrive (not default paths): fix before using them.
 GS16 option (TK2G=0 off): tk2g_row/tk2g_consume, cfg +10000 (+ digit w: weighted split tk2g_split), 2nd token group's x
@@ -133,16 +124,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
    draft tools/tk2f_gs16_draft.cu (166 regs, no spill), apply on top of 128b11a's wait/__ldg scheme; sweep-test
    at GS 16 with tools/sweep_routings.py. bs32 has 10% (up to 40%) extra-group rows: expect bs32 -5..8%.
    Root-cause the s7 race (ld.global.cg first-row-after-reload errors) if time allows: it may hide elsewhere.
-1. Decode bs32 (1.49x) / bs16 (1.83x) are now the weakest. s6 SASS (tk2<512,8,8,true>): 130 instr per stage
-   = 104 dq+mma + ~22 overhead (6 mbarrier wait/branch/sync, 4 LDS weights/scales + arrive, ~16 scale-LUT
-   extract/add/LDS). NSTG 8 is special: = blocks per rp, so ptxas constant-folds the stage index (6/12 don't). H100 ncu bs32 gemm13: DRAM 84%, issue 51%, 18.8 instr per
-   256 weights vs 13 for dq+mma (overhead: per-stage mbar/LDS/scale LUT, per-rp cross-warp reduce + named barrier).
-   On H200 both GEMMs run at ~65% of HBM: consumer issue/latency limited. Ideas: cut per-stage overhead (scales
-   for 2 stages per LDS, fewer LUT lookups), reduce per rp reduce cost (accumulate 2 rps before reducing), prefetch
-   the next segment's x into registers (one global-latency bubble per segment change).
-2. Shared dequant for experts with > 8 tokens in decode (judge bs32 routings have hot experts with 9-32 tokens;
-   locally time tracks 8-token groups, not experts): 2 groups per pass reusing A fragments (x of group 2 in
-   registers: 1 CTA/SM allows ~224 regs). Earlier 16-token try spilled (s3): keep NG=2 path separate.
 3. Big-M: gemm2 tail (only 8 items per expert at RT=4; 200 items / 132 CTAs at bs128): give the last items 2-tile
    halves or let idle CTAs start moe_norm rows whose experts are done (per-token flags); fuse moe_gather into
    moe_route (multi-CTA route) -1 launch (~3 us).
