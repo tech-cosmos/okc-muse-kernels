@@ -1001,6 +1001,14 @@ __global__ void __launch_bounds__(1024, 1) gemm(const uint2* __restrict__ WS, co
     unsigned wn_[PF];
 #pragma unroll
     for (int p = 0; p < PF; ++p) { ws_[p] = ld2(wbs + p * WG * 32); wn_[p] = ld1(wbn + p * WG * 32); }
+#ifdef G14_BPF  // s36 (as pr8 npf 2xx): bulk L2 prefetch of atoms [PF, PF + G14_BPF) of each row group (WS, WN)
+    if (t < 2 * NG) {
+        const int nb = min(G14_BPF, NA - PF);
+        const long o0 = (((long)ks * nrg_all + rg0 + (t >> 1)) * (KC / 32) + PF * WG) * 32;
+        const char* src = (t & 1) ? (const char*)(WN + o0) : (const char*)(WS + o0);
+        if (nb > 0) asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"((unsigned)nb * WG * 32 * ((t & 1) ? 4 : 8)) : "memory");
+    }
+#endif
     float acc[TT][4];
 #pragma unroll
     for (int tt = 0; tt < TT; ++tt) acc[tt][0] = acc[tt][1] = acc[tt][2] = acc[tt][3] = 0.f;
@@ -1701,6 +1709,11 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 // M tokens (16/32), KC k per chunk, AP atoms (32 k) per warp per stage, NS ring stages, IS stages per tail item.
 // out FP32 [M, n] (zeroed by the primary), ctr int (zeroed by the primary). tail: stages left for dynamic items.
 // smem: ring [NS][SB] | x [2][M][XS] | pbuf [2][128 rows][M] f32 | barriers | tag [NS] int | ptag [2] int
+#ifdef G19_NOFIXB  // diag: headers loaded and tested, but no slot is in range (opaque): the fixups' own share
+#define KHI_B (khi - (int)(gridDim.z << 30))
+#else
+#define KHI_B khi
+#endif
 #ifndef G19_NPB
 #define G19_NPB 2
 #endif
@@ -1992,6 +2005,10 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
     int q = 0, st0 = 0, prev_end = 1, prev_xl = 1;
     unsigned xph[2] = {0, 0}, xpc[2] = {0, 0};
     float4 hd0[RPW], hd1[RPW];
+#ifdef G19_HPF  // s48: the next run's headers (predicted: the static order's next run) are loaded one run ahead
+    float4 hn0[RPW], hn1[RPW];
+    int htr = -1;
+#endif
     for (int i = 0;; ++i) {
         const int slot = i % NS;
         bar_wait(bars + 8 * slot, (i / NS) & 1);
@@ -2019,11 +2036,35 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
 #ifndef G19_RAW
         if (prev_end) {  // run start: its escape headers (rows g, g + 8 of the warp's row groups; lane c: slots 2c, 2c + 1)
             st0 = st;
+#ifdef G19_HPF
+            const bool hit = tr == htr;
+            const int un = (u / SPK + 1) * SPK, trn = tm ? un / (S * SPK) : (un % (ntr * SPK)) / SPK;
+            htr = un < U ? trn : -1;
+#pragma unroll
+            for (int rr = 0; rr < RPW; ++rr) {
+                if (hit) { hd0[rr] = hn0[rr]; hd1[rr] = hn1[rr]; }
+                else {
+                    const float2* hp0 = H + (long)((tr * NWC + wr + rr) * 16 + g) * ESC;
+                    hd0[rr] = __ldg((const float4*)hp0 + c);
+                    hd1[rr] = __ldg((const float4*)(hp0 + 8 * ESC) + c);
+                }
+                if (htr >= 0) {
+                    const float2* hq0 = H + (long)((htr * NWC + wr + rr) * 16 + g) * ESC;
+                    hn0[rr] = __ldg((const float4*)hq0 + c);
+                    hn1[rr] = __ldg((const float4*)(hq0 + 8 * ESC) + c);
+                }
+            }
+            if (false)
+#endif
 #pragma unroll
             for (int rr = 0; rr < RPW; ++rr) {
                 const float2* hp0 = H + (long)((tr * NWC + wr + rr) * 16 + g) * ESC;
+#ifdef G19_NOHDR  // diag: no header loads (empty slots: escapes unfixed): the header loads' share of the time
+                hd0[rr] = hd1[rr] = make_float4(0.f, 0x1p-15f, 0.f, 0x1p-15f); (void)hp0;
+#else
                 hd0[rr] = __ldg((const float4*)hp0 + c);
                 hd1[rr] = __ldg((const float4*)(hp0 + 8 * ESC) + c);
+#endif
             }
         }
 #endif
@@ -2217,7 +2258,29 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                     for (int pr = 0; pr < 2; ++pr) {
                         const float4 hq = h ? hd1[rr] : hd0[rr];
                         const float hx = pr ? hq.z : hq.x, hy = pr ? hq.w : hq.y;
-                        unsigned b = __ballot_sync(0xffffffffu, hy != 0x1p-15f && __float_as_int(hx) >= klo && __float_as_int(hx) < khi);
+                        unsigned b = __ballot_sync(0xffffffffu, hy != 0x1p-15f && __float_as_int(hx) >= klo && __float_as_int(hx) < KHI_B);
+#ifdef G19_FIX2  // s48: two escapes per round (loads of both issued first; same per-address order: bit-identical)
+                        while (b) {
+                            const int s1 = __ffs(b) - 1;
+                            b &= b - 1;
+                            const bool two = b != 0;
+                            const int s2 = two ? __ffs(b) - 1 : s1;
+                            b &= b - 1;
+                            const int col1 = __float_as_int(__shfl_sync(0xffffffffu, hx, s1)), col2 = __float_as_int(__shfl_sync(0xffffffffu, hx, s2));
+                            const float hv1 = __shfl_sync(0xffffffffu, hy, s1), hv2 = __shfl_sync(0xffffffffu, hy, s2);
+                            if (lane < MT) {
+                                float* pp1 = pbuf + pb * PBF + ((wr + rr) * 16 + (s1 >> 2) + 8 * h) * M + th * MT + lane;
+                                float* pp2 = pbuf + pb * PBF + ((wr + rr) * 16 + (s2 >> 2) + 8 * h) * M + th * MT + lane;
+                                const float xv1 = __bfloat162float(*(const __nv_bfloat16*)(xt + col1 * 2));
+                                const float xv2 = __bfloat162float(*(const __nv_bfloat16*)(xt + col2 * 2));
+                                const float p1 = *pp1, p2 = *pp2;
+                                const float r1 = fmaf(xv1, hv1, fmaf(xv1, -0x1p-15f, p1));
+                                if (!two) *pp1 = r1;
+                                else if ((s1 >> 2) == (s2 >> 2)) *pp1 = fmaf(xv2, hv2, fmaf(xv2, -0x1p-15f, r1));
+                                else { *pp1 = r1; *pp2 = fmaf(xv2, hv2, fmaf(xv2, -0x1p-15f, p2)); }
+                            }
+                        }
+#else
                         while (b) {
                             const int src = __ffs(b) - 1;
                             b &= b - 1;
@@ -2229,6 +2292,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                                 *pp = fmaf(xv, hv, fmaf(xv, -0x1p-15f, *pp));
                             }
                         }
+#endif
                     }
             __syncwarp();
         }
@@ -2260,9 +2324,17 @@ __global__ void zero(float4* __restrict__ p, int n4, int* __restrict__ ctr) {
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += gridDim.x * blockDim.x) p[i] = make_float4(0.f, 0.f, 0.f, 0.f);
 }
 // test predecessor: lets its dependent launch, then writes x = src (n8 uint4) and spins ~ns_ nanoseconds
-__global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int n8, int ns_) {
+// ns_ < 0 (s40 probe): instead of spinning, -ns_ dependent __ldcg loads per thread through a 256 MB random index table
+// (a latency-bound, memory-touching predecessor like the layer's glue)
+__global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int n8, int ns_, const int* chase) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n8; i += gridDim.x * blockDim.x) dst[i] = src[i];
+    if (ns_ < 0) {
+        int idx = (int)((blockIdx.x * blockDim.x + threadIdx.x) * 7919u & ((64u << 20) - 1));
+        for (int i = 0; i < -ns_; ++i) idx = __ldcg(chase + idx);
+        if (idx == -1) dst[0] = src[0];
+        return;
+    }
     unsigned long long t0, t1;
     asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t0));
     do { asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t1)); } while (t1 - t0 < (unsigned long long)ns_);
@@ -2325,7 +2397,10 @@ void g19_stream(torch::Tensor w, int64_t sb, int64_t ns, torch::Tensor out) {
     g19::stream<<<132, 288, sm, c10::cuda::getCurrentCUDAStream()>>>((const unsigned char*)w.data_ptr(), w.numel(), sb, ns, out.data_ptr<float>());
 }
 void g19_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
-    g19::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_);
+    static torch::Tensor chase;
+    if (ns_ < 0 && !chase.defined()) chase = torch::randint(0, 64 << 20, {64 << 20}, torch::dtype(torch::kInt32).device(torch::kCUDA));
+    g19::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_,
+                                                                 ns_ < 0 ? chase.data_ptr<int>() : nullptr);
 }
 void g19_zero(torch::Tensor out, torch::Tensor ctr) {
     g19::zero<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((float4*)out.data_ptr(), out.numel() / 4, ctr.data_ptr<int>());
@@ -4657,6 +4732,13 @@ DIAG19Q_S15 = {"qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (16, 1024, 8, 3, 3,
 DIAG19Q = {}
 DIAG_SLAB = {}  # s22 diag done (check ccf41026: qkv m32 bmm2 16.03 vs lt 17.50 H200 us; NOTES s22); was {"qkv_gate": (16, 32), "o": (32,), "pooler": (32,)}
 DIAG_EXT = {}  # s25 diag done (check 5abb71f1: DeepGEMM bf16_gemm_nt ties/loses vs lt everywhere); was {"qkv_gate": (16, 32, 128, 256), "o": (128, 256), "pooler": (32, 128, 256), "unpooler": (128,)}
+# s50: _diag19d only (print): H200 decomposition of gemv19 at m32/m16 in the layer's case (3 us PDL predecessor, npre = ns),
+# each config rebuilt with diag defines: "" (= main), G19_NOW (no W loads: consumer-only), +G19_NOMMA (no decode/mma),
+# +G19_NOX (decode, no x/mma), G19_NOFIX (no escape fixups); grids 132 and 108 (the layer's pooler grid). H100 proxy
+# (NOTES s16/s34): skeleton 13.8, decode +5.9, mma+ldsm +7.5 proxy-us at pool m32 G72; the H200 itself never measured.
+DIAG19D = {"pooler": [(32, 1024, 8, 2, 2, 1, 1, 8, 1), (16, 1024, 8, 3, 2, 1, 1, 8, 1)], "unpooler": [(32, 1024, 8, 2, 2, 1, 1, 8, 1)]}
+DIAG19D_DEFS = ["", "G19_NOW", "G19_NOW G19_NOMMA", "G19_NOW G19_NOX", "G19_NOFIX"]
+DIAG19D_GRIDS = (132, 108)
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
@@ -5043,6 +5125,7 @@ def prepare(weights):
     _diag19q(st)
     _diag20(st)
     _diag19_stream()
+    _diag19d(st)
     _diag_slab(st)
     _diag_ext(st)
     st["rpick"] = _tune_router(st)
@@ -5232,6 +5315,51 @@ def _diag19(st):
                 med[1] = float("nan")
             print(f"diag19 {layer} m{m} {c}: after a 3 us PDL predecessor ({med[0] * 1e3:.2f}): pick {pick} +{(med[1] - med[0]) * 1e3:.2f} us, "
                   f"g19 FP32 out +{(med[2] - med[0]) * 1e3:.2f} us")
+
+
+def _diag19d(st):
+    """Print only: per DIAG19D config and grid, us over the 3 us predecessor for each DIAG19D_DEFS build."""
+    if _g19 is None or not DIAG19D:
+        return
+    mods = []
+    for i, defs in enumerate(DIAG19D_DEFS):
+        try:
+            mods.append(load_inline(
+                name="muse_proj_g19d%d" % i, cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
+                "torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources="".join("#define %s\n" % d for d in defs.split()) + "#define G19_ONLY2\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
+                    "G19_CASE(%d,%d,%d,%d,1,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in DIAG19D.values() for c in v}))),
+                functions=["g19_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"]))
+        except Exception as e:  # noqa: BLE001
+            print("diag19d build failed:", defs, e)
+            mods.append(None)
+    g = torch.Generator(device="cuda")
+    g.manual_seed(5)
+    for layer, cfgs in DIAG19D.items():
+        for c in cfgs:
+            if ("g19", layer, c[1], c[2], c[7]) not in st:
+                continue
+            m, w = c[0], st[layer]
+            xs = torch.randn(m, w.shape[1], generator=g, device="cuda").to(torch.bfloat16)
+            x = xs.clone()
+            P, hdr, scale = st[("g19", layer, c[1], c[2], c[7])]
+            o32 = st["ws19"][:m * w.shape[0]].view(m, w.shape[0])
+            for grid in DIAG19D_GRIDS:
+                fns, names = [lambda: _g19.g19_pred(xs, x, 3000)], []
+                for defs, mod in zip(DIAG19D_DEFS, mods):
+                    if mod is None:
+                        continue
+                    ctr = torch.zeros(2, dtype=torch.int32, device="cuda")  # one epoch counter per (build, grid)
+                    fns.append(lambda mod=mod, ctr=ctr, grid=grid: (_g19.g19_pred(xs, x, 3000), mod.g19_gemm(
+                        P, hdr, scale, x, o32, ctr, c[1], c[2], c[3], 1, grid, 0, 2, c[3], *c[5:])))
+                    names.append(defs.replace("G19_", "") or "main")
+                try:
+                    med = _graph_medians(fns)
+                except Exception as e:  # noqa: BLE001
+                    print("diag19d", layer, m, grid, "failed:", e)
+                    continue
+                print(f"diag19d {layer} m{m} {c} G{grid} (pred {med[0] * 1e3:.2f}):", " | ".join(
+                    f"{nm_} +{(t - med[0]) * 1e3:.2f}" for nm_, t in zip(names, med[1:])))
 
 
 def _diag19q(st):

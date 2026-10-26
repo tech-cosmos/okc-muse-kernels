@@ -1030,3 +1030,19 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   session build. Closed. Also: _compress uses ONE base per matrix (global max exponent); other weights (zeros, outlier
   rows, NaN/Inf) only add escapes -> per-layer BF16 fallback, so correctness on reviewers' weights is not at risk.
 - With this, every proj-lane item on the list is measured or bounded below ~0.3% layer. Request to lead for a new lane.
+
+## s50 (2026-10-26 20:27-21:15Z, sandbox okc-night4, session 7): BF16 wgmma at m16/m32 DEAD; H200 g19 decomposition DIAG queued
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z). Lead 20:16Z: the layer's T>=16 GEMMs are what count.
+- (a) gemv23 (BF16 SS-wgmma swap-AB, plain BF16 W by bulk TMA, no decode) instantiated at M = 16/32 (wgss<16>/<32> added
+  to dev/gemv23.cu). H100 standalone graph, cold L2, us (cuBLAS F.linear | best g23): qkv m16 17.46 | 16.94, m32 17.70 |
+  17.66; o m16 8.91 | 11.28, m32 9.07 | 11.20; pool m16 27.38 | 26.78, m32 27.58 | 27.66; unp m16 24.78 | 27.01, m32 25.26 |
+  27.54. NOMMA pool m32 = 26.9-27.3: W-stream-bound (67 MB at ~2.5 TB/s). BF16 bytes floor on the H200 (67 MB ~ 18.3 us)
+  ~= g19's current m32 standalone: no room. DEAD (the 12-bit decode is not worth dropping at m32).
+- (b) New print-only `_diag19d` in dev/sub_template.py (DIAG19D, DIAG19D_DEFS, DIAG19D_GRIDS): g19 pool m32/m16, unp m32
+  rebuilt 5 ways (main, NOW, NOW+NOMMA, NOW+NOX, NOFIX) x grids 132/108, after the 3 us PDL predecessor. Adds ~1-2 min
+  compile. Purpose: the H200's own split of g19 m32 into skeleton / decode / mma+ldsm / W stream (only the H100 proxy so
+  far). H100 local (us over pred): pool m32 G132 main 21.50 | NOW 16.19 | NOMMA 10.08 | NOX 11.81 | NOFIX 21.60;
+  G108 23.04 | 19.01 | 11.74 | 13.63 | 23.33; pool m16 G132 19.62 | 14.14 | 10.56 | 12.35; unp m32 G132 21.44 | 16.00 |
+  10.02 | 11.20 | 21.70. bench.py test all PASS (3:56 incl. builds).
+  Reading it at 00:00Z: if H200 main ~= NOW, consumers bound it (then the skeleton NOMMA share says whether barrier/run
+  structure or decode+mma is the target); if main >> NOW, it is the W stream (then nothing kernel-side is left).

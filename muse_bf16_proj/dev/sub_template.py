@@ -143,6 +143,13 @@ DIAG19Q_S15 = {"qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (16, 1024, 8, 3, 3,
 DIAG19Q = {}
 DIAG_SLAB = {}  # s22 diag done (check ccf41026: qkv m32 bmm2 16.03 vs lt 17.50 H200 us; NOTES s22); was {"qkv_gate": (16, 32), "o": (32,), "pooler": (32,)}
 DIAG_EXT = {}  # s25 diag done (check 5abb71f1: DeepGEMM bf16_gemm_nt ties/loses vs lt everywhere); was {"qkv_gate": (16, 32, 128, 256), "o": (128, 256), "pooler": (32, 128, 256), "unpooler": (128,)}
+# s50: _diag19d only (print): H200 decomposition of gemv19 at m32/m16 in the layer's case (3 us PDL predecessor, npre = ns),
+# each config rebuilt with diag defines: "" (= main), G19_NOW (no W loads: consumer-only), +G19_NOMMA (no decode/mma),
+# +G19_NOX (decode, no x/mma), G19_NOFIX (no escape fixups); grids 132 and 108 (the layer's pooler grid). H100 proxy
+# (NOTES s16/s34): skeleton 13.8, decode +5.9, mma+ldsm +7.5 proxy-us at pool m32 G72; the H200 itself never measured.
+DIAG19D = {"pooler": [(32, 1024, 8, 2, 2, 1, 1, 8, 1), (16, 1024, 8, 3, 2, 1, 1, 8, 1)], "unpooler": [(32, 1024, 8, 2, 2, 1, 1, 8, 1)]}
+DIAG19D_DEFS = ["", "G19_NOW", "G19_NOW G19_NOMMA", "G19_NOW G19_NOX", "G19_NOFIX"]
+DIAG19D_GRIDS = (132, 108)
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
@@ -510,6 +517,7 @@ def prepare(weights):
     _diag19q(st)
     _diag20(st)
     _diag19_stream()
+    _diag19d(st)
     _diag_slab(st)
     _diag_ext(st)
     st["rpick"] = _tune_router(st)
@@ -699,6 +707,51 @@ def _diag19(st):
                 med[1] = float("nan")
             print(f"diag19 {layer} m{m} {c}: after a 3 us PDL predecessor ({med[0] * 1e3:.2f}): pick {pick} +{(med[1] - med[0]) * 1e3:.2f} us, "
                   f"g19 FP32 out +{(med[2] - med[0]) * 1e3:.2f} us")
+
+
+def _diag19d(st):
+    """Print only: per DIAG19D config and grid, us over the 3 us predecessor for each DIAG19D_DEFS build."""
+    if _g19 is None or not DIAG19D:
+        return
+    mods = []
+    for i, defs in enumerate(DIAG19D_DEFS):
+        try:
+            mods.append(load_inline(
+                name="muse_proj_g19d%d" % i, cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
+                "torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources="".join("#define %s\n" % d for d in defs.split()) + "#define G19_ONLY2\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
+                    "G19_CASE(%d,%d,%d,%d,1,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in DIAG19D.values() for c in v}))),
+                functions=["g19_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"]))
+        except Exception as e:  # noqa: BLE001
+            print("diag19d build failed:", defs, e)
+            mods.append(None)
+    g = torch.Generator(device="cuda")
+    g.manual_seed(5)
+    for layer, cfgs in DIAG19D.items():
+        for c in cfgs:
+            if ("g19", layer, c[1], c[2], c[7]) not in st:
+                continue
+            m, w = c[0], st[layer]
+            xs = torch.randn(m, w.shape[1], generator=g, device="cuda").to(torch.bfloat16)
+            x = xs.clone()
+            P, hdr, scale = st[("g19", layer, c[1], c[2], c[7])]
+            o32 = st["ws19"][:m * w.shape[0]].view(m, w.shape[0])
+            for grid in DIAG19D_GRIDS:
+                fns, names = [lambda: _g19.g19_pred(xs, x, 3000)], []
+                for defs, mod in zip(DIAG19D_DEFS, mods):
+                    if mod is None:
+                        continue
+                    ctr = torch.zeros(2, dtype=torch.int32, device="cuda")  # one epoch counter per (build, grid)
+                    fns.append(lambda mod=mod, ctr=ctr, grid=grid: (_g19.g19_pred(xs, x, 3000), mod.g19_gemm(
+                        P, hdr, scale, x, o32, ctr, c[1], c[2], c[3], 1, grid, 0, 2, c[3], *c[5:])))
+                    names.append(defs.replace("G19_", "") or "main")
+                try:
+                    med = _graph_medians(fns)
+                except Exception as e:  # noqa: BLE001
+                    print("diag19d", layer, m, grid, "failed:", e)
+                    continue
+                print(f"diag19d {layer} m{m} {c} G{grid} (pred {med[0] * 1e3:.2f}):", " | ".join(
+                    f"{nm_} +{(t - med[0]) * 1e3:.2f}" for nm_, t in zip(names, med[1:])))
 
 
 def _diag19q(st):
