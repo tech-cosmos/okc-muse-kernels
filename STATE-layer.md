@@ -1,12 +1,18 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 07:15Z (end of session 14).
+Updated 2026-10-26 08:50Z (session 15).
+
+**ACTION: 1 scored run left for the sandbox (ends ~19:10Z): submit the best CHECKED code before ~17:30Z. Now: v44
+(de763eb) check c6a00da7 1.9608x > board 1.9558 = eligible. 2 checks left (20/20 resets 00:00Z, after the sandbox).**
 
 ## Board
 - **Best scored: 371a17ee = v42 (cfd3bc5), 1.9558x, 11,566 us/step, overall #49** at 07:10Z 10-26 (#1 2.368x, #10 2.176x,
   #50 ~1.953x). Per shape (H200 us): d1 71.4/82.3, d16 145.1/223.9, d32 185.9/334.2, v1 120.5/132.4, v16 264.9/368.3,
   v32 368.0/544.3. Its check 9db0d4eb 1.9545x. (Old best e5512e00 1.9459 had moe's tk2f race; now superseded.)
-- **main = v42 (cfd3bc5)** = v41 + N2U_SLOT/N2U_PFW (n2u: slot-ordered y32, W L2 bulk prefetch) + g17 PDL at T=8 with
+- **main = v44 (de763eb)** = v42 + moe 499bde6 (twm order overridden back to {}) + proj g19 s15 fixups + g19 T=32 pooler/unpool +
+  g19 qkv T=16 (+ cast): check c6a00da7 1.9608x: d1 72.1/80.3, d16 146.9/220.6, d32 167.4/317.6, v1 122.4/129.2, v16 273.8/360.5,
+  v32 345.9/519.3. NOT yet submitted (see ACTION).
+- v42 (cfd3bc5) = v41 + N2U_SLOT/N2U_PFW (n2u: slot-ordered y32, W L2 bulk prefetch) + g17 PDL at T=8 with
   __ldcg x (the s8 "race" was ptxas hoisting __ldg above griddepcontrol.wait; see NOTES s14 SASS audit).
 - v41 (4afa8ea): TK2F_LATE_TRIG 3 (tk2f triggers PDL at each CTA's gemm2 rows; n2u / moe_norm2/3 as PDL secondaries).
   Check 36073e6e 1.9526x.

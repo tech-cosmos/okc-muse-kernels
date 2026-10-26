@@ -465,3 +465,11 @@
   So the "spare HBM during issue-bound tk2f on H200" does not exist for prefetches (or L2 thrash). Flags kept, off.
 - DEAD BND_ROWS: _boundary with 2/4 rows per program at T=128/256 (weight vectors loaded once per program): H100 v16
   +3.4/+3.3 (2 rows), +12/+10 (4 rows); v32 +0.5/+0.2, +5/+6. Fewer CTAs = less bandwidth; the L2 re-reads are free.
+- **v44 (de763eb) = v43 + proj's g19 s15 escape-fixup rework (r-proj dev/g19_s15_layer.patch) + g19 at T=32 for the
+  pooler (32,1024,8,2,2,1) on 108 blocks and the unpool (same cfg) + qkv at T=16 on g19 (16,1024,4,4,4,2), FP32 out
+  + .to(bf16) (1.2 us cast) + _moe_TWM_ORDER_M = {} (moe s16 H200 proxy: order 76 loses ~3.6 us at v32; my two judge
+  runs were within noise).** H100 vs v43: d16 213.8/315.9 -> 212.1/313.9, d32 212.3/442.9 -> 207.2/435.3.
+  Check c6a00da7 **1.9608x** (> board 1.9558): d1 72.1/80.3, d16 146.9/220.6, d32 167.4/317.6 (was 181.2/323.6),
+  v1 122.4/129.2, v16 273.8/360.5, v32 345.9/519.3. H200 profile d32: g19 pooler+unpool 49.0 (2 calls) vs cuBLAS
+  pooler 19.8 + o/unpool 26.5; d16 qkv g19 ~11.2 + cast 1.2 vs cuBLAS 12.6 + reduce 1.8. Submit held for later
+  candidates (1 submit left; must be used before the sandbox ends ~19:10Z).
