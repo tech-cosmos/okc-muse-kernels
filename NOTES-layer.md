@@ -347,3 +347,10 @@
   loaded before griddepcontrol.wait (BPre, pooler role) +1.2/+0.3. Cause (likely): 132 blocks x 144 KB redundant L2
   reads beside the W stream, and pr1 loses the boundary's 5 us of free W prefetch. Would need cluster/DSMEM sharing
   (each block of a 4-cluster computes 1/4 of h) to cut the redundant reads; est. gain <= 2-3 us d1.
+- v38 (d664b23): proj pr8 (r-proj dev/pr8.cu@3be546b -> pr8_src.cu) at T=8: gemv14 pooler blocks each also take a
+  router item, extra finisher block sums K slices + routes (PR1_TOKENS (1, 8), PR8_CFG {8: (8,8,4,128,1,0)},
+  pr1_cnt int32[32]). H100 interleaved v1 157.7/172.6 -> 156.1/170.8 us. route_judge v1 0/120, replay T=1/8 0/60.
+  Check 0602febf **1.936x** (SGLang's own times +2-4% this run): d1 74.2/84.5, d16 151.8/228.9, d32 179.8/336.5,
+  v1 125.0/138.3 (v37 126.0/131.5; profile: pr8 22.2-22.7 us vs g14 pooler 16.6 + r3 5.6 + routing 3.2 overlapped;
+  tk2f full 55.4 -> 57.2), v16 279.7/367.3, v32 361.0/529.5. Unresolved by one check; kept on main (H100 says win).
+  Not submitted (needs > 1.9459). Budget 2026-10-26 at 05:55Z: checks 12/20, submits 8/9.

@@ -1,18 +1,20 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~05:35Z (end of session 11).
+Updated 2026-10-26 ~05:55Z (end of session 11).
 
 ## Board
 - **Best scored: e5512e00 = v33 (bb6fb77), 1.9459x, 11,624 us/step**, overall #56 at 04:50Z (#1 2.360x, #10 2.176x,
   #50 ~1.953x). v33 contains moe's old tk2f race (lead asked about withdrawing it: see COORD Judge runs line).
-- main = **v37 (s11)** = v36 + proj pr1 at T=1 (pooler+router+top-8 one launch; H100 d1 -2.4/-1.9 us) + moe 2466fac
+- main = **v38 (d664b23)** = v37 + proj pr8 at T=8 (same fusion with gemv14 pooler; H100 v1 -1.7/-1.8 us): check 0602febf
+  1.936x (noisy run; v1 full +6.8 vs v37 unexplained: re-check before trusting; T=8 off = PR1_TOKENS (1,)).
+- v37 (d411cf4) = v36 + proj pr1 at T=1 (pooler+router+top-8 one launch; H100 d1 -2.4/-1.9 us) + moe 2466fac
   (twm): check 7b02fb2c 1.947x = tie on H200 (d1 72.5/82.2), not submitted. PR1_BND (boundary fused into pr1): off, loses.
 - v36 (4017c16) = v33 + moe c33acae (race fix) + proj gemv19 at T=16 (pooler AP8 on 108 blocks as PDL
   dependent of the first boundary, which triggers at start; full unpool). **Best check ee80a8f8 1.9566x**; its submit
   543b6ca9 scored 1.9395x (noise). Per shape (H200 us ours, ratio): d1 72.1/83.7 (2.369/2.174), d16 150.1/225.4
   (1.747/1.912), d32 181.1/311.0 (1.443/1.974), v1 121.6/132.8 (2.133/2.043), v16 273.0/359.4, v32 351.8/527.1.
 - Budget 2026-10-26 (resets 00:00Z): submits 8 of 9 used (keep the last as spare unless a check clearly wins);
-  checks 11 of 20 used at 05:35Z.
+  checks 12 of 20 used at 05:55Z.
 - Judge noise: SGLang's own per-shape times move 2-6% between runs; identical code's per-shape ratios spread ~+-1.5%,
   total ~+-1%: one check cannot resolve <2% changes. Decide on H100 interleaved A/Bs (tools/ab_flag.py), check to confirm.
 - SGLang per shape (H200 us sliding/full): d1 171/183, d16 262-271/431-444, d32 261-268/614-634, v1 259-261/271-280,
@@ -70,7 +72,7 @@ Updated 2026-10-26 ~05:35Z (end of session 11).
    starts 30.1 (3.4 late) and takes 19.4 (qkv g13 14.5); _routing (1 CTA) cannot get an SM until the pooler drains
    (46.9-51.2); tk2f starts 51.3. Fewer pooler blocks: worse (132 95.1, 120 95.8, 96 96.2). Pooler + FP32 router +
    top-8 in ONE kernel (blockIdx role split; the last router block does the routing) est. d1 -3..5 us, v1 similar.
-   DONE s11 at T=1 (pr1, v37; H200 gain within noise). proj does T=8 next (pooler g14 + r3 router): integrate.
+   DONE s11: pr1 at T=1 (v37), pr8 at T=8 (v38); H200 gains within noise so far.
    Boundary fused into pr1 per block: loses (NOTES s11); a cluster/DSMEM-shared prologue is the remaining idea.
 2. T=16 o / qkv on g19: proj's H200 diag says o +0.8 worse, qkv has no PDL predecessor (first op): low value.
 3. Experts are 50-60% of every T>=16 shape and 27 us of d1's 72 (moe lane: tk2f ~63% of H200 HBM peak at d1).
