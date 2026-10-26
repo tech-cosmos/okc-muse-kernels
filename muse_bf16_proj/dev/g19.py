@@ -9,12 +9,13 @@ _g18 = open(os.path.join(d, "g18.py")).read()
 exec(_g18[_g18.index("ESC = 8"):_g18.index("cfgs = ")])
 exec(_g18[_g18.index("def pack16"):_g18.index("SH = [")].replace('"G18_ILV" in', '"G18_NEVER" in'))
 cfgs = [tuple(map(int, c.split(","))) for c in sys.argv[1].split(";")]
+cfgs = [c if len(c) == 7 else c + (2,) for c in cfgs]  # XB (x buffers) default 2
 src = open(os.path.join(d, "gemv19.cu")).read()
 src = "".join("#define %s\n" % d_ for d_ in os.environ.get("DEFS", "").split(",") if d_) + src
-src = src.replace("G19_CONFIGS", " ".join("G19_CASE(%d,%d,%d,%d,%d)" % c[:5] for c in sorted(set(c[:5] for c in cfgs))))
+src = src.replace("G19_CONFIGS", " ".join("G19_CASE(%d,%d,%d,%d,%d,%d)" % (c[:5] + c[6:]) for c in sorted(set(cfgs))))
 fns = ["g19_gemm", "g19_pred", "g19_zero", "g19_cvt"] + (["g19_trace"] if "G19_TRACE" in os.environ.get("DEFS", "") else [])
 mod = load_inline(name="pj_g19_" + hashlib.md5(src.encode()).hexdigest()[:10],
-                  cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_pred(torch::Tensor, torch::Tensor, int64_t); void g19_zero(torch::Tensor, torch::Tensor); void g19_cvt(torch::Tensor, torch::Tensor);" + (" torch::Tensor g19_trace();" if "G19_TRACE" in os.environ.get("DEFS", "") else ""),
+                  cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_pred(torch::Tensor, torch::Tensor, int64_t); void g19_zero(torch::Tensor, torch::Tensor); void g19_cvt(torch::Tensor, torch::Tensor);" + (" torch::Tensor g19_trace();" if "G19_TRACE" in os.environ.get("DEFS", "") else ""),
                   cuda_sources=src, functions=fns, extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"])
 SH = [("qkv", "qkv_gate", 2304), ("o", "o", 8192), ("pool", "pooler", 4096), ("unp", "unpooler", 8192)]
 only = os.environ.get("SH")
@@ -53,7 +54,7 @@ for nm, layer, n in SH:
         tc = bench.time_graph(lambda: (pre(), F.linear(x, W))) - e
         line = f"{nm:5s} m{M}: cublas {tc:6.2f}"
         out = torch.empty(M, n, device="cuda")
-        for (m_, kc, ap, ns, is_, tpb) in cfgs:
+        for (m_, kc, ap, ns, is_, tpb, xb_) in cfgs:
             if m_ != M or k % kc: continue
             if (kc, ap) not in packs: packs[(kc, ap)] = pack18(W, kc, ap)
             P, hdr, scale = packs[(kc, ap)]
@@ -67,10 +68,10 @@ for nm, layer, n in SH:
                 for j, r_ in enumerate(sp):
                     xp_[r_].zero_(); xp_[r_, CE[layer][j % 32]] = 8.0
             refp = xp_.double() @ W.double().T
-            for rep in range(40 if ESCW else 3):
+            for rep in range(0 if os.environ.get("SKIPCHK") else 40 if ESCW else 3):
                 out.fill_(1.0)
                 if MODE == 1: mod.g19_zero(out, ctr)
-                mod.g19_gemm(P, hdr, scale, xp_, out, ctr, kc, ap, ns, is_, GRID, tail, MODE, min(NPRE, ns)); torch.cuda.synchronize()
+                mod.g19_gemm(P, hdr, scale, xp_, out, ctr, kc, ap, ns, is_, GRID, tail, MODE, min(NPRE, ns), xb_); torch.cuda.synchronize()
                 err = ((out.double() - refp).norm() / refp.norm()).item()
                 assert err < 1e-5, (err, nm, m_, kc, ap, ns, is_, tpb)
                 pw_ = (W[:, col].double() * 16).float()
@@ -86,7 +87,7 @@ for nm, layer, n in SH:
             if "G19_TRACE" in os.environ.get("DEFS", ""):
                 fl = torch.empty(512 << 20, dtype=torch.uint8, device="cuda"); sk = torch.zeros(1, dtype=torch.int64, device="cuda")
                 for _ in range(3):
-                    torch.sum(fl.view(torch.int64), 0, out=sk[0]); (mod.g19_zero(out, ctr) if MODE == 1 else None); pre(); mod.g19_gemm(P, hdr, scale, x, out, ctr, kc, ap, ns, is_, GRID, tail, MODE, min(NPRE, ns)); torch.cuda.synchronize()
+                    torch.sum(fl.view(torch.int64), 0, out=sk[0]); (mod.g19_zero(out, ctr) if MODE == 1 else None); pre(); mod.g19_gemm(P, hdr, scale, x, out, ctr, kc, ap, ns, is_, GRID, tail, MODE, min(NPRE, ns), xb_); torch.cuda.synchronize()
                 tr = mod.g19_trace().cpu()[:GRID]; t0 = int(tr[:, 0].min())
                 if os.environ.get("SMDUMP"):
                     import pickle; R = pickle.load(open("/tmp/pj/smd.pkl", "rb")) if os.path.exists("/tmp/pj/smd.pkl") else []
@@ -98,7 +99,7 @@ for nm, layer, n in SH:
                 del fl
             ob = torch.empty(M, n, dtype=torch.bfloat16, device="cuda")
             CVT = bool(os.environ.get("CVT"))  # + the BF16 copy (PDL)
-            dt = bench.time_graph(lambda: ((mod.g19_zero(out, ctr) if MODE == 1 and ZG else None), pre(), mod.g19_gemm(P, hdr, scale, x, out, ctr, kc, ap, ns, is_, GRID, tail, MODE, min(NPRE, ns)), mod.g19_cvt(out, ob) if CVT else None)) - e
-            line += f" | {kc},{ap},{ns},{is_},{tpb} {dt:6.2f}"
+            dt = bench.time_graph(lambda: ((mod.g19_zero(out, ctr) if MODE == 1 and ZG else None), pre(), mod.g19_gemm(P, hdr, scale, x, out, ctr, kc, ap, ns, is_, GRID, tail, MODE, min(NPRE, ns), xb_), mod.g19_cvt(out, ob) if CVT else None)) - e
+            line += f" | {kc},{ap},{ns},{is_},{tpb},x{xb_} {dt:6.2f}"
         print(line, flush=True)
     del W, packs

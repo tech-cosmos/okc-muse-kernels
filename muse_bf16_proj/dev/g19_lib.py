@@ -42,5 +42,5 @@ def build(cfgs, src=None):
     src = open(SRC).read() if src is None else src
     src = src.replace("G19_CONFIGS", " ".join("G19_CASE(%d,%d,%d,%d,1)" % tuple(c) for c in sorted(set(map(tuple, cfgs)))))
     return load_inline(name="pj_g19_" + hashlib.md5(src.encode()).hexdigest()[:10],
-                       cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_cvt(torch::Tensor, torch::Tensor);",
+                       cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_cvt(torch::Tensor, torch::Tensor);",
                        cuda_sources=src, functions=["g19_gemm", "g19_cvt"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])

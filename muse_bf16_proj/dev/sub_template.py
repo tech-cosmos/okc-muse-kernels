@@ -89,8 +89,13 @@ BF16_G17 = {"unpooler": [(1, 4, 512), (1, 4, 256), (8, 4, 256), (8, 4, 128)]}
 # gemv19 (dev/gemv19.cu, dev/g19_lib.py): TMA-ring streamer over the 12-bit weights, FP32 out zeroed in-kernel + red.add
 # split-K partials, then a BF16 copy (g19_cvt). (m, kc, ap, ns, npre). Built for the layer (PDL W prefetch during the
 # previous kernel); standalone (no predecessor) H100 it ties cuBLAS at m16 (pooler 24.8 vs 28.0) and loses at m32.
-BF16_G19 = {"qkv_gate": [(16, 1024, 4, 4, 2), (32, 512, 4, 3, 2)], "pooler": [(16, 1024, 4, 4, 2), (32, 512, 4, 4, 2)],
-            "unpooler": [(16, 1024, 4, 4, 2), (32, 512, 4, 4, 2)], "o": [(16, 512, 4, 3, 2)]}
+# (m, kc, ap, ns, npre, xb): xb = x buffers (1: m32 can use kc 1024: H100 pooler m32 22.9 vs 24.3 with (512, xb 2)).
+BF16_G19 = {"qkv_gate": [(16, 1024, 4, 4, 2, 2), (32, 1024, 4, 4, 2, 1)], "pooler": [(16, 1024, 4, 4, 2, 2), (32, 1024, 4, 4, 2, 1)],
+            "unpooler": [(16, 1024, 4, 4, 2, 2), (32, 1024, 4, 4, 2, 1)], "o": [(16, 512, 4, 3, 2, 2)]}
+# _diag19 only (print, no picks): H200 behaviour of ring depth / stage size in the layer case
+DIAG19 = {"pooler": [(16, 1024, 4, 6, 6, 1), (16, 1024, 8, 3, 3, 1), (16, 1024, 2, 8, 8, 2), (16, 2048, 4, 4, 4, 1),
+                     (32, 1024, 4, 3, 3, 1), (32, 1024, 8, 2, 2, 1), (32, 512, 4, 6, 6, 1), (32, 512, 4, 4, 4, 2)]}
+DIAG19_STREAM = [(24576, 3), (24576, 4), (24576, 8), (49152, 4), (12288, 8)]  # (stage bytes, stages): 50 MB bare streams
 _SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _LAYER_K = {"qkv_gate": 8192, "o": 1024, "pooler": 8192, "unpooler": 4096}
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
@@ -144,11 +149,11 @@ try:
     _g19 = load_inline(
         name="muse_proj_g19a",
         cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_cvt(torch::Tensor, torch::Tensor); "
-                    "void g19_pred(torch::Tensor, torch::Tensor, int64_t);",
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_cvt(torch::Tensor, torch::Tensor); "
+                    "void g19_pred(torch::Tensor, torch::Tensor, int64_t); void g19_stream(torch::Tensor, int64_t, int64_t, torch::Tensor);",
         cuda_sources="#define G19_ONLY2\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
-            "G19_CASE(%d,%d,%d,%d,1)" % c[:4] for c in sorted({c for v in BF16_G19.values() for c in v}))),
-        functions=["g19_gemm", "g19_cvt", "g19_pred"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+            "G19_CASE(%d,%d,%d,%d,1,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in list(BF16_G19.values()) + list(DIAG19.values()) for c in v}))),
+        functions=["g19_gemm", "g19_cvt", "g19_pred", "g19_stream"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
 except Exception as _e:  # noqa: BLE001
     print("muse_proj gemv19 build failed:", _e)
     _g19 = None
@@ -277,7 +282,8 @@ def _pack19(c, kc, ap):
 def prepare(weights):
     st = {name: w.contiguous() for name, w in weights.items()}
     if _g19 is not None:
-        for name, cfgs in BF16_G19.items():
+        for name in BF16_G19:
+            cfgs = BF16_G19[name] + DIAG19.get(name, [])
             c = _compress(weights[name])
             if c is None:
                 continue
@@ -326,6 +332,7 @@ def prepare(weights):
     st["ltws"] = torch.empty(LT_WS_BYTES, dtype=torch.uint8, device=r.device)
     st["pick"] = _tune(st)
     _diag19(st)
+    _diag19_stream()
     st["rpick"] = _tune_router(st)
     return st
 
@@ -354,7 +361,7 @@ def _run(st, layer, x, out, cand):
     elif kind == "g19":
         P, hdr, scale = st[("g19", layer, c[1], c[2])]
         o32 = st["ws19"][:out.numel()].view(out.shape)
-        _g19.g19_gemm(P, hdr, scale, x, o32, st["ctr19"], c[1], c[2], c[3], 1, _SMS, 0, 2, c[4])
+        _g19.g19_gemm(P, hdr, scale, x, o32, st["ctr19"], c[1], c[2], c[3], 1, _SMS, 0, 2, c[4], c[5])
         _g19.g19_cvt(o32, out)
     elif kind == "g17":
         _mod.g17_gemv(st[layer], x, out, *c)  # W[:n] prefix rows, in place
@@ -465,7 +472,7 @@ def _diag19(st):
     g = torch.Generator(device="cuda")
     g.manual_seed(3)
     for layer, cfgs in BF16_G19.items():
-        for c in cfgs:
+        for c in cfgs + DIAG19.get(layer, []):
             if ("g19", layer, c[1], c[2]) not in st:
                 continue
             m, w = c[0], st[layer]
@@ -477,9 +484,22 @@ def _diag19(st):
             pick = st["pick"].get((layer, m))
             med = _graph_medians([lambda: _g19.g19_pred(xs, x, 3000),
                                   lambda: (_g19.g19_pred(xs, x, 3000), _run(st, layer, x, out, pick)),
-                                  lambda: (_g19.g19_pred(xs, x, 3000), _g19.g19_gemm(P, hdr, scale, x, o32, st["ctr19"], c[1], c[2], c[3], 1, _SMS, 0, 2, c[3]))])
+                                  lambda: (_g19.g19_pred(xs, x, 3000), _g19.g19_gemm(P, hdr, scale, x, o32, st["ctr19"], c[1], c[2], c[3], 1, _SMS, 0, 2, c[3], c[5]))])
+            if c not in cfgs:
+                med[1] = float("nan")
             print(f"diag19 {layer} m{m} {c}: after a 3 us PDL predecessor ({med[0] * 1e3:.2f}): pick {pick} +{(med[1] - med[0]) * 1e3:.2f} us, "
                   f"g19 FP32 out +{(med[2] - med[0]) * 1e3:.2f} us")
+
+
+def _diag19_stream():
+    if _g19 is None:
+        return
+    w = torch.zeros(50 << 20, dtype=torch.uint8, device="cuda")
+    o = torch.zeros(1, device="cuda")
+    med = _graph_medians([lambda: o.zero_()] + [(lambda c=c: _g19.g19_stream(w, c[0], c[1], o)) for c in DIAG19_STREAM])
+    print("diag19 bare TMA stream 50 MB, 132 blocks:", " ".join(f"{c}:{(t - med[0]) * 1e3:.2f}" for c, t in zip(DIAG19_STREAM, med[1:])),
+          f"(a 1-kernel graph, {med[0] * 1e3:.2f} us, subtracted)")
+    del w
 
 
 def _graph_medians(fns, reps=25):

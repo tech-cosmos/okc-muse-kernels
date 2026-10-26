@@ -63,7 +63,7 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 // M tokens (16/32), KC k per chunk, AP atoms (32 k) per warp per stage, NS ring stages, IS stages per tail item.
 // out FP32 [M, n] (zeroed by the primary), ctr int (zeroed by the primary). tail: stages left for dynamic items.
 // smem: ring [NS][SB] | x [2][M][XS] | pbuf [2][128 rows][M] f32 | barriers | tag [NS] int | ptag [2] int
-template <int M, int KC, int AP, int NS, int IS, int PRE>
+template <int M, int KC, int AP, int NS, int IS, int PRE, int XB>
 __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H,
                                                          float scale, const __nv_bfloat16* __restrict__ x,
                                                          float* __restrict__ out, int* __restrict__ ctr, int n, int k, int tail, int npre) {
@@ -71,9 +71,9 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
     static_assert(NA % AP == 0 && SPK % IS == 0, "config");
     extern __shared__ __align__(128) unsigned char smem[];
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), xs = ring + NS * SB;
-    float* pbuf = (float*)(smem + NS * SB + 2 * M * XS);
+    float* pbuf = (float*)(smem + NS * SB + XB * M * XS);
     const unsigned bars = (unsigned)__cvta_generic_to_shared(pbuf + 2 * PBF);
-    int* tag = (int*)(pbuf + 2 * PBF) + 2 * (2 * NS + 8);  // after the barriers. per slot: u | xb << 30 | end << 31 (-1: no more work)
+    int* tag = (int*)(pbuf + 2 * PBF) + 2 * (2 * NS + 8);  // after the barriers. per slot: u | xb << 29 | last x use << 30 | run end << 31 (-1: no more work)
     int* ptag = tag + NS;                                 // per pbuf: tile (-1: consumers done)
     // full[NS], empty[NS], xfull[2], xempty[2], pfull[2], pempty[2]
     const unsigned xfull = bars + 16 * NS, xempty = xfull + 16, pfull = xfull + 32, pempty = xfull + 48;
@@ -100,7 +100,8 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                 const int ks0 = ra / (ntr * SPK);
                 for (; i < npre && ra < rb && ra / (ntr * SPK) == ks0; ++i, ++ra) {
                     const int st = ra % SPK;
-                    tag[i] = ra | (ra + 1 == rb || st + 1 == SPK ? 1 << 31 : 0);  // x buffer 0
+                    const bool xl = ra + 1 == rb || (ra + 1) / (ntr * SPK) != ks0;
+                    tag[i] = ra | (xl ? 1 << 30 : 0) | (ra + 1 == rb || st + 1 == SPK ? 1 << 31 : 0);  // x buffer 0
                     bar_expect(bars + 8 * i, SB);
                     bulk(ring + i * SB, WP + (long)ra * SB, SB, bars + 8 * i);
                 }
@@ -120,8 +121,8 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                 }
                 for (int u = ra; u < rb; ++u, ++i) {
                     const int ks = u / (ntr * SPK), st = u % SPK;
-                    if (ks != xks[xb]) {  // switch x buffers, load chunk ks
-                        xb ^= 1;
+                    if (ks != xks[xb]) {  // next x buffer, load chunk ks (consumers release a buffer after its last use)
+                        xb = XB == 2 ? xb ^ 1 : 0;
                         if (xuse[xb]) bar_wait(xempty + 8 * xb, (xuse[xb] - 1) & 1);
                         ++xuse[xb];
                         xks[xb] = ks;
@@ -131,7 +132,9 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                     const int slot = i % NS;
                     if (i >= NS) bar_wait(bars + 8 * (NS + slot), ((i / NS) - 1) & 1);
                     const bool end = u + 1 == rb || st + 1 == SPK;
-                    tag[slot] = u | xb << 30 | (end ? 1 << 31 : 0);
+                    const bool xl = u + 1 == rb || (u + 1) / (ntr * SPK) != ks;
+                    if (xl) xks[xb] = -1;  // released by the consumers after this stage: reload even if the next run has this ks
+                    tag[slot] = u | xb << 29 | (xl ? 1 << 30 : 0) | (end ? 1 << 31 : 0);
                     const unsigned full = bars + 8 * slot;
                     bar_expect(full, SB);
                     bulk(ring + slot * SB, WP + (long)u * SB, SB, full);
@@ -191,7 +194,7 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
     for (int j = 0; j < NT; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = acc2[j][0] = acc2[j][1] = acc2[j][2] = acc2[j][3] = 0.f;
     // ldmatrix row address: matrix q = lane / 8 (x4: n-tile pair member q / 2, k half q % 2), row = lane % 8
     const unsigned xrow = ((lane >> 4) * 8 + (lane & 7)) * XS + ((lane >> 3) & 1) * 16;
-    int q = 0, cxb = -1, st0 = 0, prev_end = 1;
+    int q = 0, st0 = 0, prev_end = 1, prev_xl = 1;
     unsigned xph[2] = {0, 0};
     float4 hd0, hd1;
     for (int i = 0;; ++i) {
@@ -199,15 +202,14 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
         bar_wait(bars + 8 * slot, (i / NS) & 1);
         const int tg = tag[slot];
         if (tg == -1) break;
-        const int u = tg & 0x3FFFFFFF, xb = (tg >> 30) & 1;
-        const bool end = tg < 0;
+        const int u = tg & 0x1FFFFFFF, xb = (tg >> 29) & 1;
+        const bool end = tg < 0, xl = (tg >> 30) & 1;
         const int ks = u / (ntr * SPK), r = u % (ntr * SPK), tr = r / SPK, st = r % SPK;
-        if (xb != cxb) {  // new x buffer: release the old one, wait for the new one
-            if (cxb >= 0) { __syncwarp(); if (lane == 0) bar_arrive(xempty + 8 * cxb); }
+        if (prev_xl) {  // first stage of an x use: wait for it
             bar_wait(xfull + 8 * xb, xph[xb]);
             xph[xb] ^= 1;
-            cxb = xb;
         }
+        prev_xl = xl;
         if (prev_end) {  // run start: its escape headers (rows g, g + 8 of the warp's row group; lane c: slots 2c, 2c + 1)
             st0 = st;
             const float2* hp0 = H + (long)((tr * NWC + w) * 16 + g) * ESC;
@@ -224,6 +226,13 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
             asm volatile("ld.shared.v4.u32 {%0,%1,%2,%3}, [%4];" : "=r"(sv.x), "=r"(sv.y), "=r"(sv.z), "=r"(sv.w) : "r"(sb + j * 512));
             asm volatile("ld.shared.v2.u32 {%0,%1}, [%2];" : "=r"(nv.x), "=r"(nv.y) : "r"(nb + j * 256));
             const unsigned kb = (st * AP + j) * 64;  // byte offset of the atom's k within the chunk
+#ifdef G19_NOMMA
+            acc[0][j & 3] += __uint_as_float(sv.x ^ sv.y ^ sv.z ^ sv.w ^ nv.x ^ nv.y); continue;
+#endif
+#ifdef G19_NOX
+            { const uint4 af = dec8(sv.x, sv.y, nv.x), af2 = dec8(sv.z, sv.w, nv.y);
+              acc[0][j & 3] += __uint_as_float(af.x ^ af.y ^ af.z ^ af.w ^ af2.x ^ af2.y ^ af2.z ^ af2.w); continue; }
+#endif
 #pragma unroll
             for (int s = 0; s < 2; ++s) {
                 const uint4 af = dec8(s ? sv.z : sv.x, s ? sv.w : sv.y, s ? nv.y : nv.x);
@@ -238,7 +247,7 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
         }
         __syncwarp();
         if (lane == 0) bar_arrive(bars + 8 * (NS + slot));
-        if (!end) continue;
+        if (!end) continue;  // (a last x use always ends a run: released below, after the escape fixups read x)
         // run end: rows rg*16 + g (+8), tokens jj*8 + 2c (+1), k in [klo, khi)
         const int rg = tr * NWC + w, nat = (st - st0 + 1) * AP;
         const int klo = ks * KC + st0 * AP * 32, khi = ks * KC + (st + 1) * AP * 32;
@@ -269,6 +278,10 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
                     }
                 }
             }
+        }
+        if (xl) {  // done with this x buffer (the fixups above were its last reads)
+            __syncwarp();
+            if (lane == 0) bar_arrive(xempty + 8 * xb);
         }
         const int row0 = rg * 16 + g;
         if (nat == KA && PRE != 2) {  // the whole dot: plain stores (PRE 2: out is being zeroed by other blocks)
@@ -313,6 +326,38 @@ __global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int
     asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t0));
     do { asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t1)); } while (t1 - t0 < (unsigned long long)ns_);
 }
+// diagnostics: a bare TMA ring stream (no math) of `total` bytes, NS stages of SB bytes, one 288-thread block per SM
+__global__ void __launch_bounds__(288, 1) stream(const unsigned char* W, long total, int SB, int NS, float* out) {
+    extern __shared__ __align__(128) unsigned char smem[];
+    const unsigned ring = (unsigned)__cvta_generic_to_shared(smem), bars = ring + NS * SB;
+    const int t = threadIdx.x, w = t >> 5, lane = t & 31;
+    const long U = total / SB, u0 = U * blockIdx.x / gridDim.x, u1 = U * (blockIdx.x + 1) / gridDim.x;
+    if (t == 0) {
+        for (int i = 0; i < NS; ++i) { bar_init(bars + 8 * i, 1); bar_init(bars + 8 * (NS + i), 8); }
+        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+    }
+    __syncthreads();
+    if (w == 8) {
+        if (lane == 0)
+            for (long u = u0, i = 0; u < u1; ++u, ++i) {
+                const int slot = i % NS;
+                if (i >= NS) bar_wait(bars + 8 * (NS + slot), ((i / NS) - 1) & 1);
+                bar_expect(bars + 8 * slot, SB);
+                bulk(ring + slot * SB, W + u * SB, SB, bars + 8 * slot);
+            }
+        return;
+    }
+    float acc = 0.f;
+    for (long u = u0, i = 0; u < u1; ++u, ++i) {
+        const int slot = i % NS;
+        bar_wait(bars + 8 * slot, (i / NS) & 1);
+        const float4* p = (const float4*)(smem + slot * SB);
+        for (int j = t; j < SB / 16; j += 256) { const float4 v = p[j]; acc += v.x + v.w; }
+        __syncwarp();
+        if (lane == 0) bar_arrive(bars + 8 * (NS + slot));
+    }
+    if (acc == 1.2345f) out[0] = acc;
+}
 // BF16 copy of a gemm's FP32 output, as its PDL dependent (for consumers that need BF16)
 __global__ void cvt(const float4* __restrict__ src, uint2* __restrict__ dst, int n4) {
     asm volatile("griddepcontrol.wait;" ::: "memory");
@@ -333,6 +378,11 @@ void g19_cvt(torch::Tensor src, torch::Tensor dst) {
     cfg.attrs = attr; cfg.numAttrs = 1;
     cudaLaunchKernelEx(&cfg, g19::cvt, (const float4*)src.data_ptr(), (uint2*)dst.data_ptr(), n4);
 }
+void g19_stream(torch::Tensor w, int64_t sb, int64_t ns, torch::Tensor out) {
+    const int sm = sb * ns + 16 * ns;
+    cudaFuncSetAttribute(g19::stream, cudaFuncAttributeMaxDynamicSharedMemorySize, sm);
+    g19::stream<<<132, 288, sm, c10::cuda::getCurrentCUDAStream()>>>((const unsigned char*)w.data_ptr(), w.numel(), sb, ns, out.data_ptr<float>());
+}
 void g19_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
     g19::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_);
 }
@@ -348,26 +398,27 @@ torch::Tensor g19_trace() {
 #endif
 // mode 0: a zero kernel (out, ctr) first, the gemm its PDL dependent. mode 1: out (and ctr if tail) already zero
 // (stream-ordered before the previous kernel), the gemm a PDL dependent of the previous kernel, streaming W early.
+// xb: x buffers (2: the next k-chunk's x loads while the current one is in use; 1: less smem, the load waits).
 // npre (modes 1, 2): weight stages streamed before griddepcontrol.wait (0: wait first, x first; use 0 when the
 // previous kernel leaves nothing to overlap). mode 2: as 1, but the gemm zeroes out itself (grid barrier on the epoch counter ctr[1]: one int per call site
 // and grid size, any initial multiple of the grid, e.g. 0; tail must be 0).
 // out: FP32 [m, n] (overwritten), ctr: int32 [>= 1] scratch. grid: blocks (<= #SMs, 1 per SM). tail: dynamic stages.
 void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out, torch::Tensor ctr,
-              int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode, int64_t npre) {
+              int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode, int64_t npre, int64_t xb) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
-    const int sm = ns * g19::NWC * ap * 768 + 2 * m * (kc * 2 + 16) + 2 * g19::NWC * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
+    const int sm = ns * g19::NWC * ap * 768 + xb * m * (kc * 2 + 16) + 2 * g19::NWC * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
     TORCH_CHECK(n % (16 * g19::NWC) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0) && npre <= ns, "g19: shape");
     auto stream = c10::cuda::getCurrentCUDAStream();
     if (!mode) g19::zero<<<32, 256, 0, stream>>>((float4*)out.data_ptr(), m * n / 4, ctr.data_ptr<int>());
 #ifdef G19_ONLY2
     TORCH_CHECK(mode == 2, "g19: built for mode 2 only");
-#define G19_KERN(M_, KC_, AP_, NS_, IS_) g19::gemm<M_, KC_, AP_, NS_, IS_, 2>
+#define G19_KERN(M_, KC_, AP_, NS_, IS_, XB_) g19::gemm<M_, KC_, AP_, NS_, IS_, 2, XB_>
 #else
-#define G19_KERN(M_, KC_, AP_, NS_, IS_) (mode == 2 ? g19::gemm<M_, KC_, AP_, NS_, IS_, 2> : mode ? g19::gemm<M_, KC_, AP_, NS_, IS_, 1> : g19::gemm<M_, KC_, AP_, NS_, IS_, 0>)
+#define G19_KERN(M_, KC_, AP_, NS_, IS_, XB_) (mode == 2 ? g19::gemm<M_, KC_, AP_, NS_, IS_, 2, XB_> : mode ? g19::gemm<M_, KC_, AP_, NS_, IS_, 1, XB_> : g19::gemm<M_, KC_, AP_, NS_, IS_, 0, XB_>)
 #endif
-#define G19_CASE(M_, KC_, AP_, NS_, IS_) \
-    if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && is == IS_) { \
-        auto kern = G19_KERN(M_, KC_, AP_, NS_, IS_); \
+#define G19_CASE(M_, KC_, AP_, NS_, IS_, XB_) \
+    if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && is == IS_ && xb == XB_) { \
+        auto kern = G19_KERN(M_, KC_, AP_, NS_, IS_, XB_); \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
         cudaLaunchConfig_t cfg = {}; \
         cfg.gridDim = dim3(grid); cfg.blockDim = dim3((g19::NWC + 2) * 32); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
