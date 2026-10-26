@@ -1,19 +1,22 @@
 # STATE-moe (muse_moe_w4a16)
 
 ## Board
-- Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z; check 64c725e6 same code 2.205x), SA scale decode.
-  Previous: 9a73c24a 2.176x @9aa37e0. Top of board 2.55x (#10 2.37x, #20 2.31x).
-  Used 2026-10-26: checks 9 of 20, submits 3 (lead cap 9). s10 checks: b25182e8 2.191 (GS16 bs32 135.7: dead), 66b5e104 2.183 (race fix only, noise). Per-shape (submit 6a92803a / check 64c725e6):
-  bs1 28.8/27.1, bs16 93.9/94.5, bs32 128.7/128.8, bs8 67.0/71.0, bs128 197.4/203.0, bs256 248.0/246.5.
-  Decode shapes vary +-4% between identical-code checks (bs16 99.8-107.2): A/B decode changes against 2-3 checks.
-- One expert = 18.9 MB w13 + 9.4 MB w2 (incl. scales).
-- **H200 proxy**: ncu kernel durations x 0.72 works for DECODE (moe_tk2). For big-M it does NOT rank changes:
-  moe_tw: ncu said -9% (judge -19%); K-split tail: ncu -1% (judge +5%). For big-M trust a judge check.
-  `tools/ncu_t.sh <bs> <cfg>`, `TW=<cfg> ncu ... python tools/sk_tw.py <bs>` (big-M kernels only).
-- **The judge clones the prepared state** ("copies": 2): never keep scratch buffers or raw addresses
-  (tensor maps!) in the state. bench.py test runs a cloned state now.
+- Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z). Board is a TEST BED only (lead 01:45Z): the layer counts.
+  Used 2026-10-26: checks 12 of 20, submits 3. s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
+  worse), d4909e24 2.170 (twm mixed: neutral). Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
+  bs128 196-207, bs256 243-251 (judge noise +-4%).
+- **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.
+  USE THEM (they show the experts inside the layer). moe_norm's time there = mostly twf's tail (PDL secondary).
+- **H100 is NOT a proxy** for big-M changes (s11: RT 2 H100 -3..9 us, judge +8%) nor for decode (DRAM-bound locally).
+  Decode: ncu x 0.72 / instruction counts; tools/l2warm.py = consumer-bound proxy (1 expert, warm L2).
+- The judge clones the prepared state: never keep scratch buffers or raw addresses in the state.
 
 ## What's on main (submission.py)
+s11: M > 32 now runs **moe_twm** (TWF_MIX = 1): moe_twf with the item shape chosen per expert (RT 2 / 64-token passes,
+packing w*b2, for experts with > 32 tokens; RT 4 / 32-token passes otherwise; stage stride = RT 4 stage). prepare packs b2 too.
+Options (off): TWF_SPLIT / TWF_SPLIT_M (K-split tail items, FP32 partial + ticket/flag in st["tk"], split starts at an
+expert boundary), TWF_RT / TWF_RT_M (whole-call RT 2), tk2f NC 16 (cfg +20000). moe_route orders an expert's tokens
+nondeterministically: any per-pass treatment difference makes outputs nondeterministic (see NOTES s11).
 s10 (c33acae): RACE FIX in tk2f_consume: a consumer arrives on empty[stage] only AFTER the stage's dq/mma (was: right
 after issuing the LDS -> the producer could overwrite the stage before the LDS read it; = the s7 race). Never move the
 arrive back up. moe_tk / moe_tk2 / tk2d (DYN) still have the early arrive (not default paths): fix before using them.
@@ -83,6 +86,10 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 11 summary
+- Layer handoff: twm (mixed RT) + race fix; asked layer for an A/B of _moe_TWF_MIX 0/1 at T=128/256 (v16/v32).
+- Dead/neutral: K-split tail (tail shorter, twf longer: tie), RT 2 for all (judge +8%), NC16 decode (proxy +5-10%).
+
 ## Session 10 summary
 - Layer-routing harness: /tmp/moe10/dump_routes.py (run in ~/r-layer/muse_decode_layer) -> /tmp/moe10/routes.pt;
   tools/layer_ab.py "decode 32" ... (SUB=, ENV=, VS=), tools/ncu_layer.py (ncu driver), tools/gs_ab.py (GS16 vs GS8 bitwise).
@@ -90,20 +97,13 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - tk2f row census: dq 768 of 1122 instr (69%), HMMA 64, SA 64, overhead ~226. Instruction cuts must come from dq.
 - Found/fixed the tk2f ring race (NOTES s10). GS16 dead for now (judge bs32 +7 us; H100 phase 2 rows +40% slower, unexplained).
 
-## Session 9 summary
-- 2.176x -> 2.190x (submit 6a92803a): arithmetic scale decode (SA) in decode tk2f: -5.7% instructions. Same in big-M
-  twf (-3% instr): judge noise, kept. Dead: fused post-expert norm in tk2f (judge bs1 +2 us, check 168fa04c).
-  bs1 anatomy (H100): routing 2 us, first data 4.4, phases ~3 TB/s, norm2 4.4 + gap; see NOTES s9.
-
-## Session 8 summary
-- 2.131x -> 2.176x: tk2f stages of KPS = 2 k chunks per warp (NSTG 4, same 72 KB ring): fewer per-stage ops
-  (-5% instructions), H200 bs8-32 -3..4%. KPS 4 (402): -6.5% instr but judge tie (2.157x). DYN row tail: H100 win,
-  judge no gain. Tools: tools/ncu_tk2f.sh <bs> <cfg..> (duration, instructions, issue, dram), ab_decode.py VS=<cfgs>
-  (sets TK2F and TK2F_DYN), /tmp/moe8/mkdbg2.py + td.py (per-CTA %globaltimer timeline; recreate from NOTES if lost).
-- LESSON: the local H100 is DRAM-bound for decode (ncu dram 83%), the H200 is consumer-issue-bound: rank decode
-  changes by smsp__inst_executed and stalls, not by H100 time; then a judge check.
+## Sessions 8-9: see NOTES (KPS stages 2.131->2.176x, SA scale decode ->2.190x).
 
 ## Ranked ideas
+-2. (s11) Read the layer's check of TWF_MIX (COORD). If twm wins at v32: tune the threshold (> 32 vs > 48 tokens) and try
+   RT 2 for gemm2 only / gemm13 only. If it loses: revert TWF_MIX to 0 (prepare then skips the b2 packing).
+   Decode d1 (+0.16%/us in the layer): tk2f fixed overhead ~7 us on H200 (routing 1.5, first data ~2, barrier ~1, tails);
+   layer-owned PDL tried (tie). Ideas: producer-warp-only routing (start bulk copies ~0.5-1 us earlier), half rows at T=1.
 -1. (s10) Re-check the layer copied the race fix (COORD Requests). Then: why are GS16 phase-2 rows slower (timeline tool in
    NOTES s10: globaltimer per CTA at phase ends)? If fixable, GS16 cuts 8-17% instructions on the layer's d16/d32 and halves
    DRAM when L2 cannot dedup. Suspects: 64 KB extra smem (L1 carveout: inter __ldg x loads), xs LDS before mbar_wait, s_red x2.
