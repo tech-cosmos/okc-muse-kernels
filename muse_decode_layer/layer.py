@@ -288,9 +288,14 @@ def _router_plan(tokens):
 def _route(state, h, h32, local_start, tokens, router_pdl=False):
     bt, be, bk, ks, warps = _router_plan(tokens)
     dev = h.device
-    part = torch.empty((ks, tokens, N_EXPERTS), dtype=torch.float32, device=dev)
     fp32 = tokens <= ROUTER_FP32_MAX_TOKENS
-    if fp32:
+    lib = _G10.get("lib") if fp32 and tokens in ROUTER3_CFG else None
+    if lib is not None:
+        ks = 1  # no split K: part = the logits
+    part = torch.empty((ks, tokens, N_EXPERTS), dtype=torch.float32, device=dev)
+    if lib is not None:
+        lib.r3_router(state["router"], h32, part, *ROUTER3_CFG[tokens])
+    elif fp32:
         _router_fma[(N_EXPERTS // be, ks)](h32, state["router"], part, tokens, K=HIDDEN, E=N_EXPERTS, BT=bt, BE=be,
                                            BK=bk, KS=ks, num_warps=warps, launch_pdl=router_pdl)
     else:
@@ -706,7 +711,7 @@ def _g10_lib():
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src13.count(anchor) == 1, anchor
                     src13 = src13.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
-            src = src + "\n" + src13
+            src = src + "\n" + src13 + "\n" + _R3_SRC.replace("R3_CONFIGS", " ".join("R3_CASE(%d,%d,%d)" % c for c in sorted(set(ROUTER3_CFG.values()))))
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
@@ -716,12 +721,85 @@ def _g10_lib():
                             "void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
                             "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                             "void g14_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
-                            "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
-                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm"],
+                            "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                            "void r3_router(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);",
+                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router"],
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
             print("layer: gemv10/12 build failed, cuBLAS:", e)
     return _G10["lib"]
+
+
+# FP32 router up to 8 tokens without split K (r3_router; proj's router2 r-proj e605717 with FP32 x, tokens split over
+# blockIdx.y in groups of M so x fits in registers): tokens -> (M, rows per block, threads). H100 cold L2 m8: 8.74 us vs
+# _router_fma 11.52 (+ its 8 split partials); m1 6.91 vs 7.10 (tie: not used).
+ROUTER3_CFG = {8: (4, 2, 512)}
+_R3_SRC = r'''// router3: proj's router2 (no split K, x in registers, W float4 loads issued up front) with FP32 x; tokens split over
+// blockIdx.y in groups of M so that x fits in registers.
+namespace r3 {
+template <int M, int R, int T, int K>
+__global__ void __launch_bounds__(T) router(const float4* __restrict__ w, const float4* __restrict__ x,
+                                            float* __restrict__ out, int m, int n) {
+    constexpr int J = K / (4 * T), NW = T / 32;
+    __shared__ float red[NW][R * M];
+    const int t = threadIdx.x, lane = t & 31, warp = t >> 5, r0 = blockIdx.x * R, i0 = blockIdx.y * M;
+    float4 a[R][J];
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int j = 0; j < J; ++j) a[r][j] = __ldcs(w + (size_t)(r0 + r) * (K / 4) + t + T * j);
+    float4 xr[M][J];
+#pragma unroll
+    for (int i = 0; i < M; ++i)
+#pragma unroll
+        for (int j = 0; j < J; ++j)
+            xr[i][j] = i0 + i < m ? __ldg(x + (size_t)(i0 + i) * (K / 4) + t + T * j) : make_float4(0, 0, 0, 0);
+    float acc[R][M];
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int i = 0; i < M; ++i) acc[r][i] = 0.f;
+#pragma unroll
+    for (int j = 0; j < J; ++j)
+#pragma unroll
+        for (int i = 0; i < M; ++i)
+#pragma unroll
+            for (int r = 0; r < R; ++r) {
+                acc[r][i] = fmaf(a[r][j].x, xr[i][j].x, acc[r][i]);
+                acc[r][i] = fmaf(a[r][j].y, xr[i][j].y, acc[r][i]);
+                acc[r][i] = fmaf(a[r][j].z, xr[i][j].z, acc[r][i]);
+                acc[r][i] = fmaf(a[r][j].w, xr[i][j].w, acc[r][i]);
+            }
+#pragma unroll
+    for (int r = 0; r < R; ++r)
+#pragma unroll
+        for (int i = 0; i < M; ++i) {
+            float v = acc[r][i];
+#pragma unroll
+            for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+            if (lane == 0) red[warp][r * M + i] = v;
+        }
+    __syncthreads();
+    if (t < R * M) {
+        const int r = t / M, i = t % M;
+        float s = 0.f;
+#pragma unroll
+        for (int q = 0; q < NW; ++q) s += red[q][t];
+        if (i0 + i < m) out[(size_t)(i0 + i) * n + r0 + r] = s;
+    }
+}
+}  // namespace r3
+#define R3_CASE(M, R, T) \
+    if (mp == M && rr == R && tt == T) { \
+        r3::router<M, R, T, 8192><<<dim3(n / R, (m + M - 1) / M), T, 0, c10::cuda::getCurrentCUDAStream()>>>( \
+            (const float4*)w.data_ptr(), (const float4*)x.data_ptr(), out.data_ptr<float>(), m, n); \
+        C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
+void r3_router(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mp, int64_t rr, int64_t tt) {
+    const int m = (int)x.size(0), n = (int)w.size(0);
+    R3_CONFIGS
+    TORCH_CHECK(false, "r3: no config");
+}
+'''
 
 
 # ---- cuBLASLt with explicit algo configs (lt_src.cu = r-proj dev/lt.cu @f7b1c8b) at T >= 16 ----
