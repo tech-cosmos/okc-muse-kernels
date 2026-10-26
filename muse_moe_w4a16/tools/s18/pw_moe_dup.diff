@@ -1,0 +1,78 @@
+diff --git a/muse_moe_w4a16/submission.py b/muse_moe_w4a16/submission.py
+index ca1db24..4394979 100644
+--- a/muse_moe_w4a16/submission.py
++++ b/muse_moe_w4a16/submission.py
+@@ -2980,7 +2980,10 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float*
+ #pragma unroll
+       for (int qq = 0; qq < NQ; ++qq) {
+         const int kc = qq * NC + warp;
+-        if (GATED) {
++        if (GATED && (PF & 64)) {  // s18 PW: X is the PDL predecessor's output: never .nc (hoisted above the wait)
++          xf[qq][0] = v ? __ldcg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
++          xf[qq][1] = v ? __ldcg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
++        } else if (GATED) {
+           xf[qq][0] = v ? __ldg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
+           xf[qq][1] = v ? __ldg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
+         } else {  // written in this kernel: L2 only
+@@ -3752,6 +3755,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
+   constexpr bool FP = (PF & 16) != 0;
+ #define TK2F_SYNC() do { if (FP) asm volatile("bar.sync 4, %0;" ::"n"(NC * 32) : "memory"); else __syncthreads(); } while (0)
+   static_assert(!FP || (!DYN && !FN && GS == 8 && MRG == 0), "FP: static GS 8 path only");
++  static_assert(!(PF & 64) || (!FP && !DYN && !FN && GS == 8 && MRG == 0), "PW: static GS 8 path only");
+   int gen = 0;  // FN: this call's generation (see tk2f_norm); thread 0 only
+   if (FN && tid == 0) asm volatile("ld.relaxed.gpu.global.b32 %0, [%1];" : "=r"(gen) : "l"(cnt + 7) : "memory");
+   if (!FP || warp < NC)
+@@ -3922,6 +3926,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
+   }
+   if (FP) asm volatile("bar.sync 3, %0;" ::"n"((NC + 1) * 32) : "memory");  // the producer initialized the ring
+   if (FP && a0 >= a1) mbar_arrive(&xrdy);  // no gemm13 rows here: release the producer's gate at once
++  if (PF & 64) asm volatile("griddepcontrol.wait;" ::: "memory");  // s18 PW: X (and Y/inter reuse) after the predecessor
+   tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
+                                     empty, st, ph, rb, &xrdy);
+   tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
+@@ -3948,7 +3953,7 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
+     grid = nsm;
+   }
+   cudaStream_t st = at::cuda::getCurrentCUDAStream();
+-  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM, st, false,
++  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM, st, (PF & 64) != 0,
+       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
+       (const float*)gs13, (const float*)gs2, (const __nv_bfloat16*)x, (const int*)ids, nr, start, count, (int*)meta,
+       (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D, (const float*)tw, (const float*)w1,
+@@ -3982,8 +3987,13 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
+ #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
+     (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
+     cnt_.data_ptr()
++  const bool pw = cfg >= 1000000;  // s18 + 1000000: PW (PDL secondary: routing + weight stream before the wait)
++  cfg %= 1000000;
+   const bool sa = cfg >= 100000;  // + 100000: SA (arithmetic scale decode; prepare() checked the scales)
+   cfg %= 100000;
++  if (pw && cfg == 84204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 68>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 68>(0, TK2F_ARGS0);
++  if (pw && cfg == 204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 64>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 64>(0, TK2F_ARGS0);
++  // pw with any other cfg: ignored (plain launch, no wait)
+   if (cfg == 96204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 16>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 16>(0, TK2F_ARGS0);
+   if (cfg == 97204) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 20>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 20>(0, TK2F_ARGS0);
+   if (cfg > 80000 && cfg < 96000 && cfg % 1000 == 204) {  // s13 PF = cfg / 1000 % 10: 1 = L1 prefetch of the next segment's
+@@ -4374,6 +4384,12 @@ TK2G = 0  # s10: 1 = 16-token segments in moe_tk2f (2 token groups share each de
+ TWF_DBG = 0
+ TWF_SPLIT_M = {}  # s11 per-M override of TWF_SPLIT; judge c1659443 {128: 132, 256: 66}: tie (tail -12 us, twf +10 us)
+ TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K halves (FP32 partials, ticket): shorter tail
++# s18 PW: moe_tk2f launched as a PDL secondary (cfg + 1000000): routing, barrier init and the producer's weight stream
++# run BEFORE griddepcontrol.wait; the consumers wait right before their first x load (ld.global.cg). SAFE ONLY when
++# topk_ids is complete when the predecessor triggers (e.g. it triggers after its own griddepcontrol.wait, or ids come
++# through a full edge): the layer's _rmsnorm_gain. Standalone (nothing before it) = a no-op launch attribute.
++TK2F_PW = 0
++TK2F_PW_M = {}
+ TK2F = 204  # s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
+ TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
+ SK_ZERO = 64  # CTAs zeroing Acc13 in route2
+@@ -4534,7 +4550,8 @@ def _tk2f_cfg(M, st):
+         return sa + 70000 + TK2W * 1000
+     if TK2H:
+         return sa + (40000 + TK2H_W * 1000 if TK2H == 16 and M >= TK2H_MIN16 else 30000) + 20000 * TK2H_PSC
+-    return (TK2F_DYN if M > 1 else TK2F) + sa + (10000 + TK2G_W * 1000 if TK2G and M >= TK2G_MIN else 0)
++    pw = 1000000 if TK2F_PW_M.get(M, TK2F_PW) else 0  # s18 PW (cfg 204 / 84204 only)
++    return (TK2F_DYN if M > 1 else TK2F) + sa + pw + (10000 + TK2G_W * 1000 if TK2G and M >= TK2G_MIN else 0)
+ 
+ 
+ def kernel_fn(data, st):

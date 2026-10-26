@@ -1,0 +1,55 @@
+84a85,88
+> __device__ unsigned long long g_stl[132 * 1024];
+> __device__ int g_stn[132];
+> int64_t moe_stl_get(torch::Tensor out) { cudaMemcpyFromSymbol(out.data_ptr(), g_stl, sizeof(g_stl)); return 0; }
+> int64_t moe_stl_clear() { static int z[132] = {0}; cudaMemcpyToSymbol(g_stn, z, sizeof(z)); return 0; }
+1072c1076
+<     grid = nsm;
+---
+>     grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;
+1334c1338
+<     grid = nsm;
+---
+>     grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;
+1587c1591
+<     grid = nsm;
+---
+>     grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;
+1681a1686,1688
+>   const bool stl = STRIDE && threadIdx.x == 0;
+>   unsigned long long tprev = clock64();
+>   int sn = stl ? g_stn[blockIdx.x] : 0;
+1684a1692
+>     const unsigned long long ta = clock64();
+1685a1694
+>     if (stl && sn < 511) { const unsigned long long tb = clock64(); g_stl[blockIdx.x * 1024 + 2 * sn] = tb - ta; g_stl[blockIdx.x * 1024 + 2 * sn + 1] = ta - tprev; tprev = tb; ++sn; }
+1743a1753
+>   if (stl) g_stn[blockIdx.x] = sn;
+1957c1967
+<     grid = nsm;
+---
+>     grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;
+2252c2262
+<     grid = nsm;
+---
+>     grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;
+2631c2641
+<     grid = nsm;
+---
+>     grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;
+2897c2907
+<     grid = nsm;
+---
+>     grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;
+3948c3958
+<     grid = nsm;
+---
+>     grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;
+4180c4190
+<         "int64_t moe_set_sa(int64_t);")
+---
+>         "int64_t moe_set_sa(int64_t); int64_t moe_stl_get(torch::Tensor); int64_t moe_stl_clear();")
+4191c4201
+<                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa"],
+---
+>                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_stl_get", "moe_stl_clear"],

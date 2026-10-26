@@ -2,7 +2,7 @@
 
 ## Board
 - Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z). Board is a TEST BED only (lead 01:45Z): the layer counts.
-  Used 2026-10-26: checks 20 of 20 (all DIAG since s12, never submit those), submits 3. s15-s17: none left. Sandbox ends ~19:10Z (no reset). s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
+  Used 2026-10-26: checks 20 of 20 (all DIAG since s12, never submit those), submits 3. s15-s18: none left. Sandbox ends ~19:10Z (no reset). s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
   worse), d4909e24 2.170 (twm mixed: neutral). Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
   bs128 196-207, bs256 243-251 (judge noise +-4%).
 - **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.
@@ -70,6 +70,14 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 18 summary (no speedup; why twm is slow; NOTES s18)
+- twm consumers never wait on the ring (stage timeline): compute-bound. Microbenchmark (tools/s18/mb_wgmma.py): dq ALU
+  and wgmma do NOT overlap (RS or SS; SS/dequant-to-smem is worse): stage cost ~ dq + MMA. On the H200 light items
+  (RT4 N8/N16) are under the per-SM HBM share, only hot RT2 N64 passes are over it. Big-M gap = scheduling (layer's
+  H200 tuner has the order/tail/twq/twm_hot options). mma.sync m16n8k16 beats wgmma only at N8 (-7%).
+- Dead: TWM_NF (finer N for RT2 passes: twm at its register limit, spills/serializes), my tk2f PDL "PW" (duplicate of
+  layer v62/v63; claim first!), tk2f at v16 (fit +30 us).
+
 ## Session 17 summary (moe_twq for T=128; s16's "ring cap" was a bug; see NOTES s17)
 - s16's TWX ablation builds were all the full kernel (macro redefined). Correct ablations: moe_twm items are
   CONSUMER-bound (ring alone 18 us vs full 34.7 per RT4 N8 item at G16); dq and MMA costs add up (no overlap).
@@ -85,7 +93,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - Dead: dq IMAD/IMAD.WIDE rebalancing (+6..18%); exhaustive nibble-layout search (nothing beats 7 ALU + 1 IMAD);
   N48/N64/N96 passes in twq/twm (C7512: whole-kernel wgmma serialization); inline producer in warp 0 (2x slower).
 
-## Session 16 summary (no speedup; H200 PROXY found; big-M per-SM ingest cap found; see NOTES s16)
+## Session 16 summary (H200 PROXY found; s14/s15: twm orders, TWM_TAIL, item-cost ablations: NOTES)
 - **H200 proxy for the expert kernels**: H100 with the persistent kernels' grid capped at 88 CTAs (MOE_GRID env in a
   /tmp copy, tools/s16/README), times x 0.73 = H200 diag numbers (v16/v32/d16/v1 within 0.5%, d1/d32 ~5-8%), and it
   orders TWM_TAIL variants like the H200 (full-grid H100 does not). USE IT for every big-M/decode A/B (no checks needed).
@@ -94,17 +102,15 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - (WRONG, s17: the ablation builds were all TWX 0) "twm item cost is not consumer work". Dead: KG 2/4, 4 fragment
   buffers + wait_group 3 (ptxas serializes), KPS 2 stages, x by bulk copy, TWF_SPLIT on the proxy.
 
-## Session 15 summary: big-M item-cost ablations (superseded by s17); tk2f FP option (off: layer harness +0.2..1.8 us).
-## Session 14 summary: twm item orders / TWM_TAIL / H200 timeline tool (NOTES s14).
 
 ## Ranked ideas
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
    all their tokens needs N 96-128 accumulators = a SEPARATE kernel (ptxas sizes registers for the whole function).
    E.g. hot experts on their own launch on a subset of SMs concurrently with twm/twq for the rest (2 streams or one
    kernel with blockIdx-split roles: the dependency counters already work across CTAs). Est. v32 -20 H200 us.
--7. (s17) tk2f d1 fixed cost (H200 timeline s12: routed 1.5, first data 3.6, ph1 end 11-13, cnt ok 14.1, end 16-19):
-   overlap gemm2 with gemm1's drain by I-chunk readiness (per-chunk counters, gemm2 K split by inter chunk), or start
-   streaming the routed experts' w13 before griddepcontrol.wait if the layer can publish ids earlier. d1 weight .161.
+   s18: such a kernel could also take finer N (40/48: hot-pass stage -24/-14%) that twm cannot (register limit).
+-7. (s17/s18) tk2f fixed cost: weights-before-wait is DONE by layer (v62/63 TK2FX/TK2FJ); per-chunk gemm2 readiness
+   is likely ~0 (s12 per-segment counters gave 0 on the H200). d1 is at ~85% of HBM (2-3 experts, 20 us).
 -5. (s14) Drain of twm is still ~20-30 us (items ~40 us). Half-size tail items (TWM_TAIL) clash with the merge order;
    try tail class only for the LAST B items after the merge window, or K-split of the last wave. And: fewer dq per token
    for hot experts (128-token passes need N 128: registers).
@@ -125,7 +131,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
    only (phase 1 tied) with GS8 segments in gemm2 (needs inter rows of 16-token segments readable as 2 x 8: they are).
 -0. (s10) Cheaper dq is the only other lever (69%): ideas: fold the e4m3 scale into the x side per k16 block is impossible
    (per-row scale); 2-group sharing = GS16 above.
-00/0'/0. (s7-s9) older decode instruction-count ideas: see NOTES s7-s9.
 3. Big-M: gemm2 tail (only 8 items per expert at RT=4; 200 items / 132 CTAs at bs128): give the last items 2-tile
    halves or let idle CTAs start moe_norm rows whose experts are done (per-token flags); fuse moe_gather into
    moe_route (multi-CTA route) -1 launch (~3 us).

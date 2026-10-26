@@ -506,3 +506,44 @@
   470.9 / 453.2 / 454.2 (confirm 470.7 -> 454.0, twq 4); T=256 keeps o76 (twq 429.3/663.8 vs o76 ~417/654).
 - Session end 11:45Z. Next: idea -8 (hot experts > 96 tokens / x-tile streaming of the hot class), -7 (tk2f d1 fixed
   cost); no moe checks left today (sandbox ends ~19:10Z).
+
+## Session 18 (2026-10-26 11:25Z - ~12:20Z) -- why twm's consumer is slow (microbenchmarks); no speedup; one duplicate
+- DUPLICATE (dropped): moe_tk2f as a PDL secondary of the layer's pre-expert rmsnorm (my "PW": routing + producer
+  before griddepcontrol.wait, consumers wait before x, x via __ldcg, rmsnorm triggers after its own wait). The layer
+  built the same thing in parallel (v62 TK2FX / v63 TK2FJ) because I had not posted a Claims line: ALWAYS claim first.
+  My H100 layer A/B (5 rounds) matched theirs: d1 -0.6/-1.2, v1 -0.5/-0.6, d16 -0.1/-0.9, d32 -2.1/-1.2 us. Diff kept
+  in tools/s18/pw_moe_dup.diff (not on main: the layer text-patches tk2f's entry/x loads; keep their anchors).
+- Also found: the layer's d16/d32 outputs are NOT bitwise reproducible across graph replays even without PDL
+  (maxdiff 0.016-0.03); d1/v1 'full' rarely, 'sliding' never. Not an expert-kernel effect (told layer).
+- s17's twq_layer.patch had stale layer.py hunks (would have reverted layer's v60 nu8 X); the layer caught it and
+  took only moe_src + twq hunks (v61). RULE (layer's ask): post patches as a diff of moe_src.py only + a list of the
+  layer.py lines to add.
+- **Per-stage consumer timeline of moe_twm** (tools/s18/stl.py + stl_build.diff: clock64 per stage, consumer warp 0,
+  MOE_GRID=16): consumers wait on full[] only ~120-150 cycles per stage (= the try_wait cost) and work 740-1030 cycles:
+  twm items are CONSUMER-COMPUTE bound; the ring is never the limit (s16's "ring-only 17 us" ablation measured the ring
+  when nothing else runs, not a bottleneck). Same with cold L2 on the layer's v16/v32 routings (wait share 0.15).
+- **Microbenchmark (tools/s18/mb_wgmma.py, 1 CTA, 2 consumer WGs, a stage = 4 k16 steps x RT tiles, cycles/stage)**
+  reproduces twm exactly (RS both: RT4 N8 792 / RT4 N32 1046 / RT2 N64 737 vs twm 839 / 1033 / 735):
+    RT4 N8:  ALU(dq) only 750 | RS MMA only 417 | RS both 792 | SS MMA only 576 | ALU + SS 1015 | ALU + STS A + SS 1528
+    RT4 N32: ALU 750 | RS 550 | RS both 1046 | SS 768 | ALU + SS 1156 | ALU + STS + SS 1812
+    RT2 N64: ALU 377 | RS 512 | RS both 737 | SS 512 | ALU + SS 877 | ALU + STS + SS 1142
+  (ALU-only includes 4 xor sinks per dq.) => dq ALU and wgmma DO NOT OVERLAP (sum minus ~100-250 cycles), and it is
+  not RS-specific: SS (A from smem) is worse, with the STS of A much worse. Likely the accumulators' register-file
+  traffic. DEAD before building: an SS / dequant-to-smem rewrite of twm.
+  RT2 finer N: RS both N40 558 / N48 632 / N56 709 / N64 737 (MMA only 324/384/448/512).
+- tools/s18/mb_mmasync.py: dq + legacy mma.sync m16n8k16 (B by LDS): RT4 N8 740 (vs wgmma 792), N16 874, N32 1203
+  (wgmma 1046), RT2 N64 1028 (wgmma 737); mma.sync only N8 220 vs RS wgmma only 417 (tiny wgmmas ~13 cycles each).
+  => mma.sync wins only N8 items, by ~7%: not worth a twm variant.
+- What this means for the H200: per-SM HBM share at 4.2 TB/s = ~16 B/cycle = ~1024 cycles per RT4 16 KB stage.
+  RT4 N8 (792) and N16 are under it (HBM-bound, fine), RT4 N32 (1046) at it, RT2 N64 (737 per 8 KB = 22 GB/s/SM)
+  well over it: only the hot experts' 64-token passes are consumer-bound. The v16/v32 gap to the floor is
+  scheduling (start phase on hot items, drain), which the layer's H200-tuned options (order 76/4, tail, twq, twm_hot)
+  already cover. The levers left: fewer dq ops per weight (none found: s17 exhaustive search), or fewer MMA FLOPs
+  (padding).
+- DEAD (s18): TWM_NF = RT2 passes of 33-40 / 41-48 tokens at N40 / N48 in moe_twm (est. hot-pass stage -24% / -14%):
+  ONE extra tw_item instantiation makes ptxas spill (LDL 15 -> 163-165), TWO serialize the whole kernel's wgmma
+  pipeline (C7512: DEPBAR gsb0 0x0 136, 0x1 0). twm is at its register limit: any new N needs a separate kernel or
+  replacing an existing N. Diff: tools/s18/twm_nf_dead.diff. (Untested alternative: class-1 pass size 48 instead of
+  64 at T=128 only, N48 replacing N64 at compile time: est. v16 -2.6 H200 us; v32 loses.)
+- Fit check, no build: tk2f (decode kernel) at v16 routings would cost ~197 H200 us (fit 14.1 + 6.97 E + 4.4 extra
+  groups) vs twm's ~167: dead.
