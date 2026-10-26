@@ -185,7 +185,7 @@ __device__ __forceinline__ void ld16(const float* p, uint4& a, uint4& b) {
     b = make_uint4(pkbf(f2.x, f2.y), pkbf(f2.z, f2.w), pkbf(f3.x, f3.y), pkbf(f3.z, f3.w));
 }
 
-template <int PAGE, typename QT>
+template <int PAGE, typename QT, bool PW = false>
 __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               unsigned char* kc, unsigned char* vc, const int* __restrict__ pt,
                                               const int* __restrict__ seqs, const long* __restrict__ loc,
@@ -216,12 +216,17 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const 
 
     // Every load that doesn't need the page table goes out first (warps issue in order, and the gathers' addresses
     // wait for the page-table trip): queries, the new token, the gate, scales; then cos/sin (needs seq).
+    // layer s62 (PW): a PDL secondary of the qkv GEMM: the page table, cos/sin and K/V gathers (inputs only) go out
+    // before griddepcontrol.wait, the qkv rows after it.
     const QT* qp = qkv + (long)b * QKV_W + (h * 8 + g) * D + 16 * c;
     uint4 qa, qb;
-    ld16(qp, qa, qb);
     const QT* kp = qkv + (long)b * QKV_W + (HQ + h) * D + 2 * lane;
-    const unsigned kw = ld2(kp), vw = ld2(kp + HKV * D);
-    const unsigned gw = ld2(qkv + (long)b * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
+    unsigned kw, vw, gw;
+#define CSL_QLOADS                                                                                             \
+    ld16(qp, qa, qb);                                                                                          \
+    kw = ld2(kp); vw = ld2(kp + HKV * D);                                                                      \
+    gw = ld2(qkv + (long)b * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
+    if (!PW) { CSL_QLOADS }
     const long nloc = loc[b];
     const float kscale = *ks, vscale = *vs;
     // spec >= 0 (batch 1, page 1): SGLang slices the page table to the batch's longest length, so the window's
@@ -262,6 +267,11 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const 
         if (real != seq) { seq = real; CSL_LOADS }
     }
 #undef CSL_LOADS
+    if (PW) {
+        asm volatile("griddepcontrol.wait;" ::: "memory");
+        CSL_QLOADS
+    }
+#undef CSL_QLOADS
     const float g0 = bf(gw & 0xffff), g1 = bf(gw >> 16);
     float x[16];
     {
@@ -426,7 +436,7 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const 
 
 void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor pt,
                 torch::Tensor seq, torch::Tensor loc, torch::Tensor ks, torch::Tensor vs, torch::Tensor out, int64_t page,
-                double qk_scale, int64_t pf_ptr, int64_t pf_bytes) {
+                double qk_scale, int64_t pf_ptr, int64_t pf_bytes, int64_t pw) {
     int batch = seq.size(0), mp = pt.size(1);
     const int spec = (batch == 1 && page == 1 && CSL_SPEC) ? mp - 1 : -1;
     cudaLaunchConfig_t cfg = {};
@@ -434,18 +444,23 @@ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
     cfg.blockDim = dim3(128);
     cfg.dynamicSmemBytes = 0;
     cfg.stream = c10::cuda::getCurrentCUDAStream();
-    cudaLaunchAttribute at[1];
+    cudaLaunchAttribute at[2];
     at[0].id = cudaLaunchAttributeClusterDimension;
     at[0].val.clusterDim.x = 16; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
-    cfg.attrs = at; cfg.numAttrs = 1;
+    at[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[1].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = at; cfg.numAttrs = pw ? 2 : 1;
 #define CSL_ARGS(QT) (const QT*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
     (unsigned char*)vc.data_ptr(), pt.data_ptr<int>(), seq.data_ptr<int>(), loc.data_ptr<long>(), ks.data_ptr<float>(), \
     vs.data_ptr<float>(), (__nv_bfloat16*)out.data_ptr(), mp, (float)qk_scale, spec, \
     (const unsigned char*)pf_ptr, (long long)pf_bytes
-#define CSL_LAUNCH(P, QT) { \
+#define CSL_LAUNCH1(P, QT, PW) { \
         static bool set = false; \
-        if (!set) { cudaFuncSetAttribute(csl::decode<P, QT>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; } \
-        cudaLaunchKernelEx(&cfg, csl::decode<P, QT>, CSL_ARGS(QT)); }
+        if (!set) { cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); \
+                    if (PW) cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributePreferredSharedMemoryCarveout, 100); \
+                    set = true; } \
+        cudaLaunchKernelEx(&cfg, csl::decode<P, QT, PW>, CSL_ARGS(QT)); }
+#define CSL_LAUNCH(P, QT) { if (pw) CSL_LAUNCH1(P, QT, true) else CSL_LAUNCH1(P, QT, false) }
     TORCH_CHECK(page == 1 || page == 64, "csl: page 1 or 64");
     const bool f32 = qkv.scalar_type() == at::kFloat;
     if (page == 1) {
@@ -454,6 +469,7 @@ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
         if (f32) CSL_LAUNCH(64, float) else CSL_LAUNCH(64, unsigned short)
     }
 #undef CSL_LAUNCH
+#undef CSL_LAUNCH1
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -803,7 +819,7 @@ try:
     _CSL = _load_inline(
         name="muse_csl_s96_" + __import__("hashlib").sha256(_CSL_SRC.encode()).hexdigest()[:10],
         cpp_sources="void csl_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t);"
+                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t, int64_t);"
                     "void vtk_verify(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double);",
         cuda_sources=_CSL_SRC, functions=["csl_decode", "vtk_verify"],
@@ -3987,7 +4003,7 @@ def attn_kernel_fn(data: Inputs) -> torch.Tensor:
         out = torch.empty((batch, 1, hq * d), dtype=torch.bfloat16, device=device)
         _CSL.csl_decode(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], page_table,
                         data["seq_lens"], data["cache_loc"], data["k_scale"], data["v_scale"], out, cfg["page_size"],
-                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, *data.get("o_pf", (0, 0)))
+                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, *data.get("o_pf", (0, 0)), int(data.get("csl_pw", 0)))
         return out
     if _CSL is not None and cfg["window"] == 2048 and length == 8 and batch <= VTK_MAX_BATCH and hq == 16 \
             and hkv == 2 and d == 64 and cfg["page_size"] in (1, 64) and cfg["rope_theta"]:
@@ -11010,6 +11026,8 @@ void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
     if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && is == IS_ && xb == XB_) { \
         auto kern = G19_KERN(M_, KC_, AP_, NS_, IS_, XB_); \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        /* layer s62: npre bit 17 = the whole SM's shared memory as carveout (room for a PDL dependent's CTAs) */ \
+        cudaFuncSetAttribute(kern, cudaFuncAttributePreferredSharedMemoryCarveout, (npre >> 17) & 1 ? 100 : -1); \
         cudaLaunchConfig_t cfg = {}; \
         cfg.gridDim = dim3(grid); cfg.blockDim = dim3((g19::NWC + 2) * 32); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
         cudaLaunchAttribute attr[1]; \
@@ -13962,7 +13980,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
-             {"tk2h": 3}, {"tk2h": 4}, {"bal": True}, {"bal": False}),
+             {"tk2h": 3}, {"tk2h": 4}, {"bal": True}, {"bal": False}, {"cslpw": False}, {"cslcarve": True}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
@@ -13990,6 +14008,11 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
 TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True, "bal": True},
              (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s61: T=16 sliding moe n8 BAL (H100 real routings 4 seeds -2.6 us mean); s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
+# s62: tokens where decode sliding csl is a PDL secondary of the qkv GEMM (TUNE option cslpw). H100 ab_flag 5-6 rounds x
+# 3 seeds: d16 sliding -0.7..-1.0 us (csl CTAs still wait for g19's SMs: launch + prologue overlap only); d1 +1.3..1.7 (off).
+CSL_PW_TOKENS = (16,)
+CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem carveout so 1 csl CTA/SM fits beside it from
+# the start (H100: csl starts at 2.8 us, but its gathers slow g19 17.3 -> 20.6 us: d16 sl +0.3..0.6 net; xb 1 qkv: same)
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
@@ -14128,7 +14151,7 @@ def _tune(state):
     torch.cuda.empty_cache()
 
 
-def _g19(x, key, state, trig=False):
+def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3 = also the full smem carveout
     """x @ W.T (key's weight) in FP32 by gemv19 (a PDL dependent of the previous kernel), or None."""
     m = x.shape[0]
     e = state.get("g22", {}).get((key, m)) if _opt(state, m, "g22:" + key, False) else None
@@ -14357,7 +14380,12 @@ def kernel_fn(data, state):
         kv_pf = (pt[0, pt.shape[1] - n_pf:], kc, vc, n_pf, kc.stride(0) * kc.element_size())
     global RF_TRIG
     RF_TRIG = _opt(state, tokens, "rf_trig", RF_TRIG_DEFAULT)  # s27: attention's _red_fin (decode 1 full) triggers o after its wait
-    qkv = _g19(data["attn_input"], "qkv_gate", state)  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
+    # s62 CSL_PW: decode sliding csl as a PDL secondary of the g19 qkv (g19 triggers at start; csl's K/V gathers
+    # go out before its griddepcontrol.wait, overlapping the GEMM's weight stream)
+    csl_pw = bool(cfg["window"] > 0 and length == 1 and _opt(state, tokens, "cslpw", tokens in CSL_PW_TOKENS))
+    qkv = _g19(data["attn_input"], "qkv_gate", state,  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
+               trig=csl_pw and (1 + 2 * bool(_opt(state, tokens, "cslcarve", CSL_PW_CARVE))))
+    csl_pw = csl_pw and (qkv is not None or tokens == 1)  # T=1: the qkv gemv13/10 triggers at start (GEMV_PDL)
     slabs, qss = None, 0
     if (qkv is None and length == 1 and batch >= NDS_MIN_BATCH and HAVE_GLUON and USE_GDEC and QF32_NDS
             and (_NDS is not None or cfg["window"] == 0) and _opt(state, tokens, "qss", QSS_DEFAULT.get(tokens, False))):
@@ -14383,7 +14411,7 @@ def kernel_fn(data, state):
         w = e[0] if e is not None else dense["o"]
         o_pf = (w.data_ptr(), int(w.numel() * w.element_size() * pf_frac) & ~15)
     o = attn_kernel_fn({
-        "o_pf": o_pf,
+        "o_pf": o_pf, "csl_pw": csl_pw,
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],

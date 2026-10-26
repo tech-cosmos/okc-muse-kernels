@@ -2272,7 +2272,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
-             {"tk2h": 3}, {"tk2h": 4}, {"bal": True}, {"bal": False}),
+             {"tk2h": 3}, {"tk2h": 4}, {"bal": True}, {"bal": False}, {"cslpw": False}, {"cslcarve": True}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
@@ -2300,6 +2300,11 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
 TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True, "bal": True},
              (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s61: T=16 sliding moe n8 BAL (H100 real routings 4 seeds -2.6 us mean); s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
+# s62: tokens where decode sliding csl is a PDL secondary of the qkv GEMM (TUNE option cslpw). H100 ab_flag 5-6 rounds x
+# 3 seeds: d16 sliding -0.7..-1.0 us (csl CTAs still wait for g19's SMs: launch + prologue overlap only); d1 +1.3..1.7 (off).
+CSL_PW_TOKENS = (16,)
+CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem carveout so 1 csl CTA/SM fits beside it from
+# the start (H100: csl starts at 2.8 us, but its gathers slow g19 17.3 -> 20.6 us: d16 sl +0.3..0.6 net; xb 1 qkv: same)
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
@@ -2438,7 +2443,7 @@ def _tune(state):
     torch.cuda.empty_cache()
 
 
-def _g19(x, key, state, trig=False):
+def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3 = also the full smem carveout
     """x @ W.T (key's weight) in FP32 by gemv19 (a PDL dependent of the previous kernel), or None."""
     m = x.shape[0]
     e = state.get("g22", {}).get((key, m)) if _opt(state, m, "g22:" + key, False) else None
@@ -2667,7 +2672,12 @@ def kernel_fn(data, state):
         kv_pf = (pt[0, pt.shape[1] - n_pf:], kc, vc, n_pf, kc.stride(0) * kc.element_size())
     global RF_TRIG
     RF_TRIG = _opt(state, tokens, "rf_trig", RF_TRIG_DEFAULT)  # s27: attention's _red_fin (decode 1 full) triggers o after its wait
-    qkv = _g19(data["attn_input"], "qkv_gate", state)  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
+    # s62 CSL_PW: decode sliding csl as a PDL secondary of the g19 qkv (g19 triggers at start; csl's K/V gathers
+    # go out before its griddepcontrol.wait, overlapping the GEMM's weight stream)
+    csl_pw = bool(cfg["window"] > 0 and length == 1 and _opt(state, tokens, "cslpw", tokens in CSL_PW_TOKENS))
+    qkv = _g19(data["attn_input"], "qkv_gate", state,  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
+               trig=csl_pw and (1 + 2 * bool(_opt(state, tokens, "cslcarve", CSL_PW_CARVE))))
+    csl_pw = csl_pw and (qkv is not None or tokens == 1)  # T=1: the qkv gemv13/10 triggers at start (GEMV_PDL)
     slabs, qss = None, 0
     if (qkv is None and length == 1 and batch >= NDS_MIN_BATCH and HAVE_GLUON and USE_GDEC and QF32_NDS
             and (_NDS is not None or cfg["window"] == 0) and _opt(state, tokens, "qss", QSS_DEFAULT.get(tokens, False))):
@@ -2693,7 +2703,7 @@ def kernel_fn(data, state):
         w = e[0] if e is not None else dense["o"]
         o_pf = (w.data_ptr(), int(w.numel() * w.element_size() * pf_frac) & ~15)
     o = attn_kernel_fn({
-        "o_pf": o_pf,
+        "o_pf": o_pf, "csl_pw": csl_pw,
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],

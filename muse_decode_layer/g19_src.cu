@@ -486,6 +486,8 @@ void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
     if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && is == IS_ && xb == XB_) { \
         auto kern = G19_KERN(M_, KC_, AP_, NS_, IS_, XB_); \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        /* layer s62: npre bit 17 = the whole SM's shared memory as carveout (room for a PDL dependent's CTAs) */ \
+        cudaFuncSetAttribute(kern, cudaFuncAttributePreferredSharedMemoryCarveout, (npre >> 17) & 1 ? 100 : -1); \
         cudaLaunchConfig_t cfg = {}; \
         cfg.gridDim = dim3(grid); cfg.blockDim = dim3((g19::NWC + 2) * 32); cfg.dynamicSmemBytes = sm; cfg.stream = stream; \
         cudaLaunchAttribute attr[1]; \

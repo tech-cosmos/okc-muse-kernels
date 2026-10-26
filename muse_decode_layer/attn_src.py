@@ -135,7 +135,7 @@ __device__ __forceinline__ void ld16(const float* p, uint4& a, uint4& b) {
     b = make_uint4(pkbf(f2.x, f2.y), pkbf(f2.z, f2.w), pkbf(f3.x, f3.y), pkbf(f3.z, f3.w));
 }
 
-template <int PAGE, typename QT>
+template <int PAGE, typename QT, bool PW = false>
 __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               unsigned char* kc, unsigned char* vc, const int* __restrict__ pt,
                                               const int* __restrict__ seqs, const long* __restrict__ loc,
@@ -165,12 +165,17 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const 
 
     // Every load that doesn't need the page table goes out first (warps issue in order, and the gathers' addresses
     // wait for the page-table trip): queries, the new token, the gate, scales; then cos/sin (needs seq).
+    // layer s62 (PW): a PDL secondary of the qkv GEMM: the page table, cos/sin and K/V gathers (inputs only) go out
+    // before griddepcontrol.wait, the qkv rows after it.
     const QT* qp = qkv + (long)b * QKV_W + (h * 8 + g) * D + 16 * c;
     uint4 qa, qb;
-    ld16(qp, qa, qb);
     const QT* kp = qkv + (long)b * QKV_W + (HQ + h) * D + 2 * lane;
-    const unsigned kw = ld2(kp), vw = ld2(kp + HKV * D);
-    const unsigned gw = ld2(qkv + (long)b * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
+    unsigned kw, vw, gw;
+#define CSL_QLOADS                                                                                             \
+    ld16(qp, qa, qb);                                                                                          \
+    kw = ld2(kp); vw = ld2(kp + HKV * D);                                                                      \
+    gw = ld2(qkv + (long)b * QKV_W + (HQ + 2 * HKV) * D + (h * 8 + (rank & 7)) * D + 2 * lane);
+    if (!PW) { CSL_QLOADS }
     const long nloc = loc[b];
     const float kscale = *ks, vscale = *vs;
     // spec >= 0 (batch 1, page 1): SGLang slices the page table to the batch's longest length, so the window's
@@ -211,6 +216,11 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const 
         if (real != seq) { seq = real; CSL_LOADS }
     }
 #undef CSL_LOADS
+    if (PW) {
+        asm volatile("griddepcontrol.wait;" ::: "memory");
+        CSL_QLOADS
+    }
+#undef CSL_QLOADS
     const float g0 = bf(gw & 0xffff), g1 = bf(gw >> 16);
     float x[16];
     {
@@ -375,7 +385,7 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const 
 
 void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor pt,
                 torch::Tensor seq, torch::Tensor loc, torch::Tensor ks, torch::Tensor vs, torch::Tensor out, int64_t page,
-                double qk_scale, int64_t pf_ptr, int64_t pf_bytes) {
+                double qk_scale, int64_t pf_ptr, int64_t pf_bytes, int64_t pw) {
     int batch = seq.size(0), mp = pt.size(1);
     const int spec = (batch == 1 && page == 1 && CSL_SPEC) ? mp - 1 : -1;
     cudaLaunchConfig_t cfg = {};
@@ -383,18 +393,23 @@ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
     cfg.blockDim = dim3(128);
     cfg.dynamicSmemBytes = 0;
     cfg.stream = c10::cuda::getCurrentCUDAStream();
-    cudaLaunchAttribute at[1];
+    cudaLaunchAttribute at[2];
     at[0].id = cudaLaunchAttributeClusterDimension;
     at[0].val.clusterDim.x = 16; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
-    cfg.attrs = at; cfg.numAttrs = 1;
+    at[1].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[1].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = at; cfg.numAttrs = pw ? 2 : 1;
 #define CSL_ARGS(QT) (const QT*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
     (unsigned char*)vc.data_ptr(), pt.data_ptr<int>(), seq.data_ptr<int>(), loc.data_ptr<long>(), ks.data_ptr<float>(), \
     vs.data_ptr<float>(), (__nv_bfloat16*)out.data_ptr(), mp, (float)qk_scale, spec, \
     (const unsigned char*)pf_ptr, (long long)pf_bytes
-#define CSL_LAUNCH(P, QT) { \
+#define CSL_LAUNCH1(P, QT, PW) { \
         static bool set = false; \
-        if (!set) { cudaFuncSetAttribute(csl::decode<P, QT>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); set = true; } \
-        cudaLaunchKernelEx(&cfg, csl::decode<P, QT>, CSL_ARGS(QT)); }
+        if (!set) { cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); \
+                    if (PW) cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributePreferredSharedMemoryCarveout, 100); \
+                    set = true; } \
+        cudaLaunchKernelEx(&cfg, csl::decode<P, QT, PW>, CSL_ARGS(QT)); }
+#define CSL_LAUNCH(P, QT) { if (pw) CSL_LAUNCH1(P, QT, true) else CSL_LAUNCH1(P, QT, false) }
     TORCH_CHECK(page == 1 || page == 64, "csl: page 1 or 64");
     const bool f32 = qkv.scalar_type() == at::kFloat;
     if (page == 1) {
@@ -403,6 +418,7 @@ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
         if (f32) CSL_LAUNCH(64, float) else CSL_LAUNCH(64, unsigned short)
     }
 #undef CSL_LAUNCH
+#undef CSL_LAUNCH1
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -751,7 +767,7 @@ try:
     _CSL = _load_inline(
         name="muse_csl_s96_" + __import__("hashlib").sha256(_CSL_SRC.encode()).hexdigest()[:10],
         cpp_sources="void csl_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t);"
+                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t, int64_t);"
                     "void vtk_verify(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double);",
         cuda_sources=_CSL_SRC, functions=["csl_decode", "vtk_verify"],
@@ -3935,7 +3951,7 @@ def kernel_fn(data: Inputs) -> torch.Tensor:
         out = torch.empty((batch, 1, hq * d), dtype=torch.bfloat16, device=device)
         _CSL.csl_decode(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], page_table,
                         data["seq_lens"], data["cache_loc"], data["k_scale"], data["v_scale"], out, cfg["page_size"],
-                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, *data.get("o_pf", (0, 0)))
+                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, *data.get("o_pf", (0, 0)), int(data.get("csl_pw", 0)))
         return out
     if _CSL is not None and cfg["window"] == 2048 and length == 8 and batch <= VTK_MAX_BATCH and hq == 16 \
             and hkv == 2 and d == 64 and cfg["page_size"] in (1, 64) and cfg["rope_theta"]:
