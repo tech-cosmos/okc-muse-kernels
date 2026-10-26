@@ -358,3 +358,43 @@
   => DEAD for the layer: wgmma consumers, 2 blocks/SM (both kernels). Only qkv m16/m32 gain, and qkv is the
   layer graph's first op (no PDL predecessor to overlap: the diag's case does not apply). g19 stays as handed off.
 - Budget 10-26: checks 12/20 (2ef3aafd, 88800611 diag only), scored 4/10. No submits (my board is a test bed).
+
+## Session 13 (2026-10-26 06:14 - ~07:20 UTC): lead item (5), T<=8 GEMV ramps. QG overlap + gemv21: both DEAD
+- Idea (QG): qkv_gate = q 1024 | k 128 | v 128 | gate 1024 rows; the gate is only used in csl's final merge, and csl
+  (decode 1 sliding attention) runs on 32 CTAs (two 16-CTA clusters, 128 threads, 79-88 regs, 22 KB smem) while ~100
+  SMs idle. Plan: qkv GEMV counts finished q/k/v rows (qg[0]) and gate rows (qg[1]) with red.release; csl launches as
+  its PDL secondary, gathers the window's KV first, spins (ld.acquire) on qg[0] before its q/k/v loads (ld.cg) and on
+  qg[1] before the gate in the merge; csl's last CTA (atomic ticket) resets qg. Implemented in a copy of r-layer
+  (patch: muse_bf16_proj/dev/qg_layer.patch = diff vs r-layer layer.py/build.py at 4afa8ea): tests 13/13, same errors.
+- Co-residency needs BOTH: register room (g13 is 60 regs x 1024 threads = the whole RF; csl needs 88 x 128) AND the
+  smem carveout (cudaFuncAttributePreferredSharedMemoryCarveout 100 on g13; without it csl CTAs only start when g13
+  blocks exit, even with registers free). With g13 on 768-thread blocks (64 regs) + carveout, csl starts at 2 us
+  (beside the GEMV) instead of 13 us.
+- But g13 needs its full RF to be fast: 768 threads 16.1-16.6 us, 1024 x __maxnreg__(48) 15.5, vs 13.2 (H100 qkv m1;
+  bytes in flight per SM = registers). H100 layer A/B (5 rounds, d1 sliding): baseline 93.1, QG single g13 (768 thr)
+  95.1, QG split (q/k/v rows on the fast config, gate rows on a 768-thread launch with csl beside it) 99.6. DEAD.
+- gemv21 (dev/gemv21.cu, dev/g21.py): m=1 GEMV over gemv13's packing with the weights in a TMA bulk ring (one row
+  per stage: bytes 8 KB + nibbles 4 KB + header 64 B), NG consumer groups of WG warps (x in registers), a producer
+  warp; few registers, so csl would fit beside it. Correct first try (probe columns exact through escapes).
+  * v1 (consumer-side finalize via smem ticket, static rows): H100 qkv 14.9 (g13 13.8; pure ring = consumers do
+    nothing: 12.7). H200 (check 96165c87, tuner us): qkv 17.7-18.3 vs g13 14.0, pooler 26.2 vs 18.7, unp1k 11.2 vs g17
+    7.3. DEAD on the H200.
+  * Trace (globaltimer, ~256 ns ticks on H100: use clock64 within an SM): per-CTA end times spread 11.0-14.9 us with
+    static rows (slow SMs); per-row ready->stored latency ~0.8 us.
+  * Dynamic rows by ONE global ticket counter (never reset: a call takes exactly n + TQ*grid tickets, row = ticket mod
+    that) are throttled by same-address atomics: 132 CTAs bumping one counter serialize at ~0.5 us per round.
+    Static rows + tickets only for the last DT rows: spread fixed, but still slower overall.
+  * Lessons: an mbarrier.arrive.release (TMA expect_tx) waits for the SAME thread's pending global atomics/stores:
+    keep ticket atomics and output stores on other lanes than the TMA-issuing lane. A shifted register queue of pending
+    atomics (q[i] = q[i+1]) waits for every atomic: unroll by the queue depth. try_wait suspend hints: no effect.
+  * v2 (producer finalizes rows lazily): worse on H100 (17.0). Kept in the tree as reference; BF16_G21 = {} (not tuned).
+- Launch-completion edges (dev/lc_edge.py): during capture, cudaStreamUpdateCaptureDependencies with edge data
+  {from_port = cudaGraphKernelNodePortLaunchCompletion (2) or Programmatic (1), type = Programmatic} after a cuBLAS
+  GEMM lets the next kernel (which must griddepcontrol.wait) launch early. H100: -0.8..1.0 us per edge at m16/32/128,
+  but port 2 = port 1, and port 1 is what launching the next kernel with PDL already gives (layer: "PDL on glue after
+  cuBLAS: no gain" on the judge). Nothing new.
+- PDL hoisting audit (after layer v42 found ptxas hoisting __ldg above griddepcontrol.wait in g17): SASS of the layer's
+  pr1/pr8/g19 builds has no nc load of primary-written data before ACQBULK (pr1's 8 pre-wait LDG.128.CONSTANT are
+  the PR1_BND prologue's s/alpha/beta/gain inputs). Made pr1.cu robust anyway: x32 and x after the wait by __ldcg
+  (dev/pr1.py OK). pr8: x32 by cp.async, ls by __ldg (input, not written by the primary): fine.
+- Checks 10-26: 13/20 (96165c87 1.3091x, diag only). Scored 4/10.

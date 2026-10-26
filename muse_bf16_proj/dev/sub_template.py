@@ -92,8 +92,9 @@ BF16_G16 = {"unpooler": [(16, 4, 4, 4, 128, 1, 2), (16, 4, 8, 2, 128, 1, 2)],
 # NG consumer groups of WG warps + a producer warp, rows by global ticket. (m, k, wg, ng, ns). H100 (dev/g21.py): slower
 # than gemv13 (qkv 15.1 vs 13.7: HBM-bound there, per-row consumer latency ~0.8 us); built for the layer's QG overlap
 # (few registers: csl fits beside it) and the H200, where gemv13 runs at ~2.6 TB/s.
-BF16_G21 = {"qkv_gate": [(1, 8192, 8, 2, 8), (1, 8192, 8, 3, 9), (1, 8192, 8, 3, 12), (1, 8192, 4, 4, 8)],
-            "pooler": [(1, 8192, 8, 2, 8), (1, 8192, 8, 3, 12)], "unpooler": [(1, 4096, 8, 2, 8), (1, 4096, 8, 3, 9)]}
+# H200 (check 96165c87, first version: consumer-side finalize, static rows): qkv m1 17.7-18.3 vs gemv13 14.0, pooler 26.2
+# vs 18.7, unp1k 11.2 vs g17 7.3 (tuner us): DEAD, not tuned any more (s13 NOTES).
+BF16_G21 = {}
 BF16_G17 = {"unpooler": [(1, 4, 512), (1, 4, 256), (8, 4, 256), (8, 4, 128)]}
 # gemv19 (dev/gemv19.cu, dev/g19_lib.py): TMA-ring streamer over the 12-bit weights, FP32 out zeroed in-kernel + red.add
 # split-K partials, then a BF16 copy (g19_cvt). (m, kc, ap, ns, npre). Built for the layer (PDL W prefetch during the

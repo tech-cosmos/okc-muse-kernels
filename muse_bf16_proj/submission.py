@@ -2599,7 +2599,8 @@ _G21_SRC = r'''// gemv21: m = 1 GEMV over gemv13's lossless 12-bit weights (same
 // Block = NG consumer groups of WG warps + 1 producer warp. Stage = one row (bytes, nibbles, header). Rows by
 // global ticket (dynamic: no slow-SM tail); this CTA's it-th row goes to stage it % NS, group it % NG. A consumer thread owns fixed 16-weight groups of
 // the row (x in registers as FP32), warp sums -> red[s][warp]; the group's last warp (smem ticket) adds the WG
-// partials in warp order (deterministic), applies the escapes (true / scale - 2^-15 per entry, as gemv13) and stores.
+// partials in warp order (deterministic); the producer warp, before refilling a stage, adds that row's WG partials,
+// applies the escapes (true / scale - 2^-15 per entry, as gemv13) and stores.
 // qg != nullptr: after a row's store, red.release +1 on qg[row >= nq] (QG: a PDL secondary spins on these).
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
@@ -2634,9 +2635,16 @@ __device__ __forceinline__ float dot16(const uint4& s, const uint2& nb, const fl
 __device__ __forceinline__ void mbar_init(unsigned a, unsigned cnt) {
     asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(a), "r"(cnt) : "memory");
 }
+#ifndef G21_SUSP
+#define G21_SUSP 0
+#endif
 __device__ __forceinline__ void mbar_wait(unsigned a, unsigned par) {
-    asm volatile("{\n\t.reg .pred p;\n\tW: mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n\t@!p bra W;\n\t}"
-                 ::"r"(a), "r"(par) : "memory");
+    if (G21_SUSP)  // suspend-time hint: the warp sleeps until the phase completes instead of spinning on issue slots
+        asm volatile("{\n\t.reg .pred p;\n\tW: mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1, %2;\n\t@!p bra W;\n\t}"
+                     ::"r"(a), "r"(par), "r"(G21_SUSP) : "memory");
+    else
+        asm volatile("{\n\t.reg .pred p;\n\tW: mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n\t@!p bra W;\n\t}"
+                     ::"r"(a), "r"(par) : "memory");
 }
 __device__ __forceinline__ void mbar_arrive(unsigned a) {
     asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" ::"r"(a) : "memory");
@@ -2656,7 +2664,7 @@ __global__ void __launch_bounds__((NG * WG + 1) * 32, 1) gemv(const unsigned cha
                                                               const __nv_bfloat16* __restrict__ x,
                                                               __nv_bfloat16* __restrict__ out, int n, float scale,
                                                               unsigned* qg, int nq, unsigned long long* tk) {
-    constexpr int GT = WG * 32, NJ = KK / 16 / GT, RB = KK + KK / 2 + ESC * 8, TQ = 4;
+    constexpr int GT = WG * 32, NJ = KK / 16 / GT, RB = KK + KK / 2 + ESC * 8, TQ = 4, DT = 3;
     static_assert(KK % (16 * GT) == 0 && NS % NG == 0, "shape");
     extern __shared__ __align__(128) unsigned char sm[];
     unsigned char* ring = sm;                                                  // [NS][RB]
@@ -2672,11 +2680,18 @@ __global__ void __launch_bounds__((NG * WG + 1) * 32, 1) gemv(const unsigned cha
     // Rows by ticket: the producer keeps TQ tickets in flight (one thread's atomics on one address return increasing
     // values); it stops at its first ticket >= n, holding TQ - 1 more (all >= n): one call takes exactly
     // n + TQ * gridDim.x tickets, so tk is never reset and ticket % (n + TQ * gridDim.x) is the row (or a stop).
-    const unsigned long long NT = (unsigned long long)n + TQ * gridDim.x;
+    // Static rows first (row = blockIdx.x + it * G for it < r0), tickets only for the dynamic tail (the last ~DT
+    // rows per CTA: one counter cannot hand out every row, same-address atomics serialize at ~0.5 us per round).
+    const int G = gridDim.x, r0 = max(0, n / G - DT), nd = n - r0 * G;
+    const unsigned long long NT = (unsigned long long)nd + TQ * G;
     unsigned long long tq[TQ];
-    if (grp == NG && lane == 0) {
+    // lane 1 of the producer warp owns the tickets: lane 0's release arrives (TMA issue) and lane 2's release counter
+    // bumps (finalize) must not wait for a pending ticket atomic. Slot u % TQ serves iteration u >= r0 and is fetched
+    // at iteration u - TQ (before the loop if that is < 0).
+    if (grp == NG && lane == 1) {
 #pragma unroll
-        for (int i = 0; i < TQ; ++i) tq[i] = atomicAdd(tk, 1ull);
+        for (int j = 0; j < TQ; ++j)
+            if (r0 + j < TQ) tq[(r0 + j) % TQ] = atomicAdd(tk, 1ull);
     }
     // x first (consumers: their fixed 16-weight groups, to registers; everyone: the bf16 copy for the escapes)
     uint4 xv[NJ][2];
@@ -2694,31 +2709,81 @@ __global__ void __launch_bounds__((NG * WG + 1) * 32, 1) gemv(const unsigned cha
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
     __syncthreads();
-    if (grp == NG) {  // producer
-        if (lane == 0) {
-            int it = 0;
-            for (;; ++it) {
-                const int row = (int)(tq[0] % NT);
-                if (row >= n) break;
+    if (grp == NG) {  // producer warp: refills stages; finalizes each row (sum of the WG partials, escapes, store)
+        // just before its stage is refilled (consumers only compute and release)
+        auto finalize = [&](int f) {
+            const int s = f % NS;
+            mbar_wait(empty0 + 8 * s, (f / NS) & 1);
+#ifdef G21_TRACE
+            if (lane == 0 && f < 32 && blockIdx.x < 4) ((long long*)qg)[(blockIdx.x * 32 + f + NS) * 4 + 2] = clock64();
+#endif
+            const int row = rowid[s];
+            float r = lane < WG ? red[s * WG + lane] : 0.f;
 #pragma unroll
-                for (int i = 0; i + 1 < TQ; ++i) tq[i] = tq[i + 1];
-                tq[TQ - 1] = atomicAdd(tk, 1ull);
-                const int s = it % NS;
-                if (it >= NS) mbar_wait(empty0 + 8 * s, ((it / NS) - 1) & 1);
-                const unsigned d = (unsigned)__cvta_generic_to_shared(ring + s * RB), mb = full0 + 8 * s;
-                rowid[s] = row;
-                mbar_expect(mb, RB);
-                bulk(d, S + (long)row * KK, KK, mb);
-                bulk(d + KK, N + (long)row * (KK / 2), KK / 2, mb);
-                bulk(d + KK + KK / 2, H + (long)row * ESC, ESC * 8, mb);
+            for (int o = 16; o; o >>= 1) r += __shfl_xor_sync(0xffffffffu, r, o);
+            if (lane == 2) {
+                const float2* he = reinterpret_cast<const float2*>(ring + s * RB + KK + KK / 2);
+                for (int e = 0; e < ESC; ++e) {
+                    const float2 h = he[e];
+                    if (h.y == 0x1p-15f) break;  // slots fill in order; empty = 2^-15
+                    const float xe = __bfloat162float(xb[__float_as_int(h.x)]);
+                    r = fmaf(xe, h.y, fmaf(xe, -0x1p-15f, r));
+                }
+                out[row] = __float2bfloat16(r * scale);
+#ifndef G21_TRACE
+                if (qg) asm volatile("red.release.gpu.global.add.u32 [%0], 1;" ::"l"(qg + (row >= nq)) : "memory");
+#endif
             }
-            for (int j = 0; j < NG; ++j, ++it) {  // one stop per group
+            __syncwarp();
+        };
+        // ticket slot j of the queue is used at iterations it = j (mod TQ): unrolled so each slot keeps its own
+        // register (a shifted queue would wait for every pending atomic). All of a call's tickets lie in one window
+        // of NT: its base comes from the first ticket (one 64-bit division per CTA).
+        unsigned long long tbase = ~0ull;
+        int it = 0;
+        bool done = false;
+        while (!done) {
+#pragma unroll
+            for (int j = 0; j < TQ; ++j, ++it) {
                 const int s = it % NS;
-                if (it >= NS) mbar_wait(empty0 + 8 * s, ((it / NS) - 1) & 1);
+#ifdef G21_TRACE
+                long long c0_ = clock64();
+#endif
+                if (it >= NS) finalize(it - NS);
+#ifdef G21_TRACE
+                long long c1_ = clock64();
+                if (lane == 0 && it < 32 && blockIdx.x < 4) { ((long long*)qg)[(blockIdx.x * 32 + it) * 4] = c0_; ((long long*)qg)[(blockIdx.x * 32 + it) * 4 + 1] = c1_; }
+#endif
+                int row = blockIdx.x + it * G;
+                if (lane == 1 && it >= r0) {
+                    if (tbase == ~0ull) tbase = tq[j] - tq[j] % NT;
+                    const int d = (int)(tq[j] - tbase);
+                    row = d < nd ? r0 * G + d : n;
+                }
+                if (lane == 1 && row < n && it + TQ >= r0) tq[j] = atomicAdd(tk, 1ull);
+                row = __shfl_sync(0xffffffffu, row, 1);
+                if (row >= n) { done = true; break; }
+                if (lane == 0) {
+                    const unsigned d = (unsigned)__cvta_generic_to_shared(ring + s * RB), mb = full0 + 8 * s;
+                    rowid[s] = row;
+                    mbar_expect(mb, RB);
+                    bulk(d, S + (long)row * KK, KK, mb);
+                    bulk(d + KK, N + (long)row * (KK / 2), KK / 2, mb);
+                    bulk(d + KK + KK / 2, H + (long)row * ESC, ESC * 8, mb);
+                }
+                __syncwarp();
+#ifdef G21_TRACE
+                if (lane == 0 && it < 32 && blockIdx.x < 4) ((long long*)qg)[(blockIdx.x * 32 + it) * 4 + 3] = clock64();
+#endif
+            }
+        }
+        for (int f = it >= NS ? it - NS + 1 : 0; f < it; ++f) finalize(f);  // (it - NS was finalized in the loop)
+        if (lane == 0)
+            for (int j = 0; j < NG; ++j) {  // one stop per group (those stages' last rows are finalized)
+                const int s = (it + j) % NS;
                 rowid[s] = -1;
                 mbar_arrive(full0 + 8 * s);
             }
-        }
         return;
     }
     float xr[NJ][16];
@@ -2731,18 +2796,10 @@ __global__ void __launch_bounds__((NG * WG + 1) * 32, 1) gemv(const unsigned cha
     for (int it = grp;; it += NG) {
         const int s = it % NS;
         mbar_wait(full0 + 8 * s, (it / NS) & 1);
-        const int row = rowid[s];
-        if (row < 0) break;
-#ifdef G21_TRACE
-        if (wi == 0 && lane == 0 && it < 32) { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); ((unsigned long long*)qg)[(blockIdx.x * 32 + it) * 2] = t_; }
-#endif
+        if (rowid[s] < 0) break;
         const unsigned char* st = ring + s * RB;
-#ifdef G21_NOMATH
-        __syncwarp();
-        if (lane == 0) mbar_arrive(empty0 + 8 * s);
-        continue;
-#endif
         float v = 0.f;
+#ifndef G21_NOMATH
 #pragma unroll
         for (int q = 0; q < NJ; ++q) {
             const int j = gt + q * GT;
@@ -2750,45 +2807,14 @@ __global__ void __launch_bounds__((NG * WG + 1) * 32, 1) gemv(const unsigned cha
             const uint2 c = *reinterpret_cast<const uint2*>(st + KK + 8 * j);
             v += dot16(b, c, xr[q]);
         }
-#ifdef G21_TRACE
-        if (wi == 0 && it < 32) { v += __shfl_sync(0xffffffffu, v, 0) * 0.f; unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_) :: "memory"); if (lane == 0) ((unsigned long long*)qg)[132 * 64 + (blockIdx.x * 32 + it) * 2] = t_ + (__float_as_uint(v) & 0); }
-#endif
 #pragma unroll
         for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-        int t = 0;
+#endif
         if (lane == 0) {
             red[s * WG + wi] = v;
-            __threadfence_block();
-            t = atomicAdd(&tick[s], 1);
-        }
-        t = __shfl_sync(0xffffffffu, t, 0);
-#ifdef G21_TRACE
-        if (t == WG - 1 && lane == 0 && it < 32) { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_) :: "memory"); ((unsigned long long*)qg)[132 * 64 + (blockIdx.x * 32 + it) * 2 + 1] = t_; }
-#endif
-        if (t == WG - 1) {  // the group's last warp for this row
-            __threadfence_block();
-            float r = lane < WG ? red[s * WG + lane] : 0.f;
-#pragma unroll
-            for (int o = 16; o; o >>= 1) r += __shfl_xor_sync(0xffffffffu, r, o);
-            if (lane == 0) {
-                const float2* he = reinterpret_cast<const float2*>(st + KK + KK / 2);
-                for (int e = 0; e < ESC; ++e) {
-                    const float2 h = he[e];
-                    if (h.y == 0x1p-15f) break;  // slots fill in order; empty = 2^-15
-                    const float xe = __bfloat162float(xb[__float_as_int(h.x)]);
-                    r = fmaf(xe, h.y, fmaf(xe, -0x1p-15f, r));
-                }
-                out[row] = __float2bfloat16(r * scale);
-#ifdef G21_TRACE
-                if (it < 32) { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); ((unsigned long long*)qg)[(blockIdx.x * 32 + it) * 2 + 1] = t_; }
-                if (0)
-#endif
-                if (qg) asm volatile("red.release.gpu.global.add.u32 [%0], 1;" ::"l"(qg + (row >= nq)) : "memory");
-                tick[s] = 0;
-            }
+            mbar_arrive(empty0 + 8 * s);  // release: orders the partial before the producer's finalize
         }
         __syncwarp();
-        if (lane == 0) mbar_arrive(empty0 + 8 * s);
     }
 }
 }  // namespace g21
@@ -3086,8 +3112,9 @@ BF16_G16 = {"unpooler": [(16, 4, 4, 4, 128, 1, 2), (16, 4, 8, 2, 128, 1, 2)],
 # NG consumer groups of WG warps + a producer warp, rows by global ticket. (m, k, wg, ng, ns). H100 (dev/g21.py): slower
 # than gemv13 (qkv 15.1 vs 13.7: HBM-bound there, per-row consumer latency ~0.8 us); built for the layer's QG overlap
 # (few registers: csl fits beside it) and the H200, where gemv13 runs at ~2.6 TB/s.
-BF16_G21 = {"qkv_gate": [(1, 8192, 8, 2, 8), (1, 8192, 8, 3, 9), (1, 8192, 8, 3, 12), (1, 8192, 4, 4, 8)],
-            "pooler": [(1, 8192, 8, 2, 8), (1, 8192, 8, 3, 12)], "unpooler": [(1, 4096, 8, 2, 8), (1, 4096, 8, 3, 9)]}
+# H200 (check 96165c87, first version: consumer-side finalize, static rows): qkv m1 17.7-18.3 vs gemv13 14.0, pooler 26.2
+# vs 18.7, unp1k 11.2 vs g17 7.3 (tuner us): DEAD, not tuned any more (s13 NOTES).
+BF16_G21 = {}
 BF16_G17 = {"unpooler": [(1, 4, 512), (1, 4, 256), (8, 4, 256), (8, 4, 128)]}
 # gemv19 (dev/gemv19.cu, dev/g19_lib.py): TMA-ring streamer over the 12-bit weights, FP32 out zeroed in-kernel + red.add
 # split-K partials, then a BF16 copy (g19_cvt). (m, kc, ap, ns, npre). Built for the layer (PDL W prefetch during the

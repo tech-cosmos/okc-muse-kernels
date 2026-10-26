@@ -82,7 +82,7 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
     asm volatile("griddepcontrol.wait;" ::: "memory");
     float4 xr[J];
 #pragma unroll
-    for (int j = 0; j < J; ++j) xr[j] = __ldg(a.x32 + t + T * j);
+    for (int j = 0; j < J; ++j) xr[j] = __ldcg(a.x32 + t + T * j);  // ldcg: an __ldg (nc) may be hoisted above the wait
     int par = 0;
     for (; g < NG; g += RB) {
         float acc[R];
@@ -204,7 +204,7 @@ __device__ __forceinline__ void pooler(const Args& a, int pb, int PB) {
 #pragma unroll
     for (int q = 0; q < XV; ++q) {
         const int i = threadIdx.x + q * 256 * NV;
-        if (i < KK / 8) xv[q] = __ldg(reinterpret_cast<const uint4*>(a.x) + i);
+        if (i < KK / 8) xv[q] = __ldcg(reinterpret_cast<const uint4*>(a.x) + i);  // not __ldg (see above)
     }
 #pragma unroll
     for (int q = 0; q < HV; ++q) {

@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~06:30 UTC (session 12).
+Updated 2026-10-26 ~07:20 UTC (session 13).
 
 ## Board
 - **Best: submit 71145e34fe424844 = a1f0af7, 1.307x (3,695.6 us), proj rank 196** (router3 at router m9-128; its check
@@ -8,7 +8,7 @@ Updated 2026-10-26 ~06:30 UTC (session 12).
 - Before: 6d0fc4d4 (405439e) 1.2742x; d8160f04 (e605717) 1.2636x; f9cd875d (21bec6b) 1.2482x.
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 12/20, scored 4/10 (cap 9). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
+- Budget 10-26 used: checks 13/20, scored 4/10 (cap 9). s13 check 96165c87 1.3091 (diag: gemv21 loses). s12 checks 2ef3aafd 1.2953, 88800611 1.2934 (diag only). s10 checks 9b09c536 1.3136, 60ddb481 1.3296, f1319777 1.3146, s11 6b50e844
   1.3064 (diag only).
 - H200 unpooler-1k now (check 1be6c8f5): m1 3.75 (g17), m8 5.99 (g17).
 
@@ -103,7 +103,18 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
   the smaller buffers lose more; wgmma per stage = 8 dependent wgmmas: slower than mma.sync. g19 1 block AP8 stays.
 - gemv19.cu gained G19_MINB / G19_NPB (defaults unchanged) + co-residency TORCH_CHECK for >1 block/SM.
 
+## Session 13: lead item (5) T<=8 ramps: QG (csl beside the qkv GEMV, gate rows overlapped) and gemv21 (TMA-ring
+## m=1 GEMV) both DEAD (NOTES s13). Patch for the layer kept: dev/qg_layer.patch; edge trick dev/lc_edge.py: no gain.
+- Key facts: g13 needs its whole register file (60 x 1024) for speed; co-residency also needs the smem carveout attr.
+  One global ticket counter cannot feed 132 CTAs per row (~0.5 us per round). mbarrier release-arrive waits for the
+  same thread's pending atomics/stores.
+- pr1.cu: x32/x after the wait now __ldcg (robust vs ptxas hoisting; the layer's built SASS was already safe).
+
 ## Next (ranked)
+-1. (s13) The ramps (lead item 5) left: qkv g13 at d1 (H200 ~10.8 us for 28 MB) and pr1. Ideas not tried: g13 with
+   fewer, fatter loads per thread (U=4: 2 rows per chunk) to raise bytes in flight without more threads; a cp.async
+   (LDGSTS) ring inside g13's structure (bytes in flight in smem, consumers = the same threads; no producer warp).
+   Measure on the judge via the tuner (BF16_G13 candidates print H200 times in the log).
 0. (s12) wgmma consumers: DONE, dead (see above). Remaining m32 idea: fewer, fatter stages per consumer sync
    (one barrier per 2 ring slots, or a warp-specialized consumer that processes 2 slots per wait) to cut the 0.28 us
    fixed cost without shrinking the ring; and moving the fixed index math out of the loop (tags carry ks/tr/st).
@@ -122,27 +133,4 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 1. If the layer reports pr1/pr8 H200 numbers: tune rb/npf (pr1) on the judge via the layer's checks (layer owns them).
 2. m32 g19 fixed costs (flush, x arrival) after 0.
 
-Older list (s10):
-0. Check 3 (f1319777) done: H200 m16 pooler 15.8 vs 18.9, unp 16.5 vs 17.5, qkv (AP4) 11.2 vs 13.2; m32 + o lose. Handoff
-   updated. Next: ask layer whether g19 is wired at d16; measure in a copy of r-layer harness (tools/timeline.py).
-1. m32 on H200: cut the fixed costs: flush (escape fixups loop 2 x 8 slots x shfl per run end; move them to the
-   finisher? pbuf handoff), x arrival (x by TMA from L2 right after the wait: 16-32 separate bulk copies; one 2D tensor
-   map copy?), fewer segments per block (KC 2048 with xb 1 at m16; at m32 x 128 KB doesn't fit).
-2. Standalone board: g19 is never picked (no predecessor). Board-only ideas below are low value (lead: test bed).
--2. Router m256 (11.2 vs floor 2.7) and m128 (9.0): needs less split-K red volume AND less L2->SM traffic: x by TMA
-   multicast to the n-tile blocks of a cluster of 2 (gemv16 has the machinery), or wgmma (compute ~3.5 us on mma.sync).
--1. gemv16 on the H200 only ties lt: cut x staging further (the critical path is x latency at kernel start: W cannot
-   start computing before x lands; ideas: start computing atoms whose x rows came first with per-row mbarriers; FP32->
-   nothing: x must stay BF16) and the math cost (2 row groups per warp sharing the ldmatrix x fragments). m32: needs
-   S=2 x mc=2 (clusters of 4, <=120 blocks) or a smaller-x scheme.
-0. Compressed m16/m32 kernel that beats cuBLASLt (decode 16/32 loads: qkv 1.0x, unpooler 1.0x, pooler 1.12-1.16x):
-   bytes -25% => ~-3.5 us pooler/unpooler, -2 us qkv per shape if the kernel reaches reader speed. Idea: gemv13-style
-   grid-stride over whole rows (no split K: k=8192 rows) with tensor cores (mma m16n8k16, W as A = 16 rows, x as B),
-   x chunk in smem; or split-K with a cluster/DSMEM reduction.
-   Also o m1/unp1k m1 (k <= 4096: gemv13 fixed costs lose to gemv10).
-1. Remaining gap is mostly unpooler m16-256 (~1.0x, cuBLAS ~3.6 TB/s already: near practical) and qkv m16/m32 (1.01;
-   floor 7.9 vs ~13.7): a native kernel that hits m1-gemv10 speed at m16/32 (gemv10 qkv m1 = 11.5 on H200).
-2. Tuner: more candidates for weak shapes (qkv m16/32: sweep was noisy, 2-rep screen; try a 6-rep screen of the top
-   500), and router m>32 (stacked hi/lo FP32-out GEMM) through cuBLASLt configs too (needs an FP32-out lt variant).
-3. gemv12 split-K end phase (~2.8 us): DSMEM cluster reduction instead of global partials+counter.
-4. Router m<=8 (5-8 us vs 1.8 floor).
+Older ranked lists (s10 and before): see git history of this file / NOTES-proj.md.

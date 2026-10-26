@@ -13,7 +13,7 @@ SH = [("qkv", 2304, 8192), ("pool", 4096, 8192), ("o", 8192, 1024), ("unp1k", 10
 only = os.environ.get("SH")
 SH = [s for s in SH if not only or s[0] in only.split(",")]
 d = os.path.dirname(os.path.abspath(__file__))
-src = "".join("#define %s\n" % x for x in os.environ.get("DEFS", "").split() if x) + open(os.path.join(d, "gemv21.cu")).read()
+src = "".join("#define %s\n" % x.replace("=", " ") for x in os.environ.get("DEFS", "").split() if x) + open(os.path.join(d, "gemv21.cu")).read()
 src = src.replace("G21_CONFIGS", " ".join("G21_CASE(%d,%d,%d,%d)" % (k, w, g, s) for (w, g, s) in cfgs for k in sorted({k for _, _, k in SH})
                                           if k % (16 * 32 * w) == 0))
 mod = load_inline(name="pj_g21_" + hashlib.md5(src.encode()).hexdigest()[:10],
@@ -51,9 +51,9 @@ for nm, n, k in SH:
             qg = torch.zeros(4, dtype=torch.int32, device="cuda")
             tk = torch.zeros(1, dtype=torch.int64, device='cuda')
             mod.g21_gemv(sm, nib, hdr, x, out, scale, w, g, s, b, qg, n // 2, tk); torch.cuda.synchronize()
-            if not os.environ.get("DEFS"): assert qg[0].item() == n // 2 and qg[1].item() == n - n // 2, qg
+            if "NOMATH" not in os.environ.get("DEFS", ""): assert qg[0].item() == n // 2 and qg[1].item() == n - n // 2, qg
             err = ((out.double() - ref).norm() / ref.norm()).item()
-            if os.environ.get("DEFS"): probe_cols = []; err = 0
+            if "NOMATH" in os.environ.get("DEFS", ""): probe_cols = []; err = 0
             assert err < 5e-3, (err, nm, w, s, b)
             for col in probe_cols:
                 xp = torch.zeros(1, k, device="cuda", dtype=torch.bfloat16); xp[0, col] = 32.0
@@ -63,5 +63,5 @@ for nm, n, k in SH:
                 assert torch.equal(op[0], exp), (nm, col, (op[0].double() - exp.double()).abs().max().item())
             dt = bench.time_graph(lambda: mod.g21_gemv(sm, nib, hdr, x, out, scale, w, g, s, b, none, 0, tk)) - e
             line += f" | W{w}G{g}S{s} g{b} {dt:6.2f}"
-            assert tk.item() % (n + 4 * b) == 0, tk.item()
+            assert tk.item() % (n - max(0, n // b - 3) * b + 4 * b) == 0, tk.item()
     print(line, flush=True)
