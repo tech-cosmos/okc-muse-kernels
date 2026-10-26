@@ -1101,3 +1101,14 @@
   TWM_PB_M then TORCH_CHECKs), _lib() sets it to 1 in DIAG builds only. 00:00Z DIAG: + pb48 (v16 {128: 48}) and h32pb48
   (v32 {256: 48} with hot 32). Rule: pb48 < off by >= 1.5 us at v16 on the H200 -> offer the layer TUNE pb48 at T=128
   (TWM_PB48 1 there); else close it.
+
+## Night4 session 13 (2026-10-26 22:48Z - , moe checks 0/20 until 00:00Z) -- mixed N48/N64 big passes DEAD; then the 00:00Z DIAG
+- Tried (not kept): moe_twm<.., PB 0> = 64-token big-class passes, wgmma N48 when the pass has <= 48 tokens, else N64
+  (no 48 + 1 split like pb48). Bitwise = off, 0 bad (tools/n13/pb_t.py, layer v16/v32 + 30 skewed synthetic, SUB=sub_g13 in
+  /tmp/moe16 = TWM_PB48 1 + MOE_GRID build); REG 168 / STACK 40 like the others.
+- Proxy (tools/s16/proxy.py, 3 rounds x 5 layer seeds, HOT_M {256: 32}, H100 us):
+    G88  v16: o 230.8 | mx 230.8 | pb48 229.4      v32: o 241.0 | mx 243.3 | pb48 241.7
+    G132 v16: o 196.9 | mx 197.3 | pb48 199.7      v32: o 228.3 | mx 228.5 | pb48 228.8
+  => N48 vs N64 for a <= 48-token pass is worth nothing (twm's big passes are not consumer-bound by N there); pb48's
+  small G88 v16 gain must come from its extra items (49..64-token experts -> 2 items = finer load balance), and it
+  flips sign at G132. Reverted; pb48 stays only as the queued DIAG probe.
