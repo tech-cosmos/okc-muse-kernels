@@ -7,7 +7,7 @@ st = s["moe"]
 g = torch.Generator(device="cuda").manual_seed(7)
 bad = tot = 0
 for T in (1, 8, 16, 32):
-    for r in range(150):
+    for r in range(int(sys.argv[1]) if len(sys.argv) > 1 else 150):
         x = (torch.randn(T, 4096, device="cuda", generator=g)).bfloat16()
         # skewed: some ids local [0,32), some off (-1)
         ids = torch.randint(0, 40 if r % 2 else 12, (T, 8), device="cuda", generator=g, dtype=torch.int32)
