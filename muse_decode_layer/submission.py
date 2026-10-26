@@ -10873,6 +10873,7 @@ PR1_TOKENS = (1, 8)  # 8: proj pr8 (r-proj dev/pr8.cu@3be546b): gemv14 pooler bl
 # finisher block sums the K slices + routes. H100 v1 158.1/172.4 -> 157.0/171.0 us (proj). cfg (kcu, wg, pf, bk, xp, npf)
 PR8_CFG = {8: (8, 8, 4, 128, 1, 0)}
 PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 4)}
+PR1_PF_ALT = (2,)  # s23: pr1 pooler PF (rows in flight per virtual block) alternatives, TUNE option "pr1_pf" (H200 GEMVs ~2.5 TB/s)
 PR1_BND = False  # s11: the boundary fused into pr1 as a per-block prologue (each block re-reads 144 KB: H100 d1 +1.2/+0.3 us even with s/alpha/beta/gain loaded before the wait): off
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
 
@@ -11064,7 +11065,7 @@ def _g10_lib():
                 src = src + "\nvoid g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
             if _GPR1_SRC is not None:
-                src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c[:4] for c in sorted(set(PR1_CFG.values()))))
+                src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
                 if _GPR8_SRC is not None:
                     src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4]) for c in sorted(set(PR8_CFG.values()))))
             else:
@@ -12215,7 +12216,7 @@ def _g19_prepare(state):
 # kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T; lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
-            {"g10alt:o": 1}),
+            {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
@@ -12531,7 +12532,8 @@ def kernel_fn(data, state):
             pk = state["g13"]["pooler"]
             _G10["lib"].pr1_launch(pk[0], pk[1], pk[2], h, pooled, pk[3], state["router"], h32, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
-                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens][:4], _opt(state, tokens, "pr1_rb", PR1_CFG[tokens][4]),
+                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens][:2], _opt(state, tokens, "pr1_pf", PR1_CFG[tokens][2]),
+                                   PR1_CFG[tokens][3], _opt(state, tokens, "pr1_rb", PR1_CFG[tokens][4]),
                                    PR1_CFG[tokens][5], _opt(state, tokens, "pr1_npf", PR1_CFG[tokens][6]), 1,
                                    [a, data["stream"], alpha, beta, state["pre_ffn"], stream1, h] if bnd else [],
                                    POST_NORM_EPS, RMS_EPS)
