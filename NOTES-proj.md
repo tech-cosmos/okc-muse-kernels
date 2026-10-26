@@ -1056,3 +1056,27 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   out globaltimer cost) and an ncu source view of NOW mode around the loop top. If real, the target is ~1/3 of the
   consumer time at m32 (H200: g19 consumer-bound) = up to ~-3..5 us/call; the H200 _diag19d at 00:00Z says how much
   of main is consumer time there.
+
+## s51 (2026-10-26 21:05-21:45Z, sandbox okc-night4, session 8): g19 loop-top overhead explained; G19_TAG2 queued for H200
+- No judge runs (proj checks 20/20 for 10-26, reset 00:00Z). Target: s50's unexplained ~0.35 us/stage outside the atom loop.
+- Cause: runtime integer div/mod in the consumers' loop top. proj's g19 has a runtime `tm` (tile-major order, mode 3), and
+  both branches of `tm ? .. : ..` were computed: u/SPK % S, u/(S*SPK), u%(ntr*SPK), u/(ntr*SPK) = several runtime divides
+  per stage. (The layer's g19 copy has no tm: one runtime div pair.)
+- New switches in dev/gemv19.cu (default OFF, default build unchanged): G19_TAG2 (producer writes tag2[slot] = ks | st<<8 |
+  tr<<13 beside tag; consumers read it: no div/mod; +4*ns smem; bit-identical math), G19_NOTM (tm = 0 at compile time =
+  the layer's copy), G19_CLK (trace stamps = clock64 instead of globaltimer). dev/s44/g19ab.py: TOL=skip for diag builds.
+- H100 A/B (dev/s44/g19ab.py, MODE 2 PRED 3000, medians us, B-A), consumer-only (G19_NOW):
+  vs proj main (runtime tm), G72: pool m32 -1.49, m16 -1.35, unp m32 -0.98, m16 -0.94; G132: -1.46/-1.10/-0.36/-0.75.
+  vs NOTM (= layer-like), G72: pool m32 -0.36, m16 -0.98, unp m32 -0.13, m16 -1.08. NOW+NOMMA pool m32 G72: -0.76.
+  Full kernel (W stream on), G72: main vs TAG2 -0.2..+0.3 (tie); NOTM vs NOTM+TAG2 -0.23..+0.19 (tie): the H100 is
+  W-bound at this proxy, so only the H200 can show it (it is believed consumer-bound at m32).
+- Clock64 trace (dev/g19.py DEFS=G19_TRACE,G19_TR2,G19_CLK STAGES=1 MODE 2 PRED 3000 G132 pool m32 (1024,8,2,xb1)), stage 2
+  of warp 0, kcycles: NOTM got->loop start 0.30, atom loop 1.51, arrive 0.02; NOTM+TAG2 0.14 / 1.45 / 0.02. So ~160 cyc
+  (~0.09 us) per stage was the div/mod chain; the rest of s50's "0.35 us" was NOW-mode producer turnaround (2-slot ring:
+  arrive -> producer's empty wait -> its full arrive -> wake ~0.13 us), not consumer work. (NOW builds fail g19.py's
+  correctness check and print nothing; use the g19ab TOL=skip path for NOW numbers.)
+- _diag19d DEFS += "G19_NOTM", "G19_NOTM G19_TAG2" (7 builds; bench.py test 39/39, H100 diag19d pool m32 G132 NOTM 22.72 |
+  +TAG2 22.37, m16 19.30 | 18.98, unp m32 21.28 | 21.82: ties). Read at 00:00Z: NOTM vs NOTM TAG2 on the H200; if TAG2
+  wins >= ~0.3 us at m16 or m32, hand it to layer (small patch on its g19_src.cu: tag2 after ptag, cbuf shifted, +4*ns smem).
+- Also in diag19 (main) at 00:00Z: o m16 g19 vs lt (H100 now 5.79 vs 7.52; H200 lost +0.8 before s15/DEC3): if g19 wins
+  now on the H200, that is a layer TUNE option at T=16 o.

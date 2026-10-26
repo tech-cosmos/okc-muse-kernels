@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~21:20 UTC (s50: _diag19d = H200 g19 m32/m16 decomposition queued for the 00:00Z check; gemv23 BF16 wgmma at m16/m32 DEAD; H100 trace: ~0.35 us/stage of g19's consumer time is outside the decode/mma loop, unexplained. s49: 'fewer bytes at m=1' bounded: exponent entropy 2.54 bits -> 10.54-bit floor, no fixed-rate format < 12 bits; closed; lane request to lead. s48: g19 m32 header/fixup cost measured, FIX2/HPF dead; s47, sandbox okc-night4: PDL .nc-hoist SASS audit of proj kernels in layer v91 = no live hazard; unpool T=32 grid tie; checks 20/20 until 00:00Z; main unchanged).
+Updated 2026-10-26 ~21:45 UTC (s51: g19 loop-top 0.35 us/stage explained = runtime div/mod (tm) ~160 cyc/stage + NOW-mode producer turnaround; G19_TAG2 (bit-identical, precomputed ks/st/tr) queued in _diag19d as NOTM vs NOTM+TAG2; H100 full-kernel tie. s50: _diag19d = H200 g19 m32/m16 decomposition queued for the 00:00Z check; gemv23 BF16 wgmma at m16/m32 DEAD; H100 trace: ~0.35 us/stage of g19's consumer time is outside the decode/mma loop, unexplained. s49: 'fewer bytes at m=1' bounded: exponent entropy 2.54 bits -> 10.54-bit floor, no fixed-rate format < 12 bits; closed; lane request to lead. s48: g19 m32 header/fixup cost measured, FIX2/HPF dead; s47, sandbox okc-night4: PDL .nc-hoist SASS audit of proj kernels in layer v91 = no live hazard; unpool T=32 grid tie; checks 20/20 until 00:00Z; main unchanged).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -75,7 +75,6 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 - Lesson: under saturated HBM each dependent memory round trip costs ~3-4 us: keep ticket/last-block chains OFF the
   streaming blocks (extra finisher block spinning on an acquire counter).
 
-## Session 12: gemv20 (wgmma consumers) + 2 blocks/SM DEAD on H200; g19 m32 consumer-bound (~0.28 us/stage/warp). NOTES s12.
 
 ## Session 13: T<=8 ramps QG (csl beside qkv) + gemv21 (TMA-ring m=1) DEAD; g13 needs its whole register file. NOTES s13.
 - Key facts: g13 needs its whole register file (60 x 1024) for speed; co-residency also needs the smem carveout attr.
@@ -102,18 +101,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 - **H200 proxy for g19** (NOTES s16): H100 `GRID=88 MODE=2 PRED=3000 python dev/g19.py ...`, times x 0.73 = judge g19
   after-pred numbers for pooler/unpool (qkv off by ~3 us); GRID 72 ~ the layer's 108 blocks. Use it before H200 diags.
 
-## Session 17: H200 says m=1 GEMVs are AT bare-stream speed (pooler g13 18.53 = bare 50 MB TMA stream + graph cost;
-## qkv g13 = bare 28 MB + 0.9 us); cp.async ring g13c loses. No m=1 kernel lever left (NOTES s17).
-## Session 18: g19 consumer instruction ORDER is not the m32 bound: SWP (prefetch next group) and ILV2 (decode between
-## mmas) both null in an interleaved A/B (new tool dev/g19ab.py: DEFS_A/DEFS_B builds, alternating rounds). 11-bit format
-## re-estimated at ~3-7% bytes net (~0.2-0.3%): not worth it. Router FP32 weights have full mantissas.
 ## s19-s26 (NOTES): QSS (d32 qkv as 2 FP32 bmm slabs) in layer v70; G19_RAW dead; DeepGEMM bf16 dead (image: flashinfer
 ## 0.7.0, deep_gemm 0.2.1+muse, sgl_kernel 0.4.9); tinygemm2 port = proj tuner candidate at unpooler m8 (not judge-checked).
-## Session 28: gemv23 (own BF16 SS-wgmma swap-AB GEMM for m128/256, packed W, cluster DSMEM split-K, BF16 out) DEAD:
-## H100 loses 1-4 us at every m128 shape, m256 worse; H200 proxy (GRID 88 x0.73) loses too. Lead option (a) closed. NOTES s28.
-## Session 29: M=8 gemv19 (layer's T=8 qkv) DEAD: H100 16.6 vs g14 15.4 us (g14 is already mma.sync). NOTES s29.
-## Session 30: cuBLASLt splitKreduce DOES trigger PDL dependents (H100: successor -1.0..1.4 us), plain nvjet does not;
-## but the layer has no split-K cuBLAS left (profile 703d3a7e), so nothing to apply. dev/pdl_cublas.py, NOTES s30.
 ## Session 31: pr1 router-W L2 prefetch with evict_last = WIN at T=1 (H100 layer d1 ~-1.3/-1.1 us, bitwise same): handoff
 ## dev/s31/pr1_evl_layer.patch; all layer prefetch sites evict_last (dev/s31/pf_last.py) d1 -1.8/-1.7. evict_first on W streams null. NOTES s31.
 ## Session 32 (in layer v80+): evict_last on ALL 9 layer L2 prefetch sites + KV_PF (g13's prefetch.global.L2 of the d1 KV rows): layer
@@ -146,11 +135,14 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s50: _diag19d (print only) in submission: g19 pool m32/m16, unp m32 x {main, NOW, NOW+NOMMA, NOW+NOX, NOFIX} x G132/108
 ## after a 3 us PDL pred (+~1-2 min compile). gemv23 at m16/m32 (BF16, no decode) = W-stream-bound, ties/loses cuBLAS: DEAD.
 ## H100 G19_TR2 trace: per consumer stage ~0.35 us outside the atom loop (loop top tag/int math 0.23, arrive->got 0.13).
-## Next (before the 00:00Z check, ranked):
+## s51: G19_TAG2/G19_NOTM/G19_CLK switches (off by default). NOW-mode H100: TAG2 -1.0 (m16) / -0.1..-0.4 (m32) us vs layer-like
+## NOTM; full kernel tie on H100 (W-bound). Loop top 0.30 -> 0.14 kcyc/stage (clock64). NOTES s51.
+## Next (00:00Z check, ranked):
+## 0. In the 00:00Z check log: diag19d 'NOTM' vs 'NOTM TAG2' (H200): >= 0.3 us win at m16/m32 -> TAG2 patch for layer's
+##    g19_src.cu (Handoff). diag19 'o m16' g19 vs pick: if g19 wins now -> layer TUNE option at T=16 o.
 ## a. First proj check after 00:00Z = main (carries _diag19d): read 'diag19d' lines. main-NOW = W-stream share on H200;
 ##    NOW-NOMMA = decode+mma; NOMMA = skeleton. Copy into NOTES. Submit only if > 1.3110 (diag adds nothing to timing).
-## b. Explain the 0.35 us/stage (clock64 stamps vs globaltimer; ncu source view of NOW). If real and H200 consumer-bound,
-##    restructure the consumer loop top (precomputed per-slot ks/tr/st in the tag, no div/mod) = cheap, bit-identical.
+## b. (done s51: TAG2, see above)
 ## Next sandbox (ranked; sandbox okc-night3 expired ~19:10Z 10-26 with proj checks 20/20, scored 5/10)
 1. proj's first check = main as is (DEC3 in g13/g14 m1/m8 picks; tg2 unpooler m8 candidate): read the 'tune' lines in the
    judge log (profiles/*.log); submit if > 1.3110. Layer's first check = its main v88 (carries DEC3, pr8 npf 212, g19 s15).
