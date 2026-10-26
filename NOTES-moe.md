@@ -854,3 +854,9 @@
   had moe_route 2.1 us serial before moe_gathern on the H200: expected H200 gain ~1-2 us at T=128, ~0..1 at T=256.
 - Layer would need its moe_gathern (pre-expert rmsnorm, strided FP32 pooler rows) merged with this routing prologue:
   handoff posted as a T=128 tuner candidate (small: ~0.3% on 2 of 12 shapes).
+
+## Session 34 (2026-10-26 18:21Z-18:27Z): notes + DIAG queue only
+- Budget spent (moe checks 20/20), sandbox ends ~19:10Z, lead: push before 18:30Z. No GPU work.
+- Added ("h32rg0", RG 0) / ("h32rg1", RG 1) (both HOT_M {256: 32}) to DIAG_VARIANTS["big"]: RG is a module global read
+  in kernel_fn at call time, so the DIAG override works. py_compile OK; DIAG = 0 on main (board code = s33).
+- Next sandbox: first moe check = DIAG run (STATE s30/s34 sections); grep "diag12 MEAN" in the job log.

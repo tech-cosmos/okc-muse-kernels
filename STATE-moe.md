@@ -71,6 +71,10 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 34 (18:25Z, no judge runs; sandbox ends ~19:10Z): DIAG_VARIANTS "big" += h32rg0 / h32rg1 (RG 0/1 with hot 32),
+so the next sandbox's FIRST moe check (sed DIAG = 1 into a /tmp copy) A/Bs moe_hot G AND RG on the H200 in one run.
+Board code unchanged (DIAG = 0). Then report the winners to layer under Requests.
+
 ## Session 33 (no judge runs): RG = 1 on main: moe_routegather (route + gather in one launch, stable order, bitwise =
 old, 15/15). H100 layer_ab v16 -1.1 us, v32 tie. Handoff for layer's moe_gathern at T=128 (NOTES s33). Next sandbox:
 first moe check = the queued moe_hot DIAG (s30), add RG 0/1 to DIAG_VARIANTS if cheap.

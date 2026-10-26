@@ -4702,7 +4702,8 @@ DIAG_VARIANTS = {  # s30 queued: H200 A/B of moe_hot (HOT_M) on the layer's v32 
     "big": [("off", {"HOT_M": {}, "TWM_ORDER_M": {}})]
            + [(f"h{g_}", {"HOT_M": {256: g_}, "TWM_ORDER_M": {}}) for g_ in (24, 32, 40)]
            + [("h32o76", {"HOT_M": {256: 32}, "TWM_ORDER_M": {256: 76}}), ("o76", {"HOT_M": {}, "TWM_ORDER_M": {256: 76}}),
-              ("offb", {"HOT_M": {}, "TWM_ORDER_M": {}})],
+              ("offb", {"HOT_M": {}, "TWM_ORDER_M": {}}),
+              ("h32rg0", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "RG": 0}), ("h32rg1", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "RG": 1})],
 }
 
 
