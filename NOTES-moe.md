@@ -500,3 +500,9 @@
   full twq (469.6 -> 454.2); T=256: twq 427.9/663.0 vs default 435.3/669.0 but o76+lt:unpool 419.6/655.9 wins; twm_hot
   436.7/669.9, twm_hot+o76(+lt) 437.2/670.5 (H100 full grid: lose; the H200 proxy says -3.6..7.6 proxy-us: the judge's
   tuner decides).
+- twq flag bit 3 (TWQ 12) = pass-minor order: proxy v32 307.8 vs 305.6 (TWQ 4), v16 225.3 vs 224.5. Layer patch v3
+  (tools/s17/twq_layer.patch, r-moe 2d9a732) adds twq 4/12 at T=128/256 + twm_hot at T=256; layer copy tests 13/13;
+  H100 tuner: T=128 sliding default 362.6 / twq4 356.1 / twq12 356.0 (confirm 363.1 -> 357.2, picks twq 12), full
+  470.9 / 453.2 / 454.2 (confirm 470.7 -> 454.0, twq 4); T=256 keeps o76 (twq 429.3/663.8 vs o76 ~417/654).
+- Session end 11:45Z. Next: idea -8 (hot experts > 96 tokens / x-tile streaming of the hot class), -7 (tk2f d1 fixed
+  cost); no moe checks left today (sandbox ends ~19:10Z).
