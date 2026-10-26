@@ -4,7 +4,7 @@ Updated 2026-10-26 ~01:30Z (end of session 7).
 
 ## Board
 - **Best scored: ca8f833a = v22 (3fab554), 1.8924x, 11,953 us/step (2026-10-26 ~01:20Z).** Board #1 2.360x, #10 2.167x
-  (10-26 01:20Z). v23 (358d87c = main, check f2db2454 1.9088x) submitted after it: see NOTES / COORD for its score.
+  (10-26 01:20Z). v23 (358d87c = main, check f2db2454 1.9088x) scored dae762e4 1.8852x (noise; not the board best).
 - main = v23: v22 + r3_router (FP32 router at T=8, no split K). FUSED_ROUTER_TOKENS option off (tie).
 - Budget 2026-10-26: 3 submits (81e501e9, ca8f833a, v23), 3 checks used.
 - v22 scored per shape (H200 us sliding/full; SGLang in brackets): d1 76.4/87.2 (173/184), d16 147.6/237.7 (252/445),

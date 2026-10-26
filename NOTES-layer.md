@@ -227,3 +227,6 @@
   block, 512 threads, no split K (part = logits, KS=1). H100 standalone m8 8.74 vs _router_fma 11.52 us (err 1e-7
   vs FP64); m1 tie (6.91 vs 7.10, not used). Layer H100 v1 162.1/177.3 -> 157.6/172.6 (3 rounds). Timeline: pooler
   (side g14) now starts 5 us after the router (was 8). check f2db2454 **1.9088x, 11,851 us**: v1 123.3/138.4.
+- submit dae762e4 (v23, 358d87c): **1.8852x, 11,999 us** (below v22's 1.8924 = noise: SGLang's own reference times moved
+  2-3% between runs, e.g. v32 sliding 692 vs 704). Board best stays ca8f833a (v22) 1.8924x. v23 stays on main (real
+  H100 -4.6 us at v1). Don't resubmit v23 unchanged; it rides along with the next real change.
