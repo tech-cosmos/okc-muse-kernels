@@ -1,6 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~12:50 UTC (end of session 20).
+Updated 2026-10-26 ~12:50 UTC (end of session 21).
 
 ## Board
 - **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -139,44 +139,11 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## Session 20: dead: FP32-out cuBLASLt split-K (always + splitKreduce kernel); g19 qkv T=32 as first op (H100 21.8 vs
 ## cuBLAS 18.7 us, so no gain even without the cast). NOTES s20.
 ## Next (ranked)
+-10. (s21) Layer's lt32f (FP32-out splitK=1 qkv T=32) is dead from H200 data (+1.0-1.5 us; NOTES s21). Same as -9: wait for the lead's lane pick.
 -9. (s20) Same as -8: proj has no item above ~0.3% layer score left; wait for the lead's lane pick. Don't rebuild dead items.
 -8. (s19) First read COORD Human decisions for the lead's lane pick (a/b/c in Requests s18) and the layer's 14:30Z
    check tuner lines (which g19/lt options the H200 picked at T=16/32). With no answer, do not rebuild dead items (see NOTES s12-s19).
--7. (s18) Read COORD Human decisions for the lead's answer to proj's lane question (s16/s17). Without one, there is no
-   proj item above ~0.3%; candidates: own BF16 swap-AB GEMM for qkv/o at T=128 (~-5 us v16), 11-bit m=1 format.
--6. (s17) Only remaining proj lever with size: a ~10.5-11-bit lossless format (exponent entropy 2.54 bits; NOTES s17)
-   for the m=1 path (g13, pr1): est. -1.5..2 us per d1 layer (~0.3-0.4%). Needs the layer to re-wire packers: agree
-   with lead/layer first (new sandbox tomorrow). Otherwise proj is done: ask the lead for a lane (asked s16, no answer).
--5. (s16) FIRST: read COORD for the lead's answer to "proj -> lead (s16 10:36Z)" (move to moe tk2f fixed cost? or the
-   fused pooler+router+routing). Budget 10-26: 4 checks + 5 submits left (sandbox ends ~19:10Z; new sandbox tomorrow).
-   The layer has my qkv-m8 g14 config and lt picks as handoffs (check COORD whether it took them).
--4. (s16) Only if worth it (the H200 proxy says the fused GEMM alone loses; routing must be fused too): router + routing fused into the T=16/32 pooler g19 (per-tile scale for hi/lo tiles, routing
-   by the last router-flush finisher, like pr8) so the pooler gets 132 SMs and the side stream goes: est. -2 us d16/d32.
-   Otherwise the proj lane is near what these kernels can do; ask the lead for a lane (moe tk2f fixed cost is biggest).
--3. (s15) If the layer's H200 check of the s15 patch (+ T=32 g19) holds: g19 m32 consumer cost (Next 0 below) is
-   the lever at d32 (pooler/unpool now ~tie on H200). qkv T=16/32 standalone: needs a non-g19 design (cuBLASLt wins
-   by 3-6 us; a cp.async/LDG kernel with x first, like gemv14/16, over 12-bit at m16 ties lt on H200).
--2. (s14) g19: fixups in the finisher warp (consumer run end 0.7 -> 0.1 us; NOTES s14 Next (a)), then npre cap so x
-   is not queued behind the W prologue, then x hot-spot (multicast). Each run end saved ~= 0.6 us per g19 call x ~2.
--1. (s13) The ramps (lead item 5) left: qkv g13 at d1 (H200 ~10.8 us for 28 MB) and pr1. Ideas not tried: g13 with
-   fewer, fatter loads per thread (U=4: 2 rows per chunk) to raise bytes in flight without more threads; a cp.async
-   (LDGSTS) ring inside g13's structure (bytes in flight in smem, consumers = the same threads; no producer warp).
-   Measure on the judge via the tuner (BF16_G13 candidates print H200 times in the log).
-0. (s12) wgmma consumers: DONE, dead (see above). Remaining m32 idea: fewer, fatter stages per consumer sync
-   (one barrier per 2 ring slots, or a warp-specialized consumer that processes 2 slots per wait) to cut the 0.28 us
-   fixed cost without shrinking the ring; and moving the fixed index math out of the loop (tags carry ks/tr/st).
-   Also: the lead's 05:00Z direction (fuse glue into GEMM prologues/epilogues, overlap weight streams with
-   latency-bound phases) may beat more m32 GEMM tuning: ask layer for its H200 idle-interval list first.
-0-old. **wgmma consumers for g19 (the layer's T=16/32 GEMMs, also a path to T=128/256).** On H200 g19 at m32 is issue-bound
-   (mma.sync + ldmatrix per token tile; HBM needs only ~10.4 us for 50 MB). Plan: consumer warps 0-7 = 2 warpgroups of 4
-   row groups (64 rows); A = dec8 output in registers (same fragment layout as mma.sync m16n8k16 A: warp i of the WG =
-   rows 16i..16i+15), B = x chunk in smem as K-major SW128 ([N tokens][64 k] blocks, N*128 B apart, desc LBO 1, SBO 64,
-   swizzle 1 like r-moe moe_tw sw128_desc; +32 B per k16), x by TMA tensor map (cuTensorMapEncodeTiled via
-   cudaGetDriverEntryPointByVersion, encode at every launch: the judge clones state) or a swizzled manual copy.
-   wgmma m64nNk16 (N = 16/32) per atom per k16, double-buffered A registers + fence_r (moe tw_item pattern), wg_wait
-   before releasing a ring slot / x buffer and before a run-end flush. Escape fixups: x address = base + (k/64)*N*128 +
-   tok*128 + (((k%64)*2) ^ ((tok&7)<<4)). Accumulator layout = mma.sync C layout per n8 tile (epilogue unchanged).
-   Est: d32 pooler/unpool/qkv -4..6 us each on H200 (layer d32 1 us = +0.05%, d16 +0.07%).
+(Older Next items s10-s18: see git history of this file; all built/measured or dead per NOTES.)
 1. If the layer reports pr1/pr8 H200 numbers: tune rb/npf (pr1) on the judge via the layer's checks (layer owns them).
 2. m32 g19 fixed costs (flush, x arrival) after 0.
 

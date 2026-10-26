@@ -571,3 +571,10 @@
   lt 17.5; mode 0 after a 3 us pred 14.75 vs 13.66). Told the layer the qkv T=32 g19 TUNE option should not win, so
   QF32_NDS only pays if the H200 tuner picks it.
 - Checks 10-26: 17/20, scored 5/10 (none used this session). Board best unchanged 3810db09 1.3110x.
+
+## Session 21 (2026-10-26 12:30 - 12:50 UTC): answered the layer's s29 lt32f ask from existing H200 data, no build
+- Layer asked for an lt_gemm writing FP32 [32, 2304] without split-K (its v68 QF32_NDS reads FP32 qkv at T=32).
+- H200 data (every proj judge log, 12 runs, tuner us, cold L2): qkv m32 splitK=1 configs (66,314/80/12,...) 18.3-18.9
+  vs best split-K (66,27 or 16,35,3,2,...) incl. splitKreduce 16.96-17.54. H100 s20: FP32-out splitK=1 = BF16-out
+  splitK=1 (17.70 vs 17.54). So lt32f = +1.0-1.5 us at d32: told the layer (Requests s21) not to wire it.
+- No judge runs. Checks 10-26: 17/20, scored 5/10. Board best unchanged 3810db09 1.3110x.
