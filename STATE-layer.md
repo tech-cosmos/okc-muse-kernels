@@ -1,45 +1,30 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 (session 44: main = v87, NOT judge-checked; budget for 10-26 spent).
-**s44: main = v87** = v86 + moe s29 moe_hot (65..128-token experts in one N128 pass before moe_twm) at T=256: TUNE_BASE
-(256, *) {"hot": 32}, tuner candidates hot 0/24/40. H100 tuner: hot0 vs hot32 +14 us v32 sliding, +11 full. Tests 13/13,
-replay/route_judge 0 fails (all shapes 10 x 2 seeds; v32 20 x 3 seeds; tuner-off and +twm_order 76 variants v32 0/40).
-FIRST CHECK OF THE NEXT SANDBOX = main (v87): compare per shape vs 703d3a7e; submit if it beats 1.9954x.
-**s43: main = v86** = v85 + proj s35 DEC3 (12-bit decode 3 instr per BF16 pair; packers via proj's _dec3 with round-trip
-check; g22 keeps the old layout). H100: tests 13/13, T=1/8 bit-identical to v85, replay 0/240, route_judge 0/240, ab_files
-ABBA 4 rounds tie (d1 -0.3/-0.4). FIRST CHECK OF THE NEXT SANDBOX = main (v86): compare per shape vs 703d3a7e.
+Updated 2026-10-26 17:05Z (session 45). **main = v87 (r-layer 1b9743e), NOT judge-checked** (layer budget for 10-26 spent:
+20/20 checks, 10/10 submits). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x (9,505 us/step), #10 2.180x.
 
-**s42: main = v85 (cf16011)** = v84 + proj s34 DEC4 (r-proj dev/s34/dec4_layer.patch: 12-bit decode in 4 instead of 5
-instr per BF16 pair in g13/g14/g19/pr1/pr8; bit-identical). H100: tests 13/13, replay 0/240, route_judge 0/240 (tuner on),
-ab_files ABBA 4 rounds tie on every shape (proj's H200 proxy: -0.4..-1.6 us per g19 call at d16/d32).
-FIRST CHECK OF THE NEXT SANDBOX = main (v85): compare per shape vs 703d3a7e; copy the 'layer tune T=1' lines (g13o) for proj.
+## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
+1. `okc check muse_decode_layer/submission.py --json` on main (v87). Compare per shape vs 703d3a7e (d1 69.6/77.8,
+   d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5; tools/ckparse.py). Expected:
+   v32 -8..14 us (moe_hot), g19 shapes -0.5..1.5 us (DEC3/DEC4), d1 -1..2 (evict_last, g13o). Submit if > 1.9954x.
+2. Copy the profile's 'layer tune' lines into NOTES (T=1 g13o for proj; T=256 hot 0/24/32/40 for moe; T=8 g19 picks).
+3. If v87's check loses on some shape vs 703d3a7e, bisect with ONE check of a DIAG build that forces the suspect
+   options per shape (the tuner lines in the log already A/B every TUNE option on the H200: read them first).
+4. Then: integrate new moe/proj Handoffs (stack several into one check), check, submit only on a beat.
 
-**s41: main v84 re-validated (tuner on, H100): tests 13/13, replay 0/240, route_judge 0/240.** v1 sliding timeline in
-NOTES s41: tk2f 84 of 153 us; pr8 23.5 us (2.4 TB/s, m8 issue-bound). FIRST CHECK OF THE NEXT SANDBOX = main (v84).
+Mains since the board best (v70), all H100-validated (bench test 13/13, replay_test + route_judge 0 fails), details in
+NOTES s32-s44: v71 BND_SPLIT | v72 O_PF (d32/v16 sl) | v73 moe TK2F_L2H | v74 pr1_npf 0 at T=1 | v75 TUNE_BASE (H200-agreed
+per-(T, sliding) defaults) | v76 moe TWM_L2H | v77 fused pooler+router GEMM at T=256 | v78-v80 g19 M=8 + T=8 candidates +
+proj evict_last on all L2 prefetches | v81-v83 PDL edges in the routing glue | v84 proj g13o (T=1 o 12-bit, TUNE) | v85 proj
+DEC4 | v86 proj DEC3 (12-bit decode 3 instr/pair) | v87 moe_hot at T=256 (TUNE_BASE hot 32; H100 v32 -14 sl / -11 full).
 
-**s40: main = v84 (00ce840)** = v83 + proj s33 g13o (T=1 o on 12-bit gemv13 as PDL secondary; TUNE[1] option, off by
-default): H100 tuner off d1 sl -0.75, full -1.9 us; H100 tuner picks it at T=1 sliding. FIRST CHECK OF THE NEXT SANDBOX =
-main (v84); copy the T=1 tune lines into NOTES for proj.
-
-**s39: main = v83 (7fad983)** = v80 + PDL edges in the routing glue: moe_route PDL secondary of _routing at T>32 and
-_routing on 1 warp there (v81), _routing PDL secondary of pr3 at T=128 (v82) and of _router_split at T=16/32 (v83).
-H100: v16 router-end -> twm-start 7.9 -> 5.7 us; d32 -0.5..0.9; rest tie (all bit-identical outputs). ab_files noise at
-v16/v32 is +-3 us between runs (twm): use tools/tlm.py per-kernel timelines for small glue changes.
-FIRST CHECK OF THE NEXT SANDBOX = main (v83); compare per shape vs 703d3a7e (below) and read the T=8/T=256 tune lines.
-
-**s38: main = v80 (e598e41)** = v77 + g19 M=8 + vtk FP32 qkv (v78, T=8 TUNE candidate g19:qkv_gate) + T=8 candidates
-{pr1 off, g19:pooler} (v79) + proj s32 evict_last on all layer L2 prefetches (v80: H100 d1 -2.0/-0.8 us). Attention libs
-have source-hashed names (another agent's copy built into the shared extension dir). Dead: moe TK2F_L2H mode 4 in the
-layer (d16/d32 sl +2), expert-weight L2 prefetch during the pooler (oracle upper bound -1.2 us). FIRST CHECK OF THE NEXT
-SANDBOX = main (v80): read the T=8 and T=256 "layer tune" lines (g19:qkv_gate, g19:pooler, fr).
-
-Mains since the board best (details NOTES s32-s37): v71 BND_SPLIT (boundary row over SPL programs; H100 d1-d32 -0.5..1.9)
-| v72 O_PF {32: 0.5, 128: 0.5} (sliding attention L2-prefetches half of o's W) | v73 moe TK2F_L2H 1 (d16 -3.2/-4.6, v1 -3.6/-6.3)
-| v74 pr1_npf 0 at T=1 | v75 TUNE_BASE (per-(T, sliding) defaults the H200 tuners agreed on: T=8 nu8 (+ g14alt 1 full),
-T=16 sl g19:o) | v76 moe TWM_L2H (v16 full -3.2) | v77 fused pooler+router GEMM at T=256 (FUSED_ROUTER_TOKENS (256,), v32
-sl -2.4..6.2; TUNE fr at T=128/256). Compare the first check per shape vs 703d3a7e (d1 69.6/77.8, d16 143.3/227.7,
-d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5); submit if it beats 1.9954x.
-
+## s45 (16:48Z): no build. H200 703d3a7e profile per shape re-read: every phase streams near its bare rate; what is left
+is latency chains between phases (d1: g13 qkv 11.4 | csl 4.2 | o 6.7 | bnd ~4.3 | pr1 20.8 | tk2f 28.7 | n2u 5.6 | bnd) and
+the experts (tk2f d32 82.6 = 42%) / g19 m32 (d32 2 calls 50.2): moe's and proj's lanes. All layer-side ideas on the list
+below were measured dead; a new layer gain needs a structural change, > 1 session: e.g. at T=1 launch pr1 earlier (PDL
+secondary of csl) and land part of the 48 MB pooler W in SMEM (up to ~200 KB x 132 SMs) during the latency-bound csl/o/bnd
+windows (~15 us at < 50% HBM); L2 prefetch for the same purpose was zero-sum (s2, s15, s34), SMEM residency is untested
+(risk: o GEMV and bnd then lack SMs).
 **s32: v70 (909010f)** = proj QSS + moe twm AUTO K-split: check 0f065691 1.9754x; **submit 703d3a7e 1.9954x = board best**.
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of

@@ -980,3 +980,13 @@
   with moe's 4-round layer A/B, -8 us sliding). Hot at T=128 left out (v16 experts <= ~49 tokens: launch would cost ~2 us).
 - FIRST CHECK OF THE NEXT SANDBOX = main (v87); compare per shape vs 703d3a7e (v32 sliding/full should drop ~8-14 us on
   the H200), and read the T=256 tune lines (hot 0/24/32/40).
+
+## s45 (2026-10-26 16:48Z-): no build, no judge runs (layer budget for 10-26 spent: 20/20 checks, 10/10 submits)
+- Board 17:00Z: #45 at 1.9954x (703d3a7e); #1 colinlikescode 2.380x, #10 2.180x. main = v87 unchanged; submission.py ==
+  build.py output (rebuilt, cmp identical). No new Handoffs/Requests for layer since s44.
+- Re-read the 703d3a7e H200 profile: d1 sliding kernels g13 11.4 | csl 4.2 | g10 o 6.7 | bnd 2 x ~4.3 | pr1 20.8 (incl. its
+  PDL wait) | tk2f 28.7 (incl. wait) | n2u 5.6 | rmsnorm 1.6; d32 sliding tk2f 82.6 (42%), g19 m32 x2 50.2, qkv nvjet 12.8,
+  nds 10.2, moe_norm2 9.8, bnd 8.0, router_split 6.3, routing 4.0. Nothing layer-side left on the dead-end list's terms.
+- STATE condensed to <= 150 lines with a concrete first-check plan for the next sandbox (check v87, read tune lines).
+- Idea queued (STATE s45): T=1 pooler W partly SMEM-resident in early-launched pr1 CTAs during the latency-bound
+  csl/o/bnd windows (L2 prefetch was zero-sum; SMEM residency untested).
