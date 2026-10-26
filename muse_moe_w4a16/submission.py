@@ -3365,7 +3365,7 @@ def prepare(weights):
         if rt not in TB_PACK:
             st[f"w13b{rt}"], st[f"w13sb{rt}"] = _tb_pack(st["w13q"], st["w13s"], True, rt)
             st[f"w2b{rt}"], st[f"w2sb{rt}"] = _tb_pack(st["w2q"], st["w2s"], False, rt)
-    for rt in TB_PACK:
+    for rt in sorted(set(TB_PACK) | ({2} if TWF_RT == 2 or 2 in TWF_RT_M.values() else set())):
         st[f"w13b{rt}"], st[f"w13sb{rt}"] = _tb_pack(st["w13q"], st["w13s"], True, rt)
         st[f"w2b{rt}"], st[f"w2sb{rt}"] = _tb_pack(st["w2q"], st["w2s"], False, rt)
     st["gs13"] = weights["w13_gs"][:LOCAL].float().contiguous()
@@ -3397,9 +3397,11 @@ PLAN_OVERRIDE = None
 TB_RT = 0  # big-M moe_tb on (1) or off (0: old moe_big path)
 TB_CFG = 48  # RT*10 + stages
 TW_CFG = 418  # big-M wgmma kernel moe_tw: RT*100 + KG*10 + stages (0: off)
-TWF_RT = 2  # s11: 2 = moe_twf with RT 2 / 64-token passes (needs 2 in TB_PACK: prepare packs w13b2/w2b2)
+TWF_RT = 4  # s11: 2 = moe_twf with RT 2 / 64-token passes (prepare then packs w13b2/w2b2): judge 7dda218c bs128 224.5,
+# bs256 267.0 us (RT 4: ~200 / ~247): worse when experts have <= 32 tokens; H100 layer v16 -5, v32 -7 us (H100 misleads)
+TWF_RT_M = {}  # s11: per-M override, e.g. {256: 2} for the layer's verify 32 (hot experts with 90+ tokens: 34 vs 24 passes)
 TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
-TB_PACK = (2,)  # RT values packed in prepare (moe_tb; s11: 2 for moe_twf TWF_RT 2)
+TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
 _CFGS = (10, 11, 22, 118)
 SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
 TK2_MAX = 32  # M above this: big-M path
@@ -3473,7 +3475,8 @@ def kernel_fn(data, st):
         xg = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
         lib.moe_gather_launch(x, meta, sroutes, xg)
         if TWF and rt == 4:
-            trt = TWF_RT if f"w2b{TWF_RT}" in st else 4
+            trt = TWF_RT_M.get(M, TWF_RT)
+            trt = trt if f"w2b{trt}" in st else 4
             lib.moe_set_sa((1 if TWSA and st["sa"] else 0) | (2 if trt == 2 else 0))
             ns = TWF_SPLIT_M.get(M, TWF_SPLIT)
             part = (torch.full if TWF_DBG else torch.empty)((max(ns, 1) * 32768,), *((float("nan"),) if TWF_DBG else ()), dtype=torch.float32, device=dev)
