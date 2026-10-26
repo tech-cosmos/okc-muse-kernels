@@ -442,3 +442,39 @@
 - Dead (proxy, bitwise = main on 50 big-M outputs): TWM_KPS 2 = 2 k chunks per moe_twm ring stage ([x0 x1|W0 W1|S0 S1],
   NSTG 4, 4 copies per 2 chunks instead of 6): G88 v32 294/296 vs 294.5, v16 231 vs 228; G16 warm items unchanged (34.2).
   Reverted (code not kept).
+
+## Session 17 (2026-10-26 08:25Z - ) -- s16's "ring cap" was a measurement bug; twm is consumer-bound; moe_twq
+- **s16's TWX ablation builds were all the FULL kernel**: mkx2.py inserted `#define TWX n` right before sub_tlg's own
+  `#define TWX 0` (redefinition: the last wins). Every "no dq / no MMA / ring only" number in s16 = main. Fixed builds
+  (/tmp/moe16/sub_z<n>.py), G16 warm items (us; RT4 N8 / RT4 N32 / RT2 N64): full 34.7/47.5/31.8, no dq 26.9/33.1/26.6,
+  no MMA 34.0/39.2/23.0, no dq+MMA+LDS (ring only) 18.0/21.1/17.2, + no x 15.6/19.6/15.0. => moe_twm items are
+  CONSUMER-bound; the ring alone does them in ~18 us (= the bare-ring microbenchmark). dq and MMA do not overlap
+  (their costs add).
+- Ring microbenchmark with consumer delay (tools/s17/ring5.py, clock64 per stage): per-stage time = consumer work +
+  ~100-150 cycles (barrier wait when data is ready ~100 cyc + loop); releasing the stage one step late (as twm does)
+  adds ~60 ns at G16. The ring itself is not the limit.
+- ncu (G16, one launch, tools/s17/ncu_drv.py): RT4 N8 items: issue 62% busy, ALU pipe 59%, fmaheavy 35%, tensor 13%;
+  2.25 warps/scheduler, stalls spread (wait .55, not_selected .51, gmma .38, long_sb .35, math throttle .34).
+  RT2 N64 items: tensor 55%, issue 43%, stalls wait .95, long_sb .72 (mostly the idle producer warp), dispatch .70
+  (ALU ops vs the RS wgmma reading A from the register file), gmma .45.
+- dq pipe rebalancing (all bit-exact or speed-only proxies, G16 warm items): rotl via 2 IMAD (mul.lo+mul.hi) + 1 LOP3
+  (bit-exact): 40.9 vs 34.7 us (IMAD.HI is costly); via one IMAD.WIDE.U32 (mul.wide): 37.3 / N32 55.5 (worse); one
+  rotation wide, one SHF: 35.7 / 53.6. Speed-only (wrong values) "both shifts as IMAD.SHL": 32.6 (-6%), but no correct
+  layout exists with plain left shifts (exhaustive search tools/s17/search2.py: identity + shift + (rot|mul) + mul has
+  no solution; the sign bits at 15/31 block it). Dead.
+- Layer v32 time split on the proxy (G88 timeline, seed 7): the 3 hot experts (97/73/50 tokens, RT2 64-token passes)
+  take ~35% of all CTA time for ~17% of the bytes (8 GB/s/SM vs 31 for RT4 N8 items); v16's 2 hot experts ~2x per byte.
+- **moe_twq** (new, flag TWQ / TWQ_M, off by default): moe_twm with 16 consumer warps (4 WGs) x RT 2 instead of 8 x RT 4;
+  same 32 row tiles per item read from the w*b4 packing through an index remap (gated w16: gate slot w16&1, up slot
+  2+(w16&1); gemm2 slots 2*(w16&1)+{0,1}; scale word = __byte_perm of the 8-warp uint2), so prepare() is unchanged.
+  640 threads = 4 consumer WGs + producer WG (setmaxnreg dec 32 / inc 112). ptxas compiles the WHOLE kernel at the
+  launch-bound cap (640 threads -> 96 regs; setmaxnreg does not raise ptxas's budget): N <= 32 fits (no spill, wgmma
+  pipelined), N 64 does not (C7512: wgmma serialized) -> all experts run 32-token passes. 125 big-M routings OK.
+  G16 warm items: N8 34.0 vs 35.0 (twm), N32 45.0 vs 47.8; issue 73% (twm 62%) but +18% instructions per byte.
+  Proxy G88 (x0.73 = H200): v16 223.7 vs 230.2 (-6.5), v32 302.8 vs 298.2 (+4.6: hot experts of 90+ tokens lose
+  twm's 64-token passes). => use at T=128 only (TWQ_M {128: 4}).
+- Dead (s17): twq with a hot-expert class (64-token passes, 1 tile/warp + smem gate/up exchange, NSTG 7): does not fit
+  96 regs (spills, serialized). 512-thread twq with an inline producer in warp 0 (to get 128 regs): first a hang
+  (lane-0-only pump with __syncwarp around warpgroup MMAs: warp 0 never reached its first k chunk; fixed by running
+  the producer control flow warp-uniformly), then 2x SLOWER (v16 445 vs 228, v32 600 vs 297): warp 0's polling/pump
+  steals issue slots and delays WG0's MMAs, and every ring slot waits for all 16 warps. Code: /tmp/moe17/twq_inline.patch.

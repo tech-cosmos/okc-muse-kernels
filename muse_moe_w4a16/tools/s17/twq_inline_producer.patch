@@ -1,0 +1,545 @@
+diff --git a/NOTES-moe.md b/NOTES-moe.md
+index c7374d5..e49444f 100644
+--- a/NOTES-moe.md
++++ b/NOTES-moe.md
+@@ -442,3 +442,25 @@
+ - Dead (proxy, bitwise = main on 50 big-M outputs): TWM_KPS 2 = 2 k chunks per moe_twm ring stage ([x0 x1|W0 W1|S0 S1],
+   NSTG 4, 4 copies per 2 chunks instead of 6): G88 v32 294/296 vs 294.5, v16 231 vs 228; G16 warm items unchanged (34.2).
+   Reverted (code not kept).
++
++## Session 17 (2026-10-26 08:25Z - ) -- s16's "ring cap" was a measurement bug; twm is consumer-bound; moe_twq
++- **s16's TWX ablation builds were all the FULL kernel**: mkx2.py inserted `#define TWX n` right before sub_tlg's own
++  `#define TWX 0` (redefinition: the last wins). Every "no dq / no MMA / ring only" number in s16 = main. Fixed builds
++  (/tmp/moe16/sub_z<n>.py), G16 warm items (us; RT4 N8 / RT4 N32 / RT2 N64): full 34.7/47.5/31.8, no dq 26.9/33.1/26.6,
++  no MMA 34.0/39.2/23.0, no dq+MMA+LDS (ring only) 18.0/21.1/17.2, + no x 15.6/19.6/15.0. => moe_twm items are
++  CONSUMER-bound; the ring alone does them in ~18 us (= the bare-ring microbenchmark). dq and MMA do not overlap
++  (their costs add).
++- Ring microbenchmark with consumer delay (tools/s17/ring5.py, clock64 per stage): per-stage time = consumer work +
++  ~100-150 cycles (barrier wait when data is ready ~100 cyc + loop); releasing the stage one step late (as twm does)
++  adds ~60 ns at G16. The ring itself is not the limit.
++- ncu (G16, one launch, tools/s17/ncu_drv.py): RT4 N8 items: issue 62% busy, ALU pipe 59%, fmaheavy 35%, tensor 13%;
++  2.25 warps/scheduler, stalls spread (wait .55, not_selected .51, gmma .38, long_sb .35, math throttle .34).
++  RT2 N64 items: tensor 55%, issue 43%, stalls wait .95, long_sb .72 (mostly the idle producer warp), dispatch .70
++  (ALU ops vs the RS wgmma reading A from the register file), gmma .45.
++- dq pipe rebalancing (all bit-exact or speed-only proxies, G16 warm items): rotl via 2 IMAD (mul.lo+mul.hi) + 1 LOP3
++  (bit-exact): 40.9 vs 34.7 us (IMAD.HI is costly); via one IMAD.WIDE.U32 (mul.wide): 37.3 / N32 55.5 (worse); one
++  rotation wide, one SHF: 35.7 / 53.6. Speed-only (wrong values) "both shifts as IMAD.SHL": 32.6 (-6%), but no correct
++  layout exists with plain left shifts (exhaustive search tools/s17/search2.py: identity + shift + (rot|mul) + mul has
++  no solution; the sign bits at 15/31 block it). Dead.
++- Layer v32 time split on the proxy (G88 timeline, seed 7): the 3 hot experts (97/73/50 tokens, RT2 64-token passes)
++  take ~35% of all CTA time for ~17% of the bytes (8 GB/s/SM vs 31 for RT4 N8 items); v16's 2 hot experts ~2x per byte.
+diff --git a/muse_moe_w4a16/submission.py b/muse_moe_w4a16/submission.py
+index f698d08..0696979 100644
+--- a/muse_moe_w4a16/submission.py
++++ b/muse_moe_w4a16/submission.py
+@@ -929,6 +929,12 @@ __device__ __forceinline__ void mbar_wait(uint64_t* b, int parity) {
+       "mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
+       "@!p bra WAIT_%=;\n}\n" ::"r"(smem_u32(b)), "r"(parity) : "memory");
+ }
++__device__ __forceinline__ bool mbar_test(uint64_t* b, int parity) {
++  uint32_t r;
++  asm volatile("{\n.reg .pred p;\nmbarrier.test_wait.parity.shared::cta.b64 p, [%1], %2;\nselp.u32 %0, 1, 0, p;\n}\n"
++               : "=r"(r) : "r"(smem_u32(b)), "r"(parity) : "memory");
++  return r != 0;
++}
+ __device__ __forceinline__ void prefetch_l2(const void* src, int bytes) {
+   asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(src), "r"(bytes) : "memory");
+ }
+@@ -2548,6 +2554,454 @@ int64_t moe_twm_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
+   return (g_sa & 1) ? twm_go<true>(TWMA) : twm_go<false>(TWMA);
+ #undef TWMA
+ }
++// ---- s17 moe_twq: moe_twm with 16 consumer warps (4 warpgroups) x RT 2 instead of 8 x RT 4. An item covers the same
++// 32 row tiles (it reads the w*b4 / w*sb4 packing: warp w16 takes slots of 8-warp warp w16 / 2), so the tensor work
++// and the bytes per stage are unchanged, but each scheduler has 4 consumer warps instead of 2 (s17 ncu: twm items are
++// latency-bound, 2 warps per scheduler, issue 43-62% busy). 512 threads = 4 consumer warpgroups at <= 128 registers;
++// thread 0 also produces (pump(): non-blocking, called every 2 k16 steps and while warp 0 waits for data). Gated warp w16: gate tile rb*16 + w16 (slot r = w16 & 1), up = slot 2 + (w16 & 1);
++// gemm2: tiles rb*32 + 2*w16 + {0, 1} (slots 2*(w16 & 1) + {0, 1}). Experts with > 32 tokens: 64-token passes if
++// (flags & 1) (tq_big), else 32-token passes like the rest.
++template <int N, int NSTG, bool SA, typename PF>
++__device__ __forceinline__ void tq_item(PF& pump, const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
++                                        const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
++                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, bool g2) {
++  using C = TWC<4, true, 8>;
++  constexpr int NA = N / 2, STRIDE = C::STG;
++  float acc[2][NA];
++#pragma unroll
++  for (int r = 0; r < 2; ++r)
++#pragma unroll
++    for (int i = 0; i < NA; ++i) acc[r][i] = 0.f;
++  uint32_t afA[2][4], afB[2][4];
++  const int w8 = warp >> 1, sub = warp & 1;
++  const int wo0 = (w8 * 4 + (g2 ? 2 * sub : sub)) * 32 + lane, wo1 = wo0 + (g2 ? 32 : 64);
++  const uint32_t sel = g2 ? (sub ? 0x7654u : 0x3210u) : (sub ? 0x7632u : 0x5410u);
++  const int so = C::XB + C::WB + (w8 * 32 + lane) * 8;
++  int pst = -1;
++#pragma unroll 1
++  for (int kc = 0; kc < 64; ++kc) {
++    const char* sb = smem + st * STRIDE;
++    if (warp == 0) pump();
++    if (kc) tq_wait(pump, &full[st], ph, warp, lane);
++    const uint4* wp = reinterpret_cast<const uint4*>(sb + C::XB);
++    uint4 wv[2];
++    wv[0] = wp[wo0];
++    wv[1] = wp[wo1];
++    const uint2 v = *reinterpret_cast<const uint2*>(sb + so);
++    const uint32_t word = __byte_perm(v.x, v.y, sel);
++    uint32_t s0[2], s1[2];
++    if (SA) {
++      s0[0] = sca<0>(word); s1[0] = sca<1>(word); s0[1] = sca<2>(word); s1[1] = sca<3>(word);
++    } else {
++      s0[0] = slut[word & 0xFF]; s1[0] = slut[(word >> 8) & 0xFF];
++      s0[1] = slut[(word >> 16) & 0xFF]; s1[1] = slut[word >> 24];
++    }
++    const uint64_t d0 = sw128_desc(sb);
++#pragma unroll
++    for (int j0 = 0; j0 < 4; ++j0) {
++      const bool odd = j0 & 1;
++#pragma unroll
++      for (int r = 0; r < 2; ++r) {
++        if (odd) dq(u4get(wv[r], j0), s0[r], s1[r], afB[r]);
++        else dq(u4get(wv[r], j0), s0[r], s1[r], afA[r]);
++      }
++      wg_fence();
++#pragma unroll
++      for (int r = 0; r < 2; ++r) wgmma_bf16<N>(acc[r], odd ? afB[r] : afA[r], d0 + j0 * 2);
++      wg_commit();
++      wg_wait<1>();
++#pragma unroll
++      for (int r = 0; r < 2; ++r)
++#pragma unroll
++        for (int i = 0; i < 4; ++i) {
++          if (odd) fence_r(afA[r][i]);
++          else fence_r(afB[r][i]);
++        }
++      if (j0 == 0 && pst >= 0) mbar_arrive(&empty[pst]);
++    }
++    pst = st;
++    if (++st == NSTG) { st = 0; ph ^= 1; }
++  }
++  wg_wait<0>();
++#pragma unroll
++  for (int r = 0; r < 2; ++r) {
++#pragma unroll
++    for (int i = 0; i < 4; ++i) { fence_r(afA[r][i]); fence_r(afB[r][i]); }
++#pragma unroll
++    for (int i = 0; i < NA; ++i) fence_f(acc[r][i]);
++  }
++  mbar_arrive(&empty[pst]);
++  if (g2) tw_epi<2, N, false, 16>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
++  else tw_epi<2, N, true, 16>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
++}
++
++// s17 moe_twq producer state (thread 0 only; file-scope smem: direct LDS/STS, no consumer registers)
++struct TqP {
++  const char *w, *s;
++  int map;  // tensor map: g2 * 4 + mi (the kernel takes &maps.m[] itself: param-space addresses)
++  int st, ph, i, pk, item, e, need, off, bytes, wb, sb, end, n13, nitems, rr;
++  const char *W13, *S13, *W2, *S2, *W13h, *S13h, *W2h, *S2h;
++  int* meta;
++  uint64_t* full;
++  int *s_item, *s_e, *s_big, *s_off, *s_cum;
++};
++__shared__ TqP g_tqp;
++// rare path (once per item): decode item `next` if the current one is fully issued (returns bit 1: `next` consumed),
++// then check the gemm2 dependency (bit 0: a stage may be issued now). Posts the end marker when out of items.
++__device__ __noinline__ int tq_next(int next) {
++  using C = TWC<4, true, 8>;
++  using HG = TWC<2, true, 8>;
++  constexpr int NR13 = TWC<4, true, 8>::NRB, NR2 = TWC<4, false, 8>::NRB, NB13 = HG::NRB, NB2 = TWC<2, false, 8>::NRB;
++  TqP& P = g_tqp;
++  int r = 0;
++  if (P.pk == 64) {
++    const int item = next;
++    if (item >= P.nitems) {
++      P.s_item[P.st] = -1;
++      mbar_arrive(&P.full[P.st]);
++      P.end = 1;
++      return 0;
++    }
++    const int g2 = item >= P.n13;
++    const int it = g2 ? item - P.n13 : item;
++    const int* cum = P.s_cum + g2 * 33;
++    int a = 0;
++    while (cum[a + 1] <= it) ++a;
++    const int bg = P.s_big[a];
++    const int nrb = bg ? (g2 ? NB2 : NB13) : (g2 ? NR2 : NR13), rem = it - cum[a];
++    const int p = rem / nrb, rb = rem - p * nrb;
++    const int e = P.s_e[a], PS = bg ? 64 : 32;
++    const int off = P.s_off[e] + p * PS, nv = min(PS, P.s_off[e + 1] - off);
++    const int mi = nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
++    const int wb = bg ? HG::WB : C::WB, sbb = bg ? HG::SB : C::SB;
++    P.wb = wb;
++    P.sb = sbb;
++    P.w = (bg ? (g2 ? P.W2h : P.W13h) : (g2 ? P.W2 : P.W13)) + ((size_t)e * nrb + rb) * 64 * wb;
++    P.s = (bg ? (g2 ? P.S2h : P.S13h) : (g2 ? P.S2 : P.S13)) + ((size_t)e * nrb + rb) * 64 * sbb;
++    P.map = g2 * 4 + mi;
++    P.bytes = wb + sbb + (1024 << mi);
++    P.need = g2 ? ((P.s_off[e + 1] - P.s_off[e] + PS - 1) / PS) * (bg ? NB13 : NR13) : 0;
++    P.e = e;
++    P.off = off;
++    P.item = item;
++    P.pk = 0;
++    r = 2;
++  }
++  if (P.need) {
++    int v;
++    asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(v) : "l"(P.meta + 68 + P.e) : "memory");
++    if (v < P.need) return r;
++    P.need = 0;
++    asm volatile("fence.proxy.async.global;" ::: "memory");
++  }
++  return r | 1;
++}
++
++// s17 moe_twq: warp 0 is also the producer (pump: non-blocking; lane 0 issues). Warp 0 polls a full barrier and
++// pumps meanwhile (a blocking wait there could deadlock: nobody else fills the ring); the other warps block.
++template <typename PF>
++__device__ __forceinline__ void tq_wait(PF& pump, uint64_t* b, int ph, int warp, int lane) {
++  if (warp) {
++    mbar_wait(b, ph);
++    return;
++  }
++  while (!mbar_test(b, ph)) pump();
++}
++
++// s17 moe_twq hot-expert class (flags & 1, experts with > 32 tokens): 64-token passes over the RT 2 packing (w*b2:
++// 16 row tiles per item, as moe_twm's class 1), one tile per warp (w16 -> 8-warp slot w16 / 2, r = w16 & 1), N <= 64.
++// Gated: warp 2i holds gate tile rb*8 + i, warp 2i+1 the matching up tile; the up warp passes its FP32 accumulators
++// through smem (xb, 8 x 32 x 32 floats) to the gate warp, which writes silu(gate) * up (named barrier 2 + i per pair).
++template <int N, int NSTG, bool SA, typename PF>
++__device__ __forceinline__ void tq_big(PF& pump, const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
++                                       const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
++                                       const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, bool g2,
++                                       float* xb) {
++  using C = TWC<4, true, 8>;
++  using HG = TWC<2, true, 8>;
++  constexpr int NA = N / 2, STRIDE = C::STG;
++  float acc[1][NA];
++#pragma unroll
++  for (int i = 0; i < NA; ++i) acc[0][i] = 0.f;
++  uint32_t afA[4], afB[4];
++  const int w8 = warp >> 1, sub = warp & 1;
++  const int wo = (w8 * 2 + sub) * 32 + lane;
++  const int so = HG::XB + HG::WB + (w8 * 32 + lane) * 4 + sub * 2;
++  int pst = -1;
++#pragma unroll 1
++  for (int kc = 0; kc < 64; ++kc) {
++    const char* sb = smem + st * STRIDE;
++    if (warp == 0) pump();
++    if (kc) tq_wait(pump, &full[st], ph, warp, lane);
++    const uint4 wv = reinterpret_cast<const uint4*>(sb + HG::XB)[wo];
++    const uint32_t word = *reinterpret_cast<const uint16_t*>(sb + so);
++    uint32_t s0, s1;
++    if (SA) {
++      s0 = sca<0>(word); s1 = sca<1>(word);
++    } else {
++      s0 = slut[word & 0xFF]; s1 = slut[word >> 8];
++    }
++    const uint64_t d0 = sw128_desc(sb);
++#pragma unroll
++    for (int j0 = 0; j0 < 4; ++j0) {
++      const bool odd = j0 & 1;
++      if (odd) dq(u4get(wv, j0), s0, s1, afB);
++      else dq(u4get(wv, j0), s0, s1, afA);
++      wg_fence();
++      wgmma_bf16<N>(acc[0], odd ? afB : afA, d0 + j0 * 2);
++      wg_commit();
++      wg_wait<1>();
++#pragma unroll
++      for (int i = 0; i < 4; ++i) {
++        if (odd) fence_r(afA[i]);
++        else fence_r(afB[i]);
++      }
++      if (j0 == 0 && pst >= 0) mbar_arrive(&empty[pst]);
++    }
++    pst = st;
++    if (++st == NSTG) { st = 0; ph ^= 1; }
++  }
++  wg_wait<0>();
++#pragma unroll
++  for (int i = 0; i < 4; ++i) { fence_r(afA[i]); fence_r(afB[i]); }
++#pragma unroll
++  for (int i = 0; i < NA; ++i) fence_f(acc[0][i]);
++  mbar_arrive(&empty[pst]);
++  if (g2) {
++    tw_epi<1, N, false, 16>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
++    return;
++  }
++  float* x = xb + w8 * 32 * 32;
++  if (sub) {
++#pragma unroll
++    for (int i = 0; i < NA; ++i) x[i * 32 + lane] = acc[0][i];
++  }
++  asm volatile("bar.sync %0, 64;" ::"r"(2 + w8) : "memory");
++  if (!sub) {
++    const int g = lane >> 2, t = lane & 3, tile = rb * 8 + w8;
++#pragma unroll
++    for (int gi = 0; gi < N / 8; ++gi)
++#pragma unroll
++      for (int q = 0; q < 4; ++q) {
++        const int tok = gi * 8 + t * 2 + (q & 1);
++        if (tok < nv) {
++          const int col = tile * 16 + g + ((q & 2) ? 8 : 0);
++          const float v = acc[0][gi * 4 + q] * gsc;
++          const float u = x[(gi * 4 + q) * 32 + lane] * gsc;
++          const int c = col & 63;
++          const int lc = (col & ~63) | (((c >> 2) & 3) << 4) | (((c >> 1) & 1) << 3) | ((c >> 4) << 1) | (c & 1);
++          Out[(size_t)(off + tok) * NOUT + lc] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
++        }
++      }
++  }
++  asm volatile("bar.sync %0, 64;" ::"r"(2 + w8) : "memory");
++}
++
++template <int NSTG, bool SA>
++__global__ void __launch_bounds__(512, 1) moe_twq(
++    const char* __restrict__ W13, const char* __restrict__ S13, const float* __restrict__ gs13,
++    const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
++    const char* __restrict__ W13h, const char* __restrict__ S13h, const char* __restrict__ W2h,
++    const char* __restrict__ S2h,
++    const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
++    int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
++    __nv_bfloat16* __restrict__ Y, float* __restrict__ part, int flags) {
++  using C = TWC<4, true, 8>;
++  using HG = TWC<2, true, 8>;
++  constexpr int NB13 = HG::NRB, NB2 = TWC<2, false, 8>::NRB;
++  constexpr int STRIDE = C::STG, NR13 = TWC<4, true, 8>::NRB, NR2 = TWC<4, false, 8>::NRB;
++  extern __shared__ __align__(1024) uint4 smem_tw[];
++  char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
++  __shared__ uint32_t slut[256];
++  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_big[32];
++  __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
++  int* done = meta + 68;
++  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  for (int i = tid; i < 256; i += 512) slut[i] = lut[i];
++  asm volatile("griddepcontrol.wait;" ::: "memory");
++  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++  if (tid < 33) s_off[tid] = meta[33 + tid];
++  if (tid == 0) {
++    for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 16 * 32); }
++    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
++  }
++  __syncthreads();
++  if (tid < 32) {
++    const int nact = meta[0];
++    const int e = tid < nact ? meta[1 + tid] : 0;
++    s_e[tid] = e;
++    const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0, big = (flags & 1) && nt > 32;
++    const int npass = big ? (nt + 63) / 64 : (nt + 31) / 32;
++    s_big[tid] = big;
++#pragma unroll
++    for (int gq = 0; gq < 2; ++gq) {
++      int incl = npass * (big ? (gq ? NB2 : NB13) : (gq ? NR2 : NR13));
++#pragma unroll
++      for (int o = 1; o < 32; o <<= 1) {
++        const int v = __shfl_up_sync(0xffffffffu, incl, o);
++        if (tid >= o) incl += v;
++      }
++      s_cum[gq][tid + 1] = incl;
++      if (tid == 0) s_cum[gq][0] = 0;
++    }
++  }
++  __syncthreads();
++  const int n13 = s_cum[0][32], nitems = n13 + s_cum[1][32];
++  auto decode = [&](int item, int& g2, int& a, int& p, int& rb) {
++    g2 = item >= n13;
++    const int it = g2 ? item - n13 : item;
++    const int* cum = s_cum[g2];
++    a = 0;
++    while (cum[a + 1] <= it) ++a;
++    const int nrb = s_big[a] ? (g2 ? NB2 : NB13) : (g2 ? NR2 : NR13), rem = it - cum[a];
++    p = rem / nrb;
++    rb = rem - p * nrb;
++  };
++  // producer (thread 0, between its consumer work): state in g_tqp; pnext = the prefetched next item number (its
++  // atomic is only waited for when the current item is fully issued)
++  int pnext = 0;
++  if (tid == 0) {
++    TqP& P = g_tqp;
++    P.rr = 0;
++    P.st = P.ph = P.i = 0;
++    P.pk = 64;
++    P.end = 0;
++    P.need = 0;
++    P.n13 = n13;
++    P.nitems = nitems;
++    P.W13 = W13; P.S13 = S13; P.W2 = W2; P.S2 = S2; P.W13h = W13h; P.S13h = S13h; P.W2h = W2h; P.S2h = S2h;
++    P.meta = meta;
++    P.full = full;
++    P.s_item = s_item;
++    P.s_e = s_e;
++    P.s_big = s_big;
++    P.s_off = s_off;
++    P.s_cum = &s_cum[0][0];
++    pnext = atomicAdd(meta + 66, 1);
++  }
++  __syncwarp();  // warp 0 reads g_tqp in pump
++  // pump: run by all of warp 0 (warp-uniform control flow: no divergence around the warpgroup MMAs); lane 0 issues
++  auto pump = [&]() {
++    TqP& P = g_tqp;
++    while (!P.end) {
++      if (P.i >= NSTG && !mbar_test(&empty[P.st], P.ph ^ 1)) return;
++      if (P.pk == 64 || P.need) {
++        if (lane == 0) {
++          const int r = tq_next(pnext);
++          if (r & 2) pnext = atomicAdd(meta + 66, 1);
++          P.rr = r;
++        }
++        __syncwarp();
++        const int r = P.rr;
++        __syncwarp();
++        if (!(r & 1)) return;
++      }
++      const int st = P.st, pk = P.pk;
++      if (lane == 0) {
++        const int wb = P.wb, sbb = P.sb, mp = P.map;
++        char* sb = smem + st * STRIDE;
++        if (!pk) s_item[st] = P.item;
++        mbar_expect_tx(&full[st], P.bytes);
++        tma2d(sb, mp >= 4 ? &maps2.m[mp - 4] : &maps13.m[mp], pk * 64, P.off, &full[st]);
++        bulk_g2s(sb + C::XB, P.w + (size_t)pk * wb, wb, &full[st]);
++        bulk_g2s(sb + C::XB + wb, P.s + (size_t)pk * sbb, sbb, &full[st]);
++        P.pk = pk + 1;
++        ++P.i;
++        if (st + 1 == NSTG) { P.st = 0; P.ph ^= 1; } else P.st = st + 1;
++      }
++      __syncwarp();
++    }
++  };
++  int st = 0, ph = 0;
++#if TWM_TL
++  unsigned long long* tl = (flags & 2) ? reinterpret_cast<unsigned long long*>(part) + blockIdx.x * 64 : nullptr;
++  int ntl = 0;
++  if (tl && tid == 0) tl[0] = gtimer();
++#endif
++  for (;;) {
++    tq_wait(pump, &full[st], ph, warp, lane);
++    const int item = s_item[st];
++#if TWM_TL
++    if (tl && tid == 0) {
++      if (item < 0) { tl[1] = ntl; tl[63] = gtimer(); }
++      else if (ntl < 20) { tl[2 + 3 * ntl] = gtimer(); tl[4 + 3 * ntl] = item; }
++    }
++#endif
++    if (item < 0) break;
++    int g2, a, p, rb;
++    decode(item, g2, a, p, rb);
++    const int e = s_e[a], PS = s_big[a] ? 64 : 32;
++    const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
++    const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
++    __nv_bfloat16* out = g2 ? Y : Inter;
++#define TQI(NN) tq_item<NN, NSTG, SA>(pump, smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2)
++#define TQB(NN) tq_big<NN, NSTG, SA>(pump, smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
++                                    reinterpret_cast<float*>(smem + NSTG * STRIDE))
++    if (s_big[a]) {
++      switch ((nv + 15) >> 4) {
++        case 1: TQB(16); break;
++        case 2: TQB(32); break;
++        case 3: TQB(48); break;
++        default: TQB(64); break;
++      }
++    } else {
++      switch ((nv + 7) >> 3) {
++        case 1: TQI(8); break;
++        case 2: TQI(16); break;
++        case 3: TQI(24); break;
++        default: TQI(32); break;
++      }
++    }
++#undef TQI
++#undef TQB
++    if (!g2) {
++      asm volatile("fence.proxy.async.global;" ::: "memory");
++      asm volatile("bar.sync 1, 512;" ::: "memory");
++      if (tid == 0) {
++        __threadfence();
++        atomicAdd(done + e, 1);
++      }
++    }
++#if TWM_TL
++    if (tl && tid == 0 && ntl < 20) tl[3 + 3 * ntl] = gtimer();
++    ++ntl;
++#endif
++  }
++}
++
++template <bool SA>
++static int64_t twq_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
++                      torch::Tensor gs2_, torch::Tensor w13h_, torch::Tensor s13h_, torch::Tensor w2h_, torch::Tensor s2h_,
++                      torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
++                      torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, int64_t flags) {
++  constexpr int NSTG = 7;
++  constexpr int SMEM = NSTG * TWC<4, true, 8>::STG + 8 * 32 * 32 * 4 + 1024;
++  static int grid = 0;
++  if (!grid) {
++    int dev, nsm;
++    cudaGetDevice(&dev);
++    cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
++    cudaFuncSetAttribute(moe_twq<NSTG, SA>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
++    grid = getenv("MOE_GRID") ? atoi(getenv("MOE_GRID")) : nsm;
++  }
++  TMaps m13, m2;
++  tw_maps(m13, xg_.data_ptr(), xg_.size(0));
++  tw_maps(m2, inter_.data_ptr(), inter_.size(0));
++  return launch_k(moe_twq<NSTG, SA>, grid, 512, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
++      (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
++      (const char*)PTR(s2_), (const float*)PTR(gs2_), (const char*)PTR(w13h_), (const char*)PTR(s13h_),
++      (const char*)PTR(w2h_), (const char*)PTR(s2h_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
++      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(),
++      (float*)part_.data_ptr(), (int)flags);
++}
++int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
++                       torch::Tensor gs2_, torch::Tensor w13h_, torch::Tensor s13h_, torch::Tensor w2h_,
++                       torch::Tensor s2h_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
++                       torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, int64_t flags) {
++#define TWQA w13_, s13_, gs13_, w2_, s2_, gs2_, w13h_, s13h_, w2h_, s2h_, lut_, xg_, meta_, sr_, inter_, y_, part_, flags
++  return (g_sa & 1) ? twq_go<true>(TWQA) : twq_go<false>(TWQA);
++#undef TWQA
++}
+ // ---- moe_tk2f: the decode gemm13 and gemm2 in ONE launch (moe_tk2 rows, one routing, one ring). Phase 1 = gemm13
+ // rows, phase 2 = gemm2 rows (each split over the CTAs as in moe_tk2); the producer streams phase-2 weights as soon
+ // as its phase-1 copies are issued. A CTA publishes the phase-1 rows it finished of each (expert, group) segment in
+@@ -3809,6 +4263,9 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
+         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor, "
+         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, torch::Tensor, torch::Tensor, "
+         "torch::Tensor, double);"
++        "int64_t moe_twq_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
++        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
++        "torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
+         "int64_t moe_set_pdl(int64_t, int64_t);"
+         "int64_t moe_set_blk(int64_t);"
+         "int64_t moe_set_sa(int64_t);")
+@@ -3821,7 +4278,7 @@ def _lib():
+         h = hashlib.sha256(CUDA_SRC.encode()).hexdigest()[:12]
+         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=CUDA_SRC,
+                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
+-                                      "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch",
++                                      "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
+                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa"],
+                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
+                            extra_cflags=["-O3"], verbose=False)
+@@ -3988,6 +4445,8 @@ TWM_TAIL13_M = {}
+ TWM_ORDER = 0  # s14: moe_twm item order (bits, see moe_twm): 76 = pass-minor + multi-pass experts' items merged evenly
+ #   over both phases (H100 layer v32 248.8 -> 239.9 us without TWM_TAIL (with it: 247), v16 = 0); 2 = timeline stamps
+ TWM_ORDER_M = {256: 76}  # s14: per-M override
++TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2) if nonzero; value = flags: bit 0 = 64-token passes for experts with > 32 tokens (else 32), bit 2 = on
++TWQ_M = {}  # s17: per-M override
+ TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
+ TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
+ _CFGS = (10, 11, 22, 118)
+@@ -4229,7 +4688,13 @@ def kernel_fn(data, st):
+             lib.moe_set_sa((1 if TWSA and st["sa"] else 0) | (2 if trt == 2 else 0))
+             ns = TWF_SPLIT_M.get(M, TWF_SPLIT)
+             part = (torch.full if TWF_DBG else torch.empty)((max(ns, 1) * 32768,), *((float("nan"),) if TWF_DBG else ()), dtype=torch.float32, device=dev)
+-            if TWF_MIX and "w2b2" in st:
++            if TWQ_M.get(M, TWQ):
++                q = TWQ_M.get(M, TWQ)
++                if DIAG_TL and TWM_ORDER_M.get(M, TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
++                lib.moe_twq_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["w13b2"],
++                                   st["w13sb2"], st["w2b2"], st["w2sb2"], st["lut"], xg,
++                                   meta, sroutes, inter, y, part, q)
++            elif TWF_MIX and "w2b2" in st:
+                 tl = TWM_TAIL_M.get(M, TWM_TAIL) + 4096 * TWM_TAIL13_M.get(M, TWM_TAIL13) + (TWM_ORDER_M.get(M, TWM_ORDER) << 24)
+                 ns = -tl if tl else ns
+                 if DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)

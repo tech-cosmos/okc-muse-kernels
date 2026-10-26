@@ -1,0 +1,7 @@
+s17 tools (run from /tmp/moe16 like tools/s16; see NOTES-moe.md session 17):
+ring5.py: cp.async.bulk ring microbenchmark with a consumer delay and clock64 split (wait / work / producer wait).
+search2.py: exhaustive search for NVFP4 nibble layouts where dq needs fewer ALU ops (none better than main's).
+ncu_drv.py: NEXP=<experts> TWQ=<0|4> MOE_GRID=16 SUB=<module> ncu ... python ncu_drv.py (T=64, NEXP experts).
+warm3.py: warm2.py (tools/s16 README) with TWQ from the env (timeline kinds per item).
+twq_inline_producer.patch: the DEAD 512-thread moe_twq with the producer inside warp 0 (2x slower) + hot-expert class.
+s16 bug: tools/s16/mkx2.py builds were all TWX 0 (redefinition); fixed builds: replace sub_tlg's '#define TWX 0'.
