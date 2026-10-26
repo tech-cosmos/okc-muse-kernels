@@ -109,21 +109,6 @@ Remaining moe ideas, all needing H200 time (next sandbox; moe checks = H200 DIAG
   macros; build a DIAG copy with TK2F_L2H 0 vs 4 as two libs if needed). Then: evict_first/evict_last hints elsewhere
   (layer's own streams, proj GEMVs: Requests), x/inter loads in tk2f (ld.global with L2::evict_last for inter?).
 
-## Session 20 summary (grid-aware tail split: halves tie, quarters dead; NOTES s20)
-- main = 6f6c487: TWF_SPLIT(_M) 1022/1023 = AUTO halves (split count = item cost mod gridDim, in-kernel; off by
-  default). Proxy/layer copy: tie (-0..4 us, noise). Posted to layer as optional TUNE option (tools/s20 diff).
-- Dead: Q = 4/8 K parts (tie..+6 us; tools/s20/twm_qparts_dead.diff). Halves cut the timeline tail ~9 us when they run
-  but cost ~half of that in overhead; at G=132 the layer's v16/v32 last waves are mostly > half full (no split).
-- Tool: tools/s20/spills.sh (moe_twm spill count per build; main 48, all in the producer warp).
-
-## Session 19 summary (NOTES s19)
-- twm items run in lockstep waves; tail loss 16-25 H100-us per v16/v32 (s20: K-split fixes it only partly, tie).
-  TWF_SPLIT_M combinable with order/hot (bit 22; light experts only). DEAD: warp-specialized dequant (smem-bound).
-
-## Session 18 summary: twm items are consumer-compute bound (dq ALU + wgmma never overlap; microbenchmarks); TWM_NF dead (NOTES s18).
-
-## Session 17 summary: moe_twq (TWQ_M, layer TUNE option at T=128) and twm hot class (TWM_HOT); dq/nibble searches dead (NOTES s17).
-
 ## Ranked ideas
 -9. (s19) grid-aware twm tail by K-split: DONE s20, tie (halves) / dead (quarters). Tail needs cheaper items, not finer.
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
