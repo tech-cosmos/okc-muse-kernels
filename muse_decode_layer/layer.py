@@ -1604,6 +1604,7 @@ TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
 TUNE_REPS = 40
+TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
 TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}  # T -> (batch, q_len)
 
 
@@ -1685,9 +1686,25 @@ def _tune(state):
                         ts[i].append(a.elapsed_time(b))
             med = [sorted(v)[len(v) // 2] for v in ts]
             best = min(idx, key=lambda i: med[i])
+            conf = ""
+            if best != 0 and cands[0] == {}:  # s24: confirm against the defaults (winner's curse of a min over many noisy medians)
+                c2 = [[], []]
+                for r in range(TUNE_REPS):
+                    for j, i in enumerate((0, best) if r % 2 == 0 else (best, 0)):
+                        flush.zero_()
+                        a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                        a.record()
+                        graphs[i].replay()
+                        b.record()
+                        b.synchronize()
+                        c2[i != 0].append(a.elapsed_time(b))
+                m0, mb = (sorted(v)[len(v) // 2] for v in c2)
+                conf = f" (confirm default {m0 * 1e3:.1f} vs {mb * 1e3:.1f}us)"
+                if mb > m0 * (1 - TUNE_MARGIN):
+                    best = 0
             state["tune"][key] = cands[best]
             print(f"layer tune T={tokens} {'sliding' if sliding else 'full'}: " + " | ".join(f"{cands[i] or 'default'} {med[i] * 1e3:.1f}us" for i in idx)
-                  + f" -> {cands[best] or 'default'}", flush=True)
+                  + f"{conf} -> {cands[best] or 'default'}", flush=True)
             del graphs, data
         del flush
     except Exception as ex:  # keep the defaults
