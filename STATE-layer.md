@@ -9,6 +9,8 @@ join at T>32: v32 -3) + GNORM (pre-expert rmsnorm inside the gather at T>32: v16
 with a {opt: False} TUNE option so the H200 tuner can revert. moe_src.py now has 2 layer edits (data["bucket"],
 data["gather_norm"]): re-apply on any re-copy. Tests 13/13, scored + replay ok each. NOT CHECKED: the ~14:30Z last check
 runs main (copy every "layer tune" line of profiles/submission.<job>.log into NOTES). Cold compile+prepare 4.3 min (H100).
+Bundle v66 vs v60 (H100 ab_files 4 rounds): every shape better or tie (v16 -9.0/-5.3, v32 -5.0/-2.8, d32 -1.9/-3.0, d1 full
+-2.5 us; ~+0.9%). Main: tk2f_stress 0/600, route_judge 0/360, replay 0/240.
 
 **s25: main = v59 (46fb62d) = v57 + tuner on SKEWED synthetic routing (`SYNTH_P`/`_synth_stream`: stream = sum of 8
 picked experts' unit router rows; local expert j picked w.p. SYNTH_P[j] = scored loads' mean shares; T=256 synth

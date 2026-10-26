@@ -678,3 +678,9 @@
   the tuner), 4.3 min total.
 - Ideas not done: fuse the d16 qkv g19 FP32->BF16 cast (1.2 us) into csl (attention kernel reads BF16 qkv; ~0.1%);
   _routing + moe_route in one kernel at T>32 (now off the H200 critical path anyway).
+- Bundle v66 vs v60 (ab_files 4 rounds, H100, real scored inputs): d1 91.3/112.9 -> 91.1/110.5, d16 211.1/315.5 ->
+  210.9/314.2, d32 205.3/436.2 -> 203.4/433.1, v1 153.6/168.9 -> 153.2/167.7, v16 318.3/460.9 -> 309.3/455.5, v32
+  402.8/649.8 -> 397.8/647.0 (~+0.9% on the score if the H200 agrees). Main v66: tests 13/13, tk2f_stress 0/600,
+  route_judge 0/360, replay all shapes 0/240.
+- Session end ~12:15Z. Next session: the last check of the sandbox at ~14:30Z on main (+ any handoff posted by 14:15Z,
+  as TUNE options), then submit by 17:30Z if it beats 1.9558 (else v45 2dddb88, check ea9421fa 1.9634x).
