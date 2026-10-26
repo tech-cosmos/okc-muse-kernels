@@ -1143,3 +1143,27 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   every slot reading slot 0's row (variants/s57_y0.py, TUNE = {}): H100 ab_files 6 rounds d1 86.26/106.20 vs 86.21/106.35:
   the n2u tail is its latency chain, not L2 bytes (so a K-split n2u would not pay at T=1).
 - v94 tests: bench test 13/13, replay_test d16/d32 x seeds 11,23 0/80, scored_test d16/d32 x3 0 bad. H100 tuner: {g19trig: False} lost in every T=16/32 tuner line (e.g. T=16 sl 235.4 vs 232.3).
+
+## s58 (2026-10-26 20:41Z-21:00Z, sandbox okc-night4, session 7): v95 = v94 + moe tk2h as T=16/32 TUNE option
+- No judge runs (budget resets 00:00Z).
+- Port: `git -C ~/r-moe diff 1f3b71b 3710aa8 -- muse_moe_w4a16/submission.py` applied to moe_src.py with `patch` (10/14
+  hunks; by hand: TK2G_PAR define, norm3 condition in kernel_fn; DIAG hunks skipped). Layer-side edits in moe_src.py (not
+  layer.py text patches): the h16 PF4 SA instantiation `tk2f_go<8,4,2,false,false,true,16,1,4>` built outside TK2_EXP
+  (cfg 14W004, W = cfg/1000 % 10); `griddepcontrol.wait` before tk2h_consume (TK2FX/TK2FJ: x is the PDL predecessor's
+  output); tk2h_consume x loads `__ldcg` (were __ldg: .nc after the wait); `griddepcontrol.launch_dependents` at the
+  start of the CTA's gemm2 phase (= TK2F_LATE_TRIG 3 for the merged consumer, so norm3 is an early PDL secondary).
+  python: `TK2H_M = {M: W + 1}` (SA only) in _tk2f_cfg; layer `_experts_moe` sets it from _opt "tk2h". moe has an
+  equivalent tools/n6/patch_layer_h16.py (not used).
+- Correctness: bench test 13/13 (forced tk2h 4 at T=16/32 and with the tuner), scored_test decode x3 0 bad, replay_test
+  d16/d32 x seeds 11,23 0/160, tools/tk2h_stress.py (tk2f_stress with _moe_TK2H_M set; args: reps file W+1) 0/400 (W3) +
+  0/240 (W0) bitwise vs the 3-launch moe_tk2 path. Layer outputs are not bitwise run-to-run anyway (g19 red.add order).
+- Timing. H100 full grid (ab_flag 5 rounds, seed 99, tuner off): ties everywhere (d16 sl +3.7 with W2/W3): DRAM-bound
+  locally, as moe warned. G88 proxy (variants/s58_g.py = tk2f grid from env MOE_GRID; MOE_GRID=88; ab_flag now takes
+  SEEDS=7,11,13,17), base / tk2h 3 (W2) / tk2h 4 (W3), us:
+  d32 sl s7 216.1/207.2/208.1, s11 224.7/224.6/222.7, s13 216.1/202.6/201.2, s17 202.7/189.5/189.6;
+  d32 full s7 433.7/426.3/427.9, s11 433.0/433.7/432.5, s13 418.9/421.0/422.4, s17 419.3/406.1/405.5;
+  d16 sl s7 168.4/170.1/169.8, s11 163.3/158.9/159.8, s13 168.5/170.7/170.3, s17 167.5/159.8/160.6;
+  d16 full s7 281.1/283.8/283.3, s11 305.2/307.9/312.1, s13 279.0/282.9/292.6, s17 291.8/297.6/297.3.
+  W0 (tk2h 1) lost at d32 sl on seed 99 (+7): dropped from TUNE.
+- H100 tuner (synthetic skewed routing): T=32 sl default 225.5 vs {tk2h 4, lt:o} 220.2 -> picked; T=32 full -> {tk2h 4}
+  (430.4 vs 432.4); T=16 sl/full tk2h +5 us -> not picked (synthetic T=16 has no >8-token expert).

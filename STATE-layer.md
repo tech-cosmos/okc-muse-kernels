@@ -1,5 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
+Updated 2026-10-26 20:58Z (s58): **main = v95 = v94 + moe n6 tk2h (GS16 merged consumer + PF4) as TUNE option {tk2h: W+1}
+at T=16/32** (candidates 3, 4; T=32 also {tk2h 4, lt:o}). NOT judge-checked. G88 proxy (tk2f grid capped at 88 = H200-like,
+4 seeds) d32 sl -9 / full -4.5 proxy-us (x0.73 = H200), d16 sl -2 / full +3.8; H100 tuner picks tk2h 4 at T=32, rejects T=16.
+FIRST CHECK AFTER 00:00Z = main v95: read the 'layer tune T=32' (and T=16) tk2h lines; NOTES s58. Plan below otherwise unchanged.
+
 Updated 2026-10-26 20:40Z (s57): **main = v94 = v92 + BND_SEP at T=8 (v93: second boundary loads nu8's 8 slabs as an [8,1024] tile;
 H100 v1 -1.0/-1.1 us) + G19_TRIG (v94: g19 unpool/o trigger PDL at start, both boundaries their PDL secondaries at T=16/32;
 H100 d16 -1.1..2.8 sl / -1.0 full, d32 -1.6 / -1.4 us; TUNE {g19trig: False} at T=16/32)**. NOT judge-checked.
