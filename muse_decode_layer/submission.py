@@ -14028,6 +14028,10 @@ TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gat
 # s62: tokens where decode sliding csl is a PDL secondary of the qkv GEMM (TUNE option cslpw). H100 ab_flag 5-6 rounds x
 # 3 seeds: d16 sliding -0.7..-1.0 us (csl CTAs still wait for g19's SMs: launch + prologue overlap only); d1 +1.3..1.7 (off);
 # T=8 (vtk after g14, TUNE[8] option): v1 sliding -0.3..+0.0 (6 rounds x 3 seeds).
+# SAFETY (s63 audit, NOTES s63): the pre-wait loads read only inputs (page_table, seq_lens, cache_loc, k/v scales, K/V cache
+# rows at positions < seq_lens) and the config-derived cos/sin table; the only cache writer is csl/vtk itself (the new
+# rows, at positions >= seq_lens, taken from smem). This holds ONLY while the qkv GEMM is the graph's first kernel: never
+# put a kernel that writes the K/V cache (or triggers early after writing an input) before it. tools/pw_race.py: 0 diffs.
 CSL_PW_TOKENS = (16,)
 CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem carveout so 1 csl CTA/SM fits beside it from
 # the start (H100: csl starts at 2.8 us, but its gathers slow g19 17.3 -> 20.6 us: d16 sl +0.3..0.6 net; xb 1 qkv: same)

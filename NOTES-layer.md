@@ -1263,3 +1263,30 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   On the H200 (more HBM headroom, g19 issue-bound) the tuner decides.
 - Tests: bench test 13/13; scored d16 x3 (forced) + x2 (default) 0 bad, scored d1/v1 sl x3 forced 0 bad; replay d16 0/160,
   v1 0/160 (vtk PW forced) and default.
+
+## s63 (2026-10-26 21:55Z-22:10Z, sandbox okc-night4, session 12): CSL_PW safety audit (lead 21:51Z), no judge runs
+- Lead's ask: list what csl/vtk PW read before griddepcontrol.wait, show nothing earlier in the replay writes it, stress
+  with inputs that change between replays.
+- Pre-wait reads (attn_src.py csl::decode / vtk::verify, PW=true): page_table rows, seq_lens[b] (OLD lengths, not
+  cache_seqlens), cache_loc[b/tok], k_scale/v_scale, cos/sin rows (`_cos_sin`: built from rope_theta only, config-derived),
+  K/V cache rows at token positions t = clamp(.., 0, seq_lens-1), i.e. only the context BEFORE this step. Post-wait:
+  the qkv rows (q, new k/v, gate). Writers: the new token(s)' K/V rows at cache_loc (positions seq_lens..seq_lens+L-1) are
+  written by csl/vtk itself and taken from smem/registers for its own attention; with a valid page table those slots
+  never equal a gathered slot (same as without PW: CTA 15 writes while the others gather, unchanged by PW).
+  No other kernel in the layer writes k/v cache, page table, seq_lens, cache_loc or scales.
+- Ordering: PW's primary is the qkv GEMM (g19 at T=16, g14 at T=8), which is the FIRST kernel of kernel_fn (KV_PF is T=1
+  only, not combined with PW). Its PDL attribute has no in-graph predecessor, so the graph launch fully orders it after
+  the previous replay and the harness's input copies/flush. Hazard found in the control below: if a kernel that writes
+  the cache and triggers early ever precedes the qkv GEMM in the same graph, PW races. Comment added at CSL_PW_TOKENS.
+- Tests (H100, main v99 + comment = v100):
+  * tools/pw_race.py (new): per input, step A = D moved back by L tokens (writes D's last L context rows), step B = D;
+    fixed random qkv per step, so attention is bitwise deterministic. 40 inputs x {d16 csl, v1 vtk}: eager ref twice
+    nondet 0; split (graph [csl A] then graph [qkv GEMM trig-at-start -> csl/vtk B PW], flush between) 0 diffs; split_nf
+    (no flush) 0; joint (one graph A -> GEMM -> B PW) 0 (B can't get SMs until A is done); joint2 (one graph [A, B PW],
+    B direct PDL secondary of A, which triggers at start) 39/40 and 40/40 DIFF = the test sees a real race.
+  * tools/step_test.py (new): the whole layer, step A then step B in the same captured graph (caches not re-copied):
+    d16 sl 0/12 + 0/12, v1/v16 sl (cslpw forced at T=8) 0/12 + 0/12. NB the reference tolerance does NOT catch one stale
+    row (/tmp/s63_sens.py: stale B passes 6/6), so pw_race.py's bitwise check is the real evidence; the whole layer is
+    not bitwise deterministic (g19 split-K red.add order: tools/step_bitwise.py nondet 6/6), so it can't be used there.
+  * s62's replay_test (fresh inputs: new K/V cache, page table, seq_lens, positions every replay) d16/v1 0/160.
+- Verdict: CSL_PW (T=16 default) and vtk PW (TUNE[8]) are safe to check at 00:00Z.
