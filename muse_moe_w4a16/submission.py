@@ -94,6 +94,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #ifndef TK2G_PAR
 #define TK2G_PAR 1       // n4s5: GS16 weighted split bounds by warp 0 (tk2g_bound) instead of every thread (tk2g_split)
 #endif
+#define TK2H_P4 0        // n6: build only the SA tk2h PF4 kernels (cfg 1x3x004 GS8 / 1x4w004 GS16) without TK2_EXP: layer tuner use
 #define TK2_EXP 0        // s12: tk2h (TK2H/PSC) and weighted-split (TK2W) instantiations: H200 diags, no gain (off: compile time)
 
 __device__ __forceinline__ uint32_t bmul(uint32_t a, uint32_t b) {
@@ -4416,7 +4417,15 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     if (pf == 2) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 2>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 2>(0, TK2F_ARGS0);
     return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 0, 3>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 0, 3>(0, TK2F_ARGS0);
   }
-#if TK2_EXP
+#if TK2H_P4 && !TK2_EXP
+  if (sa && cfg >= 30000 && cfg < 50000 && cfg % 1000 == 4) {  // n6: tk2h PF4 only (SA): GS 8 / GS 16 with weight wt
+    if (cfg < 40000) return tk2f_go<8, 4, 2, false, false, true, 8, 1, 4>(0, TK2F_ARGS0);
+    return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+  }
+#endif
+#if !TK2_EXP
+  TORCH_CHECK(cfg < 30000 || cfg >= 80000, "moe_tk2f: cfg ", cfg, " needs TK2_EXP (or TK2H_P4 + SA)");
+#else
   if (cfg >= 30000) {  // s12 merged-phase consumer (tk2h): + 30000 GS 8, + 40000 GS 16 (cfg / 1000 % 10 = 2-group weight),
     // + 50000 / + 60000: the same with per-segment gemm13 -> gemm2 counters (PSC)
     const int kind = (int)(cfg / 10000);
@@ -4973,6 +4982,7 @@ TK2H_MIN16 = 1
 TK2H_MIN = 1  # n4s5: TK2H applies from this M (below: the main tk2f cfg); 9 = only calls that can have 2-group rows
 TK2W = 0  # s12: weighted static row split for M > 1 (extra-group rows weigh TK2W / 8; 0 = by count), cfg + 70000
 TK2H_PSC = 0  # s12: 1 = per-segment gemm13 -> gemm2 counters (cnt[64 + seg]) instead of the global one
+TK2H_M = {}  # n6: per-M GS16 tk2h PF4 weight W (overrides TK2H/TK2W); layer TUNE option "tk2h" = W + 1
 TK2H_PF4 = 0  # n6: 1 = tk2h writes y32 like tk2f PF 4 (slot order, pre-scaled) -> moe_norm3 (cfg + 4; kinds 3/4 only)
 TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
 
@@ -4983,6 +4993,8 @@ def _tk2f_cfg(M, st):
 
 def _tk2f_cfg0(M, st):
     sa = 100000 if TK2SA and st["sa"] else 0
+    if M in TK2H_M:  # n6: {M: W}: GS16 tk2h + PF4 (moe_norm3), 2-group row weight (8 + W) / 8; SA only in TK2H_P4 builds
+        return sa + 40000 + TK2H_M[M] * 1000 + 4
     if TK2W and M > 1:
         return sa + 70000 + TK2W * 1000
     if TK2H and M >= TK2H_MIN:
