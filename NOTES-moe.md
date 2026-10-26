@@ -948,3 +948,28 @@
   variant per d16/d32 seed). Second check if the DIAG shows h16 within ~2 us of gs8.
 - If h16 wins on the H200: layer port is big (layer's tk2f has TK2FX/TK2FJ weights-before-wait, late PDL trigger,
   x via __ldcg after griddepcontrol.wait): first port PF 4/norm3 into tk2h here, then hand off the GS16 consumer.
+
+## Night4 session 6 (2026-10-26 20:18Z - ~21:00Z, no judge runs: moe checks 20/20 until 00:00Z) -- tk2h PF4 + layer port
+- Lead 20:16Z asked for "the hot-expert single pass": already built in s29 (moe_hot) and in layer v87; did the queued
+  GS16 follow-up instead (STATE n4s5: port PF 4 into tk2h so the H200 DIAG compares like with like, then hand off).
+- tk2g_row<..., SLOT> / tk2h_consume<..., SLOT>: gemm2 writes Y[s_srt[off + tok]] = v * gsc (gsc = gs2 * 256), as
+  tk2f_consume PF & 4; moe_tk2f passes (PF & 4). Dispatch: tk2h cfg % 1000 == 4 -> PF 4 instantiations (kinds 3/4).
+  Python: TK2H_PF4 (cfg + 4), TK2H_M = {M: W} (GS16 PF4, overrides TK2H/TK2W), kernel_fn picks moe_norm3 for them.
+- Bitwise: tools/n6/h4_ab.py (TK2_EXP 1 copy): TK2H 8/16, W 0/3, PF4 0/1 vs main, layer decode routings + 120 random
+  T=1..32, each twice: 0 of 1680 differ. TK2H_P4 build (P4ONLY): 0/480. TK2H_M W 0/3/4 on layer routings: 0/60.
+- G88 H200 proxy (proxy_s.py, 2 rounds, proxy-us): d16 main 89.3/89.5, h8p4 89.8/90.2, h16w0p4 95.6, h16w3p4 89.6,
+  h16w3 89.4; d32 main 121.0/120.7, h8p4 121.6, h16w0p4 128.0, h16w3p4 114.7/115.0, h16w3 114.6. PF4 itself ~0 here (as s13).
+- #define TK2H_P4 (default 0): builds only tk2f_go<..., SA, GS 8/16, MRG 1, PF 4> without TK2_EXP; compile time of the
+  layer's moe lib 83.9 -> 81.8 s (noise: no cost). Without TK2_EXP a tk2h cfg now raises (TORCH_CHECK) instead of
+  silently falling into the NC16 branch.
+- tools/n6/patch_layer_h16.py <moe_src.py>: layer port (r-layer 69ab934's moe_src): tk2g_bound split (n4s5), SLOT,
+  griddepcontrol.wait before tk2h_consume (the layer's TK2FX/TK2FJ wait sits before tk2f_consume only) + __ldcg for the
+  gated x loads, TK2H_P4 1, python TK2H_MIN / TK2H_PF4 / TK2H_M. In a /tmp copy of r-layer (built): bench test 13/13
+  with TK2H 16 W3 PF4 forced at T>=9; layer-namespace stress (T 8/9/16/24/32 x 60 skewed, W 3/2 + GS8, twice) 0/1800.
+- H100 layer harness (tools/ab_flag.py, tuner on, 3 rounds, us sliding/full): d16 main 197.4/294.1, h16w3p4 201.3/298.1,
+  h16w0p4 199.6/301.7; d32 main 194.1/411.9, h16w3p4 201.2/413.9 (2nd run 196.0..200.9), h16w0p4 201.8/423.4, h8p4
+  195.9/415.9. Same gap with TK2FJ off (d32 +4.3/+1.9), so not the PDL overlap. Moe-only H100 (DIAG dry run, full grid)
+  had h16w3p4 d32 104.6 vs gs8 105.4, d16 84.5 vs 82.0. => H100 says GS16 loses in the layer; the H100 is DRAM-bound
+  for these shapes and the proxy says issue-bound H200 gains: only the H200 tuner can decide (TUNE candidate, never default).
+- Layer s58 was already wiring it (uncommitted r-layer work seen in a /tmp copy): TUNE option tk2h at T=16/32; told them
+  under Requests that their value goes in as W directly (no -1).

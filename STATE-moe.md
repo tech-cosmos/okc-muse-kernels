@@ -71,6 +71,14 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 6 (20:18-21:00Z, no judge runs) -- r-moe 3710aa8 + 82d6781: tk2h PF4 + layer port (NOTES n6)
+- tk2h (merged-phase consumer, GS8/GS16) now has PF4 (slot-ordered pre-scaled y32 -> moe_norm3, like main tk2f 84204):
+  python TK2H_PF4 (cfg + 4) or TK2H_M = {M: W} (GS16 + PF4, weight W). Bitwise = main (tools/n6/h4_ab.py 0/1680).
+- #define TK2H_P4 1 builds only the SA tk2h PF4 kernels (no TK2_EXP); non-EXP builds TORCH_CHECK any other tk2h cfg.
+- tools/n6/patch_layer_h16.py ports it into a layer moe_src.py (layer s58 is wiring it as TUNE option tk2h at T=16/32).
+- H100 in the layer harness: h16w3p4 LOSES d16 +4, d32 +2..7 us (DRAM-bound H100); G88 proxy d32 -6 proxy-us. Only the
+  H200 decides: the 00:00Z DIAG has h8p4 / h16w2p4 / h16w3p4 / h16w4p4 (moe-only), the layer's tuner does the rest.
+
 ## Night4 session 5 (19:57-20:35Z, no judge runs) -- r-moe 1378d3e + 6dfa437: GS16 loss = row split (NOTES n4s5)
 - GS16 (tk2h TK2H 16) lost on the H200 because (a) count split overloads CTAs with 2-group rows (ncu: 10% of samples on
   the gemm2 counter spin), (b) the weighted split tk2g_split cost 1.8-4.1 us per call (64-bit loops in every thread).
@@ -78,7 +86,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - The proxy misjudged the GS16 weight before (NOTES n4s5): only the H200 decides. Queued in the DIAG below: h16w0/2/3/4.
 - If the DIAG shows h16 within ~2 us of gs8 at d32: 2nd check = `python muse_moe_w4a16/tools/n4s5/mktl_h.py;
   okc check /tmp/moe5tl/submission.py --json` (grep diagth: per-CTA ph1end/wait/end on the H200) to pick the weight.
-  If h16 wins: port PF 4 (norm3) into tk2h, then Handoff (layer port is big: see NOTES n4s5 last line).
+  PF 4 port + layer port: DONE n6.
 
 ## Night4 session 4 (19:49-20:25Z, no judge runs) -- paper only
 - Dead on paper (NOTES n4s4): lossless 5/6-bit block-scale packing (exp 11..15 = 5 octaves; 6-bit costs +4% consumer
