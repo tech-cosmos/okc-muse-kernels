@@ -1,6 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 18:05Z (session 49: notes only, main unchanged; board #46 1.9954x). **main = v88 (v87 + proj s36 pr8 npf 212), NOT judge-checked** (layer budget for 10-26 spent:
+Updated 2026-10-26 18:20Z (session 50: notes only, main unchanged; board #46 1.9954x). **main = v88 (v87 + proj s36 pr8 npf 212), NOT judge-checked** (layer budget for 10-26 spent:
 20/20 checks, 10/10 submits). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x (9,505 us/step), #10 2.180x.
 
 ## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
@@ -11,6 +11,10 @@ Updated 2026-10-26 18:05Z (session 49: notes only, main unchanged; board #46 1.9
 3. If v87's check loses on some shape vs 703d3a7e, bisect with ONE check of a DIAG build that forces the suspect
    options per shape (the tuner lines in the log already A/B every TUNE option on the H200: read them first).
 4. Then: integrate new moe/proj Handoffs (stack several into one check), check, submit only on a beat.
+   Queued handoff: moe s33 RG = moe_routegather (r-moe 7ac1069; route+gather in one launch; moe H100 layer_ab v16 -1.1 us,
+   v32 tie). NOT a plain re-copy: layer's moe_src is patched (s21 L2H, s29 hot diff, v81 route PDL, v77 strided
+   moe_gathern for the fused pooler+router at T=256): port RG's kernel + RG flag onto moe_src, keep the strided-row read,
+   make it a TUNE option at T=128/256, A/B with tools/ab_flag.py, then stack into a check.
 
 Mains since the board best (v70), all H100-validated (bench test 13/13, replay_test + route_judge 0 fails), details in
 NOTES s32-s44: v71 BND_SPLIT | v72 O_PF (d32/v16 sl) | v73 moe TK2F_L2H | v74 pr1_npf 0 at T=1 | v75 TUNE_BASE (H200-agreed

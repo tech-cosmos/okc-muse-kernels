@@ -1025,3 +1025,8 @@
 - New since s48: proj s39 (side-stream HBM stream dilates a tiny-kernel chain by its whole time; only +3.8 us with
   1 TMA/SM in flight) and s40 (throttled pre-wait W prologue / pre-wait stream: dead). Nothing to integrate.
 - Next sandbox: unchanged, STATE "FIRST THING" (check main v88, submit if > 1.9954x).
+
+## s50 (2026-10-26 18:12-18:20Z): notes only
+- Budget spent, sandbox ends ~19:10Z, push deadline 18:30Z: did not port moe s33 RG (r-moe 7ac1069) - it needs a
+  merge onto the patched moe_src (strided moe_gathern at T=256, hot/L2H/route-PDL patches), not doable+validated in 15 min;
+  value ~-1.1 us v16 (~+0.04%). Queued as STATE item 4. main v88 unchanged.
