@@ -162,6 +162,7 @@ DIAG24 = {"pooler": [(16, 1024, 2, 4, 16, 2, 1), (16, 1024, 4, 3, 12, 2, 1), (32
           "unpooler": [(16, 1024, 2, 4, 16, 2, 1), (16, 1024, 4, 3, 12, 2, 1), (32, 512, 2, 4, 16, 2, 1), (32, 512, 4, 3, 12, 2, 1)],
           "qkv_gate": [(16, 512, 2, 4, 16, 2, 1), (16, 1024, 2, 4, 16, 2, 1), (32, 512, 2, 4, 16, 2, 1)],
           "o": [(16, 512, 2, 4, 16, 2, 1), (32, 512, 2, 4, 16, 2, 1)]}
+DIAG24 = {k: v + [c[:6] + (257,) for c in v] for k, v in DIAG24.items()}  # s54: + SK twins (r = 1 | 256: stream-K stages)
 DIAG24_GRIDS = (132, 108)
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
@@ -794,7 +795,7 @@ def _diag24(st):
                 continue
             xs = torch.randn(m, w.shape[1], generator=g, device="cuda").to(torch.bfloat16)
             x = xs.clone()
-            P, hdr, scale = _pack19(c_, kc, ap, r)
+            P, hdr, scale = _pack19(c_, kc, ap, r & 0xff)
             o32 = torch.empty(m, w.shape[0], dtype=torch.float32, device="cuda")
             try:
                 ref = x.float() @ w.float().T

@@ -2585,11 +2585,16 @@ _G24_SRC = r'''// gemv24 (s53): m = 16/32 GEMM over lossless 12-bit weights (DEC
 // Tasks: t = ks * (n / 16) + row group; block b owns tasks [T b / G, T (b + 1) / G) (static), warp w every WPB-th;
 // the block's x chunks (<= XB) are loaded once after griddepcontrol.wait. out FP32 [M, n] zeroed in the kernel
 // (epoch-counter grid barrier before the first red), partials by red.global.add.v4 through a per-warp smem tile.
+// SK (s54, template RR = R | 256): stream-K over stages instead (each warp an equal contiguous stage range, partial
+// flushes at task boundaries): H200 proxy wins at m32 / qkv m16, loses at m16 pool/unp/o (NOTES-proj s54).
 // Escape fixups at each task end (g19's register path); G24_NOFIX skips them (x @ W'^T, escaped weights = 2^-15 * scale).
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
 namespace g24 {
+#ifdef G24_TRACE
+__device__ unsigned long long trace[4096 * 3];
+#endif
 constexpr int WB = 768, ESC = 8;  // bytes per 16 x 32 atom
 __device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {
     unsigned r;
@@ -2635,9 +2640,11 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 // smem: ring [WPB][NS][SB] | x [XB][M][XS] | stage [WPB][M][STR] f32 | full [WPB][NS] | xfull [XB] | target
 // R: row groups per task (one x fragment load feeds R atoms); stage (ks, tile of R row groups, st) =
 // [R][AP][32 lanes x 16 B sign|mantissa] [R][AP][32 x 8 B codes] (pack19 with rg = R).
-template <int M, int KC, int AP, int NS, int WPB, int XB, int R>
+template <int M, int KC, int AP, int NS, int WPB, int XB, int RR>
 __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H, float scale, const __nv_bfloat16* __restrict__ x,
                                                     float* __restrict__ out, int* __restrict__ ctr, int n, int k, int npre) {
+    constexpr int R = RR & 0xff;
+    constexpr bool SK = RR >> 8;
     constexpr int NT = M / 8, NA = KC / 32, SPK = NA / AP, SB = R * AP * WB, XS = KC * 2 + 16, STR = 16 * R + 4;
     static_assert(NA % AP == 0 && NT % 2 == 0 && M <= 32, "config");
     extern __shared__ __align__(128) unsigned char smem[];
@@ -2652,11 +2659,18 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
     const unsigned xfb = (unsigned)__cvta_generic_to_shared(smem + WPB * NS * SB + XB * M * XS + WPB * M * STR * 4) + WPB * NS * 8;
     int* tgt = (int*)(smem + WPB * NS * SB + XB * M * XS + WPB * M * STR * 4 + WPB * NS * 8 + XB * 8);
     const int nrt = n / (16 * R), S = k / KC, T = S * nrt;
-    const int ta = (int)((long)T * blockIdx.x / gridDim.x), tb = (int)((long)T * (blockIdx.x + 1) / gridDim.x);
+    // SK (s54, RR bit 8) = stream-K over stages: block b owns global stages [SG b / G, SG (b + 1) / G) (stage g = task
+    // g / SPK, st g % SPK), warp w a contiguous 1/WPB of them, flushing its partials at every task boundary it crosses
+    const long SG = (long)T * SPK;
+    const int sa = SK ? (int)(SG * blockIdx.x / gridDim.x) : 0, sz = SK ? (int)(SG * (blockIdx.x + 1) / gridDim.x) : 0;
+    const int wa = sa + (int)((long)(sz - sa) * w / WPB);
+    const int ta = SK ? sa / SPK : (int)((long)T * blockIdx.x / gridDim.x);
+    const int tb = SK ? (sz + SPK - 1) / SPK : (int)((long)T * (blockIdx.x + 1) / gridDim.x);
     const int ks0 = ta / nrt;
-    const int nq = tb - ta > w ? (tb - ta - w + WPB - 1) / WPB : 0, total = nq * SPK;
+    const int nq = SK ? 0 : tb - ta > w ? (tb - ta - w + WPB - 1) / WPB : 0;
+    const int total = SK ? sa + (int)((long)(sz - sa) * (w + 1) / WPB) - wa : nq * SPK;
     auto issue = [&](int j) {  // lane 0: this warp's sequence element j -> slot j % NS
-        const int tq = ta + w + (j / SPK) * WPB, st = j % SPK, sl = j % NS;
+        const int tq = SK ? (wa + j) / SPK : ta + w + (j / SPK) * WPB, st = SK ? (wa + j) % SPK : j % SPK, sl = j % NS;
 #ifdef G24_NOW
         bar_arrive(fb + 8 * sl);
 #else
@@ -2694,11 +2708,17 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
     }
     const int target = *tgt;
     bool passed = false;
+#ifdef G24_TRACE
+    unsigned long long tr0;
+    asm volatile("mov.u64 %0, %globaltimer;" : "=l"(tr0));
+#endif
     const unsigned xrow = ((lane >> 4) * 8 + (lane & 7)) * XS + ((lane >> 3) & 1) * 16;
     float acc[R][NT][4], acc2[R][NT][4];
     int j = 0;
-    for (int q = 0; q < nq; ++q) {
-        const int tq = ta + w + q * WPB, ks = tq / nrt, tr = tq % nrt, xb = ks - ks0;
+    for (int q = 0; SK ? j < total : q < nq; ++q) {
+        const int tq = SK ? (wa + j) / SPK : ta + w + q * WPB;
+        const int st0 = SK ? (wa + j) % SPK : 0, st1 = SK ? min(SPK, st0 + total - j) : SPK;
+        const int ks = tq / nrt, tr = tq % nrt, xb = ks - ks0;
 #ifndef G24_NOFIX
         // escape headers of rows g, g + 8 of each row group (lane c: slots 2c, 2c + 1), loaded early: used at the task end
         float4 hd[R][2];
@@ -2715,7 +2735,7 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
 #pragma unroll
                 for (int e = 0; e < 4; ++e) acc[r][jj][e] = acc2[r][jj][e] = 0.f;
         const unsigned xbase = xs + xb * M * XS + xrow;
-        for (int st = 0; st < SPK; ++st, ++j) {
+        for (int st = st0; st < st1; ++st, ++j) {
             const int sl = j % NS;
             bar_wait(fb + 8 * sl, (j / NS) & 1);
             const unsigned sb = ring + sl * SB + lane * 16, nb = ring + sl * SB + R * AP * 512 + lane * 8;
@@ -2768,7 +2788,7 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
                 for (int e = 0; e < 4; ++e) acc[r][jj][e] += acc2[r][jj][e];
 #ifndef G24_NOFIX
         {  // escape fixups (g19's register path): escaped weights were decoded as 2^-15 (scale units); add x * (true - 2^-15)
-            const int klo = ks * KC, khi = klo + KC;
+            const int klo = ks * KC + st0 * AP * 32, khi = ks * KC + st1 * AP * 32;
 #pragma unroll
             for (int r = 0; r < R; ++r)
 #pragma unroll
@@ -2787,7 +2807,7 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
                     const float hy = __shfl_sync(0xffffffffu, (e2 & 1) ? hq.w : hq.y, src);
                     const int col = __float_as_int(hx);
                     if (hy != 0x1p-15f && col >= klo && col < khi) {
-                        const unsigned char* xc = smem + WPB * NS * SB + xb * M * XS + (col - klo) * 2;
+                        const unsigned char* xc = smem + WPB * NS * SB + xb * M * XS + (col - ks * KC) * 2;
 #pragma unroll
                         for (int jj = 0; jj < NT; ++jj)
 #pragma unroll
@@ -2822,6 +2842,16 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
         }
         __syncwarp();
     }
+#ifdef G24_TRACE
+    if (lane == 0) {
+        unsigned long long tr1;
+        asm volatile("mov.u64 %0, %globaltimer;" : "=l"(tr1));
+        const int id = blockIdx.x * WPB + w;
+        unsigned smid_;
+        asm volatile("mov.u32 %0, %%smid;" : "=r"(smid_));
+        trace[3 * id] = tr0; trace[3 * id + 1] = tr1; trace[3 * id + 2] = (unsigned long long)total | ((unsigned long long)smid_ << 32);
+    }
+#endif
 }
 __global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int n8, int ns_) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
@@ -2831,22 +2861,35 @@ __global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int
     do { asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t1)); } while (t1 - t0 < (unsigned long long)ns_);
 }
 }  // namespace g24
+#ifdef G24_TRACE
+torch::Tensor g24_trace() {
+    auto t = torch::empty({4096 * 3}, torch::dtype(torch::kInt64).device(torch::kCUDA));
+    cudaMemcpyFromSymbol(t.data_ptr(), g24::trace, sizeof(unsigned long long) * 4096 * 3, 0, cudaMemcpyDeviceToDevice);
+    return t;
+}
+#else
+torch::Tensor g24_trace() { return torch::empty({0}); }
+#endif
 void g24_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
     g24::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_);
 }
 void g24_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out, torch::Tensor ctr,
               int64_t kc, int64_t ap, int64_t ns, int64_t wpb, int64_t xb, int64_t grid, int64_t npre, int64_t rr) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
+    const int sk = rr >> 8;
+    rr &= 0xff;
     const int sm = wpb * ns * rr * ap * g24::WB + xb * m * (kc * 2 + 16) + wpb * m * (16 * rr + 4) * 4 + wpb * ns * 8 + xb * 8 + 16;
     const int nrg = n / (16 * rr), T = (k / kc) * nrg;
     for (int b = 0; b < grid; ++b) {  // x chunks per block <= xb
-        const int ta = (int)((long)T * b / grid), tb = (int)((long)T * (b + 1) / grid);
+        const long spk = kc / 32 / ap, SG = (long)T * spk;
+        const int ta = sk ? (int)(SG * b / grid / spk) : (int)((long)T * b / grid);
+        const int tb = sk ? (int)((SG * (b + 1) / grid + spk - 1) / spk) : (int)((long)T * (b + 1) / grid);
         TORCH_CHECK(tb == ta || (tb - 1) / nrg - ta / nrg < xb, "g24: block spans more than xb x chunks");
     }
     TORCH_CHECK(n % (16 * rr) == 0 && k % kc == 0 && sm <= 227 * 1024, "g24: shape/smem ", sm);
     auto stream = c10::cuda::getCurrentCUDAStream();
 #define G24_CASE(M_, KC_, AP_, NS_, WPB_, XB_, R_) \
-    if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && wpb == WPB_ && xb == XB_ && rr == R_) { \
+    if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && wpb == WPB_ && xb == XB_ && (rr | sk << 8) == R_) { \
         auto kern = g24::gemm<M_, KC_, AP_, NS_, WPB_, XB_, R_>; \
         cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
         cudaLaunchConfig_t cfg = {}; \
@@ -5132,6 +5175,7 @@ DIAG24 = {"pooler": [(16, 1024, 2, 4, 16, 2, 1), (16, 1024, 4, 3, 12, 2, 1), (32
           "unpooler": [(16, 1024, 2, 4, 16, 2, 1), (16, 1024, 4, 3, 12, 2, 1), (32, 512, 2, 4, 16, 2, 1), (32, 512, 4, 3, 12, 2, 1)],
           "qkv_gate": [(16, 512, 2, 4, 16, 2, 1), (16, 1024, 2, 4, 16, 2, 1), (32, 512, 2, 4, 16, 2, 1)],
           "o": [(16, 512, 2, 4, 16, 2, 1), (32, 512, 2, 4, 16, 2, 1)]}
+DIAG24 = {k: v + [c[:6] + (257,) for c in v] for k, v in DIAG24.items()}  # s54: + SK twins (r = 1 | 256: stream-K stages)
 DIAG24_GRIDS = (132, 108)
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
@@ -5783,7 +5827,7 @@ def _diag24(st):
                 continue
             xs = torch.randn(m, w.shape[1], generator=g, device="cuda").to(torch.bfloat16)
             x = xs.clone()
-            P, hdr, scale = _pack19(c_, kc, ap, r)
+            P, hdr, scale = _pack19(c_, kc, ap, r & 0xff)
             o32 = torch.empty(m, w.shape[0], dtype=torch.float32, device="cuda")
             try:
                 ref = x.float() @ w.float().T

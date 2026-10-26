@@ -17,8 +17,8 @@ DEFS = [d_ for d_ in os.environ.get("DEFS", "").split(",") if d_]
 src = "".join("#define %s\n" % d_.replace("=", " ") for d_ in DEFS) + open(os.path.join(D, "gemv24.cu")).read()
 src = src.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(cfgs))))
 mod = load_inline(name="pj_g24_" + hashlib.md5(src.encode()).hexdigest()[:10],
-                  cpp_sources="void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g24_pred(torch::Tensor, torch::Tensor, int64_t);",
-                  cuda_sources=src, functions=["g24_gemm", "g24_pred"],
+                  cpp_sources="torch::Tensor g24_trace(); void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g24_pred(torch::Tensor, torch::Tensor, int64_t);",
+                  cuda_sources=src, functions=["g24_trace", "g24_gemm", "g24_pred"],
                   extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"] + (["-Xptxas", "-v"] if os.environ.get("PTXV") else []))
 
 
@@ -54,6 +54,7 @@ if ESCW:
             rows = torch.arange(n_, device="cuda")[torch.rand(n_, device="cuda", generator=g_) < 0.75]
             cols = CE[name][torch.randint(0, 32, (len(rows),), device="cuda", generator=g_)]
             t[rows, cols] = vals[torch.randint(0, len(vals), (len(rows),), device="cuda", generator=g_)]
+FL = torch.zeros(64 << 20, device="cuda") if "G24_TRACE" in os.environ.get("DEFS", "") else None
 ctr = torch.zeros(4, dtype=torch.int32, device="cuda")
 for nm, layer, n in SH:
     if only and nm not in only.split(","): continue
@@ -70,16 +71,16 @@ for nm, layer, n in SH:
         out = torch.empty(M, n, device="cuda")
         for (m_, kc, ap, ns, wpb, xb, r) in cfgs:
             if m_ != M or k % kc: continue
-            if (kc, ap, r) not in packs:
-                P, hdr, scale = pack24(W, kc, ap, r)
+            if (kc, ap, r & 0xff) not in packs:
+                P, hdr, scale = pack24(W, kc, ap, r & 0xff)
                 Wp = W.clone()
                 er = (hdr[:, :, 1] != 2.0 ** -15).nonzero()
                 if NOFIX and len(er):
                     cols = hdr[er[:, 0], er[:, 1], 0].view(torch.int32).long()
                     Wp[er[:, 0], cols] = torch.tensor(2.0 ** -15 * scale, dtype=torch.bfloat16, device="cuda")
                 col = int(hdr[er[0, 0], er[0, 1], 0].view(torch.int32)) if len(er) else 3
-                packs[(kc, ap, r)] = (P, hdr, scale, Wp, col)
-            P, hdr, scale, Wp_, col = packs[(kc, ap, r)]
+                packs[(kc, ap, r & 0xff)] = (P, hdr, scale, Wp, col)
+            P, hdr, scale, Wp_, col = packs[(kc, ap, r & 0xff)]
             xp_ = x.clone(); xp_[M - 1].zero_(); xp_[M - 1, col] = 16.0  # probe row: one escaped weight x 16, exact
             sp = list(range(0, M - 1, 2)) if ESCW else []
             for j_, r_ in enumerate(sp):
@@ -103,5 +104,18 @@ for nm, layer, n in SH:
             if ESCW: print("  esc ok", nm, M, cf, "rel err", err, flush=True)
             dt = bench.time_graph(lambda: (pre(), mod.g24_gemm(P, hdr, scale, x, out, ctr, *cf))) - e
             line += f" | {kc},{ap},{ns},{wpb},{xb},r{r} {dt:6.2f}"
+            if "G24_TRACE" in DEFS:
+                ends = []
+                for rep in range(5):
+                    FL.add_(1)
+                    pre(); mod.g24_gemm(P, hdr, scale, x, out, ctr, *cf); torch.cuda.synchronize()
+                    tr = mod.g24_trace().view(-1, 3)[:GRID * wpb].cpu()
+                    t0 = tr[:, 0].min(); e_ = (tr[:, 1] - t0).float() / 1000; b_ = (tr[:, 0] - t0).float() / 1000
+                    nq_ = (tr[:, 2] & 0xffffffff)
+                    q = torch.quantile(e_, torch.tensor([0.0, 0.1, 0.5, 0.9, 1.0]))
+                    ends.append(q)
+                    bl = e_.view(GRID, wpb).max(1).values
+                    print(f"    trace {nm} m{M} start spread {b_.max():.2f} end q0/10/50/90/100 " + " ".join(f"{v:.2f}" for v in q.tolist())
+                          + f" | block-end min/med/max {bl.min():.2f}/{bl.median():.2f}/{bl.max():.2f} intra-block spread med {(bl - e_.view(GRID, wpb).min(1).values).median():.2f} nq {nq_.min()}-{nq_.max()}")
         print(line, flush=True)
     del W, packs
