@@ -936,3 +936,18 @@
 - Considered, not built: pre-expert rmsnorm fused into pr1/pr8's last pooler block with tk2f as pr1's PDL secondary:
   tk2f already starts 0.3 us after pr1 ends (TK2FX hides the rmsnorm; tk2fx off costs only +0.2..1.2 us), and tk2f
   would then have to read the routing after its wait: expected tie.
+
+## s42 (2026-10-26 16:30Z-): v85 = proj s34 DEC4 (no judge runs: budget for 10-26 spent)
+- v85 (cf16011): `git apply` of r-proj muse_bf16_proj/dev/s34/dec4_layer.patch (clean on v84): the 12-bit exponent word
+  (s & 0x07800780) | 0x38003800 as one 3-register lop3 (constants made opaque via gridDim.y >> 16 == 0) in g13/g14/g19/
+  pr1/pr8. H100: bench test 13/13; tools/replay_test.py 10 x seeds 11,23 0/240; tools/route_judge.py 0/240; files_eq
+  v84_nt vs v85_nt = the same atomic-order noise as v84_nt vs itself (d16/d32/v16 FP32 split-K adds; T=1/8 identical).
+  ab_files A B B A (v84_nt v85_nt v85_nt v84_nt) 4 rounds: every shape within 0.5 us (H100 g19 shares HBM with the router).
+- HARNESS NOTE: make tuner-off variants by inserting `TUNE = {}` right before `TUNE_REPS = 40` (a fixed line number
+  breaks when submission.py grows: my first v85_nt put it ABOVE the TUNE dict = tuner on).
+- H100 timeline d32 sliding (v85_nt): qkv 19.6 | nds 17.5 | o ends 47.2 | bnd 53.7 | g19 pooler 47.9-78.9 || router_split
+  + routing end 77.8 | rmsnorm 81.2 | tk2f 79.6-178.1 (98.4) | norm3 ends 183.6 (+5.5) | g19 unpool ends 207.6 (+24.0) |
+  bnd 211.8. Considered, not built: column-split norm3 at T=16/32 using tk2f PF 16 slot sums of squares (as nu8): the
+  norm is one L2 round trip + PDL release, <= ~1 us to gain (~0.05%); fused pooler+router-hi/lo rows in g19 at T=32
+  (pooler on 132 SMs, routing on the critical path after it): expected tie (s7 cuBLAS version tied), routing-order risk.
+  The d32 gap is g19 m32 (consumer-bound, proj) and tk2f (moe).

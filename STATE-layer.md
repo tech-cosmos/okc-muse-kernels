@@ -1,6 +1,11 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 (session 41: main = v84, NOT judge-checked; budget for 10-26 spent).
+Updated 2026-10-26 (session 42: main = v85, NOT judge-checked; budget for 10-26 spent).
+**s42: main = v85 (cf16011)** = v84 + proj s34 DEC4 (r-proj dev/s34/dec4_layer.patch: 12-bit decode in 4 instead of 5
+instr per BF16 pair in g13/g14/g19/pr1/pr8; bit-identical). H100: tests 13/13, replay 0/240, route_judge 0/240 (tuner on),
+ab_files ABBA 4 rounds tie on every shape (proj's H200 proxy: -0.4..-1.6 us per g19 call at d16/d32).
+FIRST CHECK OF THE NEXT SANDBOX = main (v85): compare per shape vs 703d3a7e; copy the 'layer tune T=1' lines (g13o) for proj.
+
 **s41: main v84 re-validated (tuner on, H100): tests 13/13, replay 0/240, route_judge 0/240.** v1 sliding timeline in
 NOTES s41: tk2f 84 of 153 us; pr8 23.5 us (2.4 TB/s, m8 issue-bound). FIRST CHECK OF THE NEXT SANDBOX = main (v84).
 
