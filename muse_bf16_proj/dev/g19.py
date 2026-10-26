@@ -45,7 +45,7 @@ if ESCW:
             cols = CE[name][torch.randint(0, 32, (len(rows),), device="cuda", generator=g_)]
             t[rows, cols] = vals[torch.randint(0, len(vals), (len(rows),), device="cuda", generator=g_)]
 ctr = torch.zeros(4, dtype=torch.int32, device="cuda")
-e = bench.empty_cost()
+e = 0.0 if os.environ.get("PROF") else bench.empty_cost()
 XW = bool(os.environ.get("XWARM"))
 PRED = int(os.environ.get("PRED", -1))  # predecessor kernel: writes x, triggers PDL at start, spins PRED ns
 MODE = int(os.environ.get("MODE", 0))   # 0: zero kernel + gemm; 1: out zeroed before the predecessor, gemm PDL on it
@@ -60,8 +60,8 @@ for nm, layer, n in SH:
         x = torch.randn(M, k, device="cuda").bfloat16()
         xsrc = x.clone()
         pre = (lambda: mod.g19_pred(xsrc, x, PRED)) if PRED >= 0 else (lambda: x.mul_(1)) if XW else (lambda: None)
-        if XW or PRED >= 0: e = bench.time_graph(pre)
-        tc = bench.time_graph(lambda: (pre(), F.linear(x, W))) - e
+        if (XW or PRED >= 0) and not os.environ.get("PROF"): e = bench.time_graph(pre)
+        tc = 0.0 if os.environ.get("PROF") else bench.time_graph(lambda: (pre(), F.linear(x, W))) - e
         line = f"{nm:5s} m{M}: cublas {tc:6.2f}"
         out = torch.empty(M, n, device="cuda")
         for (m_, kc, ap, ns, is_, tpb, xb_, ts_, rg_, rpw_) in cfgs:
@@ -107,11 +107,16 @@ for nm, layer, n in SH:
                     for b_ in (0, 1, 66):
                         r_ = tr[b_]
                         print(f"  block {b_}: start {(int(r_[0]) - t0) / 1000:.2f} prod issue:", " ".join(f"{(int(r_[40 + j]) - t0) / 1000:.2f}" for j in range(24) if r_[40 + j] > 0))
+                        print(f"           cons: wait {(int(r_[9]) - t0) / 1000:.2f} x0 {(int(r_[5]) - t0) / 1000:.2f} c0 {(int(r_[6]) - t0) / 1000:.2f} hd {(int(r_[7]) - t0) / 1000:.2f} c1 {(int(r_[8]) - t0) / 1000:.2f}")
+                        print(f"           flush0: start {(int(r_[11]) - t0) / 1000:.2f} fix {(int(r_[12]) - t0) / 1000:.2f} done {(int(r_[14]) - t0) / 1000:.2f} | q1 pempty {(int(r_[13]) - t0) / 1000:.2f} done {(int(r_[15]) - t0) / 1000:.2f} | fin0 {(int(r_[2]) - t0) / 1000:.2f} fin1 {(int(r_[3]) - t0) / 1000:.2f}")
                         print(f"           cons got:", " ".join(f"{(int(r_[16 + j]) - t0) / 1000:.2f}" for j in range(24) if r_[16 + j] > 0))
                 for nm_, sl in (("prodEnd", 1), ("consEnd", 4)):
                     v = sorted(((tr[:, sl] - t0).double() / 1000).tolist())
                     print(f"  {kc},{ap},{ns},{is_},{tpb} {nm_:8s} min {v[0]:.1f} p10 {v[GRID//10]:.1f} med {v[GRID//2]:.1f} p90 {v[GRID*9//10]:.1f} max {v[-1]:.1f}")
                 del fl
+            if os.environ.get("PROF"):  # plain launches for ncu, no timing
+                for _ in range(5): mod.g19_gemm(P, hdr, scale, x, out, ctr, kc, ap, ns, is_, GRID, tail, MODE, min(NPRE, ns), xb_, ts_, rg_, rpw_)
+                torch.cuda.synchronize(); continue
             ob = torch.empty(M, n, dtype=torch.bfloat16, device="cuda")
             CVT = bool(os.environ.get("CVT"))  # + the BF16 copy (PDL)
             dt = bench.time_graph(lambda: ((mod.g19_zero(out, ctr) if MODE == 1 and ZG else None), pre(), mod.g19_gemm(P, hdr, scale, x, out, ctr, kc, ap, ns, is_, GRID, tail, MODE, min(NPRE, ns), xb_, ts_, rg_, rpw_), mod.g19_cvt(out, ob) if CVT else None)) - e

@@ -1638,10 +1638,12 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
             }
             __syncwarp();
             if (lane == 0) bar_arrive(pempty + 8 * pb);
+            if (lane == 0 && q < 2) TR(2 + q);
         }
         return;
     }
     asm volatile("griddepcontrol.wait;" ::: "memory");
+    if (t == 0) TR(9);
     // RPW = 2: warp w owns row groups 2w, 2w + 1 of the tile (one x fragment load feeds both: half the ldmatrix traffic)
     float acc[RPW][NT][4], acc2[RPW][NT][4];
 #pragma unroll
@@ -1668,6 +1670,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         const int ks = u / (ntr * SPK), r = u % (ntr * SPK), tr = r / SPK, st = r % SPK;
         if (prev_xl) {  // first stage of an x use: wait for it
             bar_wait(xfull + 8 * xb, xph[xb]);
+            if (t == 0 && i == 0) TR(5);
             xph[xb] ^= 1;
         }
         prev_xl = xl;
@@ -1746,10 +1749,15 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                     }
         }
 #endif
+#ifdef G19_TRACE
+        if (t == 0 && i == 0) { TR(6); volatile float z_ = hd0[0].x + hd1[0].y; TR(7); }
+        if (t == 0 && i == 1) TR(8);
+#endif
         __syncwarp();
         if (lane == 0) bar_arrive(bars + 8 * (NS + slot));
         if (!end) continue;  // (a last x use always ends a run: released below, after the escape fixups read x)
         // run end: rows rg*16 + g (+8), tokens jj*8 + 2c (+1), k in [klo, khi)
+        if (t == 0 && q == 0) TR(11);
         const int nat = (st - st0 + 1) * AP;
         const int klo = ks * KC + st0 * AP * 32, khi = ks * KC + (st + 1) * AP * 32;
         float v[RPW][NT][4];
@@ -1764,8 +1772,22 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
 #pragma unroll
             for (int h = 0; h < 2; ++h) {
                 const float4 hq = h ? hd1[rr] : hd0[rr];
+#ifndef G19_OLDFIX
+                // which slots any lane of the warp needs (owner lanes test their own 2 slots; OR over the 8 row lanes g):
+                // the loop below then skips empty slots by warp-uniform branches instead of a serialized shfl chain
+                unsigned f0 = __ballot_sync(0xffffffffu, hq.y != 0x1p-15f && __float_as_int(hq.x) >= klo && __float_as_int(hq.x) < khi);
+                unsigned f1 = __ballot_sync(0xffffffffu, hq.w != 0x1p-15f && __float_as_int(hq.z) >= klo && __float_as_int(hq.z) < khi);
+                f0 |= f0 >> 16; f0 |= f0 >> 8; f0 |= f0 >> 4;
+                f1 |= f1 >> 16; f1 |= f1 >> 8; f1 |= f1 >> 4;
+#endif
 #pragma unroll
                 for (int e2 = 0; e2 < ESC; ++e2) {  // empty slot = (col 0, 2^-15): skipped (real escapes: |value| < 2^-15)
+#ifndef G19_OLDFIX
+                    if (!((((e2 & 1) ? f1 : f0) >> (e2 >> 1)) & 1u)) continue;
+#endif
+#ifdef G19_NOFIX
+                    continue;
+#endif
                     const int src = (lane & ~3) | (e2 >> 1);
                     const float hx = __shfl_sync(0xffffffffu, (e2 & 1) ? hq.z : hq.x, src);
                     const float hy = __shfl_sync(0xffffffffu, (e2 & 1) ? hq.w : hq.y, src);
@@ -1782,6 +1804,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
                     }
                 }
             }
+        if (t == 0 && q == 0) TR(12);
         if (xl) {  // done with this x buffer (the fixups above were its last reads)
             __syncwarp();
             if (lane == 0) bar_arrive(xempty + 8 * xb);
@@ -1798,6 +1821,7 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         }
         const int pb = q % NPB;  // hand the partials to the finisher: pbuf[pb][row group * 16 + row16][tok]
         if (q >= NPB) bar_wait(pempty + 8 * pb, ((q / NPB) - 1) & 1);
+        if (t == 0 && q == 1) TR(13);
 #pragma unroll
         for (int rr = 0; rr < RPW; ++rr) {
             float* pw = pbuf + pb * PBF + ((wr + rr) * 16 + g) * M + th * MT + 2 * c;
@@ -1809,6 +1833,8 @@ __global__ void __launch_bounds__((RG * TS / RPW + 2) * 32, G19_MINB) gemm(const
         if (t == 0) ptag[pb] = tr;
         __syncwarp();
         if (lane == 0) bar_arrive(pfull + 8 * pb);
+        if (t == 0 && q == 0) TR(14);
+        if (t == 0 && q == 1) TR(15);
         ++q;
     }
     {  // done: tell the finisher
