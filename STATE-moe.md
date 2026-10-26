@@ -131,8 +131,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
    DRAM when L2 cannot dedup. Suspects: 64 KB extra smem (L1 carveout: inter __ldg x loads), xs LDS before mbar_wait, s_red x2.
    Try: xs in the ring's slack / smaller (bf16 x of group 2 only for the warp's k chunks is already minimal), or GS16 in gemm13
    only (phase 1 tied) with GS8 segments in gemm2 (needs inter rows of 16-token segments readable as 2 x 8: they are).
--0. (s10) Cheaper dq is the only other lever (69%): ideas: fold the e4m3 scale into the x side per k16 block is impossible
-   (per-row scale); 2-group sharing = GS16 above.
 3. Big-M: let idle tail CTAs start moe_norm rows whose experts are done (per-token flags); fuse moe_gather into
    moe_route (multi-CTA route) -1 launch (~3 us).
 
