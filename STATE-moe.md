@@ -3,7 +3,7 @@
 ## Board
 - Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z; check 64c725e6 same code 2.205x), SA scale decode.
   Previous: 9a73c24a 2.176x @9aa37e0. Top of board 2.55x (#10 2.37x, #20 2.31x).
-  Used 2026-10-26: checks 7 of 20, submits 3 (lead cap 9). Per-shape (submit 6a92803a / check 64c725e6):
+  Used 2026-10-26: checks 9 of 20, submits 3 (lead cap 9). s10 checks: b25182e8 2.191 (GS16 bs32 135.7: dead), 66b5e104 2.183 (race fix only, noise). Per-shape (submit 6a92803a / check 64c725e6):
   bs1 28.8/27.1, bs16 93.9/94.5, bs32 128.7/128.8, bs8 67.0/71.0, bs128 197.4/203.0, bs256 248.0/246.5.
   Table below = s7 (ee945887) for reference.
   | load | bs | SGLang | ours | x | floor | s6 (fa39ed7) |
@@ -23,6 +23,11 @@
   (tensor maps!) in the state. bench.py test runs a cloned state now.
 
 ## What's on main (submission.py)
+s10 (e2fd3cd): RACE FIX in tk2f_consume: a consumer arrives on empty[stage] only AFTER the stage's dq/mma (was: right
+after issuing the LDS -> the producer could overwrite the stage before the LDS read it; = the s7 race). Never move the
+arrive back up. moe_tk / moe_tk2 / tk2d (DYN) still have the early arrive (not default paths): fix before using them.
+GS16 option (TK2G=0 off): tk2g_row/tk2g_consume, cfg +10000 (+ digit w: weighted split tk2g_split), 2nd token group's x
+in smem (+64 KB dyn), s_red x2. Correct (tools/gs_ab.py), slower (see Session 10).
 s9: TK2SA = TWSA = 1: e4m3 block scales decoded arithmetically (sca<K>(w) = __byte_perm(w,0,0x4K4K)*16 + 0x77007700)
 in tk2f_consume and tw_item (moe_twf) when prepare() found every scale positive normal (st["sa"]); else the smem LUT.
 moe_twf's choice is a host flag (moe_set_sa, set in kernel_fn). TK2FN = 0: fused norm (moe_tk2fn_launch) kept, dead.
@@ -87,6 +92,13 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Session 10 summary
+- Layer-routing harness: /tmp/moe10/dump_routes.py (run in ~/r-layer/muse_decode_layer) -> /tmp/moe10/routes.pt;
+  tools/layer_ab.py "decode 32" ... (SUB=, ENV=, VS=), tools/ncu_layer.py (ncu driver), tools/gs_ab.py (GS16 vs GS8 bitwise).
+  H100 main on layer routings: d1 36.8, v1 87.1, d16 89.2, d32 112.6 us.
+- tk2f row census: dq 768 of 1122 instr (69%), HMMA 64, SA 64, overhead ~226. Instruction cuts must come from dq.
+- Found/fixed the tk2f ring race (NOTES s10). GS16 dead for now (judge bs32 +7 us; H100 phase 2 rows +40% slower, unexplained).
+
 ## Session 9 summary
 - 2.176x -> 2.190x (submit 6a92803a): arithmetic scale decode (SA) in decode tk2f: -5.7% instructions. Same in big-M
   twf (-3% instr): judge noise, kept. Dead: fused post-expert norm in tk2f (judge bs1 +2 us, check 168fa04c).
@@ -101,6 +113,13 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   changes by smsp__inst_executed and stalls, not by H100 time; then a judge check.
 
 ## Ranked ideas
+-1. (s10) Re-check the layer copied the race fix (COORD Requests). Then: why are GS16 phase-2 rows slower (timeline tool in
+   NOTES s10: globaltimer per CTA at phase ends)? If fixable, GS16 cuts 8-17% instructions on the layer's d16/d32 and halves
+   DRAM when L2 cannot dedup. Suspects: 64 KB extra smem (L1 carveout: inter __ldg x loads), xs LDS before mbar_wait, s_red x2.
+   Try: xs in the ring's slack / smaller (bf16 x of group 2 only for the warp's k chunks is already minimal), or GS16 in gemm13
+   only (phase 1 tied) with GS8 segments in gemm2 (needs inter rows of 16-token segments readable as 2 x 8: they are).
+-0. (s10) Cheaper dq is the only other lever (69%): ideas: fold the e4m3 scale into the x side per k16 block is impossible
+   (per-row scale); 2-group sharing = GS16 above.
 00. (s9) Instructions still rule the H200 decode: tk2f gemm13 row loop = 1391 SASS instr/warp/row vs 832 for dq+mma
    (before SA; SA took ~100 of the ~560 overhead). Next targets: ~137 address IMADs + 43 LEA (precompute smem
    addresses per stage: NSTG=4 -> unroll the ring so stage offsets are constants), per-row reduce/epilogue (accumulate
@@ -130,6 +149,8 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 4. Clean-up: remove moe_sk / moe_tk / moe_gemm / route2 / act / moe_tb / moe_big / RT 2 moe_tw (~55 s compile).
 
 ## Dead ends (older ones: NOTES-moe.md)
+- (s10) GS16 16-token segments as default (judge bs32 135.7 vs 128.7; H100 layer d16/d32 +5..18 us); weighted row split for
+  2-group rows (worse at every weight); ld.global.cg / asm nc loads for inter (no help: the race was the ring).
 - (s9) Post-expert norm fused into tk2f (last-M-CTA tickets, one-pass register norm): judge bs1 +2 us (168fa04c).
   Also s7's grid-barrier version. A separate norm2 kernel is as cheap as any in-kernel tail on the H200.
 - (s7) norm fused into moe_tk2f behind a grid barrier (worse, bs1 +3 us); L2 bulk prefetch of next rows in tk2f
