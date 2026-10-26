@@ -86,6 +86,7 @@ int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
+#define TK2F_L2H 0       // s21: tk2f weight-copy L2 hints (python TK2F_L2H): 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
 #define TK2_EXP 0        // s12: tk2h (TK2H/PSC) and weighted-split (TK2W) instantiations: H200 diags, no gain (off: compile time)
 
 __device__ __forceinline__ uint32_t bmul(uint32_t a, uint32_t b) {
@@ -935,6 +936,10 @@ __device__ __forceinline__ void prefetch_l2(const void* src, int bytes) {
 __device__ __forceinline__ void bulk_g2s(void* dst, const void* src, int bytes, uint64_t* bar) {
   asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                ::"r"(smem_u32(dst)), "l"(src), "r"(bytes), "r"(smem_u32(bar)) : "memory");
+}
+__device__ __forceinline__ void bulk_g2s_h(void* dst, const void* src, int bytes, uint64_t* bar, uint64_t pol) {
+  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1], %2, [%3], %4;"
+               ::"r"(smem_u32(dst)), "l"(src), "r"(bytes), "r"(smem_u32(bar)), "l"(pol) : "memory");
 }
 
 template <int NRT, int NC, int NSTG, bool XROUTE>
@@ -2945,20 +2950,41 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
                                              int early = 0) {
   constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * 1152, KB = NC * KPS;
   int a = 0;
+#if TK2F_L2H
+  // s21: an expert with > 8 tokens is streamed once per 8-token group; the groups' rows sit 256 rows apart (other
+  // CTAs, other times), so without hints the re-read often comes from HBM again (H100 ncu d16 s7: +12% DRAM bytes).
+  uint64_t pol_last, pol_first;
+  asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol_last));
+  asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol_first));
+#endif
   for (int R = r0; R < r1; ++R) {
     while (s_rs[a + 1] <= R) ++a;
     const int e = s_e[a];
     const int lr = (R - s_rs[a]) & (RPE - 1);
     const uint4* src = Wq + ((size_t)e * NRT * 64 + lr * 64) * 32;
     const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
+#if TK2F_L2H
+    const bool nfin = R + RPE < s_rs[a + 1];  // a later group of this expert re-reads this row
+    const int hk = nfin ? (TK2F_L2H == 3 ? 0 : 1) : (TK2F_L2H == 2 ? 0 : 2);  // 0 none, 1 evict_last, 2 evict_first
+    const uint64_t pol = hk == 1 ? pol_last : pol_first;
+#endif
     for (int q = 0; q < NQ; ++q, ++i) {
       if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
       if (xrdy && i == early) mbar_wait(xrdy, 0);  // s15 FP: the consumers' first x loads go out before our burst
       char* sbase = reinterpret_cast<char*>(smem) + st * SB;
       mbar_expect_tx(&full[st], SB);
-      bulk_g2s(sbase, src + q * KB * 32, KB * 512, &full[st]);
-      bulk_g2s(sbase + KB * 512, src + NRT * 32 * 32 + q * KB * 32, KB * 512, &full[st]);
-      bulk_g2s(sbase + KB * 1024, ssrc + q * KB * 32, KB * 128, &full[st]);
+#if TK2F_L2H
+      if (hk) {
+        bulk_g2s_h(sbase, src + q * KB * 32, KB * 512, &full[st], pol);
+        bulk_g2s_h(sbase + KB * 512, src + NRT * 32 * 32 + q * KB * 32, KB * 512, &full[st], pol);
+        bulk_g2s_h(sbase + KB * 1024, ssrc + q * KB * 32, KB * 128, &full[st], pol);
+      } else
+#endif
+      {
+        bulk_g2s(sbase, src + q * KB * 32, KB * 512, &full[st]);
+        bulk_g2s(sbase + KB * 512, src + NRT * 32 * 32 + q * KB * 32, KB * 512, &full[st]);
+        bulk_g2s(sbase + KB * 1024, ssrc + q * KB * 32, KB * 128, &full[st]);
+      }
       if (++st == NSTG) { st = 0; ph ^= 1; }
     }
   }
@@ -4204,8 +4230,9 @@ def _lib():
     global _LIB
     if _LIB is None:
         from torch.utils.cpp_extension import load_inline
-        h = hashlib.sha256(CUDA_SRC.encode()).hexdigest()[:12]
-        _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=CUDA_SRC,
+        src = CUDA_SRC.replace("#define TK2F_L2H 0 ", f"#define TK2F_L2H {int(TK2F_L2H)} ")
+        h = hashlib.sha256(src.encode()).hexdigest()[:12]
+        _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=src,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                       "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa"],
@@ -4394,6 +4421,7 @@ TK2G = 0  # s10: 1 = 16-token segments in moe_tk2f (2 token groups share each de
 TWF_DBG = 0
 TWF_SPLIT_M = {}  # s11 per-M override of TWF_SPLIT; judge c1659443 {128: 132, 256: 66}: tie (tail -12 us, twf +10 us)
 TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K halves (FP32 partials, ticket): shorter tail
+TK2F_L2H = 1  # s21: tk2f L2 cache hints on the weight copies (see #define TK2F_L2H; compile time, 0 = off). Bitwise = 0. H100 layer harness (tuner off): v1 -3.6/-3.9, d16 -2.0/-4.3, d1 -0.3/-0.5, d32 0 us
 TK2F = 204  # s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
