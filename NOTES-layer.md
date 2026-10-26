@@ -311,3 +311,9 @@
   1.927x; overall #52): d1 73.5/82.0, d16 149.9/238.6, d32 187.7/323.8, v1 118.8/131.5, v16 282.8/363.1, v32
   361.3/533.9.
 - Next big layer-owned item (STATE Next 1): pooler + router (+ top-8 by the last router block) in one kernel at T=1/8.
+
+## Session 10 (2026-10-26 03:51Z-)
+- v34 (f1beb08): moe_src.py = r-moe c33acae (tk2f race fix per lead 03:45Z; GS16 flags off). tests 13/13,
+  tools/tk2f_stress.py 500 (now takes reps) 0/2000. Check 80eddcdc 1.9445x (tie with v33 6aaff5a2 1.9377 / scored
+  1.9459). Submit 0b9801d2 1.9231x (noise-low): board best stays e5512e00 (v33, old race). Asked lead in COORD whether
+  to withdraw e5512e00 (only rows with the fix would then be on the board at 1.927/1.923).
