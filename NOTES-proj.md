@@ -483,3 +483,12 @@
 - **qkv m8 without split-K**: gemv14 (8, 8, 8, 4, 96, 2) = kcu 8 (S = 1), 96 blocks x 768 threads: no partials/counter
   end phase (~2.5 us at S=4). H100 g14.py 15.2-15.6 vs 16.8; H200 check a9b13469 (1.3161x): 15.39 vs 16.58 tuner us.
   Submit 3810db09 1.3110x = new board best (was 1.307). Handoff to layer (G14_CFG qkv). m16 gemv14 kcu 4 / 96 blocks: tie.
+- g19 m32 in the layer (layer request s16 09:30Z: d32 pooler+unpool 50 us on H200). H100 consumer-only (G19_NOW, MODE 2,
+  PRED 3000, pool m32 (1024,8,2) 132 blocks): full 16.45 us, NOX (decode only) 12.06, NOMMA (W lds + barriers) 9.76;
+  m16 13.3 / 11.0 / 8.0. On the H200 the W stream needs ~13.9 us for 50 MB -> the consumers bound it (as s12 found).
+  mma+ldmatrix = +4.4 us (0.57 us per 49 KB stage = mma.sync at ~2/3 of the wgmma rate), decode +2.3, skeleton 9.8
+  (trace: producer->consumer handoff ~0.5-0.6 us per stage with NS 2 even with no W loads). More warps are slower
+  in NOW mode (RG 16 20.4-21.0, TS 2 21.4), RPW 2 17.2 (not smem-bound). No cheap fix found; wgmma consumers = g20 (dead
+  s12). In the layer the pooler runs on 108 blocks (router beside it): consumer-bound -> 132/108 slower per call.
+- H100 layer timeline d32 sliding (r-layer 66fef4c copy): boundary 51.0-57.6, g19 pooler 51.6-83.7, _router_split
+  57.5-76.4 (18.8 us on its ~24 SMs), routing 76.3-81.1, rmsnorm 83.7-86.3; unpool 181.9-211.6 after norm2 (190.1).
