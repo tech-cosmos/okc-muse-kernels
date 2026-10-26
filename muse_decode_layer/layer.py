@@ -628,7 +628,9 @@ G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv
 # s21/s22: alternative GEMV configs, used only where TUNE picks them (option "<kind>alt:<key>" = index into the list, 1-based)
 G13_ALT = {"qkv_gate": [(2, 4, 1, 2, 132)]}  # s21: T=1 PF 2 (2 rows in flight per virtual block; H100 +1.3/+2 us)
 G10_ALT = {"o": [(1024, 4, 4, 1, 1, 132)]}  # s22: T=1 o (PDL secondary of csl): U 4 on 132 blocks (PF 2 on 264: H100 +11 us, dropped)
-G14_ALT = {"qkv_gate": [(2, 2, 8, 32, 1), (2, 2, 4, 48, 1)]}  # s22: T=8 qkv: PF 8 / 6 row groups per block (192 blocks)
+# s22: T=8 qkv: proj s16 (r-proj 2480c53 BF16_G14) without split-K: kcu 8 (own pack), 96 blocks of 3 row groups (H100
+# standalone 15.2-15.6 vs 16.8 us). (2, 2, 8, 32, 1) / (2, 2, 4, 48, 1): H100 in-layer ties, dropped.
+G14_ALT = {"qkv_gate": [(8, 8, 4, 96, 1), (8, 8, 4, 96, 2), (8, 8, 8, 96, 1)]}
 _ALTS = {"g10": G10_ALT, "g13": G13_ALT, "g14": G14_ALT}
 
 
@@ -1414,7 +1416,7 @@ def _lt_prepare(state):
 # weights, tile-major stream-K, escapes packed per stage; FP32 out (zero kernel + red.add; consumers round to BF16).
 # (key, T) -> (m, ap, ns, E). H100 standalone (cold L2): qkv m128 21.9 vs cuBLAS 21.1, pooler 30.9/27.5, unpool
 # 28.8/27.3, o 14.9/10.2; m256 all +10 us (compute-bound there: not built). Used only where TUNE picks it (H200).
-G22_CFG = {("qkv_gate", 128): (128, 4, 3, 32), ("pooler", 128): (128, 4, 3, 32), ("unpool", 128): (128, 4, 3, 32)}
+G22_CFG = {}  # s22: off (proj H200 check fb2fe4ee: g22 loses every m128/m256 shape); was {("qkv_gate", 128): (128, 4, 3, 32), ("pooler", 128): ..., ("unpool", 128): ...}
 _G22_SRC = None  # @@G22@@
 _G22 = {}
 
@@ -1560,9 +1562,8 @@ TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"g10alt:o": 1}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}),
-        8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}),
-        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"g22:qkv_gate": True}, {"g22:pooler": True},
-              {"g22:unpool": True}, {"g22:qkv_gate": True, "g22:pooler": True, "g22:unpool": True}), 256: ({}, {"lt:qkv_gate": False})}
+        8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3}),
+        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}), 256: ({}, {"lt:qkv_gate": False})}
 TUNE_REPS = 40
 TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}  # T -> (batch, q_len)
 
@@ -1694,6 +1695,8 @@ def _g12_prepare(state):
     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n2u's last-block counter (self-resetting)
     state["g13"] = {key: pk for key in G13_CFG if (pk := _pack13(w[key])) is not None}
     state["g14"] = {key: pk for key, c in G14_CFG.items() if (pk := _pack14(w[key], 1024 * c[0])) is not None}
+    state["g14k"] = {(key, kc): pk for key, v in G14_ALT.items() if key in state["g14"]  # alt packs (other kcu)
+                     for kc in sorted({a[0] for a in v} - {G14_CFG[key][0]}) if (pk := _pack14(w[key], 1024 * kc)) is not None}
 
 
 def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
@@ -1709,8 +1712,10 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
                 lib.g13_gemv(pk[0], pk[1], pk[2], x.contiguous(), out, pk[3],
                               *_cfg(state, 1, "g13", key, G13_CFG), *pf)
             else:
+                c = _cfg(state, G12_TOKENS, "g14", key, G14_CFG)
+                pk = pk if c[0] == G14_CFG[key][0] else state["g14k"][(key, c[0])]
                 lib.g14_gemm(pk[0], pk[1], pk[2], pk[3], x.contiguous(), out, state["g12_ws"], state["g12_cnt"],
-                             w.shape[0] // 8, *_cfg(state, G12_TOKENS, "g14", key, G14_CFG))
+                             w.shape[0] // 8, *c)
             return out
     if lib is not None and key in G17_KEYS and x.shape[0] in G17_CFG:
         out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
