@@ -274,3 +274,37 @@
   waits 0x1 in loops. Correct + deterministic (60 routings incl. split). Judge d4909e24 2.170x: bs128 206.8 (control: no
   expert > 32 tokens), bs256 247.8 (= baseline range): neutral standalone. Aimed at the LAYER's v32 (hot experts 73-98
   tokens: 34 passes of 32 -> ~24 of 64) and v16 (36-49): only a layer check can tell.
+
+## Session 12 (2026-10-26 04:25Z - )
+- NEW TOOL: H200 DIAG in prepare() (DIAG = 1 in a /tmp copy only; never submit with it): times DIAG_VARIANTS on the
+  layer's routings (embedded, zlib+b64 of /tmp/moe10/routes.pt: 5 seeds x d1/v1/d16/d32/v16/v32), cold L2 (256 MB
+  flush), graph replay medians, prints "diag12 ..." lines; the judge log lands in <cwd>/profiles/submission.<job>.log.
+  Repeatable to ~0.5 us across checks (gs8 d16 68.5-68.6, d32 88.7-89.2): MUCH better than standalone shapes.
+- H200 model of tk2f+norm2 on layer routings (3 diag checks, lstsq over 20 routings, resid <= 2.4 us):
+  t = 14.1 + 6.97 * experts + 4.4 * extra 8-token groups (us). 6.97 us/expert = 28.3 MB at 4.06 TB/s (~85% of HBM
+  peak). Levers: the fixed 14 us (incl. norm2 ~4.5) and 4.4 us per extra group (d32 has 2-3, d16 ~1).
+- diag 0b2aed51: old GS16 +6..8 us everywhere (also d1!), DYN 5402 +3..10 (d16/d32), NC16 +1..2, TWF_MIX 1 vs 0 tie/-2.
+- GS16's d1 loss = I-CACHE: ncu stall_no_instruction 923 -> 9418 at d1 (kernel 118 KB SASS vs 65 KB: 4 unrolled row
+  bodies). Fix: tk2h_consume = both phases in one run-time loop (gated flag only changes x source / epilogue / RPE):
+  one body per row kind. cfg +30000 = h8 (GS 8), +40000 = h16 (GS 16), flags TK2H 8/16. Bitwise = main (tools/h_ab.py).
+- diag 43232617: h8 = main (88.4 vs 88.7 d32), h16 d1 fixed (31.6 vs 31.0) but d16 +4.0, d32 +7.1 (uniform over
+  seeds); fit: a 2-group row costs ~6 us per 2-group segment (more than GS8's separate extra group, 4.4): static count
+  split overloads the CTAs holding 2-group rows; W 2 (weight 10/8) helps a bit (d32 94.2). MIX1 v16 -3.3, v32 -4.4.
+- diag 619ad6ad: deeper rings (SA builds, TK2F_RING_SA): d32 208 91.6, 206 91.1, 403 89.7, 108 93.8, 402 91.9 vs 204
+  88.9; d16 all +1..3. 204 stays. Not ring-depth bound.
+- PSC (TK2H_PSC 1, cfg +20000 on top): gemm2 segment j waits only for gemm13 segment j's 256 rows (cnt[64 + j]; the
+  rows of a segment sit on neighbouring CTAs in both phases, so most CTAs never wait for the slowest). Bitwise = main
+  (1280 runs). H100 layer: d16 89.6 -> 88.7, d32 112.1 -> 111.3, v1 87.5 -> 86.7.
+- diag 6e9d6e3d (PSC + GS16 weights, MIN16 9): h8p 68.5 / 88.7 = main (68.4 / 88.5): PSC gives nothing on H200; h16p d16
+  71.8 d32 94.2, W 2/4/6: 92.2/93.0/96.3 at d32, d16 72-73.5. GS16 DEAD on the H200 (4 diags, any split weight).
+- TIMELINE on H200 (check 88d201b4, tools/mktl_diag.py builds /tmp/moe12/submission.py = sub_tl stamps + _diag_tl):
+  stamps vs earliest CTA start (0.25 us grain), min/median/max over CTAs:
+  d1: routed 1.5, first data 3.6, ph1 end 11-13.3, cnt ok 14.1, ph2 data 14.3, end 16.4-18.7; event total 28.5.
+  d32 s7: routed 1.5, data 3.3, ph1 end 49.9/50.7/53.0, cnt ok 53.2, ph2 data 53.5, end 77.8/80.1/80.9; total 91.8.
+  => CTAs are balanced on the H200 (ph1/ph2 end max - median 1-3 us; barrier wait ~0.5 us): splitting/balancing and
+  PSC have little to win. Phase 1 streams ~4.0 TB/s (10 experts x 18.9 MB in 47 us), PHASE 2 ONLY ~3.5 TB/s (9.4 MB per
+  expert, 26.5 us): same row bytes and consumer work; unexplained (next lead). ~10 us of each call is outside the tk2f
+  span (graph launch + norm2 ~4.5 + gaps), 3.6 us before the first weight data (routing 1.5 + first bulk copy 2.1).
+- TK2W weighted static split (extra-group rows weigh wE/8, warp-parallel tk2w_bound, cfg +70000): bitwise ok, H100
+  worse (w 3: d32 207 us: on the H100 extra-group rows are NOT cheap; even w 8 = count +2 us, unexplained). Not sent to
+  the judge: the H200 timeline shows no imbalance to fix. Experimental instantiations now behind #if TK2_EXP (0).

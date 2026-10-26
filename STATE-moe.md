@@ -2,7 +2,7 @@
 
 ## Board
 - Best submit: 6a92803ae4fc4a11 @a670c82, **2.190x** (2026-10-26 02:16Z). Board is a TEST BED only (lead 01:45Z): the layer counts.
-  Used 2026-10-26: checks 12 of 20, submits 3. s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
+  Used 2026-10-26: checks 17 of 20 (s12: 5 DIAG checks, never submit those), submits 3. s11 checks: c1659443 2.179 (K-split tail: tie), 7dda218c 2.130 (RT 2 all:
   worse), d4909e24 2.170 (twm mixed: neutral). Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
   bs128 196-207, bs256 243-251 (judge noise +-4%).
 - **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.
@@ -10,6 +10,13 @@
 - **H100 is NOT a proxy** for big-M changes (s11: RT 2 H100 -3..9 us, judge +8%) nor for decode (DRAM-bound locally).
   Decode: ncu x 0.72 / instruction counts; tools/l2warm.py = consumer-bound proxy (1 expert, warm L2).
 - The judge clones the prepared state: never keep scratch buffers or raw addresses in the state.
+
+## H200 DIAG tool (s12) -- use it for every decode/big-M A/B
+`DIAG = 1` (only in a /tmp copy: `sed 's/^DIAG = 0$/DIAG = 1/' submission.py > /tmp/x/submission.py; okc check /tmp/x/submission.py`)
+makes prepare() time DIAG_VARIANTS (python-global overrides) on the layer's embedded routings (5 seeds x d1/v1/d16/d32
++ v16/v32), cold L2, graph replay; output: grep "diag12 MEAN" <cwd>/profiles/submission.<job>.log. Repeatable +-0.5 us.
+tools/mktl_diag.py = same for a per-CTA globaltimer timeline (diagtl lines). H200 fit (tk2f + norm2, layer routings):
+t = 14.1 + 6.97 * experts + 4.4 * extra 8-token groups (us); 6.97 us/expert = 4.06 TB/s (85% of HBM peak).
 
 ## What's on main (submission.py)
 s11: M > 32 now runs **moe_twm** (TWF_MIX = 1): moe_twf with the item shape chosen per expert (RT 2 / 64-token passes,
@@ -86,24 +93,22 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
-## Session 11 summary
-- Layer handoff: twm (mixed RT) + race fix; asked layer for an A/B of _moe_TWF_MIX 0/1 at T=128/256 (v16/v32).
-- Dead/neutral: K-split tail (tail shorter, twf longer: tie), RT 2 for all (judge +8%), NC16 decode (proxy +5-10%).
+## Session 12 summary
+- H200 diag tool + model (above). Measured on the H200, all on layer routings: GS16 (old, merged, any split weight)
+  +4..8 us DEAD; merged-phase h8 = main; per-segment counters (PSC) = main; deeper rings (208/206/403/108/402) lose;
+  DYN +3..10; NC16 +1..2; TWF_MIX 1 vs 0: v16 -3.3, v32 -4.4 us (keep 1; layer should take it).
+- GS16's d1 loss was i-cache (4 unrolled row bodies): tk2h one-body consumer fixed that, the d16/d32 loss remained.
+- Timeline: CTAs balanced (spread 1-3 us); phase 2 (w2) streams ~3.5 TB/s vs phase 1 ~4.0 TB/s; 3.6 us to first data.
 
-## Session 10 summary
-- Layer-routing harness: /tmp/moe10/dump_routes.py (run in ~/r-layer/muse_decode_layer) -> /tmp/moe10/routes.pt;
-  tools/layer_ab.py "decode 32" ... (SUB=, ENV=, VS=), tools/ncu_layer.py (ncu driver), tools/gs_ab.py (GS16 vs GS8 bitwise).
-  H100 main on layer routings: d1 36.8, v1 87.1, d16 89.2, d32 112.6 us.
-- tk2f row census: dq 768 of 1122 instr (69%), HMMA 64, SA 64, overhead ~226. Instruction cuts must come from dq.
-- Found/fixed the tk2f ring race (NOTES s10). GS16 dead for now (judge bs32 +7 us; H100 phase 2 rows +40% slower, unexplained).
-
-## Sessions 8-9: see NOTES (KPS stages 2.131->2.176x, SA scale decode ->2.190x).
+## Sessions 8-11: see NOTES (s10 race fix + layer harness, s11 twm/K-split).
 
 ## Ranked ideas
--2. (s11) Read the layer's check of TWF_MIX (COORD). If twm wins at v32: tune the threshold (> 32 vs > 48 tokens) and try
-   RT 2 for gemm2 only / gemm13 only. If it loses: revert TWF_MIX to 0 (prepare then skips the b2 packing).
-   Decode d1 (+0.16%/us in the layer): tk2f fixed overhead ~7 us on H200 (routing 1.5, first data ~2, barrier ~1, tails);
-   layer-owned PDL tried (tie). Ideas: producer-warp-only routing (start bulk copies ~0.5-1 us earlier), half rows at T=1.
+-3. (s12) Phase 2 (gemm2/w2) of tk2f streams ~12% slower per byte than phase 1 on the H200 (timeline): ~3 us at d32,
+   ~2 at d16. Find out why with the diag timeline (stamp per-row times in phase 2; try phase-2 rows = 2 rps per
+   ring pass, or w2 tile pairs adjacent instead of 2048 rows apart (prepare repack), or x (inter) prefetch earlier).
+   Also: first data at 3.6 us (routing 1.5 + 2.1 latency): let the producer warp do the routing alone (it only needs
+   s_rs/s_e) and start bulk copies while the consumers build s_srt; or prefetch expert-0 weights of ALL experts? no.
+-2. (s11, measured s12) TWF_MIX = 1 wins v16 -3.3, v32 -4.4 us on H200: make sure the layer re-copies (COORD).
 -1. (s10) Re-check the layer copied the race fix (COORD Requests). Then: why are GS16 phase-2 rows slower (timeline tool in
    NOTES s10: globaltimer per CTA at phase ends)? If fixable, GS16 cuts 8-17% instructions on the layer's d16/d32 and halves
    DRAM when L2 cannot dedup. Suspects: 64 KB extra smem (L1 carveout: inter __ldg x loads), xs LDS before mbar_wait, s_red x2.
@@ -130,6 +135,9 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 4. Clean-up: remove moe_sk / moe_tk / moe_gemm / route2 / act / moe_tb / moe_big / RT 2 moe_tw (~55 s compile).
 
 ## Dead ends (older ones: NOTES-moe.md)
+- (s12, H200 diag on layer routings) GS16 in any form (old, merged one-body tk2h, split weights 2-6): +4..8 us at d16/d32;
+  per-segment gemm13->gemm2 counters (PSC): 0; deeper tk2f rings: +1..5; DYN: +3..10; NC16: +1..2. Weighted static
+  split (TK2W): H100 worse, and the H200 timeline shows balanced CTAs (nothing to fix).
 - (s10) GS16 16-token segments as default (judge bs32 135.7 vs 128.7; H100 layer d16/d32 +5..18 us); weighted row split for
   2-group rows (worse at every weight); ld.global.cg / asm nc loads for inter (no help: the race was the ring).
 - (s9) Post-expert norm fused into tk2f (last-M-CTA tickets, one-pass register norm): judge bs1 +2 us (168fa04c).

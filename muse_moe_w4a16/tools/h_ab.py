@@ -15,10 +15,10 @@ for r in range(int(sys.argv[1]) if len(sys.argv) > 1 else 200):
     cases.append({"hidden_states": x, "topk_ids": ids.int(), "topk_weights": tw, "config": {"bs": T, "local_start": st["start"], "local_count": st["count"]}})
 for d in cases:
     submission.TK2H = 0; ref = submission.kernel_fn(d, st).clone()
-    for h, psc in ((8, 0), (16, 0), (8, 1), (16, 1)):
-        submission.TK2H = h; submission.TK2H_PSC = psc; a = submission.kernel_fn(d, st).clone()
+    for h, psc, w in ((8, 0, 0), (16, 0, 0), (8, 1, 0), (16, 1, 0), (0, 0, 5), (0, 0, 3), (0, 0, 8)):
+        submission.TK2H = h; submission.TK2H_PSC = psc; submission.TK2W = w; a = submission.kernel_fn(d, st).clone()
         torch.cuda.synchronize(); tot += 1
         if not torch.equal(a, ref):
-            bad += 1; print("MISMATCH", h, psc, d["hidden_states"].shape[0], (a.float() - ref.float()).abs().max().item(), flush=True)
-submission.TK2H = 0; submission.TK2H_PSC = 0
+            bad += 1; print("MISMATCH", h, psc, w, d["hidden_states"].shape[0], (a.float() - ref.float()).abs().max().item(), flush=True)
+submission.TK2H = 0; submission.TK2H_PSC = 0; submission.TK2W = 0
 print("bad", bad, "of", tot)

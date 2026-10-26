@@ -85,7 +85,8 @@ int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }
 
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
-#define TK2F_RING_SA 1   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108) for H200 A/B
+#define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
+#define TK2_EXP 0        // s12: tk2h (TK2H/PSC) and weighted-split (TK2W) instantiations: H200 diags, no gain (off: compile time)
 
 __device__ __forceinline__ uint32_t bmul(uint32_t a, uint32_t b) {
   uint32_t d;
@@ -3168,6 +3169,35 @@ __device__ __forceinline__ int tk2g_split(int b, int nact, int wt, int rps, cons
   return row;
 }
 
+// s12 WEIGHTED static split (GS 8): a row of an expert's first 8-token group streams its weights from HBM, rows of the
+// extra groups (hot experts) mostly hit L2 and cost ~wE/8 of it (H200 fit on layer routings: 4.4 / 6.97 us = 0.63).
+// Warp 0 computes CTA b's row bounds [r(b), r(b+1)) of a phase with RPS rows per group; lane = active expert index.
+// 32-bit math: total weight <= 64 groups x 256 rows x 8.
+__device__ __forceinline__ int tk2w_bound(int b, int nact, int wE, int rps, const int* s_e, const int* s_off) {
+  const int lane = threadIdx.x & 31;
+  const int c = lane < nact ? s_off[s_e[lane] + 1] - s_off[s_e[lane]] : 0;
+  const int ng = (c + 7) >> 3;
+  const int w = ng ? rps * (8 + (ng - 1) * wE) : 0;  // this expert's weight
+  int incl = w, rows = ng * rps;
+#pragma unroll
+  for (int o = 1; o < 32; o <<= 1) {
+    const int v = __shfl_up_sync(0xffffffffu, incl, o), r = __shfl_up_sync(0xffffffffu, rows, o);
+    if (lane >= o) { incl += v; rows += r; }
+  }
+  const int W = __shfl_sync(0xffffffffu, incl, 31);
+  const int p = (int)((long long)W * b / gridDim.x);
+  const int cum = incl - w, row0 = rows - ng * rps;
+  int res = 0x7fffffff;
+  if (ng && p >= cum && p < incl) {  // p falls in this expert: group 0 (weight 8 per row), then groups of weight wE
+    const int q = p - cum;
+    if (q < rps * 8) res = row0 + (q + 7) / 8;
+    else res = row0 + rps + (q - rps * 8 + wE - 1) / wE;
+  }
+  if (p >= W) res = __shfl_sync(0xffffffffu, rows, 31);
+  res = __reduce_min_sync(0xffffffffu, res);
+  return res;
+}
+
 template <int NC, int NSTG, int KPS, bool DYN, bool FN = false, bool SA = false, int GS = 8, int MRG = 0>
 __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     const uint4* __restrict__ Wq13, const uint32_t* __restrict__ S13, const uint4* __restrict__ Wq2,
@@ -3287,6 +3317,16 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   int a0 = (int)((long long)n13 * blockIdx.x / gridDim.x), a1 = (int)((long long)n13 * (blockIdx.x + 1) / gridDim.x);
   int b0 = (int)((long long)n2 * blockIdx.x / gridDim.x), b1 = (int)((long long)n2 * (blockIdx.x + 1) / gridDim.x);
+  if (GS == 8 && !DYN && D > 0) {  // s12 weighted split (wE = D / 8 for extra-group rows), see tk2w_bound
+    __shared__ int s_ab[4];
+    if (warp == 0) {
+      const int v0 = tk2w_bound(blockIdx.x, nact, D, 256, s_e, s_off), v1 = tk2w_bound(blockIdx.x + 1, nact, D, 256, s_e, s_off);
+      const int v2 = tk2w_bound(blockIdx.x, nact, D, 128, s_e, s_off), v3 = tk2w_bound(blockIdx.x + 1, nact, D, 128, s_e, s_off);
+      if (lane == 0) { s_ab[0] = v0; s_ab[1] = v1; s_ab[2] = v2; s_ab[3] = v3; }
+    }
+    __syncthreads();
+    a0 = s_ab[0]; a1 = s_ab[1]; b0 = s_ab[2]; b1 = s_ab[3];
+  }
   if (GS == 16 && D > 8) {  // GS16: 2-group rows cost D/8 of a 1-group row: split the rows by weight, not count
     a0 = tk2g_split(blockIdx.x, nact, D, 256, s_e, s_off);
     a1 = tk2g_split(blockIdx.x + 1, nact, D, 256, s_e, s_off);
@@ -3386,15 +3426,21 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     cnt_.data_ptr()
   const bool sa = cfg >= 100000;  // + 100000: SA (arithmetic scale decode; prepare() checked the scales)
   cfg %= 100000;
+#if TK2_EXP
   if (cfg >= 30000) {  // s12 merged-phase consumer (tk2h): + 30000 GS 8, + 40000 GS 16 (cfg / 1000 % 10 = 2-group weight),
     // + 50000 / + 60000: the same with per-segment gemm13 -> gemm2 counters (PSC)
     const int kind = (int)(cfg / 10000);
     const int wt = 8 + (int)(cfg / 1000) % 10;
     if (kind == 3) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 1>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 1>(0, TK2F_ARGS0);
     if (kind == 4) return sa ? tk2f_go<8, 4, 2, false, false, true, 16, 1>(wt, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 16, 1>(wt, TK2F_ARGS0);
+    if (kind == 7) {  // + 70000: main consumer (tk2f_consume), weighted static split, wE = cfg / 1000 % 10
+      const int wE = (int)(cfg / 1000) % 10;
+      return sa ? tk2f_go<8, 4, 2, false, false, true>(wE, TK2F_ARGS0) : tk2f_go<8, 4, 2>(wE, TK2F_ARGS0);
+    }
     if (kind == 5) return sa ? tk2f_go<8, 4, 2, false, false, true, 8, 2>(0, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 8, 2>(0, TK2F_ARGS0);
     return sa ? tk2f_go<8, 4, 2, false, false, true, 16, 2>(wt, TK2F_ARGS0) : tk2f_go<8, 4, 2, false, false, false, 16, 2>(wt, TK2F_ARGS0);
   }
+#endif
   if (cfg >= 20000) {  // + 20000: 16 consumer warps (NC 16), cfg % 1000 = KPS * 100 + NSTG (static rows)
     const int c = (int)(cfg % 1000);
     if (sa) {
@@ -3807,12 +3853,15 @@ def _diag(st):
 
 TK2H = 0  # s12: merged-phase tk2f consumer (one main-loop body, i-cache): 8 = GS 8, 16 = GS 16 (from M >= TK2H_MIN16)
 TK2H_MIN16 = 1
+TK2W = 0  # s12: weighted static row split for M > 1 (extra-group rows weigh TK2W / 8; 0 = by count), cfg + 70000
 TK2H_PSC = 0  # s12: 1 = per-segment gemm13 -> gemm2 counters (cnt[64 + seg]) instead of the global one
 TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
 
 
 def _tk2f_cfg(M, st):
     sa = 100000 if TK2SA and st["sa"] else 0
+    if TK2W and M > 1:
+        return sa + 70000 + TK2W * 1000
     if TK2H:
         return sa + (40000 + TK2H_W * 1000 if TK2H == 16 and M >= TK2H_MIN16 else 30000) + 20000 * TK2H_PSC
     return (TK2F_DYN if M > 1 else TK2F) + sa + (10000 + TK2G_W * 1000 if TK2G and M >= TK2G_MIN else 0)
