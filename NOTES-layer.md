@@ -1018,3 +1018,10 @@
 ## s48 (2026-10-26 17:40Z-17:50Z): housekeeping only
 - Budget spent (layer 20/20 checks, 10/10 submits), sandbox ends ~19:10Z. Verified submission.py == build.py output,
   no /tmp input dependencies in tools/, added variants/ to muse_decode_layer/.gitignore. main = v88 unchanged.
+
+## s49 (2026-10-26 17:56Z-18:05Z): notes only, no build, no judge runs
+- Layer budget for 10-26 spent (20/20 checks, 10/10 submits); sandbox expires ~19:10Z, before the 00:00Z reset.
+- Board 18:00Z: we are #46 at 1.9954x (703d3a7e = v70); #1 colinlikescode 2.380x, #10 2.208x, #50 above us is unchanged in kind.
+- New since s48: proj s39 (side-stream HBM stream dilates a tiny-kernel chain by its whole time; only +3.8 us with
+  1 TMA/SM in flight) and s40 (throttled pre-wait W prologue / pre-wait stream: dead). Nothing to integrate.
+- Next sandbox: unchanged, STATE "FIRST THING" (check main v88, submit if > 1.9954x).

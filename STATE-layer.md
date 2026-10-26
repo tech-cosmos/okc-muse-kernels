@@ -1,6 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 17:50Z (session 48: housekeeping only, main unchanged). **main = v88 (v87 + proj s36 pr8 npf 212), NOT judge-checked** (layer budget for 10-26 spent:
+Updated 2026-10-26 18:05Z (session 49: notes only, main unchanged; board #46 1.9954x). **main = v88 (v87 + proj s36 pr8 npf 212), NOT judge-checked** (layer budget for 10-26 spent:
 20/20 checks, 10/10 submits). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x (9,505 us/step), #10 2.180x.
 
 ## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
