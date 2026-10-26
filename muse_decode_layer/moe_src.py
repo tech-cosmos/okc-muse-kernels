@@ -4706,7 +4706,10 @@ def kernel_fn(data, st):
         return out
     p13, p2 = PLAN_OVERRIDE(M) if PLAN_OVERRIDE else _plan(M)
     assert p13 in _CFGS and p2 in _CFGS, (p13, p2)
-    if data.get("bucket") is None:
+    rg = bool(data.get("rg")) and TW_CFG and data.get("gather_norm") is not None and data.get("bucket") is None
+    if rg:  # layer s52: route + gathern in one launch below
+        pass
+    elif data.get("bucket") is None:
         lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
     else:  # layer s27: bucketed on the layer's router stream (meta, sroutes of moe_route_launch)
         meta, sroutes = data["bucket"]
@@ -4714,7 +4717,10 @@ def kernel_fn(data, st):
         # inter here holds gemm2's B in the K-permuted order (see moe_tw)
         rt = 2 if TW_CFG >= 1000 else TW_CFG // 100
         xg = torch.empty((M * TOP_K, H), dtype=torch.bfloat16, device=dev)
-        if data.get("gather_norm") is None:
+        if rg:
+            assert st["start"] == 0
+            lib.moe_routegathern_launch(ids, st["count"], x, *data["gather_norm"], meta, sroutes, xg, data["gather_eps"])
+        elif data.get("gather_norm") is None:
             lib.moe_gather_launch(x, meta, sroutes, xg)
         else:  # layer s27 GNORM: x = the pooler output; the pre-expert rmsnorm happens in the gather
             lib.moe_gathern_launch(x, *data["gather_norm"], meta, sroutes, xg, data["gather_eps"])

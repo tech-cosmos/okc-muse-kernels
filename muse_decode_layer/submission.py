@@ -8970,7 +8970,10 @@ def _moe_kernel_fn(data, st):
         return out
     p13, p2 = _moe_PLAN_OVERRIDE(M) if _moe_PLAN_OVERRIDE else _moe__plan(M)
     assert p13 in _moe__CFGS and p2 in _moe__CFGS, (p13, p2)
-    if data.get("bucket") is None:
+    rg = bool(data.get("rg")) and _moe_TW_CFG and data.get("gather_norm") is not None and data.get("bucket") is None
+    if rg:  # layer s52: route + gathern in one launch below
+        pass
+    elif data.get("bucket") is None:
         lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
     else:  # layer s27: bucketed on the layer's router stream (meta, sroutes of moe_route_launch)
         meta, sroutes = data["bucket"]
@@ -8978,7 +8981,10 @@ def _moe_kernel_fn(data, st):
         # inter here holds gemm2's B in the K-permuted order (see moe_tw)
         rt = 2 if _moe_TW_CFG >= 1000 else _moe_TW_CFG // 100
         xg = torch.empty((M * _moe_TOP_K, _moe_H), dtype=torch.bfloat16, device=dev)
-        if data.get("gather_norm") is None:
+        if rg:
+            assert st["start"] == 0
+            lib.moe_routegathern_launch(ids, st["count"], x, *data["gather_norm"], meta, sroutes, xg, data["gather_eps"])
+        elif data.get("gather_norm") is None:
             lib.moe_gather_launch(x, meta, sroutes, xg)
         else:  # layer s27 GNORM: x = the pooler output; the pre-expert rmsnorm happens in the gather
             lib.moe_gathern_launch(x, *data["gather_norm"], meta, sroutes, xg, data["gather_eps"])
@@ -9432,6 +9438,9 @@ ROUTING_WARPS_1_MIN_TOKENS = 33  # s39: _routing on 1 warp (shuffle-only reducti
 ROUTE_PDL = True  # s39: moe_route as a PDL secondary of _routing at T > 32 (see the moe_route patch); _routing as a PDL
 # secondary of the router (pr3 at T=128; _router_split at ROUTE_PDL_SPLIT_TOKENS)
 ROUTE_PDL_SPLIT_TOKENS = (16, 32)
+RG_DEFAULT = False  # s52: T > 32 with GNORM: route + gathern in one launch (moe_routegathern; moe s33 RG); TUNE option "rg" at
+# T=256 (H100 ab v32 sl/full with twf_split 1022: -4.6/-7.1, with 66: -5.5/-8.3 us; alone ~tie). T=128: +1.8 us (the
+# bucketing is hidden on the side stream there; RG puts it on the main path)
 BKT_DEFAULT = True  # s27 (H100 ab_files 4 rounds: v32 404.2/652.6 -> 401.2/649.5, v16 tie; H200 router ends ~14 us before the pooler): T > 32: moe_route on the router's stream (before the join); moe_src kernel_fn takes data["bucket"]
 BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
 TK2_MAX_TOKENS = 32  # moe's TMA decode kernel (moe_tk2: route fused into gemm13, 3 launches) at T <= this
@@ -9503,7 +9512,8 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
         out = _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                               "config": {"local_start": 0, "local_count": LOCAL_EXPERTS},
                               "bucket": bucket if m > 32 else None,
-                              "gather_norm": (state["pre_expert"],) if gnorm else None, "gather_eps": RMS_EPS}, st)
+                              "gather_norm": (state["pre_expert"],) if gnorm else None, "gather_eps": RMS_EPS,
+                              "rg": gnorm and bucket is None and _opt(state, m, "rg", RG_DEFAULT)}, st)
         if upf:
             lib.moe_set_upf(0, 0, 0, 0)
         return out
@@ -12465,6 +12475,127 @@ int64_t moe_gathern_launch(torch::Tensor x, torch::Tensor gain, torch::Tensor me
 }
 """ + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_gathern_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double);"
+# s52 RG (moe s33 moe_routegather, r-moe 7ac1069) merged with GNORM: moe_route + moe_gathern in ONE launch, one CTA per
+# token. Every CTA counts all routes per local expert (and those of earlier tokens) itself, so a route's sorted position
+# = base[e] + #earlier routes to e (stable (expert, route) order, no cross-CTA sync); CTA 0 writes meta (= moe_route's
+# fields); each CTA normalizes its token's row ONCE (moe_gathern's numerics) and writes it to each of its routes' slots.
+# ids / X are PDL-producer data: __ldcg only (NOTES s14: .nc loads get hoisted above griddepcontrol.wait).
+_a = "int64_t moe_gathern_launch(torch::Tensor x, torch::Tensor gain, torch::Tensor meta, torch::Tensor sroutes,"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, r"""template <bool F32>
+__global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nroutes, int count, const void* X,
+                                                        const float* __restrict__ gain, int* __restrict__ meta,
+                                                        int* __restrict__ sroutes, uint32_t* __restrict__ XG, float eps, long xs) {
+  __shared__ int cnt[32], pre[32], s_pos[8];
+  __shared__ float s_r[8];
+  const int tid = threadIdx.x, tok = blockIdx.x, lane = tid & 31;
+  if (tid < 32) { cnt[tid] = 0; pre[tid] = 0; }
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  __syncthreads();
+  const int lim = tok * 8;
+  for (int i = tid; i < ((nroutes + 255) & ~255); i += 256) {  // uniform trip count: __match_any_sync below
+    const int e = i < nroutes ? __ldcg(ids + i) : -1;
+    const bool v = e >= 0 && e < count;
+    const unsigned m = __match_any_sync(0xffffffffu, v ? e : -1);
+    const unsigned mp = __match_any_sync(0xffffffffu, (v && i < lim) ? e : -1);
+    if (v && (__ffs(m) - 1) == lane) atomicAdd(&cnt[e], __popc(m));
+    if (v && i < lim && (__ffs(mp) - 1) == lane) atomicAdd(&pre[e], __popc(mp));
+  }
+  // this token's row: load + sum of squares while the counts settle
+  const size_t row = (size_t)tok;
+  float v[KD / 2 / 256][2];
+  int sw[KD / 2 / 256];
+  float ss = 0.f;
+#pragma unroll
+  for (int i = 0; i < KD / 2 / 256; ++i) {
+    const int o = tid + 256 * i, w = o & 31, t = w & 3, jh = w >> 2;
+    sw[i] = (o & ~31) | (8 * t + jh);
+    float2 f;
+    if constexpr (F32) {
+      f = __ldcg(reinterpret_cast<const float2*>(X) + row * xs + sw[i]);
+      f = __bfloat1622float2(__float22bfloat162_rn(f));
+    } else {
+      const uint32_t u = __ldcg(reinterpret_cast<const unsigned int*>(X) + row * xs + sw[i]);
+      f = __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(&u));
+    }
+    v[i][0] = f.x; v[i][1] = f.y;
+    ss = fmaf(f.x, f.x, fmaf(f.y, f.y, ss));
+  }
+#pragma unroll
+  for (int o = 16; o; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
+  if (lane == 0) s_r[tid >> 5] = ss;
+  __syncthreads();
+  if (tid < 32) {
+    const int c = cnt[tid];
+    int incl = c;
+#pragma unroll
+    for (int o = 1; o < 32; o <<= 1) {
+      const int u = __shfl_up_sync(0xffffffffu, incl, o);
+      if (tid >= o) incl += u;
+    }
+    const int b = incl - c;
+    pre[tid] += b;
+    if (tok == 0) {
+      meta[33 + tid] = b;
+      if (tid == 31) { meta[65] = incl; meta[66] = 0; meta[67] = 0; }
+      meta[68 + tid] = 0;
+      int rank = 0;
+      for (int j = 0; j < 32; ++j) {
+        const int cj = __shfl_sync(0xffffffffu, c, j);
+        rank += (cj > c) || (cj == c && j < tid);
+      }
+      const int na = __popc(__ballot_sync(0xffffffffu, c > 0));
+      if (tid == 0) meta[0] = na;
+      if (tid >= na) meta[1 + tid] = 0;
+      __syncwarp();
+      if (c > 0) meta[1 + rank] = tid;
+    }
+  }
+  __syncthreads();
+  if (tid < 8) {
+    const int e = __ldcg(ids + lim + tid);
+    int pos = -1;
+    if (e >= 0 && e < count) {
+      pos = pre[e];
+      for (int j = 0; j < tid; ++j) pos += __ldcg(ids + lim + j) == e;  // repeated ids in a token (not from topk)
+      sroutes[pos] = lim + tid;
+    }
+    s_pos[tid] = pos;
+  }
+  float tot = 0.f;
+#pragma unroll
+  for (int w = 0; w < 8; ++w) tot += s_r[w];
+  const float r = rsqrtf(tot / KD + eps);
+  uint32_t o32[KD / 2 / 256];
+#pragma unroll
+  for (int i = 0; i < KD / 2 / 256; ++i) {
+    const float2 g = __ldg(reinterpret_cast<const float2*>(gain) + sw[i]);
+    const __nv_bfloat162 b = __floats2bfloat162_rn(v[i][0] * r * g.x, v[i][1] * r * g.y);
+    o32[i] = *reinterpret_cast<const uint32_t*>(&b);
+  }
+  __syncthreads();
+#pragma unroll
+  for (int s = 0; s < 8; ++s) {
+    const int pos = s_pos[s];
+    if (pos < 0) continue;
+    uint32_t* dst = XG + (size_t)pos * (KD / 2);
+#pragma unroll
+    for (int i = 0; i < KD / 2 / 256; ++i) dst[tid + 256 * i] = o32[i];
+  }
+}
+int64_t moe_routegathern_launch(torch::Tensor ids, int64_t count, torch::Tensor x, torch::Tensor gain, torch::Tensor meta,
+                                torch::Tensor sroutes, torch::Tensor xg, double eps) {
+  TORCH_CHECK(x.size(1) == KD && x.stride(1) == 1 && x.stride(0) % 2 == 0 && gain.numel() == KD && ids.numel() == 8 * x.size(0),
+              "moe_routegathern: shape");
+  const long xs = (long)(x.stride(0) / 2);
+  auto k = x.scalar_type() == at::kFloat ? moe_routegathern<true> : moe_routegathern<false>;
+  return launch_k(k, (int)x.size(0), 256, 0, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+      (const int*)ids.data_ptr(), (int)ids.numel(), (int)count, (const void*)x.data_ptr(), (const float*)gain.data_ptr(),
+      (int*)meta.data_ptr(), (int*)sroutes.data_ptr(), (uint32_t*)xg.data_ptr(), (float)eps, xs);
+}
+""" + _a)
+_moe__CPP = _moe__CPP + "int64_t moe_routegathern_launch(torch::Tensor, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double);"
 # s39 ROUTE_PDL: moe_route as a PDL secondary of the routing (which triggers at its start): its launch and smem setup
 # overlap the routing. It waits before reading ids, read with __ldcg (an __ldg/.nc load gets hoisted above the wait,
 # NOTES s14). Without the PDL attribute (moe_src's own paths) the wait is a no-op.
@@ -12499,7 +12630,7 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
-                                           "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch",
+                                           "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch", "moe_routegathern_launch",
                                            "moe_set_hot", "moe_hot_launch"],
                                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                                 extra_cflags=["-O3"], verbose=False)
@@ -13535,7 +13666,7 @@ def _g19_prepare(state):
 # each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
 # ctx 80000 like the scored ones). Options (defaults = no entry):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
+# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); rg (bool) RG (s52); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
@@ -13563,7 +13694,8 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
               {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
               {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True}, {"twf_split": 66},
               {"twf_split": 66, "twm_order": 76}, {"twf_split": 1022}, {"twf_split": 1022, "twm_order": 76}, {"fr": False},
-              {"fr": False, "twm_order": 76}, {"fr": False, "twm_order": 76, "lt:unpool": True}, {"hot": 0}, {"hot": 24}, {"hot": 40})}
+              {"fr": False, "twm_order": 76}, {"fr": False, "twm_order": 76, "lt:unpool": True}, {"hot": 0}, {"hot": 24}, {"hot": 40},
+              {"rg": True}, {"rg": True, "twf_split": 1022}, {"rg": True, "twf_split": 66})}
 # s35: per-(T, sliding) defaults under the tuner (the tune pick overrides them; {} = these): the picks both logged H200
 # tuners of 909010f (0f065691, 703d3a7e) agreed on, so a noisy judge tuner can't fall back to the slower setting.
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
@@ -13997,8 +14129,9 @@ def kernel_fn(data, state):
         wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
         # s37: T > 32: moe_route right after the routing, the pre-expert rmsnorm inside moe_gathern (strided FP32 rows)
         gnorm = (tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and _opt(state, tokens, "gnorm", GNORM_DEFAULT))
-        bkt = gnorm and _opt(state, tokens, "bkt", BKT_DEFAULT)
-        rpdl = bkt and _opt(state, tokens, "route_pdl", ROUTE_PDL)
+        rg = gnorm and _opt(state, tokens, "rg", RG_DEFAULT)
+        bkt = gnorm and not rg and _opt(state, tokens, "bkt", BKT_DEFAULT)
+        rpdl = (bkt or rg) and _opt(state, tokens, "route_pdl", ROUTE_PDL)
         _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
                             E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
                             SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, TRIG=rpdl, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2)
@@ -14038,7 +14171,8 @@ def kernel_fn(data, state):
         side_stream.wait_stream(main_stream)
         with torch.cuda.stream(side_stream):
             bkt = _use_moe(tokens) and (TK2_MAX_TOKENS < tokens <= BUCKET_SIDE_MAX_TOKENS
-                                        or tokens > 32 and _moe_TW_CFG and _opt(state, tokens, "bkt", BKT_DEFAULT))
+                                        or tokens > 32 and _moe_TW_CFG and _opt(state, tokens, "bkt", BKT_DEFAULT)
+                                        and not _opt(state, tokens, "rg", RG_DEFAULT))
             rpdl = bkt and _opt(state, tokens, "route_pdl", ROUTE_PDL)
             topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens, trig=rpdl)
             # The experts' bucketing too, off the main stream's path.

@@ -1035,3 +1035,19 @@
 Budget 0/0 left (okc problems), sandbox ends ~19:10Z, past the 18:30Z push cutoff: no build started (a RG port onto the
 patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9954x (703d3a7e = v70); #1 2.380x; #10 2.208x
 (up from 2.180x at 17:00Z). main = v88 unchanged; next sandbox: STATE "FIRST THING" list as is (check v88 first).
+
+## s52 (2026-10-26 19:12Z-, sandbox okc-night4, session 1): v89 = v88 + RG (moe s33) merged with GNORM, T=256 TUNE option
+- New sandbox works: v88 rebuilt from git, bench test 13/13. Layer budget for 10-26 still 0/0 (resets 00:00Z).
+- moe_routegathern (layer.py moe patch, after moe_gathern): moe s33 RG (route + gather, one CTA per token, stable
+  route order) merged with moe_gathern's pre-expert rmsnorm on strided FP32 / BF16 pooler rows: one launch instead of
+  moe_route (PDL secondary of _routing) + moe_gathern, and each token's row is normalized ONCE (gathern: once per route).
+  Fix vs moe's version: ids/X read with __ldcg (moe's reads ids via const __restrict__ after griddepcontrol.wait: the
+  s14 .nc-hoist hazard). moe_src kernel_fn: data["rg"] skips moe_route and launches it in place of moe_gathern.
+- tools/rg_eq.py: RG vs non-RG outputs + KV writes bitwise on v16/v32 + T=33/40/48, fr on/off, 3 seeds: every DIFF also
+  differs in the non-RG control (baseline FP32-atomics nondeterminism at T=128 pr3 / T=33), one T=33 case 5.8e-5 only.
+  RG forced: bench test 13/13, scored_test verify x3 seeds 0 bad, replay_test verify 32 0/40.
+- H100 ab (forced tune at T=256, us sl/full): {} 389.7/630.3 vs rg 390.8/627.6 (tie); twf_split 1022 387.1/622.2 vs
+  + rg 379.6/617.7; reversed 8 rounds: split1022 384.2/623.2 vs +rg 379.5/616.1, split66 384.1/623.9 vs +rg 378.6/615.6.
+  => rg wins only together with twf_split: -4.6..5.5 sl, -7..8 full (~+0.2% score if the H200 agrees).
+  T=128: rg (RG_DEFAULT) +1.8 us v16 (bucketing is hidden on the side stream there): no T=128 option.
+- TUNE[256] += {rg}, {rg, twf_split 1022}, {rg, twf_split 66}. H100 tuner picked {rg, twf_split 1022} for both layer types.

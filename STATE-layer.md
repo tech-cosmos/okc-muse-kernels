@@ -1,10 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 18:30Z (session 51: notes only, main unchanged; board 18:27Z #46 1.9954x, #1 2.380x, #10 2.208x). **main = v88 (v87 + proj s36 pr8 npf 212), NOT judge-checked** (layer budget for 10-26 spent:
+Updated 2026-10-26 19:30Z (s52, sandbox okc-night4: v89 = v88 + RG at T=256 as TUNE option). **main = v89 (v88 + moe RG/gathern fused, T=256 TUNE), NOT judge-checked** (layer budget for 10-26 spent:
 20/20 checks, 10/10 submits). Board 17:00Z: we are **#45 at 1.9954x** (703d3a7e = v70); #1 2.380x (9,505 us/step), #10 2.180x.
 
 ## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
-1. `okc check muse_decode_layer/submission.py --json` on main (v88). Compare per shape vs 703d3a7e (d1 69.6/77.8,
+1. `okc check muse_decode_layer/submission.py --json` on main (v89). Compare per shape vs 703d3a7e (d1 69.6/77.8,
    d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5; tools/ckparse.py). Expected:
    v32 -8..14 us (moe_hot), v1 -1.6..1.9 (pr8 npf 212), g19 shapes -0.5..1.5 us (DEC3/DEC4), d1 -1..2 (evict_last, g13o). Submit if > 1.9954x.
 2. Copy the profile's 'layer tune' lines into NOTES (T=1 g13o for proj; T=256 hot 0/24/32/40 for moe; T=8 g19 picks).
@@ -15,6 +15,9 @@ Updated 2026-10-26 18:30Z (session 51: notes only, main unchanged; board 18:27Z 
    v32 tie). NOT a plain re-copy: layer's moe_src is patched (s21 L2H, s29 hot diff, v81 route PDL, v77 strided
    moe_gathern for the fused pooler+router at T=256): port RG's kernel + RG flag onto moe_src, keep the strided-row read,
    make it a TUNE option at T=128/256, A/B with tools/ab_flag.py, then stack into a check.
+   **DONE s52 = v89** (main): moe_routegathern, T=256 TUNE options {rg}, {rg, twf_split 1022/66}; H100 v32 -4.6..5.5 sl,
+   -7..8 full with twf_split (NOTES s52). So the first check next budget is on v89 (not v88): look for the H200 tuner's
+   T=256 pick ('layer tune T=256' lines) and v32 per-shape vs 703d3a7e.
 
 Mains since the board best (v70), all H100-validated (bench test 13/13, replay_test + route_judge 0 fails), details in
 NOTES s32-s44: v71 BND_SPLIT | v72 O_PF (d32/v16 sl) | v73 moe TK2F_L2H | v74 pr1_npf 0 at T=1 | v75 TUNE_BASE (H200-agreed
