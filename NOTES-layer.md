@@ -658,3 +658,23 @@
   209.9/313.8, d32 205.7/433.8 -> 203.7/432.0. Default ON, TUNE {tk2fj: False}. (moe's H200 stamps: tk2f d1 routed 1.5,
   first data 3.6 us after start: the H200 may gain more than the H100.)
 - Tests 13/13; scored d1/v1/d16/d32 x3, replay 0/30 x2 seeds, forced T=8 with and without nu8.
+- v64 (2ca2d30) RF_TRIG: attention's _red_fin (decode 1 full, 1 program) triggers its PDL dependents right after its
+  own gdc_wait, so the o gemv10 (already a PDL secondary, W preload before its wait) overlaps the merge instead of
+  launching at _red_fin's exit. (s4's dead variant triggered at entry: o then fought _gd_full.) attn_src.py edited
+  (TRIG constexpr; layer sets attn global RF_TRIG per call from _opt "rf_trig"). ab_files d1 full: 113.0 -> 109.9 (8),
+  112.3 -> 110.7 (4), 112.1 -> 110.5 (6). Default ON, TUNE {rf_trig: False} at T=1.
+- DEAD: CB_TRIG = the same for verify 1 full (_combine triggers after its wait + o g12 as PDL secondary): +0.7 us
+  (o's CTAs crowd the 512-program combine: combine 2.4 -> 6 us). Reverted.
+- v65 (4fb5d01) BKT: at T=128/256 moe_route runs on the router's stream right after _routing (before the join); moe_src
+  kernel_fn takes data["bucket"] = (meta, sroutes) (2-line edit in moe_src.py: re-apply on re-copy!). The old dead
+  "side-stream bucketing at T>=128" fell back to the gemm13/gemm2 path (`bucket is None` condition). H200 v16/v32: router
+  8-11 us vs pooler 23-32, so moe_route (1.8/2.7 us) leaves the critical path. H100 v32 -3.0/-3.2, v16 tie. Default ON.
+- v66 (33608f5) GNORM: at T>32 the pre-expert rmsnorm is fused into the gather (moe_gathern<F32>, layer text patch into
+  moe's lib; moe_src kernel_fn takes data["gather_norm"]/["gather_eps"] (edit in moe_src.py: re-apply on re-copy!)):
+  each gathered row normalizes its source token from the pooler output (FP32 math, BF16-rounded input as ROUND).
+  Outputs differ from the separate rmsnorm in 0.3-0.4% of elements (reduction-order ulps in p; main vs main is
+  bit-identical at v32). H100 v16 0/-2.8, v32 -2.1/-2.0. Default ON, TUNE {gnorm: False}.
+- Cold compile + prepare on this H100 (fresh TORCH_EXTENSIONS_DIR / TRITON_CACHE_DIR): import 92 s, prepare 162 s (incl.
+  the tuner), 4.3 min total.
+- Ideas not done: fuse the d16 qkv g19 FP32->BF16 cast (1.2 us) into csl (attention kernel reads BF16 qkv; ~0.1%);
+  _routing + moe_route in one kernel at T>32 (now off the H200 critical path anyway).
