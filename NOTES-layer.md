@@ -191,3 +191,28 @@
   the kernel names in `bench.py prof` after touching the GEMV build.
 - 2026-10-26 00:11Z submit 81e501e9 (v20, 164ea45): **1.8815x, 12,023 us** (was 1.728x): d1 81.8/89.6, d16
   162.6/238.9, d32 191.7/339.5, v1 138.4/148.0, v16 279.5/354.9, v32 349.7/527.5. Budget 10-26: 1 submit, 0 checks.
+
+## Session 7 (2026-10-26 00:12-~01:30Z)
+- v21 (f57c3be; local d5b0dec before rebase): moe_src.py = r-moe 60d4a66 (= 128b11a after moe's rebase): moe_tk2f, decode
+  gemm13+gemm2 in ONE launch (per-segment done counters st['cnt'], zeroed by moe_norm2; the layer's one moe state is
+  stream-ordered, fine). moe's race fix (gemm2 waits for all gemm13 rows) included. tools/tk2f_stress.py: 600 random
+  routings T=1/8/16/32, tk2f vs 3-launch tk2 bitwise equal. H100 (2 interleaved rounds) d1 101.4->97.5, d16 230->226,
+  d32 221->217, v1 165->161 us. check f72eff30 **1.8834x, 12,011 us** (board v20 1.8815): d1 77.8/85.1, d16 160.8/233.2,
+  d32 196.4/346.5, v1 123.9/138.4, v16 280.3/371.6, v32 367.2/542.9. v1 sliding -12 us vs v20's check; d16/d32 flat
+  on the judge (H100 said -4); v16/v32 (unchanged code) +3% = noise. Total = tie.
+- v22 (3fab554): proj 3f173eb's bit-exact 12-bit escape headers (human decision 10-25T23:30Z): g13_src.cu/g14_src.cu
+  re-extracted verbatim (tools: extract _G13_SRC/_G14_SRC from r-proj submission), _compress = proj's (true/scale
+  headers, empty slot 2^-15, prepare-time round-trip check -> None = gemv10/12 fallback). tools/esc_probe.py: real
+  qkv/pooler W with injected 0 / -1e-20 / 3e-39 escapes, one-hot x at the escape col: g13 and g14 outputs bit-equal to
+  W[:, col] (0 mismatches); random x rel err 1.6e-3 (BF16 output rounding). 13/13 tests.
+- FUSED_ROUTER_TOKENS (522da14, OFF): SGLang's router above 8 tokens is BF16 h x BF16 hi/lo split (baseline.py), so
+  pooler + router = ONE GEMM of h against [pooler; hi; lo] (4608 x 8192, FP32 out; routing sums hi+lo columns via
+  strides, rmsnorm rounds the pooler part to BF16 first). No side stream. H100 tie: d32 pooler-to-rmsnorm 38.0 vs 38.3
+  us (GEMM 30.8 + splitK reduce 2.1 + routing 3.4 + rmsnorm 1.7); bench d32 +1.5, v16 full +5, v32 -2..-10. Microbench
+  (cold L2): fused = pooler alone + 3 us at every T (the router's 8 MB at HBM rate) and no orientation helps. To win it
+  needs a better GEMM than cuBLAS's heuristic for [T, 4608] FP32 out (proj's lt with Ctype 32F + tuning).
+- Not done: proj's router2 (r-proj e605717, m8 9.8 -> 6.5 us H100) takes BF16 x; SGLang's router input up to 8 tokens
+  is FP32 (FusedPostNormResidualPreNorm writes it), so the layer needs an FP32-x variant; x in registers doubles
+  (M=8, T=512: 128 regs for x alone): split tokens 2 x 4 per block, or x via L1 per j. ~2 us on v1 only.
+- Ops lesson: `okc check` blocks ~20-40 min when the judge queue is busy: run it with run_in_background and a 1 h
+  timeout; if the client dies, `okc jobs` + `okc status <job> --json` recover the result.
