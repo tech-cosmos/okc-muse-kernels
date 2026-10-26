@@ -48,6 +48,7 @@ _G15_SRC = r'''@@GEMV15@@'''
 _G16_SRC = r'''@@GEMV16@@'''
 _G19_SRC = r'''@@GEMV19@@'''
 _G20_SRC = r'''@@GEMV20@@'''
+_G22_SRC = r'''@@GEMV22@@'''
 _G17_SRC = r'''@@GEMV17@@'''
 _G21_SRC = r'''@@GEMV21@@'''
 _R3_SRC = r'''@@ROUTER3@@'''
@@ -124,6 +125,10 @@ DIAG19Q_S15 = {"qkv_gate": [(16, 1024, 4, 4, 4, 2, 1, 8, 1), (16, 1024, 8, 3, 3,
                             (32, 1024, 4, 4, 4, 1, 1, 8, 1)]}
 DIAG19Q = {}
 DIAG19_STREAM = []  # (stage bytes, stages): 50 MB bare streams
+# gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
+# run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
+# (m, ap, ns, E). H100: qkv m128 20.8 vs cuBLAS 20.6, others lose (H100 TMA stream ~2.9 TB/s); built for the H200.
+BF16_G22 = {l: [(128, 2, 6, 32), (128, 4, 3, 32), (256, 2, 4, 32), (256, 2, 3, 32)] for l in ("qkv_gate", "o", "pooler", "unpooler")}
 _SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _LAYER_K = {"qkv_gate": 8192, "o": 1024, "pooler": 8192, "unpooler": 4096}
 # BF16 tensor-core streaming GEMM configs per layer: (m, kcu, wg, pf, bk, xp, xr), chosen on the H100 (dev/g12.py).
@@ -190,6 +195,16 @@ try:
 except Exception as _e:  # noqa: BLE001
     print("muse_proj gemv19 build failed:", _e)
     _g19 = None
+
+try:
+    _g22 = load_inline(
+        name="muse_proj_g22a",
+        cpp_sources="void g22_gemm(torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+        cuda_sources=_G22_SRC.replace("G22_CONFIGS", " ".join("G22_CASE(%d,%d,%d,%d)" % c for c in sorted({c for v in BF16_G22.values() for c in v}))),
+        functions=["g22_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"]) if BF16_G22 else None
+except Exception as _e:  # noqa: BLE001
+    print("muse_proj gemv22 build failed:", _e)
+    _g22 = None
 
 _g20 = {}
 for _v, _defs in [v for v in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_SB\n#define G20_NPB 1\n"), ("c", "")) if v[0] in DIAG20]:
@@ -336,8 +351,44 @@ def _pack19(c, kc, ap, rg=8, tm=0):
     return torch.cat([S, N], 1).contiguous(), hdr, scale
 
 
+def _pack22(c, ap, E):
+    """_compress output -> gemv22 stages, tile-major (u = 128-row tile * S + ks, S = k / 32ap): [8 row groups x ap atoms x
+    32 lanes x 16 B sign|mantissa][same x 8 B codes][E escapes: int32 (row in tile | k in stage << 8, true / scale bits),
+    padding (-1, 0)]. None if a stage has more than E escapes."""
+    code, sm, hdr, scale = c
+    n, k = code.shape
+    kc = 32 * ap
+    P, _, _ = _pack19(c, kc, ap, 8, 1)  # tm: (tile, ks, st), one stage per k-chunk
+    ks, ntr = k // kc, n // 128
+    EV = torch.full((ks * ntr, E, 2), -1, dtype=torch.int32, device=code.device)
+    EV[:, :, 1] = 0
+    rows, slots = (hdr[:, :, 1] != 2.0 ** -15).nonzero(as_tuple=True)
+    if len(rows):
+        col = hdr[rows, slots, 0].view(torch.int32).long()
+        u = (rows // 128) * ks + col // kc
+        o = torch.argsort(u * (1 << 20) + rows * 8 + slots)
+        rows, col, u, hy = rows[o], col[o], u[o], hdr[rows[o], slots[o], 1]
+        rank = torch.arange(len(u), device=code.device) - torch.searchsorted(u, u)
+        if int(rank.max()) >= E:
+            return None
+        EV[u, rank, 0] = ((rows % 128) | ((col % kc) << 8)).int()
+        EV[u, rank, 1] = hy.view(torch.int32)
+    return torch.cat([P, EV.view(torch.uint8).view(ks * ntr, -1)], 1).contiguous(), scale
+
+
 def prepare(weights):
     st = {name: w.contiguous() for name, w in weights.items()}
+    if _g22 is not None:
+        for name, cfgs in BF16_G22.items():
+            c = _compress(weights[name])
+            if c is None:
+                continue
+            for cf in cfgs:
+                if ("g22", name, cf[1], cf[3]) not in st:
+                    pk = _pack22(c, cf[1], cf[3])
+                    if pk is not None:
+                        st[("g22", name, cf[1], cf[3])] = pk
+        st["ws22"] = torch.zeros(256 * 8192, dtype=torch.float32, device=weights["o"].device)
     if _g19 is not None:
         for name in BF16_G19:
             cfgs = BF16_G19[name] + DIAG19.get(name, [])
@@ -428,6 +479,11 @@ def _run(st, layer, x, out, cand):
         o32 = st["ws19"][:out.numel()].view(out.shape)
         _g19.g19_gemm(P, hdr, scale, x, o32, st["ctr19"], c[1], c[2], c[3], 1, _SMS, 0, 2, c[4], *c[5:])
         _g19.g19_cvt(o32, out)
+    elif kind == "g22":
+        P, scale = st[("g22", layer, c[1], c[3])]
+        o32 = st["ws22"][:out.numel()].view(out.shape)
+        _g22.g22_gemm(P, scale, x, o32, c[1], c[2], c[3], _SMS, 0, 0)
+        _g19.g19_cvt(o32, out) if _g19 is not None else out.copy_(o32)
     elif kind == "g17":
         _mod.g17_gemv(st[layer], x, out, *c)  # W[:n] prefix rows, in place
     elif kind == "g12":
@@ -484,6 +540,11 @@ def _tune(st, reps=25):
             for c in cfgs:
                 if ("g19", layer, c[1], c[2], c[7]) in st:
                     shapes.setdefault((layer, c[0]), []).append(("g19", c))
+    if _g22 is not None:
+        for layer, cfgs in BF16_G22.items():
+            for c in cfgs:
+                if ("g22", layer, c[1], c[3]) in st:
+                    shapes.setdefault((layer, c[0]), []).append(("g22", c))
     if _lt is not None:
         for key, cfgs in BF16_LT.items():
             shapes.setdefault(key, []).extend(("lt", c) for c in cfgs)

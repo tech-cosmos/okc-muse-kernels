@@ -33,7 +33,19 @@ def state():
         _W = reference.generate_weights(reference.WEIGHTS_SEED)
         _STATE = submission.prepare(_W)
         torch.cuda.synchronize()
+        _force(_STATE)
     return _W, _STATE
+
+
+def _force(st):
+    """FORCE=g22: use the first packed gemv22 config at m 128/256 (correctness tests of a kernel the tuner did not pick)."""
+    if os.environ.get("FORCE") == "g22":
+        for layer, cfgs in submission.BF16_G22.items():
+            for c in cfgs:
+                if ("g22", layer, c[1], c[3]) in st and (layer, c[0]) not in st.get("_forced", set()):
+                    st["pick"][(layer, c[0])] = ("g22", c)
+                    st.setdefault("_forced", set()).add((layer, c[0]))
+        print("forced:", sorted((k, v) for k, v in st["pick"].items() if v[0] == "g22"))
 
 
 def test():
@@ -72,8 +84,9 @@ def test_esc():
         print(name, "compressed" if from_sub(w[name]) is not None else "FALLBACK (uncompressed)", flush=True)
     _W, _STATE = w, submission.prepare(w)
     torch.cuda.synchronize()
+    _force(_STATE)
     bad = 0
-    for i, (m, layer) in enumerate([(m, l) for m in (1, 8, 16, 32) for l in LAYERS[:4]]):
+    for i, (m, layer) in enumerate([(m, l) for m in (1, 8, 16, 32) + ((128, 256) if os.environ.get("FORCE") else ()) for l in LAYERS[:4]]):
         data = reference.generate_input(m, layer, seed=99 + i, dist="normal")
         sp = list(range(0, m, max(1, m // 8)))  # spike rows: x = 8 at an escape column -> out = 8 * W[:, col] exactly
         for j, r in enumerate(sp):
@@ -84,6 +97,8 @@ def test_esc():
         ok, msg = reference.check_implementation(data, out, w)
         ref = reference.ref_kernel(data, w)
         exact = torch.equal(out[sp].view(torch.int16), ref[sp].view(torch.int16))
+        if m >= 128 and not exact:  # gemv22 adds escape fixups by separate FP32 red.adds (ordinary rounding): near-exact
+            exact = bool(((out[sp].float() - ref[sp].float()).abs() <= ref[sp].float().abs() * 2 ** -7 + 1e-12).all())
         ok = ok and exact
         bad += not ok
         print(f"{'PASS' if ok else 'FAIL'} esc m={m} {layer}: spike rows exact {exact}; {msg}", flush=True)
