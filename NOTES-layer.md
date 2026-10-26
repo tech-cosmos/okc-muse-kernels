@@ -1355,3 +1355,12 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   just after the pooler) | rmsnorm 2 | tk2f 98.7 | norm2 +3.8 | g24sk unpool ends +21 after tk2f | bnd 2.7. The remaining lever at
   d32 is tk2f (moe) and the unpool weight stream after it (can't be prefetched: dead s14/s15/s55).
 - Next session at/after 00:00Z: FIRST CHECK = main v102 (STATE "FIRST THING").
+
+## s67 (2026-10-26 22:46Z-, sandbox okc-night4, session 16): pre-check stress of main v102 (no code change yet)
+- Handoffs: nothing new since s66. RG at T=128 was already measured (s52: +1.8 us v16): not re-added.
+- H100 v1 sliding timeline (v102): g14 qkv 0-14.8 | vtk 15.3-21.8 | o g12 -29.4 | bnd -34.0 | pr8 22.5-55.3 | rmsnorm
+  -56.7 | tk2f 55.7-139.1 (83 us: moe lane) | nu8 -144.3 | bnd -147.0. The 8 us tail = known dead fusions (s8/s14/s15).
+- Whole-replay stress over all 12 scored shapes, router seeds 5,17, 20 inputs each: tools/replay_test.py 0/480,
+  tools/route_judge.py 0/480 (worst pick gap 0.034 at v32 sl seed 17 = the FP8 reference's own 0.034; limit 0.05).
+- H100 tuner (shared GPU, noisy: T=32 sl default 222.5 vs 235.7 us across two runs) picks tk2h 3/4 (+lt:o) at T=32 sl
+  in both runs (-5..-8 us): watch the H200 'layer tune T=32' line in the 00:00Z check.
