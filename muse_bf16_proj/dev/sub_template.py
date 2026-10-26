@@ -47,10 +47,14 @@ _G14_SRC = r'''@@GEMV14@@'''
 _G15_SRC = r'''@@GEMV15@@'''
 _G16_SRC = r'''@@GEMV16@@'''
 _G17_SRC = r'''@@GEMV17@@'''
+_R3_SRC = r'''@@ROUTER3@@'''
 _LT_SRC = r'''@@LT@@'''
 
 # Router FP32 kernel configs (mp, rows per block, threads), dev/router2.cu, chosen on the H100 (dev/r2.py).
 ROUTER_F32 = [(1, (1, 2, 512)), (8, (8, 2, 512))]
+# Router hi/lo one-kernel split-K GEMM (dev/router3.cu: tiles MT x NT, WM x WN warps, KC, stages), chosen on the H100
+# (dev/r3.py): m9-16 6.9 (g7 8.5-8.9), m32 7.2-7.7 (g7 10.3), m128 9.6-10.9 (cuBLAS 3 kernels 12.2-12.6); m256 ties cuBLAS.
+ROUTER_R3 = [(32, (16, 64, 1, 4, 256, 4)), (128, (128, 64, 4, 4, 256, 4))]
 # Router hi/lo tensor-core configs (n, mt, nwr, nwk, stages, na, cluster, token groups), chosen on the H100 (dev/g5.py).
 ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
 # BF16 grid-stride GEMV configs per layer: (m, k, u, nv, minb, pf, blocks), chosen on the H100 (dev/g10.py).
@@ -97,11 +101,12 @@ _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for
         _G14_SRC.replace("G14_CONFIGS", " ".join("G14_CASE(%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G14.values() for c in v}))) + "\n" +
         _G15_SRC.replace("G15_CONFIGS", " ".join("G15_CASE(%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G15.values() for c in v}))) + "\n" +
         _G16_SRC.replace("G16_CONFIGS", " ".join("G16_CASE(%d,%d,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in BF16_G16.values() for c in v}))) + "\n" +
-        _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d,%d)" % c for c in sorted({c + (_LAYER_K[l],) for l, v in BF16_G17.items() for c in v}))))
+        _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d,%d)" % c for c in sorted({c + (_LAYER_K[l],) for l, v in BF16_G17.items() for c in v}))) + "\n" +
+        _R3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for _, c in ROUTER_R3)))
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v13",
+        name="muse_proj_v14",
         cpp_sources="void pj_router2(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
@@ -116,9 +121,11 @@ try:
                     "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                     "void g16_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
                     "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
-                    "void g17_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);",
+                    "void g17_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
+                    "void pj_router3(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, "
+                    "int64_t, int64_t);",
         cuda_sources=_SRC, functions=["pj_router2", "g7_gemv", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "g15_gemm",
-                                      "g16_gemm", "g17_gemv"],
+                                      "g16_gemm", "g17_gemv", "pj_router3"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -263,6 +270,7 @@ def prepare(weights):
     st["router_hl_t"] = torch.cat([hi, lo], 0).t().contiguous()  # [k, 512]: one GEMM gives both halves
     # [stripe][k-tile][hi/lo][lane][8]: a 16x16 tile's mma A fragments, 512 contiguous bytes
     st["router_hl_p"] = torch.stack([_pack(hi), _pack(lo)], 2).contiguous()
+    st["router_hl2"] = torch.stack([hi, lo]).contiguous()  # [2, 256, k] for router3
     # Split-K workspace and per-row-block counters: always left zeroed by the kernels.
     st["ws"] = torch.zeros(32 * 8192, dtype=torch.float32, device=r.device)
     st["cnt"] = torch.zeros(1024, dtype=torch.int32, device=r.device)
@@ -397,6 +405,11 @@ def _router(x, st, m):
             if m <= mmax:
                 out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
                 _mod.pj_router2(st["router"], x, out, *cfg)
+                return out
+        for mmax, cfg in ROUTER_R3:
+            if m <= mmax:
+                out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
+                _mod.pj_router3(st["router_hl2"], x.contiguous(), out, *cfg)
                 return out
         for mmax, cfg in ROUTER_HL:
             if m <= mmax:
