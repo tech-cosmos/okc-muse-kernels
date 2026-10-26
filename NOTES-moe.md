@@ -996,3 +996,20 @@
   Queued in DIAG "dec": bal (M > 1) and bal1 (also M = 1). Local DIAG dry run: d16 bal 81.7 vs gs8 83.1, d32 107.0 vs 105.5.
 - If bal wins on the H200 at v1/d16: the layer port is small (moe_src: the PF & 32 lines in tk2f_consume / moe_tk2f +
   dispatch; layer's other kernels after tk2f must zero cnt[64..127] too, as moe_norm2/3 do: check n2u).
+
+## Night4 session 8 (2026-10-26 21:17Z - ~22:20Z, no judge runs: moe checks 20/20 until 00:00Z) -- BAL ported into the layer
+- tools/n8/patch_layer_bal.py <r-layer muse_decode_layer dir>: n7 BAL (tk2f PF & 32: per-segment counters cnt[64 + j],
+  gemm13 rounding rows on the last CTAs, gemm2's on the first) into the layer's moe_src.py + layer.py, in place (asserts
+  every anchor). Launcher: cfg + 1000000 = BAL, SA only: pf 4 (84204) -> PF 36; pf 5 (NU8 85204) -> PF 52 only with
+  #define MOE_BAL_NU8 (not built by default); every other cfg (204 at T=1, tk2h, ...) ignores the bit. Python:
+  moe_src TK2F_BAL_M (set of M) -> _tk2f_cfg adds 1000000; layer TUNE option "bal" (bool), default TK2F_BAL_DEFAULT = False;
+  T=8 nu8 path reads it too. cnt[64..127] is re-zeroed by every tk2f follower in the layer (moe_norm2/3, n2u, nu8 zero 0..127).
+- Tests (/tmp copy of r-layer cef0979 + patch): tools/n8/bal_stress.py (namespaced _moe_kernel_fn, BAL vs not, T 2/5/8/9/
+  16/24/32 x 40 skewed routings x 2 reps): 0/560 differ (bitwise). bench.py test with BAL forced on: 13/13 PASS.
+  (The full layer output is NOT bitwise reproducible even with BAL off: 58/96 off-vs-off differ on scored inputs.)
+- H100 layer harness (tools/ab_flag.py, tuner on, 4 rounds, ABA, 5 seeds, us): decode 16 sliding s1-s5 167.1/166.1/150.7/
+  168.5/166.2 -> 162.6/163.1/150.6/166.9/162.6 (A again 166.5/165.9/150.1/168.3/166.3) = mean -2.4; full 277.5/271.1/297.5/
+  253.3/276.9 -> 274.0/271.6/296.7/255.0/272.9 = mean -1.2. v1 (T=8) tie (+-0.3; the H100 tuner picks nu8d/nu8x False at
+  T=8 -> PF 20 path, BAL not built there). d32 (tools/n8/ab_st.py: tk2h removed from the tuned state vs BAL vs tk2h 4):
+  BAL LOSES, sliding +1.5..11.6 vs plain tk2f (noisy, shared GPU), full mixed. => BAL at T=16 only.
+- Handed to layer (COORD Requests): apply the patch, add {"bal": True} to the T=16 TUNE candidates (the H200 tuner decides).

@@ -70,6 +70,11 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 8 (21:17-22:20Z, no judge runs) -- BAL ported to the layer (NOTES n8)
+- tools/n8/patch_layer_bal.py: BAL into layer moe_src/layer.py (TUNE "bal"; cfg + 1000000; SA pf 4 only). Bitwise 0/560,
+  layer test 13/13. H100 layer d16 ABA 5 seeds: sliding -2.4, full -1.2 us mean; d32 LOSES (+1.5..12); v1 tie. Asked layer
+  for a T=16 TUNE candidate {"bal": True}.
+
 ## Night4 session 7 (20:50-21:50Z, no judge runs) -- tk2f phase transition (NOTES n7)
 - G88 timeline: rows cost the same in both phases; the loss is the transition (wait for the slowest CTA 0.8-2.3 + first
   gemm2 row +0.5-0.8 proxy-us). ILV (rows strided over CTAs) DEAD: each CTA reloads 64 KB x per segment (+200 MB L2->SM).
@@ -102,9 +107,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   hot G (h24/32/40), RG, NORM_EARLY (h32ne0/offne0) at v32/v16, and L2H mode (l2h0/l2h1 vs gs8) at d1/d16/d32/v1.
   n4s5: + h16w0/2/3/4 (GS16 at d16/d32) vs gs8.
 
-## Night4 sessions 1-2 (19:15-19:45Z): NORM_EARLY on main (9898def: post-expert norm runs in twm's drain; H100 v32 -3.3
-  us; layer has it as v90) and the PDL .nc-hoist fix (5960afc: __ldcg for producer data in moe_routegather/moe_norm;
-  audit recipe NOTES n4s2). Both queued in the 00:00Z DIAG (h32ne0/offne0, h32rg0/1).
+## Night4 sessions 1-2: NORM_EARLY on main (9898def) + PDL .nc-hoist fix (5960afc); both in the 00:00Z DIAG (NOTES n4s1/2).
 
 ## Ranked ideas
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
