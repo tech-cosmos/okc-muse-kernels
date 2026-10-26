@@ -92,12 +92,7 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
--4. (s18: DEAD on H200, tuner in check ea9421fa: 120 +8/+11 us) (s16) bundle candidate (judge-only, H100 cannot judge it): pooler G19_GRID 108 -> 120 at T=16 (and 116..120
-   at T=32). Why: in the v44 H200 profile (c6a00da7) the side-stream _router_split takes 5.6/6.5 us (d16/d32) vs 18-19
-   on H100, so on the H200 its 24 SMs idle for ~14 us of the ~21 us pooler. H100 loses (+7/+13 us, expected). Tested
-   correct (tests 13/13, scored decode x2, replay decode 0/60): `variants/sub_v45g.py` = sed of submission.py line
-   `G19_GRID = {("pooler", 16): 120, ("pooler", 32): 120}`. Put it in the next bundle check with per-shape reading
-   (d16/d32 only); keep only the shapes where it wins.
+-4. (s18) DEAD on H200: pooler G19_GRID 108 -> 120 at T=16/32 (tuner check ea9421fa +8/+11 us).
 -3. (s15) Watch Handoffs: proj is building g19 mode 3 (BF16 out, per-tile tickets) for qkv T=16/32 (drops v44's 1.2 us
    cast at d16; m32 lost on H100 so far) and was asked for an M=8 g19 (T=8 qkv: g14 m8 is issue-bound, 13.0 us H200 vs
    g19 m16 10.6). moe works big-M (v16/v32 twm) on its calibrated H200 proxy (H100 with the expert grid capped at 88,
