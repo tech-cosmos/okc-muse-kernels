@@ -2171,13 +2171,13 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"rf_trig": False}, {"g13o": True}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
-             {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}),
+             {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
              {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
-             {"o_pf": 0}),
+             {"o_pf": 0}, {"g19trig": False}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
@@ -2337,7 +2337,7 @@ def _tune(state):
     torch.cuda.empty_cache()
 
 
-def _g19(x, key, state):
+def _g19(x, key, state, trig=False):
     """x @ W.T (key's weight) in FP32 by gemv19 (a PDL dependent of the previous kernel), or None."""
     m = x.shape[0]
     e = state.get("g22", {}).get((key, m)) if _opt(state, m, "g22:" + key, False) else None
@@ -2356,7 +2356,7 @@ def _g19(x, key, state):
     ctr = e[3].get(grid)  # the epoch barrier needs one counter per grid size
     if ctr is None:
         ctr = e[3][grid] = torch.zeros(2, dtype=torch.int32, device=x.device)
-    _G10["lib"].g19_gemm(e[0], e[1], e[2], x.contiguous(), out, ctr, c[1], c[2], c[3], 1, grid, 0, 2, c[4], c[5])
+    _G10["lib"].g19_gemm(e[0], e[1], e[2], x.contiguous(), out, ctr, c[1], c[2], c[3], 1, grid, 0, 2, c[4] | (trig << 16), c[5])
     return out
 
 
@@ -2508,6 +2508,8 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
 _moe_TWM_ORDER_M = {}  # s15: moe's H200 proxy (s16): order 76 at T=256 (r-moe 499bde6 default) loses ~3.6 us at v32
 
 
+G19_TRIG_TOKENS = (16, 32)  # s57: the g19 unpool triggers at start, the second boundary is its PDL secondary
+G19_TRIG_O_TOKENS = (16, 32)  # s57: the same for the g19 o GEMM (T=16 sliding pick) and the first boundary
 BND_SEP_TOKENS = (8,)  # s57 SEP: the T=8 second boundary loads nu8's 8 slabs as an [8, 1024] tile (H100 ab_flag v1 -1.0/-1.1 us; T=1 tie)
 
 
@@ -2515,7 +2517,9 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None):
     """unpool -> second boundary: (next attention input, stream)."""
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
     if f is None:
-        f = _linear(moe, state["unpool_slice"], "unpool_slice", state) if sliced else _g19(moe, "unpool", state)
+        trig = not sliced and _opt(state, tokens, "g19trig", tokens in G19_TRIG_TOKENS)
+        f = _linear(moe, state["unpool_slice"], "unpool_slice", state) if sliced else _g19(moe, "unpool", state, trig)
+        pdl = pdl or trig and f is not None
         if f is None:
             f = _linear(moe, state["unpool"], "unpool", state)  # all-gather: identity (zeros)
     stream2 = torch.empty_like(stream1)
@@ -2577,7 +2581,9 @@ def kernel_fn(data, state):
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
         "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
         "seq_lens": data["seq_lens"], "config": cfg, "qkv_ss": qss, "qkv_slabs": slabs}).view(tokens, hq * d)
-    a = _g19(o, "o", state)
+    otrig = _opt(state, tokens, "g19trig", tokens in G19_TRIG_O_TOKENS)
+    a = _g19(o, "o", state, otrig)
+    otrig = otrig and a is not None  # s57: the first boundary is then the o GEMM's PDL secondary
     if a is None:
         a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
 
@@ -2596,9 +2602,9 @@ def kernel_fn(data, state):
       spl = BND_SPLIT.get((tokens, 1), 1)
       _boundary[(tokens * spl + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
-                               PDL=pdl, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32,
+                               PDL=pdl or otrig, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32,
                                TRIG=pr1 or (BOUNDARY_TRIG and ("pooler", tokens) in state.get("g19", {}) and "pooler" in G19_ON), num_warps=16,
-                               launch_pdl=pdl, SPL=spl)
+                               launch_pdl=pdl or otrig, SPL=spl)
     main_stream, side_stream = torch.cuda.current_stream(), state["side_stream"]
     if tokens in ROUTER_AFTER_POOLER and pdl:
         # The pooler GEMV (triggers its dependents at start) first; the router is its PDL secondary on the same

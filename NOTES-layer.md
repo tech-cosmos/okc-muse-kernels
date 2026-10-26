@@ -1127,3 +1127,19 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   (T=8 only 142.74/153.82), d1 85.55/105.25 -> 85.65/105.33 (tie: kept off at T=1, d1 bitwise = v92).
   SPL 1/2/4/8 at T=8 with SEP: noise (2 stays). Tests 13/13, scored verify x3 0 bad, replay verify 1/16 x seeds 11,23 0/80.
   files_eq vs v92: d1 sl identical; d1 full diff = the tuner (v92's copy picked g13o; v92 vs v92 identical when both pick pr1).
+- Oracle 3 (H100 ab_flag 5 rounds, second boundary skipped, g19 unpool kept): d16 198.98/295.94 -> 195.65/292.64,
+  d32 196.88/414.54 -> 192.38/410.88: the T=16/32 second boundary costs 3.4/4.3 us. It launched WITHOUT PDL there
+  (PDL_TOKENS = (1, 8), from when the unpool was cuBLAS, which never triggers), and the g19 GEMM never triggered either.
+- v94 G19_TRIG (g19_src.cu: npre bit 16 = griddepcontrol.launch_dependents at the gemm's start; `_g19(..., trig)`):
+  at T=16/32 the g19 unpool triggers and the second boundary is its PDL secondary (PDL=True, launch_pdl); same for
+  the g19 o GEMM -> first boundary (G19_TRIG_O_TOKENS; o is on g19 at T=16 sliding by TUNE_BASE). Safety: the boundary's
+  pre-wait loads are stream/alpha/beta/gains only (never g19's out); it can launch only after every g19 CTA is resident
+  (trigger = all CTAs), so g19's mode-2 epoch grid barrier cannot starve; stream1 was complete before tk2f started
+  (rmsnorm triggers after its own wait). H100 ab_flag 6 rounds (unpool only): d16 198.19/294.58 -> 197.06/293.59,
+  d32 193.96/412.39 -> 192.35/410.87 (second pair: -0.8/-1.1, -1.6/-1.4); + o edge, 8 rounds: d16 sl 197.01 -> 195.32,
+  full tie (o not on g19 there). d1 unchanged (path not taken). TUNE[16], TUNE[32] += {"g19trig": False}; with trig on,
+  the T=32 {"g19:o": True} option also gets the PDL boundary (the H200 tuner may now pick it).
+- DEAD (oracle): n2u's redundant y32 reads (every block reads all 8 slots = 128 KB, ~16 MB of L2 per call). Variant with
+  every slot reading slot 0's row (variants/s57_y0.py, TUNE = {}): H100 ab_files 6 rounds d1 86.26/106.20 vs 86.21/106.35:
+  the n2u tail is its latency chain, not L2 bytes (so a K-split n2u would not pay at T=1).
+- v94 tests: bench test 13/13, replay_test d16/d32 x seeds 11,23 0/80, scored_test d16/d32 x3 0 bad. H100 tuner: {g19trig: False} lost in every T=16/32 tuner line (e.g. T=16 sl 235.4 vs 232.3).

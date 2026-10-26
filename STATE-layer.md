@@ -1,6 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 21:00Z (s57: v93 = v92 + BND_SEP at T=8, H100 v1 -1.0/-1.1 us; tests 13/13, replay 0 fails; first check after 00:00Z = main v93; persistent tail kernel bounded on paper at <= 1-2 us d1, not built: NOTES s57).
+Updated 2026-10-26 21:05Z (s57): **main = v94 = v92 + BND_SEP at T=8 (v93: second boundary loads nu8's 8 slabs as an [8,1024] tile;
+H100 v1 -1.0/-1.1 us) + G19_TRIG (v94: g19 unpool/o trigger PDL at start, both boundaries their PDL secondaries at T=16/32;
+H100 d16 -1.1..2.8 sl / -1.0 full, d32 -1.6 / -1.4 us; TUNE {g19trig: False} at T=16/32)**. NOT judge-checked.
+First check after 00:00Z = main v94 (look at 'layer tune T=16/32' g19trig lines). Persistent experts->norm2->unpool->boundary
+tail bounded on paper (<= 1-2 us d1; oracle numbers in NOTES s57): not built. n2u's y32 L2 reads are not its bottleneck (oracle tie).
 (s56: v92 = v91 + pr1 non-bnd x/x32 __ldcg, proj s47 audit request, cache-op only; tests 13/13, replay d1/d16 0/40). Below 'main = v91' read 'main = v92'.
 (s55) **main = v91 = v90 (v89 + moe n4s1 NORM_EARLY: post-expert norm runs in twm's
 drain) + __ldcg ids/tw/inv in moe_norm/moe_norm2 (s54, moe's SASS audit), NOT judge-checked** (layer budget for 10-26 spent: 20/20 checks, 10/10 submits). v90 H100 vs v89: v32 sl -1..2,
