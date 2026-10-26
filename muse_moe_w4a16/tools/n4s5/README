@@ -1,0 +1,5 @@
+n4s5 GS16 (tk2h, TK2H 16) investigation on the G88 H200 proxy. Setup = tools/s16/README (/tmp/moe16 with sub_g.py; for
+these tools also `#define TK2_EXP 1` in sub_g.py and `ln -s sub_g.py submission.py`).
+ncu_h.py: ncu driver (TK2H env) on a layer routing; top_sb.py <ncu --page source --csv>: top long_scoreboard SASS lines.
+mk_t.py -> sub_t.py (globaltimer stamps in tk2h_consume); tl.py "decode 32" 7: per-CTA ph1 end / gemm2 wait / end.
+proxy_s.py = tools/s16/proxy.py printing per-seed times.
