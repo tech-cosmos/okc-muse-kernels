@@ -1,61 +1,26 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~13:05Z (session 31: main = v69; THE code for the ~14:30Z last check; 1 check + 1 submit left; board #56 1.956x).
+Updated 2026-10-26 ~14:05Z (session 32: main = v70 = BOARD BEST; today's budget spent: 0 checks, 0 submits left).
+
+**s32: main = v70 (909010f)** = v69 + proj QSS (qkv T=32 as 2 FP32 bmm slabs, summed in attention; TUNE qss, default on)
++ moe s20 twm AUTO K-split (TUNE twf_split 1022 at T=128/256). Check 0f065691 1.9754x; **submit 703d3a7e 1.9954x = board
+best** (d1 69.6/77.8, d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5). H200 tuner
+lines in NOTES s32. Sandbox ends ~19:10Z: no judge runs left today; next sandbox (after 00:00Z) starts from main.
 
 **s31: main = v69** = v68 + moe s19 (r-moe 20b864e) twm K-split diff in moe_src.py + TUNE option `twf_split` (T=128:
 {twf_split 66}; T=256: {twf_split 66}, {twf_split 66, twm_order 76}). Defaults unchanged (bit-identical path). Forced
 each: scored verify x2 0 bad, replay verify 0/20 per shape. THE ~14:30Z LAST CHECK RUNS MAIN = v69: copy its "layer tune
 T=128/256" lines into NOTES (moe asked for them).
 
-**s29: main = v68 (d196c9e)** = v67 + QF32_NDS (T=32 decode attention also takes FP32 qkv, bit-identical; default path
-unchanged since cuBLAS qkv is BF16; used if the tuner picks g19:qkv_gate@32, and ready for proj s20's FP32-out lt (wire
-as TUNE option when posted)). Tests 13/13. THE ~14:30Z LAST CHECK RUNS MAIN = v68.
-
-**s28: main = v67 (d51f68c)** = v66 + QF32 (T=16 decode: attention reads g19's FP32 qkv, rounding to BF16 at each load;
-drops the 1.2 us cast; bit-identical; H100 d16 -1.6/-2.6 us; TUNE {qf32: False}). Scored 24/24, replay 0/240, tests 13/13.
-THE ~14:30Z LAST CHECK RUNS MAIN = v67 (plan below unchanged: submit by 17:30Z if >= 1.9558, else v45).
-
-**s27: main = v66 (33608f5)** = v60 + moe s17 twq/twm_hot TUNE options at T=128/256 (H100 real v16 -4.6/-3.2) + TK2FX/TK2FJ
-(moe_tk2f = PDL secondary of the pre-expert rmsnorm at T=1/8/16/32; H100 d1 -0.5/-1.0, v1 -1.9/0, d16 -2.5/+0.4, d32
--2.0/-1.8 us) + RF_TRIG (attention _red_fin triggers o after its wait: d1 full -1.6..-3.1) + BKT (moe_route before the
-join at T>32: v32 -3) + GNORM (pre-expert rmsnorm inside the gather at T>32: v16 0/-2.8, v32 -2). All default ON, each
-with a {opt: False} TUNE option so the H200 tuner can revert. moe_src.py now has 2 layer edits (data["bucket"],
-data["gather_norm"]): re-apply on any re-copy. Tests 13/13, scored + replay ok each. NOT CHECKED: the ~14:30Z last check
-runs main (copy every "layer tune" line of profiles/submission.<job>.log into NOTES). Cold compile+prepare 4.3 min (H100).
-Bundle v66 vs v60 (H100 ab_files 4 rounds): every shape better or tie (v16 -9.0/-5.3, v32 -5.0/-2.8, d32 -1.9/-3.0, d1 full
--2.5 us; ~+0.9%). Main: tk2f_stress 0/600, route_judge 0/360, replay 0/240.
-
-**s25: main = v59 (46fb62d) = v57 + tuner on SKEWED synthetic routing (`SYNTH_P`/`_synth_stream`: stream = sum of 8
-picked experts' unit router rows; local expert j picked w.p. SYNTH_P[j] = scored loads' mean shares; T=256 synth
-[96,70,49,29,..] vs real [91-97,73-76,32-50,..]; before: near-uniform [43,23,20,..], so expert options were invisible)
-+ moe_twm options at T=128/256: twm_order 76 / 4, twm_tail 32 (`_moe_TWM_ORDER_M`/`_moe_TWM_TAIL_M` set per trace from
-the tune). H100: tuner picks order 76 at T=256 (synth 418/654 vs 433/667); REAL scored A/B (ab_files 5 rounds) v32
-415.5->402.7 / 666.3->651.9 us, rest tie. moe's proxy says o76 loses ~3.6 on H200, judge v43 said -11/-4: the H200 tuner
-in the last check decides (read its "layer tune T=256" lines). Tests 13/13, forced options scored/replay ok. NOT CHECKED.
-1 CHECK + 1 SUBMIT LEFT. Plan unchanged: ~14:30Z real UTC run the last check on main (+ anything moe/proj post by
-~14:15Z, as TUNE options; expert options now tune on realistic loads), copy every "layer tune" line of
-profiles/submission.<job>.log into NOTES; submit by 17:30Z that code if its check >= 1.9558 (board best; ties ok), else
-v45 (`git show 2dddb88:muse_decode_layer/submission.py > /tmp/v45.py`, check ea9421fa 1.9634x). Push before 18:30Z.**
-
-**s26: main = v60** = v59 + NU8 (T=8 moe_norm3 + unpool slice fused: nu8 kernel, mma, FP32 slabs summed in `_boundary`)
-as T=8 TUNE options {"nu8"} (sums of squares exchanged inside nu8), {"nu8", "nu8x": False} (sums from a moe_tk2f PF 20
-epilogue patch), {"nu8", "g14alt:qkv_gate": 1}; default off. H100 A/B: -0.6..+0.7 us (tie; the fused tail saves ~2 but
-the sums cost it, NOTES s26); H100 tuner picks nu8+g14alt at T=8 full. Tests 13/13, scored verify x3 + replay 0/20 for
-both variants. NOT CHECKED: rides in the ~14:30Z last check (read its "layer tune T=8" lines).
+(s25-s29 details: NOTES s25-s29. Live TUNE options incl. skewed synthetic routing SYNTH_P, nu8, QF32/QF32_NDS, TK2FX/TK2FJ, RF_TRIG, BKT, GNORM, twq/twm_*.)
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
 option sets on synthetic inputs (shapes only) and keeps the fastest in state["tune"]; `_opt()` reads it at trace time.
 Options: g19:<key>, lt:<key>, ltalt:<key>, g10alt/g13alt/g14alt:<key> (1-based `_ALTS` index), pr1, pr1_npf, pr1_rb,
 pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Defaults = v45 (checked 1.9634x).
 
-**s17 TIMELINE for the last 2 checks + 1 submit (main = v44 = checked code, keep it that way until a bundle wins):**
-(a) when proj commits gemv22 (T=128/256 12-bit wgmma, v16/v32; r-proj dev/gemv22.cu was WIP at 09:30Z), wire it in,
-H100 A/B, and run ONE bundle check = gemv22 (v16/v32) + G19_GRID 120 (d16/d32; disjoint shapes, read per shape);
-(b) if gemv22 is not in by ~15:00Z, check v44 + G19_GRID 120 alone (`variants/sub_v45g.py`, regenerate by the sed in
-Next -4); (c) by 17:30Z submit the best checked code that beat 1.9558 (v44 c6a00da7 1.9608x if nothing better).
-
 ## Board
-- **Best scored: 371a17ee = v42 (cfd3bc5), 1.9558x, 11,566 us/step, overall #49** at 07:10Z 10-26 (#1 2.368x, #10 2.176x,
+- **Best scored: 703d3a7e = v70 (909010f), 1.9954x (s32 14:00Z).** Previous: 371a17ee = v42 (cfd3bc5), 1.9558x, 11,566 us/step, overall #49** at 07:10Z 10-26 (#1 2.368x, #10 2.176x,
   #50 ~1.953x). Per shape (H200 us): d1 71.4/82.3, d16 145.1/223.9, d32 185.9/334.2, v1 120.5/132.4, v16 264.9/368.3,
   v32 368.0/544.3. Its check 9db0d4eb 1.9545x. (Old best e5512e00 1.9459 had moe's tk2f race; now superseded.)
 - **main = v44 (de763eb)** = v42 + moe 499bde6 (twm order overridden back to {}) + proj g19 s15 fixups + g19 T=32 pooler/unpool +
