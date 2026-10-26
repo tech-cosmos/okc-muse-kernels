@@ -1,0 +1,57 @@
+--- a/muse_decode_layer/moe_src.py	2026-10-26 12:50:10.374775129 +0000
++++ b/muse_decode_layer/moe_src.py	2026-10-26 12:50:10.382775135 +0000
+@@ -2390,7 +2390,7 @@
+   extern __shared__ __align__(1024) uint4 smem_tw[];
+   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
+   __shared__ uint32_t slut[256];
+-  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[2][32], s_ord[4];
++  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[2][32], s_ord[4], s_cost;
+   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
+   int* done = meta + 68;
+   // s14: nsplit < 0 = no K split; instead the lightest (last) non-big experts whose RT 4 gemm2 items add up to
+@@ -2405,6 +2405,10 @@
+   const int tail = nsplit < 0 && !sx ? (-nsplit) & 4095 : 0, tail13 = nsplit < 0 && !sx ? ((-nsplit) >> 12) & 1023 : 0;
+   const int order = nsplit < 0 ? (-nsplit) >> 24 : 0, hot = nsplit < 0 ? ((-nsplit) >> 23) & 1 : 0;
+   nsplit = nsplit < 0 ? (sx ? ((-nsplit) >> 12) & 1023 : 0) : nsplit;
++  // s20: split count 1022 / 1023 = AUTO: K-split the last r light gemm2 items, r = (total item cost mod gridDim) when
++  // that last wave is at most half full (halves then fill it; else no split). 1022: every item costs 1; 1023: light
++  // RT 4 items weighted by their pass size (N8 1, N16 1.25, N32 1.5). Shape/routing-derived on device, no host sync.
++  const int autos = nsplit >= 1022 ? nsplit - 1021 : 0;
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
+   asm volatile("griddepcontrol.wait;" ::: "memory");
+@@ -2436,6 +2440,14 @@
+     }
+     s_big[0][tid] = c13;
+     s_big[1][tid] = c2;
++    if (autos) {
++      const int w = (autos == 2 && !c2 && nt > 8) ? (nt > 16 ? 6 : 5) : 4;
++      const int n13i = npass * (c13 ? HG::NRB * (c13 == 3 ? 2 : 1) : CG::NRB), n2i = npass * (c2 ? HN::NRB * (c2 == 3 ? 2 : 1) : CN::NRB);
++      int cst = tid < nact ? w * (n13i + n2i) : 0;
++#pragma unroll
++      for (int o = 16; o > 0; o >>= 1) cst += __shfl_xor_sync(0xffffffffu, cst, o);
++      if (tid == 0) s_cost = cst;
++    }
+ #pragma unroll
+     for (int gq = 0; gq < 2; ++gq) {
+       const int c = gq ? c2 : c13;
+@@ -2455,6 +2467,10 @@
+   // result must not depend on whether its pass is split), so ns may come out a bit below nsplit.
+   const int n13 = s_cum[0][32], n2 = s_cum[1][32];
+   int n2f = n2;
++  if (autos) {
++    const int GU = 4 * gridDim.x, r = s_cost % GU;
++    nsplit = (r > 0 && 2 * r <= GU) ? min((r + 3) / 4, 66) : 0;
++  }
+   if (nsplit > 0)
+     for (int a = 32; a >= 0; --a) {
+       if (a < 32 && s_big[1][a] != 0) break;  // s19: only light (RT 4) experts split (hot/big items take no K half)
+@@ -4513,7 +4529,7 @@
+             trt = trt if f"w2b{trt}" in st else 4
+             lib.moe_set_sa((1 if TWSA and st["sa"] else 0) | (2 if trt == 2 else 0))
+             ns = TWF_SPLIT_M.get(M, TWF_SPLIT)
+-            part = (torch.full if TWF_DBG else torch.empty)((max(ns, 1) * 32768,), *((float("nan"),) if TWF_DBG else ()), dtype=torch.float32, device=dev)
++            part = (torch.full if TWF_DBG else torch.empty)((max(66 if ns >= 1022 else ns, 1) * 32768,), *((float("nan"),) if TWF_DBG else ()), dtype=torch.float32, device=dev)
+             if TWQ_M.get(M, TWQ):
+                 q = TWQ_M.get(M, TWQ)
+                 if DIAG_TL and TWM_ORDER_M.get(M, TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2

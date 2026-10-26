@@ -590,3 +590,22 @@
   K halves, or K quarters with FP32 red.global.add.v4 into an FP32 y and moe_norm reading FP32), so the last wave is
   full. Needs a per-class item cost model (H200: RT4 N8 1.0, N16 1.15, N32 1.5, RT2 N64 1.0, RT2 small 0.65 x L).
   Mind twm's register limit (any new live value spills): put the plan in smem.
+
+## Session 20 (2026-10-26 12:45Z - ) -- grid-aware AUTO K-split tail for moe_twm (s19 NEXT, halves only)
+- New (off by default, main bitwise unchanged): TWF_SPLIT(_M) = 1022 / 1023 = AUTO. moe_twm's prologue sums the item
+  cost (1022: every item 1; 1023: light RT 4 items weighted by pass size N8 1 / N16 1.25 / N32 1.5), r = cost mod
+  gridDim.x; if 0 < r <= G/2 it K-splits the last ceil(r) light gemm2 items (the existing s11/s19 halves; cap 66 =
+  part buffer), else no split. Device-side from routing, no host sync, graph-safe. Works with order / hot (bit 22).
+- Tests: /tmp/moe20/t.py (= tools/s20/t.py) 60 big-M routings x {main, a22, a23, o76+a23, hot+a22}: 0 bad, maxdiff
+  0.0039 (FP32 half order). bench.py test PASS. Layer copy with 1022 forced at m > 32: bench test 13/13.
+- Proxy (moe-only, 2 rounds x 5 layer seeds, H100 us; tools/s16/proxy.py with sub_g20):
+    G88  v16: o0 230.1/230.8  a22 230.1/233.4  a23 233.6/233.7  o76 232.3/232.1  o76a23 233.0/232.9
+    G88  v32: o0 303.9/304.1  a22 300.1/299.9  a23 302.9/303.1  o76 303.0/303.7  o76a23 302.9/302.6
+    G132 v16: o0 207.7/208.5  a22 204.6/205.2  a23 205.1/205.2  o76 207.9/208.6  o76a23 208.2/208.4
+    G132 v32: o0 240.9/239.9  a22 240.3/239.8  a23 242.9/242.8  o76 240.5/240.0  o76a23 243.1/242.6
+  a22 is the only variant <= o0 on both grids (-0..4 us); far from the wave model's ~9 us average saving.
+- Layer copy (H100 full grid, tools/s20/ab_tune.py: overrides state["tune"] twf_split at T=128/256, 3 rounds, us):
+    run 1: [0] vs [1022]: v16 sl 312.2/306.2, v16 full 456.3/455.0, v32 sl 400.6/404.8, v32 full 649.6/649.5
+    run 2: [66]/[1022]/[1023]: v16 sl 310.3/310.2/310.4, full 455.1/455.3/454.4, v32 sl 404.5/405.1/398.2, full 651.1/648.5/648.5
+  => within the +-4 us run-to-run noise. Posted as H200 TUNE options (twf_split 1022 at T=128/256; diff
+  tools/s20/twm_auto_moe_src.diff, moe_src.py only, applies to r-layer HEAD).
