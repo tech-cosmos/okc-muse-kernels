@@ -625,6 +625,7 @@ _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_p
 _GPR3_SRC = None  # @@GPR3@@
 KV_PF = True  # s9: the qkv gemv13 L2-prefetches the window's KV rows for csl (d1 sliding; H100 csl 6.1-7.3 -> ~4 us)
 G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv, minb, pf, blocks), k = 8192
+G13_ALT = {"qkv_gate": (2, 4, 1, 2, 132)}  # s21: TUNE option "g13alt:<key>" at T=1 (PF 2: 2 rows in flight per virtual block)
 G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, wg, pf, bk, xp), m = 8
 # s11: proj pr1 (r-proj dev/pr1.cu@149d115): T=1 pooler (gemv13 body) + FP32 router + routing top-8 in ONE launch,
 # PDL secondary of the boundary (which triggers at start). (u, nv, minb, r, rb, blocks, npf). H100 d1 sliding 95.1 -> 92.5.
@@ -779,7 +780,7 @@ def _g10_lib():
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src.count(anchor) == 1, anchor
                     src = src.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
-            src13 = (_G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(8192,%d,%d,%d,%d)" % c[:4] for c in sorted(set(G13_CFG.values()))))
+            src13 = (_G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(8192,%d,%d,%d,%d)" % c[:4] for c in sorted(set(G13_CFG.values()) | set(G13_ALT.values()))))
                      + "\n" + _G14_SRC.replace("G14_CONFIGS", " ".join("G14_CASE(%d,%d,%d,%d,%d)" % (G12_TOKENS, c[0], c[1], c[2], c[4])
                                                                       for c in sorted(set(G14_CFG.values())))))
             if GEMV_PDL:
@@ -1545,7 +1546,7 @@ def _g19_prepare(state):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
 # kv_pf (bool) KV_PF; pr1 (bool) pr1/pr8 at that T; lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
-TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}),
+TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": True}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}),
         8: ({}, {"pr1": False}),
@@ -1694,7 +1695,8 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
             out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
             if x.shape[0] == 1:
                 pf = kv_pf if kv_pf is not None else (x, x, x, 0, 0)
-                lib.g13_gemv(pk[0], pk[1], pk[2], x.contiguous(), out, pk[3], *G13_CFG[key], *pf)
+                lib.g13_gemv(pk[0], pk[1], pk[2], x.contiguous(), out, pk[3],
+                              *(G13_ALT[key] if key in G13_ALT and _opt(state, 1, "g13alt:" + key, False) else G13_CFG[key]), *pf)
             else:
                 lib.g14_gemm(pk[0], pk[1], pk[2], pk[3], x.contiguous(), out, state["g12_ws"], state["g12_cnt"],
                              w.shape[0] // 8, *G14_CFG[key])

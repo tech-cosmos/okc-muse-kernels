@@ -555,3 +555,11 @@
 - Why it may win on the H200: v45 profile verify 16 sliding: the T=128 GEMMs (nvjet 128x64 x2 27.5, 88x64 22.8, 48x64
   16.9) ~67 us vs ~35 us floor for 12-bit bytes at 4 TB/s; H100 TMA streams only ~2.9 TB/s (proj).
 - No check yet: holding the last check so moe/proj handoffs posted by ~14:30Z can ride along (see STATE).
+
+## Session 21 (2026-10-26 09:45Z-)
+- Budget at start: 1 submit, 1 check. Board #53 at 1.956x (#1 2.380x). No new proj/moe handoffs since s20.
+- H100 d1 sliding timeline (v49): g13 qkv 0-13.7, csl 14.2-18.5, o g10 15.2-24.2, boundary 21.2-29.6, pr1 22.1-47.3,
+  rmsnorm 34.1-48.3, tk2f 48.6-86.9, n2u 82.5-91.2, boundary 87.7-93.6 us.
+- v50: g13 PF=2 instantiation (2,4,1,2) as TUNE option g13alt:qkv_gate at T=1 (qkv = 2304 rows = 4.36 rows per
+  virtual block, one row in flight each at PF 1: latency-bound). REG 62 (PF 1: 60), no spill. H100 tuner: sliding
+  115.1 default vs 116.4, full 80.7 vs 82.7 (loses); a free H200 A/B in the last check. Forced: scored decode 1/16 x3 ok.

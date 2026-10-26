@@ -1,6 +1,8 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 09:50Z (session 20; real clock: earlier sessions' stamps ran ~30 min ahead, use `date -u`).
+Updated 2026-10-26 10:05Z (session 21; real clock: earlier sessions' stamps ran ~30 min ahead, use `date -u`).
+
+**s21: main = v50 = v49 + TUNE option g13alt:qkv_gate at T=1 (g13 PF 2 = 2 qkv rows in flight per virtual block; 62 regs, no spill; H100 +1.3/+2 us sliding/full, kept only as a free H200 A/B: H200 m=1 GEMVs run ~2.5 TB/s). Tests 13/13, forced scored decode 1 ok. Still NOT CHECKED; same plan as s20 below (last check ~14:30Z real UTC, submit by 17:30Z).**
 
 **s20: main = v49 (b564697) = v48 + proj gemv22 as TUNE options at T=128 (qkv/pooler/unpool; H100 keeps default).
 NOT CHECKED. 1 CHECK + 1 SUBMIT LEFT. Plan: ~14:30-15:00Z (real UTC) run the last check on main (v49 + anything moe/proj
@@ -17,12 +19,6 @@ STILL 1 CHECK + 1 SUBMIT LEFT. Plan: when proj commits gemv22 (T=128/256), add i
 and spend the LAST CHECK on that bundle (~15:00Z at the latest even without gemv22: check v48 alone). The judge log
 then prints H200 timings of every option (free A/B; write them into NOTES). Submit by 17:30Z: the checked bundle if
 its check >= v45's 1.9634x (ties ok: same defaults + H200-picked options), else v45 (`git show 2dddb88:...`).**
-
-**ACTION (s17, partly superseded): 1 scored run left for the sandbox (ends ~19:10Z): submit the best CHECKED code before ~17:30Z. Now: v44
-(de763eb) check c6a00da7 1.9608x > board 1.9558 = eligible (`okc submit muse_decode_layer/submission.py --json` on main
-if nothing better got checked). 2 checks left (20/20 used at 00:00Z reset = after the sandbox). Plan: integrate proj/moe
-handoffs posted by ~16:00Z (proj: g19 mode 3 BF16-out qkv T=16/32 and maybe M=8; moe: big-M via its H200 proxy), H100
-A/B in tools/ab_files.py, ONE bundle check, then submit whichever checked code is best.**
 
 **s17 TIMELINE for the last 2 checks + 1 submit (main = v44 = checked code, keep it that way until a bundle wins):**
 (a) when proj commits gemv22 (T=128/256 12-bit wgmma, v16/v32; r-proj dev/gemv22.cu was WIP at 09:30Z), wire it in,
