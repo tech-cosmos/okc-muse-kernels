@@ -8647,6 +8647,7 @@ void pj_router3(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mt,
     TORCH_CHECK(false, "pj_router3: no config");
 }
 '''
+KV_PF = True  # s9: the qkv gemv13 L2-prefetches the window's KV rows for csl (d1 sliding; H100 csl 6.1-7.3 -> ~4 us)
 G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv, minb, pf, blocks), k = 8192
 G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, wg, pf, bk, xp), m = 8
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
@@ -8793,6 +8794,34 @@ def _g10_lib():
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src13.count(anchor) == 1, anchor
                     src13 = src13.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
+            # KV_PF: gemv13 (the qkv GEMV at 1 token) also L2-prefetches the attention's KV rows: thread i of the grid
+            # reads page-table entry pft[i] (i < pfn) after issuing its W prologue and prefetches that K and V row
+            # (pfrb bytes apart per page). csl (d1 sliding) then gathers from L2 instead of HBM.
+            reps = [
+                ("__nv_bfloat16* __restrict__ out, int n, float scale) {",
+                 "__nv_bfloat16* __restrict__ out, int n, float scale,\n"
+                 "                                                       const int* __restrict__ pft, const char* __restrict__ pfk,\n"
+                 "                                                       const char* __restrict__ pfv, int pfn, int pfrb) {"),
+                ("        if (c + p * G < nch) load(p, c + p * G);\n",
+                 "        if (c + p * G < nch) load(p, c + p * G);\n"
+                 "    if (pfn > 0) {\n"
+                 "        const int i = blockIdx.x * blockDim.x + threadIdx.x;\n"
+                 "        if (i < pfn) {\n"
+                 "            const int pg = __ldg(pft + i);\n"
+                 "            if (pg >= 0) {\n"
+                 "                asm volatile(\"prefetch.global.L2 [%0];\" :: \"l\"(pfk + (long)pg * pfrb));\n"
+                 "                asm volatile(\"prefetch.global.L2 [%0];\" :: \"l\"(pfv + (long)pg * pfrb));\n"
+                 "            }\n        }\n    }\n"),
+                ("int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks) {",
+                 "int64_t u, int64_t nv, int64_t minb, int64_t pf, int64_t blocks,\n"
+                 "              torch::Tensor pft, torch::Tensor pfk, torch::Tensor pfv, int64_t pfn, int64_t pfrb) {"),
+                ("(__nv_bfloat16*)out.data_ptr(), n, (float)scale); return; }",
+                 "(__nv_bfloat16*)out.data_ptr(), n, (float)scale, \\\n"
+                 "        (const int*)pft.data_ptr(), (const char*)pfk.data_ptr(), (const char*)pfv.data_ptr(), (int)pfn, (int)pfrb); return; }"),
+            ]
+            for x_, y_ in reps:
+                assert src13.count(x_) == 1, x_
+                src13 = src13.replace(x_, y_)
             src = src + "\n" + src13 + "\n" + _R3_SRC.replace("R3_CONFIGS", " ".join("R3_CASE(%d,%d,%d)" % c for c in sorted(set(ROUTER3_CFG.values()))))
             src = src + "\n" + _GPR3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(PR3_CFG.values()))))
             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
@@ -8803,7 +8832,7 @@ def _g10_lib():
                             "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                             "int64_t, int64_t, int64_t, int64_t, int64_t" + (", int64_t" if UNPOOL_PDL else "") + ");\n"
                             "void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
-                            "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                            "int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t);\n"
                             "void g14_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
                             "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                             "void r3_router(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
@@ -9322,7 +9351,7 @@ def _g12_prepare(state):
     state["g14"] = {key: pk for key, c in G14_CFG.items() if (pk := _pack14(w[key], 1024 * c[0])) is not None}
 
 
-def _linear(x, w, key, state=None, sliding=False):
+def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
     """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), gemv12 at 8 (FP32 accumulate and
     split-K partials), else cuBLAS."""
     lib = _G10.get("lib")
@@ -9331,7 +9360,8 @@ def _linear(x, w, key, state=None, sliding=False):
         if pk is not None and key not in GEMV_PDL_SECONDARY.get((x.shape[0], sliding), ()):
             out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
             if x.shape[0] == 1:
-                lib.g13_gemv(pk[0], pk[1], pk[2], x.contiguous(), out, pk[3], *G13_CFG[key])
+                pf = kv_pf if kv_pf is not None else (x, x, x, 0, 0)
+                lib.g13_gemv(pk[0], pk[1], pk[2], x.contiguous(), out, pk[3], *G13_CFG[key], *pf)
             else:
                 lib.g14_gemm(pk[0], pk[1], pk[2], pk[3], x.contiguous(), out, state["g12_ws"], state["g12_cnt"],
                              w.shape[0] // 8, *G14_CFG[key])
@@ -9399,7 +9429,13 @@ def kernel_fn(data, state):
     hq, d = cfg["num_q_heads"], cfg["head_dim"]
     dense = state["dense"]
     dev = data["stream"].device
-    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state)
+    kc, vc, pt = data["k_cache"], data["v_cache"], data["page_table"]
+    kv_pf = None
+    if KV_PF and tokens == 1 and cfg["window"] > 0 and kc.shape[1] == 1 and kc.is_contiguous() and vc.is_contiguous():
+        # the window's page-table entries (csl's speculative range: the table's last W + 1 columns)
+        n_pf = min(pt.shape[1], cfg["window"] + 1)
+        kv_pf = (pt[0, pt.shape[1] - n_pf:], kc, vc, n_pf, kc.stride(0) * kc.element_size())
+    qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf)
     o = attn_kernel_fn({
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
