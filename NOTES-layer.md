@@ -711,3 +711,12 @@
   rounding, 22.9 vs 23.2 us: no gain alone. The win at T=32 needs an FP32-native producer: g19 (tuner option) or proj s20.
 - H100 ab_files d32 5 rounds: main 202.1/431.7, g19 qkv@32 + cast 205.0/434.1, g19 qkv@32 + QF32 204.4/431.5 us.
 - Tests 13/13 (main and g19q variant), scored d32 x3 g19q / x2 main, replay g19q d32 0/40. No judge runs.
+
+## s30 (2026-10-26 12:30-12:50Z): no build, main = v68 kept for the ~14:30Z last check
+- Budget (okc problems): checks 19/20 used (1 left), submits 9/10 (1 left). GPU at 100% from moe/proj all session.
+- H100 d1 sliding timeline (v68, shared GPU): g13 0-14.2, csl 14.5-19.4, o g10 15.7-24.5, boundary 22.4-30.3,
+  pr1 23.1-49.7, rmsnorm 35.5-50.8, tk2f 50.0-92.1, n2u 88.0-97.0, boundary 92.4-99.0 (same shape as s21/s29).
+- Considered and not built: _boundary fused into g19 unpool at T=16/32 via a second grid barrier (all blocks spin,
+  blocks 0..T-1 do one row each). Est. saving 0.5-1.5 us (launch + PDL release minus the barrier) = <0.2% score;
+  the shared H100 cannot resolve it before 14:00Z, and the last-block form lost +2.7 in s8. Tomorrow's sandbox idea.
+- build.py on main reproduces submission.py byte for byte (v68, d196c9e). Plan unchanged (STATE).

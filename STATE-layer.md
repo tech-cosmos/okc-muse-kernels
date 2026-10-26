@@ -1,6 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~12:35Z (session 29).
+Updated 2026-10-26 ~12:50Z (session 30: no build; main = v68 unchanged, still THE code for the ~14:30Z last check; 1 check + 1 submit left).
 
 **s29: main = v68 (d196c9e)** = v67 + QF32_NDS (T=32 decode attention also takes FP32 qkv, bit-identical; default path
 unchanged since cuBLAS qkv is BF16; used if the tuner picks g19:qkv_gate@32, and ready for proj s20's FP32-out lt (wire
