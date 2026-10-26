@@ -11607,8 +11607,13 @@ LT_CFG = {("pooler", 128): (66, 143, 35, 1, 0, 0, 0, 2),
           ("qkv_gate", 16): (66, 394, 35, 3, 2, 0, 5, 4), ("qkv_gate", 32): (66, 16, 35, 3, 2, 0, 7, 4),
           ("o", 16): (66, 394, 35, 1, 0, 0, 7, 4), ("o", 32): (66, 16, 35, 1, 0, 0, 5, 4),
           ("o", 128): (66, 17, 35, 1, 0, 0, 4, 2), ("o", 256): (66, 20, 35, 1, 0, 0, 5, 2),
-          ("unpool", 128): (66, 18, 35, 1, 0, 0, 6, 5)}
-LT_DEFAULT_OFF = {("qkv_gate", 16), ("qkv_gate", 32), ("o", 16), ("o", 32), ("o", 128), ("o", 256), ("unpool", 128)}
+          ("unpool", 128): (66, 18, 35, 1, 0, 0, 6, 5),
+          # pooler/unpool at T=16/32 instead of g19 (proj diag19, H200 after a 3 us PDL predecessor: pooler m32 lt 20.3 vs
+          # g19 21.6, unpool m32 19.3 vs 20.3; m16 g19 wins standalone)
+          ("pooler", 16): (66, 312, 35, 1, 0, 0, 1, 4), ("pooler", 32): (66, 13, 35, 1, 0, 0, 1, 4),
+          ("unpool", 16): (66, 394, 35, 1, 0, 0, 7, 4), ("unpool", 32): (66, 397, 35, 1, 0, 0, 5, 4)}
+LT_DEFAULT_OFF = {("qkv_gate", 16), ("qkv_gate", 32), ("o", 16), ("o", 32), ("o", 128), ("o", 256), ("unpool", 128),
+                  ("pooler", 16), ("pooler", 32), ("unpool", 16), ("unpool", 32)}
 _LT_SRC = r'''// cuBLASLt BF16 GEMM with an explicit algo config: out[m,n] = x[m,k] @ W[n,k]^T, FP32 compute and accumulation.
 // Same library and kernel family SGLang's F.linear reaches (algo 66 on sm90), but with the tile / split-K / cluster
 // config picked per shape in prepare() (timed on the judge's own GPU) instead of cuBLAS's heuristic.
@@ -12218,9 +12223,11 @@ def _g19_prepare(state):
 TUNE = {1: ({}, {"pr1_npf": 0}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}),
         16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
-             {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}),
+             {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
+             {"g19:unpool": False, "lt:unpool": True}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
-             {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}),
+             {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
+             {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True})}
@@ -12563,7 +12570,7 @@ def kernel_fn(data, state):
             pooled.record_stream(main_stream)
     elif (pooled := _g19(h, "pooler", state)) is not None:
         pass
-    elif tokens in POOLER_BMM:
+    elif tokens in POOLER_BMM and not _opt(state, tokens, "lt:pooler", False):
         # split K in NS slabs as one strided batched GEMM with FP32 out; the rmsnorm sums the slabs (no reduce kernel)
         ns = POOLER_BMM[tokens]
         kc = HIDDEN // ns
