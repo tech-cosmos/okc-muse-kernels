@@ -66,7 +66,7 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 template <int M, int KC, int AP, int NS, int IS, int PRE>
 __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H,
                                                          float scale, const __nv_bfloat16* __restrict__ x,
-                                                         float* __restrict__ out, int* __restrict__ ctr, int n, int k, int tail) {
+                                                         float* __restrict__ out, int* __restrict__ ctr, int n, int k, int tail, int npre) {
     constexpr int NT = M / 8, NA = KC / 32, SPK = NA / AP, SB = NWC * AP * 768, XS = KC * 2 + 16, PBF = NWC * 16 * M;
     static_assert(NA % AP == 0 && SPK % IS == 0, "config");
     extern __shared__ __align__(128) unsigned char smem[];
@@ -96,9 +96,9 @@ __global__ void __launch_bounds__((NWC + 2) * 32, 1) gemm(const unsigned char* _
         if (lane == 0) {
             int ra = (int)((long)US * blockIdx.x / gridDim.x), rb = (int)((long)US * (blockIdx.x + 1) / gridDim.x);
             int xks[2] = {-1, -1}, xuse[2] = {0, 0}, xb = 1, i = 0;
-            if (PRE && ra < rb) {  // out zeroed long before: stream the first stages' W while the previous kernel runs
+            if (PRE && npre > 0 && ra < rb) {  // out zeroed long before: stream the first stages' W while the previous kernel runs
                 const int ks0 = ra / (ntr * SPK);
-                for (; i < NS && ra < rb && ra / (ntr * SPK) == ks0; ++i, ++ra) {
+                for (; i < npre && ra < rb && ra / (ntr * SPK) == ks0; ++i, ++ra) {
                     const int st = ra % SPK;
                     tag[i] = ra | (ra + 1 == rb || st + 1 == SPK ? 1 << 31 : 0);  // x buffer 0
                     bar_expect(bars + 8 * i, SB);
@@ -313,7 +313,26 @@ __global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int
     asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t0));
     do { asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t1)); } while (t1 - t0 < (unsigned long long)ns_);
 }
+// BF16 copy of a gemm's FP32 output, as its PDL dependent (for consumers that need BF16)
+__global__ void cvt(const float4* __restrict__ src, uint2* __restrict__ dst, int n4) {
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += gridDim.x * blockDim.x) {
+        const float4 v = src[i];
+        const __nv_bfloat162 a = __floats2bfloat162_rn(v.x, v.y), b = __floats2bfloat162_rn(v.z, v.w);
+        dst[i] = make_uint2(*(const unsigned*)&a, *(const unsigned*)&b);
+    }
+}
 }  // namespace g19
+void g19_cvt(torch::Tensor src, torch::Tensor dst) {
+    const int n4 = src.numel() / 4;
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3((n4 + 255) / 256 < 132 ? (n4 + 255) / 256 : 132); cfg.blockDim = dim3(256);
+    cfg.stream = c10::cuda::getCurrentCUDAStream();
+    cudaLaunchAttribute attr[1];
+    attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = attr; cfg.numAttrs = 1;
+    cudaLaunchKernelEx(&cfg, g19::cvt, (const float4*)src.data_ptr(), (uint2*)dst.data_ptr(), n4);
+}
 void g19_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
     g19::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_);
 }
@@ -329,14 +348,15 @@ torch::Tensor g19_trace() {
 #endif
 // mode 0: a zero kernel (out, ctr) first, the gemm its PDL dependent. mode 1: out (and ctr if tail) already zero
 // (stream-ordered before the previous kernel), the gemm a PDL dependent of the previous kernel, streaming W early.
-// mode 2: as 1, but the gemm zeroes out itself (grid barrier on the epoch counter ctr[1]: one int per call site
+// npre (modes 1, 2): weight stages streamed before griddepcontrol.wait (0: wait first, x first; use 0 when the
+// previous kernel leaves nothing to overlap). mode 2: as 1, but the gemm zeroes out itself (grid barrier on the epoch counter ctr[1]: one int per call site
 // and grid size, any initial multiple of the grid, e.g. 0; tail must be 0).
 // out: FP32 [m, n] (overwritten), ctr: int32 [>= 1] scratch. grid: blocks (<= #SMs, 1 per SM). tail: dynamic stages.
 void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out, torch::Tensor ctr,
-              int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode) {
+              int64_t kc, int64_t ap, int64_t ns, int64_t is, int64_t grid, int64_t tail, int64_t mode, int64_t npre) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const int sm = ns * g19::NWC * ap * 768 + 2 * m * (kc * 2 + 16) + 2 * g19::NWC * 16 * m * 4 + 4 * (ns + 2) + 8 * (2 * ns + 8) + 8;
-    TORCH_CHECK(n % (16 * g19::NWC) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0), "g19: shape");
+    TORCH_CHECK(n % (16 * g19::NWC) == 0 && k % kc == 0 && sm <= 227 * 1024 && tail % is == 0 && (mode < 2 || tail == 0) && npre <= ns, "g19: shape");
     auto stream = c10::cuda::getCurrentCUDAStream();
     if (!mode) g19::zero<<<32, 256, 0, stream>>>((float4*)out.data_ptr(), m * n / 4, ctr.data_ptr<int>());
 #define G19_CASE(M_, KC_, AP_, NS_, IS_) \
@@ -349,7 +369,7 @@ void g19_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
         attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1; \
         cfg.attrs = attr; cfg.numAttrs = 1; \
         cudaLaunchKernelEx(&cfg, kern, (const unsigned char*)wp.data_ptr(), (const float2*)h.data_ptr(), (float)scale, \
-            (const __nv_bfloat16*)x.data_ptr(), out.data_ptr<float>(), ctr.data_ptr<int>(), n, k, (int)tail); \
+            (const __nv_bfloat16*)x.data_ptr(), out.data_ptr<float>(), ctr.data_ptr<int>(), n, k, (int)tail, (int)npre); \
         C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
     G19_CONFIGS
     TORCH_CHECK(false, "g19: no config");
