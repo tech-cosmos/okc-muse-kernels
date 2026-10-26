@@ -1,0 +1,141 @@
+--- /home/daytona/r-layer/muse_decode_layer/layer.py	2026-10-26 04:34:44.903136844 +0000
++++ layer.py	2026-10-26 04:36:52.554252281 +0000
+@@ -146,16 +146,15 @@
+     """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
+     s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32).
+     RB: the branch is FP32 (gemv19 output), rounded to BF16 first.
+-    PF > 0: the last PF programs instead L2-prefetch PF x PF_NT x 1 KB from pf_ptr (the router weight) and exit.
+-    TRIG: let the PDL dependent (the gemv19 pooler, which streams W before its griddepcontrol.wait) launch now."""
+-    if TRIG:
+-        gdc_launch_dependents()
++    PF > 0: the last PF programs instead L2-prefetch PF x PF_NT x 1 KB from pf_ptr (the router weight) and exit."""
+     if PF > 0:
+         if tl.program_id(0) >= tl.num_programs(0) - PF:
+             i = (tl.program_id(0) - (tl.num_programs(0) - PF)) * PF_NT + tl.arange(0, PF_NT)
+             tl.inline_asm_elementwise("cp.async.bulk.prefetch.L2.global [$1], 1024; mov.u32 $0, 0;", "=r,l",
+                                       [pf_ptr + i.to(tl.int64) * 256], dtype=tl.int32, is_pure=False, pack=1)
+             return
++    if TRIG:
++        gdc_launch_dependents()
+     row = tl.program_id(0).to(tl.int64)
+     cols = tl.arange(0, N)
+     in_b = cols < NB
+@@ -589,19 +588,21 @@
+ # in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
+ # kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
+ # npre, xb), proj's H100 picks (r-proj BF16_G19). Consumers round the FP32 out to BF16 (= the GEMM's BF16 output).
+-G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2)}
+-# proj's H200 diag (after a 3 us PDL predecessor): m16 pooler AP8 15.7 vs 19.0, unpool tie, o +0.8, every m32 loses
+-# (+1.5..5): m32 stays on cuBLAS / the bmm pooler. Was (H100 picks, s10 v35): pooler m16 (16, 1024, 4, 4, 2, 2),
+-# m32 (32, 1024, 4, 4, 2, 1), unpool the same, o m16 (16, 512, 4, 3, 2, 2).
+-G19_BUILD = [(16, 1024, 4, 4, 2, 2)]  # also compiled (A/B)
+-BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
++G19_CFG = {("pooler", 16): (16, 1024, 4, 4, 2, 2), ("pooler", 32): (32, 1024, 4, 4, 2, 1),
++           ("unpool", 16): (16, 1024, 4, 4, 2, 2), ("unpool", 32): (32, 1024, 4, 4, 2, 1),
++           ("o", 16): (16, 512, 4, 3, 2, 2)}
+ G19_ON = {"pooler", "unpool"}  # o: H100 tie (cuBLAS after attention)
+-G19_GRID = {("pooler", 16): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
++G19_GRID = {("pooler", 16): 96, ("pooler", 32): 96}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16 132: +4, 96: -2 us vs 132)
+ _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
+ _GPR3_SRC = None  # @@GPR3@@
+ KV_PF = True  # s9: the qkv gemv13 L2-prefetches the window's KV rows for csl (d1 sliding; H100 csl 6.1-7.3 -> ~4 us)
+ G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv, minb, pf, blocks), k = 8192
+ G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, wg, pf, bk, xp), m = 8
++import os as _os
++PR1_PATH = _os.environ.get("PR1_PATH", "/home/daytona/r-proj/muse_bf16_proj/dev/pr1.cu")
++PR1_TOKENS = tuple(int(v) for v in _os.environ.get("PR1_TOKENS", "1").split(",") if v)
++PR1_CFG = {1: tuple(int(v) for v in _os.environ.get("PR1_CFG", "2,4,1,4,26,132,4").split(","))}
++BOUNDARY_TRIG = int(_os.environ.get("BOUNDARY_TRIG", "1"))
+ G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
+ 
+ 
+@@ -778,10 +779,11 @@
+             src = src + "\n" + _GPR3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(PR3_CFG.values()) | set(PR3_BUILD))))
+             if G19_CFG and _G19_SRC is not None:
+                 src = src + "\n#define G19_ONLY2\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
+-                    "G19_CASE(%d,%d,%d,%d,1,%d)" % (c[0], c[1], c[2], c[3], c[5]) for c in sorted(set(G19_CFG.values()) | set(G19_BUILD))))
++                    "G19_CASE(%d,%d,%d,%d,1,%d)" % (c[0], c[1], c[2], c[3], c[5]) for c in sorted(set(G19_CFG.values()))))
+             else:
+                 src = src + "\nvoid g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
+             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
++            src = src + "\n" + open(PR1_PATH).read().replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c[:4] for c in sorted(set(PR1_CFG.values()))))
+             _G10["lib"] = load_inline(
+                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
+                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
+@@ -797,8 +799,11 @@
+                             "void pj_router3(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                             "void n2u_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                             "int64_t, int64_t, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, std::vector<torch::Tensor>, double, double);\n"
+-                            "void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+-                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "pj_router3", "g19_gemm"],
++                            "void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
++                            "void pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
++                            "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
++                            "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
++                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "pj_router3", "g19_gemm", "pr1_launch"],
+                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
+         except Exception as e:  # noqa: BLE001
+             print("layer: gemv10/12 build failed, cuBLAS:", e)
+@@ -1305,6 +1310,7 @@
+     state["g12"] = {key: _pack12(w[key], 1024 * c[0]) for key, c in G12_CFG.items()}
+     state["g12_ws"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=dev)
+     state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
++    state["pr1_cnt"] = torch.zeros(4, dtype=torch.int32, device=dev)  # pr1's router ticket (self-resetting)
+     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n2u's last-block counter (self-resetting)
+     state["g13"] = {key: pk for key in G13_CFG if (pk := _pack13(w[key])) is not None}
+     state["g14"] = {key: pk for key, c in G14_CFG.items() if (pk := _pack14(w[key], 1024 * c[0])) is not None}
+@@ -1415,10 +1421,10 @@
+     h32 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev) if fp32_router else stream1
+     alpha, beta = state["res1"]
+     npf = (state["router"].numel() * 4) // (512 * 1024) if tokens in ROUTER_L2_PF_TOKENS and fp32_router else 0
++    pr1 = tokens in PR1_TOKENS and pdl and "pooler" in state.get("g13", {})
+     _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
+                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
+-                               PDL=pdl, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32,
+-                               TRIG=BOUNDARY_TRIG and ("pooler", tokens) in state.get("g19", {}) and "pooler" in G19_ON, num_warps=16,
++                               PDL=pdl, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32, TRIG=pr1 and bool(BOUNDARY_TRIG), num_warps=16,
+                                launch_pdl=pdl)
+     main_stream, side_stream = torch.cuda.current_stream(), state["side_stream"]
+     if tokens in ROUTER_AFTER_POOLER and pdl:
+@@ -1458,12 +1464,26 @@
+         moe = _experts_moe(p, wts, lids, state) if _use_moe(tokens) else (
+             _experts_marlin if HAVE_SGL else _experts_local)(p, wts, lids, state)
+         return _tail(moe, stream1, h, tokens, state, pdl) + (ids,)
+-    side_stream.wait_stream(main_stream)
+-    with torch.cuda.stream(side_stream):
++    bucket = None
++    if pr1:  # pooler + router + routing in one launch (proj pr1), PDL secondary of the boundary
++        pk = state["g13"]["pooler"]
++        pooled = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
++        logits = torch.empty(N_EXPERTS, dtype=torch.float32, device=dev)
++        topk_ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
++        local_ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
++        topk_weights = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
++        _G10["lib"].pr1_launch(pk[0], pk[1], pk[2], h, pooled, pk[3], state["router"], h32, logits, state["pr1_cnt"],
++                               state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
++                               ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens], 1)
++    else:
++      side_stream.wait_stream(main_stream)
++      with torch.cuda.stream(side_stream):
+         topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens)
+         # The experts' bucketing too, off the main stream's path.
+         bucket = _moe_bucket(state, local_ids) if _use_moe(tokens) and TK2_MAX_TOKENS < tokens <= BUCKET_SIDE_MAX_TOKENS else None
+-    if tokens in POOLER_HI_PRIORITY:
++    if pr1:
++        pass
++    elif tokens in POOLER_HI_PRIORITY:
+         # the pooler on a high-priority stream: its CTAs go ahead of the router's remaining waves
+         hi = state["hi_stream"]
+         hi.wait_stream(main_stream)
+@@ -1494,8 +1514,9 @@
+     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl and not tk2_pdl,
+                              TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
+                              launch_pdl=pdl and not tk2_pdl)
+-    main_stream.wait_stream(side_stream)
+-    if not torch.cuda.is_current_stream_capturing():
++    if not pr1:
++        main_stream.wait_stream(side_stream)
++    if not pr1 and not torch.cuda.is_current_stream_capturing():
+         for t in (topk_ids, local_ids, topk_weights) + (bucket or ()):
+             t.record_stream(main_stream)
+         for t in (h, h32):
