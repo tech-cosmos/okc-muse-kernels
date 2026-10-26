@@ -142,9 +142,10 @@ LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference exper
 def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr, h_ptr, h32_ptr,
               NB: tl.constexpr, N: tl.constexpr, BGAIN: tl.constexpr, H32: tl.constexpr,
               EPS_POST: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr, pf_ptr=None, PF: tl.constexpr = 0,
-              PF_NT: tl.constexpr = 512):
+              PF_NT: tl.constexpr = 512, RB: tl.constexpr = False):
     """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
     s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32).
+    RB: the branch is FP32 (gemv19 output), rounded to BF16 first.
     PF > 0: the last PF programs instead L2-prefetch PF x PF_NT x 1 KB from pf_ptr (the router weight) and exit."""
     if PF > 0:
         if tl.program_id(0) >= tl.num_programs(0) - PF:
@@ -164,7 +165,10 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
     s = tl.load(s_ptr + row * N + cols)
     if PDL:
         gdc_wait()
-    b = tl.load(br_ptr + row * NB + cols, mask=in_b, other=0.0).to(tl.float32)
+    b = tl.load(br_ptr + row * NB + cols, mask=in_b, other=0.0)
+    if RB:  # FP32 branch (gemv19): round to the BF16 the GEMM would return
+        b = b.to(tl.bfloat16)
+    b = b.to(tl.float32)
     if BGAIN:
         b = b * bgain
     rb = tl.rsqrt(tl.sum(b * b, 0) / N + EPS_POST)
@@ -519,6 +523,7 @@ def prepare(weights):
             for e in range(LOCAL_EXPERTS)]
     _g10_lib()
     _g12_prepare(state)
+    _g19_prepare(state)
     _lt_prepare(state)
     torch.cuda.synchronize()
     return state
@@ -576,6 +581,17 @@ _G12_SRC = None  # @@G12@@
 # qkv m8 13.9 -> 13.0 us.
 _G13_SRC = None  # @@G13@@
 _G14_SRC = None  # @@G14@@
+_G19_SRC = None  # @@G19@@
+# proj's gemv19 (g19_src.cu = r-proj dev/gemv19.cu @6996d0c): m = 16/32 GEMM over the 12-bit weights, FP32 out zeroed
+# in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
+# kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
+# npre, xb), proj's H100 picks (r-proj BF16_G19). Consumers round the FP32 out to BF16 (= the GEMM's BF16 output).
+G19_CFG = {("pooler", 16): (16, 1024, 4, 4, 2, 2), ("pooler", 32): (32, 1024, 4, 4, 2, 1),
+           ("unpool", 16): (16, 1024, 4, 4, 2, 2), ("unpool", 32): (32, 1024, 4, 4, 2, 1),
+           ("o", 16): (16, 512, 4, 3, 2, 2)}
+G19_ON = {"pooler", "unpool"}  # o: H100 tie (cuBLAS after attention)
+G19_GRID = {("pooler", 16): 96, ("pooler", 32): 96}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16 132: +4, 96: -2 us vs 132)
+_G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _GPR3_SRC = None  # @@GPR3@@
 KV_PF = True  # s9: the qkv gemv13 L2-prefetches the window's KV rows for csl (d1 sliding; H100 csl 6.1-7.3 -> ~4 us)
 G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv, minb, pf, blocks), k = 8192
@@ -753,7 +769,12 @@ def _g10_lib():
                 assert src13.count(x_) == 1, x_
                 src13 = src13.replace(x_, y_)
             src = src + "\n" + src13 + "\n" + _R3_SRC.replace("R3_CONFIGS", " ".join("R3_CASE(%d,%d,%d)" % c for c in sorted(set(ROUTER3_CFG.values()))))
-            src = src + "\n" + _GPR3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(PR3_CFG.values()))))
+            src = src + "\n" + _GPR3_SRC.replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(PR3_CFG.values()) | set(PR3_BUILD))))
+            if G19_CFG and _G19_SRC is not None:
+                src = src + "\n#define G19_ONLY2\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
+                    "G19_CASE(%d,%d,%d,%d,1,%d)" % (c[0], c[1], c[2], c[3], c[5]) for c in sorted(set(G19_CFG.values()))))
+            else:
+                src = src + "\nvoid g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
@@ -769,8 +790,9 @@ def _g10_lib():
                             "void g17_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t);\n"
                             "void pj_router3(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                             "void n2u_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                            "int64_t, int64_t, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, std::vector<torch::Tensor>, double, double);",
-                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "pj_router3"],
+                            "int64_t, int64_t, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, std::vector<torch::Tensor>, double, double);\n"
+                            "void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "pj_router3", "g19_gemm"],
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
             print("layer: gemv10/12 build failed, cuBLAS:", e)
@@ -786,6 +808,7 @@ ROUTER3_CFG = {8: (4, 2, 512)}
 # proj H200 standalone: T16 7.38 -> 5.55, T32 8.66 -> 6.36, T128 10.24 -> 9.00 us.
 # Layer H100: T=128 (v16) -4.5 us; T=16/32 +1..3 us (its 72 KB-smem CTAs crowd the pooler bmm beside it): off there.
 PR3_CFG = {128: (128, 64, 4, 4, 256, 4)}
+PR3_BUILD = [(16, 64, 1, 4, 256, 4)]  # also compiled (A/B at T=16/32)
 _R3_SRC = r'''// router3: proj's router2 (no split K, x in registers, W float4 loads issued up front) with FP32 x; tokens split over
 // blockIdx.y in groups of M so that x fits in registers.
 namespace r3 {
@@ -1197,6 +1220,75 @@ def _lt_prepare(state):
             print("layer cuBLASLt config dropped:", key, m, cfg, st)
 
 
+def _pack19(c, kc, ap):
+    """proj's pack19 (r-proj dev/g19_lib.py): _compress output -> stage-major uint8 [stages, 8 * ap * 768]."""
+    code, sm, hdr, scale = c
+    n, k = code.shape
+    perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()  # noqa: E731
+    S = perm(sm).to(torch.uint8).reshape(k // kc, n // 16, kc // 32, 32, 16)
+    sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=code.device)
+    N = (perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8).long() << sh).sum(-1)
+    N = torch.where(N >= 2 ** 31, N - 2 ** 32, N).int().contiguous()
+    ks, ntr, spk = k // kc, n // 128, kc // 32 // ap
+    S = S.view(ks, ntr, 8, spk, ap * 512).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, 8 * ap * 512)
+    N = N.view(torch.uint8).view(ks, ntr, 8, spk, ap * 256).permute(0, 1, 3, 2, 4).reshape(ks * ntr * spk, 8 * ap * 256)
+    return torch.cat([S, N], 1).contiguous()
+
+
+def _g19_prepare(state):
+    """gemv19 packs per (key, T) (shared when kc/ap match) + one epoch counter per call site; each pick is checked
+    once against F.linear (dropped -> cuBLAS)."""
+    state["g19"] = {}
+    lib = _G10.get("lib")
+    if lib is None or not G19_CFG or _G19_SRC is None:
+        return
+    w = {**state["dense"], "unpool": state["unpool"]}
+    comp, packs = {}, {}
+    dev = state["unpool"].device
+    g = torch.Generator(device=dev)
+    g.manual_seed(0)
+    for (key, m), c in G19_CFG.items():
+        if key not in comp:
+            comp[key] = _compress(w[key])
+        if comp[key] is None:
+            continue
+        pk = packs.get((key, c[1], c[2]))
+        if pk is None:
+            pk = packs[(key, c[1], c[2])] = _pack19(comp[key], c[1], c[2])
+        grid = G19_GRID.get((key, m), _G19_SMS)
+        e = (pk, comp[key][2], comp[key][3], {grid: torch.zeros(2, dtype=torch.int32, device=dev)}, c)
+        x = torch.randn((m, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
+        out = torch.full((m, w[key].shape[0]), float("nan"), dtype=torch.float32, device=dev)
+        try:
+            lib.g19_gemm(e[0], e[1], e[2], x, out, e[3][grid], c[1], c[2], c[3], 1, grid, 0, 2, c[4], c[5])
+            torch.cuda.synchronize()
+            ref = F.linear(x, w[key]).float()
+            ok = ((out.bfloat16().float() - ref).norm() / ref.norm()).item() < 1e-2
+        except Exception as ex:  # noqa: BLE001
+            print("layer gemv19 failed:", key, m, ex)
+            ok = False
+        if ok:
+            state["g19"][(key, m)] = e
+        else:
+            print("layer gemv19 config dropped:", key, m, c)
+    del comp
+
+
+def _g19(x, key, state):
+    """x @ W.T (key's weight) in FP32 by gemv19 (a PDL dependent of the previous kernel), or None."""
+    e = state.get("g19", {}).get((key, x.shape[0])) if key in G19_ON else None
+    if e is None:
+        return None
+    c = e[4]
+    out = torch.empty((x.shape[0], e[1].shape[0]), dtype=torch.float32, device=x.device)
+    grid = G19_GRID.get((key, x.shape[0]), _G19_SMS)
+    ctr = e[3].get(grid)  # the epoch barrier needs one counter per grid size
+    if ctr is None:
+        ctr = e[3][grid] = torch.zeros(2, dtype=torch.int32, device=x.device)
+    _G10["lib"].g19_gemm(e[0], e[1], e[2], x.contiguous(), out, ctr, c[1], c[2], c[3], 1, grid, 0, 2, c[4], c[5])
+    return out
+
+
 def _g12_prepare(state):
     """gemv12's packed weights, FP32 split-K workspace (overwritten each call) and per-rg counters (left zeroed).
     All gemv12 calls run on the main stream, one at a time, so they share the workspace and counters."""
@@ -1274,13 +1366,16 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None):
     """unpool -> second boundary: (next attention input, stream)."""
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
     if f is None:
-        f = _linear(moe, state["unpool_slice"], "unpool_slice", state) if sliced else F.linear(moe, state["unpool"])  # all-gather: identity (zeros)
+        f = _linear(moe, state["unpool_slice"], "unpool_slice", state) if sliced else _g19(moe, "unpool", state)
+        if f is None:
+            f = F.linear(moe, state["unpool"])  # all-gather: identity (zeros)
     stream2 = torch.empty_like(stream1)
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]
     _boundary[(tokens,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
                          NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
-                         EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, num_warps=16, launch_pdl=pdl)
+                         EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, RB=f.dtype == torch.float32, num_warps=16,
+                         launch_pdl=pdl)
     return hidden, stream2
 
 
@@ -1303,7 +1398,9 @@ def kernel_fn(data, state):
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
         "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
         "seq_lens": data["seq_lens"], "config": cfg}).view(tokens, hq * d)
-    a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
+    a = _g19(o, "o", state)
+    if a is None:
+        a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
 
     fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
     pdl = GLUE_PDL or (GEMV_PDL and tokens in PDL_TOKENS and _G10.get("lib") is not None)
@@ -1314,7 +1411,8 @@ def kernel_fn(data, state):
     npf = (state["router"].numel() * 4) // (512 * 1024) if tokens in ROUTER_L2_PF_TOKENS and fp32_router else 0
     _boundary[(tokens + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
-                               PDL=pdl, pf_ptr=state["router"], PF=npf, num_warps=16, launch_pdl=pdl)
+                               PDL=pdl, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32, num_warps=16,
+                               launch_pdl=pdl)
     main_stream, side_stream = torch.cuda.current_stream(), state["side_stream"]
     if tokens in ROUTER_AFTER_POOLER and pdl:
         # The pooler GEMV (triggers its dependents at start) first; the router is its PDL secondary on the same
@@ -1368,6 +1466,8 @@ def kernel_fn(data, state):
         if not torch.cuda.is_current_stream_capturing():
             h.record_stream(hi)
             pooled.record_stream(main_stream)
+    elif (pooled := _g19(h, "pooler", state)) is not None:
+        pass
     elif tokens in POOLER_BMM:
         # split K in NS slabs as one strided batched GEMM with FP32 out; the rmsnorm sums the slabs (no reduce kernel)
         ns = POOLER_BMM[tokens]
@@ -1383,9 +1483,9 @@ def kernel_fn(data, state):
         # moe_tk2 gemm13 reads the routing before its griddepcontrol.wait: join first, so that its only
         # (programmatic) predecessor is this rmsnorm, which has full edges from the pooler and the routing.
         main_stream.wait_stream(side_stream)
-    nsp = POOLER_BMM.get(tokens, 1) if tokens not in POOLER_HI_PRIORITY else 1
+    nsp = pooled.shape[0] if pooled.dim() == 3 else 1  # bmm slabs [ns, T, n]
     _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=pdl and not tk2_pdl,
-                             TRIG=tk2_pdl, ROUND=nsp > 1, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
+                             TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
                              launch_pdl=pdl and not tk2_pdl)
     main_stream.wait_stream(side_stream)
     if not torch.cuda.is_current_stream_capturing():
