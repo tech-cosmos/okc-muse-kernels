@@ -1,22 +1,23 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 ~01:30Z (end of session 7).
+Updated 2026-10-26 ~02:40Z (end of session 8).
 
 ## Board
-- **Best scored: ca8f833a = v22 (3fab554), 1.8924x, 11,953 us/step (2026-10-26 ~01:20Z).** Board #1 2.360x, #10 2.167x
-  (10-26 01:20Z). v23 (358d87c = main, check f2db2454 1.9088x) scored dae762e4 1.8852x (noise; not the board best).
-- main = v23: v22 + r3_router (FP32 router at T=8, no split K). FUSED_ROUTER_TOKENS option off (tie).
-- Budget 2026-10-26: 3 submits (81e501e9, ca8f833a, v23), 3 checks used.
-- v22 scored per shape (H200 us sliding/full; SGLang in brackets): d1 76.4/87.2 (173/184), d16 147.6/237.7 (252/445),
-  d32 189.0/337.9 (254/609), v1 123.1/143.6 (260/285), v16 271.7/356.0 (508/661), v32 353.0/529.1 (704/1050).
-  Speedups: d1 2.27/2.11, d16 1.71/1.87, **d32 1.35/1.80**, v1 2.11/1.98, v16 1.87/1.86, v32 1.99/1.98.
+- **Best scored: be766193 = v26 (45bb3ef), 1.927x, 11.74 ms/step (2026-10-26 ~02:10Z).** Board #1 2.360x, #10 2.167x
+  (10-26 01:20Z). Check d3c8c88d (v26) 1.9152x.
+- main = v29 (9199ea7) = v26 + pooler split-K bmm at T=16/32 (H100 d16/d32 -2.3 us); check: see NOTES s8.
+- Budget 2026-10-26: 4 submits (81e501e9, ca8f833a, dae762e4, be766193), 5 checks used (as of 02:35Z).
+- v26 scored per shape (H200 us sliding/full; SGLang in brackets): d1 75.9/83.3 (173/183), d16 152.1/234.1 (261/442),
+  d32 194.1/339.6 (271/618), v1 121.5/130.8 (261/268), v16 283.0/365.2 (554/716), v32 371.9/547.4 (728/1091).
   Judge noise: identical code moves up to 4% per shape; total ~+-1%.
+- Scoring: geomean over 6 loads, each = 46 sliding + 16 full layers: 1 us on d1 sliding = +0.16% total, v1 +0.10%,
+  d16 +0.07%, d32 +0.05%, v16 +0.04%, v32 +0.03%.
 - Floors (us): d1 40/44, d16 77/137, d32 85/208, v1 62/66, v16 127/189, v32 144/267.
 
 ## Code (muse_decode_layer/)
 - `layer.py` = the layer. Inlined by **`python build.py` -> submission.py** (never edit submission.py by hand):
   `attn_src.py` = ~/attn submission.py @82866c6 (kernel_fn -> attn_kernel_fn, constexpr np2 fix, csl::decode patched
-  to trigger PDL dependents); `moe_src.py` = r-moe 128b11a (= local 60d4a66; T<=32 = moe_tk2f one launch; names prefixed `_moe_`; T>32 = its kernel_fn (moe_twf: gemm13+gemm2 in one persistent launch); layer.py patches moe_norm2 to
+  to trigger PDL dependents); `moe_src.py` = r-moe d899a76 (TK2F 204; T<=32 = moe_tk2f one launch; names prefixed `_moe_`; T>32 = its kernel_fn (moe_twf: gemm13+gemm2 in one persistent launch); layer.py patches moe_norm2 to
   trigger dependents); `g10_src.cu` = proj gemv10 (r-proj d894f4e, m=1), `g12_src.cu` = proj gemv12 (r-proj e71d015,
   m=8), `g13_src.cu`/`g14_src.cu` = proj gemv13 (m=1)/gemv14 (m=8) over lossless 12-bit BF16 (r-proj 3f173eb, bit-exact escape headers; packs `_pack13/_pack14` in `_g12_prepare`, used for qkv+pooler (G13_CFG/G14_CFG) when the weight compresses, built in `_g10_lib`), `lt_src.cu` = proj cuBLASLt explicit-algo GEMM (LT_CFG fixed H200 picks, `_lt_prepare`); layer.py `_g10_lib` builds g10/g12 in one load_inline and text-patches them (PDL trigger, PDL-secondary launch).
   Re-copy: `git -C ~/r-moe show <c>:muse_moe_w4a16/submission.py > moe_src.py` (check the 68-int route meta
@@ -24,7 +25,9 @@ Updated 2026-10-26 ~01:30Z (end of session 7).
 - Router: T=1 `_router_fma` (Triton FP32), T=8 `r3_router` (CUDA FP32, in `_g10_lib`), T>8 `_router_split` (SGLang hi/lo BF16).
 - Pipeline: qkv `_linear` (gemv10 T=1, gemv12 T=8, cuBLASLt pick at T=128/256, else cuBLAS) -> attn -> o `_linear` -> `_boundary` -> side stream:
   router + `_routing` || pooler `_linear` -> `_rmsnorm_gain` -> experts (`_moe_kernel_fn`: tk2 at T<=32, route+gather+
-  moe_tw at T>32) -> unpool `_linear` (1024-row slice at T<=8) -> `_boundary`.
+  moe_tw at T>32) -> unpool `_linear` (1024-row slice at T<=8; gemv17 `_G17_SRC` at T=1/8) -> `_boundary`.
+  T=1: experts = moe_tk2f launched by the layer (`_experts_n2u`) + `n2u` (moe_norm2 fused into the unpool GEMV, `_N2U_SRC`).
+  T=16/32: pooler = 2-slab split-K bmm FP32 out (POOLER_BMM), slabs summed in `_rmsnorm_gain` (NS/SS).
   PDL: GEMV_PDL (gemv triggers; glue after it launches with PDL at T in PDL_TOKENS) and GEMV_PDL_SECONDARY
   {(tokens, sliding): keys} = GEMVs launched as PDL secondaries.
 - bench.py `test` / `bench [file] [filter]` / `prof`; tools/timeline.py <file> "<load> <layer>" (per-kernel
@@ -44,17 +47,22 @@ Updated 2026-10-26 ~01:30Z (end of session 7).
   Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
 
 ## Next (ranked)
-0. Watch r-moe / r-proj Handoffs; re-copy + rebuild + test (+ tools/tk2f_stress.py, tools/esc_probe.py) + interleaved
-   bench vs variants/sub_v22.py + check. Only submit on a check beating the board by more than noise.
-1. Experts are 50-60% of every T>=16 shape (tk2f d32 101 of 217 us H100): moe's lane.
-2. d32 sliding is the weakest shape (1.33x): critical path = qkv 19, attn ~26, o 9, boundary 4, pooler||router 38,
-   tk2f 101, norm2 5, unpool 27, boundary 4 (H100 us). FUSED_ROUTER_TOKENS would win ~3-5 us at T>=16 with a GEMM
-   config for [T,4608] FP32 out better than cuBLAS's heuristic (cuBLASLt heuristic list: nothing better, s7; needs a custom kernel).
-3. Done s7 (v23 r3_router). Left at v1: the pooler still starts 5 us after the router (r3 = 256 CTAs, 2 waves).
-4. Glue fusions (each ~1-3 us at d1/v1): rmsnorm into tk2f x staging, boundary into a GEMV epilogue (last-CTA).
-5. Routing risk: diag check f5fdc570 once failed a timed rep's routing (3.18e-2 > 0.03). Not seen since.
+0. Watch r-moe / r-proj Handoffs; re-copy + rebuild + test (+ tools/tk2f_stress.py, tools/n2u_eq.py) + interleaved
+   bench vs variants/sub_v26.py + check. Only submit on a check beating the board by more than noise. NOTE: the layer
+   now calls moe_tk2f_launch directly at T=1 (`_experts_n2u`) and reimplements moe_norm2 in `_N2U_SRC`: when moe
+   changes tk2f's args, y32 layout or norm2 math, update both.
+1. Experts are 50-60% of every T>=16 shape: moe's lane. proj's compressed m16/m32 GEMM (requested s8): cuBLAS is 63 of
+   182 us at d32 sliding (H200).
+2. d1 (worth the most per us): critical path H100 = qkv 13 -> csl 7 -> o -> boundary (ends 28) -> router 5 / pooler starts
+   3.4 us late (19 us) -> rmsnorm -> tk2f 36 -> n2u 7.5 -> boundary (2 us tail). Ideas: router rows inside the pooler
+   kernel (one launch, ~-3 us), rmsnorm into tk2f's x staging (moe).
+3. v1: tail tk2f -> norm2 4.6 -> g17 7 -> boundary (~14 us). n2u doesn't scale to 8 tokens (1 MB of y32 per block).
+4. Routing risk: diag check f5fdc570 once failed a timed rep's routing (3.18e-2 > 0.03). Not seen since.
 
 ## Dead ends (details in NOTES)
+- s8: boundary as n2u's last-block epilogue (+2.7); n2u PDL after tk2f (+2..3); moe_norm2 PDL after tk2f (g_pdl 6:
+  +1.1..1.4); bmm split-K for o/unpool at T=16/32 (+0.3..0.6); pooler bmm at T=128/256 (noise). RACE: gemv17 PDL
+  secondary of norm2 at T=8 fails test 8 on repeats (unexplained; off).
 - s7: fused pooler+router GEMM with cuBLAS heuristics (tie, kept as FUSED_ROUTER_TOKENS=()).
 - s6: moe twf at decode T=16/32 (+22/+25 us H100); L2 prefetch of the unpool W from twf CTAs at their work-counter
   exhaustion (PF 16-40 MB: +1..5 us); gemv14 for o (verify full) and unpool slice at T=8 (+0.6..1.5 us).

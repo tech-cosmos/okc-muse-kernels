@@ -262,3 +262,5 @@
   slabs summed in _rmsnorm_gain (NS/SS, ROUND to BF16 = the pooler's dtype) instead of cuBLAS's splitK kernel + its
   reduce. Standalone H100 m16/m32 25.8/26.1 vs F.linear 28.0/28.1; layer d16/d32 -2.3 us on both layer kinds; 4
   slabs worse; T=128/256 noise (not used).
+- DEAD: moe_norm2 as PDL secondary of tk2f (moe_set_pdl(6)): H100 d16/d32/v1 sliding +1.1..1.4 us. bmm split-K for o /
+  unpool at T=16/32 standalone: unpool 25.4 -> 26.0 (S2), o 8.8 -> 9.5: cuBLAS non-split is better there.
