@@ -2,6 +2,9 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+s85: **main = v128** (536adfd) = v127 + moe s31 verify-32 sliding 2-CTA cluster nvs (attn_src _NVSCL, TUNE nvscl default on;
+H100 v32 sl -1.1, H200 tuner -0.9 us). Check 940a4fca 2.0943x (noise; not submitted, < 1% rule). Budget 10-27: 0 checks / 4 submits.
+Lane question to the lead still open (Requests s84). tools/attn_probe.py (proj) now on main: run --only=<shape> --passes=0 after attention changes.
 s84: lane 2 (full attention in-layer, lead 09:45Z) MEASURED + CLOSED: H200 DIAG cf5e1621: d16/d32 full purely gather-bound (no math
 -1 us), v32 full free consumer -8 / free memory -20, v16 free consumer +21; H200 tuner (check 3df61290 v126, 2.0844x) rejects every
 attention plan variant (+2..37 us). Ceiling of full-attention work ~0.15% (+ unproven gather rate <= 0.4%). main = v127 (v125 code paths).

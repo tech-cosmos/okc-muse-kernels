@@ -1770,3 +1770,20 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   on the H200 (as the unpaced no-math probes said): the attention plans are at their H200 optimum. aplan options removed from TUNE
   (v127 = v126 minus the options; plumbing ATT_PLAN/ATT_DIAG stays, inert). Full-layer attention lane: CLOSED at ~0.15% ceiling
   (consumer) + an unproven gather-rate question (moe asked to run ~/attn exp/hdiag5 on the attention budget).
+
+## s85 (2026-10-27 10:27Z-, night4 session 34): v128 = v127 + moe s31 verify-32 sliding cl nvs
+- No new lead decision after 09:45Z (s84 lane question open). Only Handoff for layer: moe s31 v32 sliding nvs `cl` (agent2
+  halfpfkr: the 2 splits of a (request, KV head) as a 2-CTA cluster merged over DSMEM, writes out, no _combine_hb; H200
+  standalone v32 sl 15.51 -> 14.07/14.39 us). Skipped moe's csl/vtk __fdividef owner merge (H100 -0.1..0.2 us, precision change).
+- git merge-file of moe's whole attention file onto attn_src mis-aligned (4 tangled conflicts): ported the cl source verbatim as a
+  SEPARATE build `_NVSCL_SRC`/`_NVSCL` (r-moe 6c4fee3's _NVS_SRC), on the build pool, joined in _join_builds. _verify_nvs uses
+  it when data["nvs_cl"] (TUNE option nvscl, layer NVS_CL = True), batch >= 32 (S 2), BF16 qkv, no QSS slabs, no O_PF (both off
+  at T=256 by default); else the old nvs + _combine_hb. Tuner: new "sl" flag = sliding-only option (skipped on full layers).
+- H100: tuner T=256 sl {nvscl False} 398.8 vs default 399.5 (one-shot); ab_flag 6 rounds verify 32 sliding 370.81 vs 371.90 us.
+  validate --quick ALL OK (test 13/13, scored 0/12, opt 0/302, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256, cold 140.5 s).
+  proj's tools/attn_probe.py (copied from proj/attnprobe) --only=verify --passes=0: all 6 verify shapes PASS, worst 2.07e-3.
+- 10:5xZ CHECK 940a4fca v128 (536adfd) 2.0943x, 10,801 us (last layer check of 10-27). Per shape: d1 66.1/76.0, d16 126.4/206.6,
+  d32 161.7/320.5, v1 108.7/124.1, v16 260.5/350.3, v32 337.5/511.1 (v32 sl slower than board 322.0: SGLang 681.8 vs 698.1, judge
+  noise). H200 tuner T=256 sl: default (nvscl on) 349.7 vs {nvscl False} 350.6 us (-0.9 us, same sign as H100 and moe's standalone;
+  below noise); tuner picked {hot 24} on confirm. NOT submitted: 1.9% under the board 2.1339x (lead 09:28Z rule needs within 1%).
+  main = v128. Value of the item ~0.03-0.05% total: housekeeping, not a lever.
