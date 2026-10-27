@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 11:30 UTC (s80). No bundle since v128. pr8 (T=8 chain) probes: in-loop 2nd L2 prefetch wave DEAD (+0.4..2.2 us
+H100); tail med->max ~2 us = stealing bound (below the line). H200 pr8 ~17 us after bnd vs 13.7 floor. NOTES s80.
 Updated 2026-10-27 10:58 UTC (s79). Validated layer v128 (536adfd, nvscl): full validate ALL OK (cold 121.3 s), attn_probe
 29/29, H100 v32 sl -1.4..-1.5 us (NOTES s79, COORD Requests). Next: same for every new layer/moe attention bundle.
 Updated 2026-10-27 10:25 UTC (s78). Lead 09:45Z: attention reopened (layer: _gd_full/_gw_verify; moe: attention board);

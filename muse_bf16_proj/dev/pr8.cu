@@ -198,11 +198,11 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
 #ifndef PR8_PFLATE
     for (int p = 0; p < PF; ++p) { ws_[p] = ld2(wbs + p * WG * 32); wn_[p] = ld1(wbn + p * WG * 32); }
 #endif
-    auto bulk_pf = [&](int nb) {  // s36: bulk L2 prefetch of atoms [PF, PF + nb) of each row group (WS, WN)
+    auto bulk_pf = [&](int nb, int a0 = PF) {  // s36: bulk L2 prefetch of atoms [a0, a0 + nb) of each row group (WS, WN)
         if (t >= 2 * NG) return;
         const int gi2 = t >> 1;
-        nb = min(nb, NA - PF);
-        const long o0 = ((long)RGOF(gi2) * (KC / 32) + PF * WG) * 32;
+        nb = min(nb, NA - a0);
+        const long o0 = ((long)RGOF(gi2) * (KC / 32) + a0 * WG) * 32;
         const char* src = (t & 1) ? (const char*)(a.WN + o0) : (const char*)(a.WS + o0);
         const unsigned bytes = (unsigned)nb * WG * 32 * ((t & 1) ? 4 : 8);
         if (nb > 0) asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(src), "r"(bytes) : "memory");
@@ -320,6 +320,9 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
             else asm volatile("cp.async.wait_group 0;");
             __syncthreads();
         }
+#ifdef PR8_PF2A  // s80: second bulk L2 prefetch wave inside the loop: at atom PR8_PF2A, atoms [PR8_PF2B, PR8_PF2B + PR8_PF2N)
+        if (at == PR8_PF2A) bulk_pf(PR8_PF2N, PR8_PF2B);
+#endif
 #ifdef PR8_RMID  // s36: router item in the middle of the pooler loop (at == PR8_RMID)
         if (at == PR8_RMID) router_item();
 #endif

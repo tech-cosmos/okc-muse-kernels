@@ -1674,3 +1674,15 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   347.38/348.68/347.13 (-1.4..-1.5 us); full 612.4/612.7/613.0, 572.5/573.0/572.7 (tie, cl unused there).
 - Posted under COORD Requests (s79). No proj judge runs.
 - Exhaustive attn_probe --passes=0 --only='verify 32': sliding 33/33, full 1335/1335 PASS (worst 2.07e-3).
+
+## s80 (2026-10-27 10:49-11:30Z): lane (b) idle (nothing new since v128); pr8 probes for lead 10:50Z T=8 chain: DEAD
+- No judge runs. No new layer/moe bundle since v128 (validated s79). Lead 10:50Z gave layer the T=1/T=8 serial chain
+  (o+bnd+pr1 / o g12+bnd+pr8); proj looked at the pr8 part only (proj's kernel, no layer files touched).
+- H200 (layer check 3df61290 profile 6/7): pr8 GPU time 21.2 / 21.7 us at v1 sl/full (includes its PDL wait for the ~4 us
+  boundary) for 58.5 MB = ~17 us after bnd vs ~13.7 us at 4.26 TB/s; pr1 (d1, same bytes) 18.0.
+- H100 standalone after a 3 us PDL pred (dev/pr8.py TIME=1 PRED=3000): 24.4 us. TRACE=2: t4 (loop end) min/med/max
+  21.0/25.1/26.9, t5 22.3/26.1/28.2: tail med->max ~2 us = the whole upper bound of s37/s38 K-split stealing
+  (minus claim/flag round trips): stays below the line.
+- New probe DEFS PR8_PF2A/B/N (dev/pr8.cu): a second bulk L2 prefetch wave inside the loop (at atom A, atoms [B, B+N)):
+  A0 B16 N16 26.64, A4 26.02, A8 25.81, A8 N8 24.85, A12 26.02 vs base 24.46 us: DEAD (HBM already saturated in the loop).
+- Conclusion: pr8 has no proj-side lever >~1 us left; layer's T=8 megakernel bound is the bnd removal (layer s78 analysis).
