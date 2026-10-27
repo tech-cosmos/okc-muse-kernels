@@ -1471,3 +1471,14 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   ({tk2h 4, lt:o} sl 176.1 vs 175.5, full 332.6 vs 332.6; {tk2h 4} alone +11/-0.3): the T=32 tuner picks are near-ties that flip
   between runs; d32 full 291 (check) vs 327 (submit) is run noise, not a pick (tuner lines differ <= 5 us).
 - Budget 10-27 after s70: 14 checks / 5 submits left.
+
+## s71 (2026-10-27 03:46Z-, session 20): v109 = v108 + proj s59 G24X + moe n18 TK2F_L2H mode 4
+- `git apply -p1 r-proj/muse_bf16_proj/dev/s59/g24x_layer.patch` (clean on v108); moe n18 l2h4_layer.md hand-applied to
+  moe_src.py (#define TK2F_L2H 4 + nfin = multi-group expert; cache policy only, bitwise).
+- Tests: bench test 13/13; replay_test decode seeds 11,23 20 inputs: 0/240 (all 6 decode shapes).
+- H100 ab_files 4 rounds v108 vs v109 (tuner on): d1 85.9/105.5 -> 85.7/104.5, d16 189.3/290.6 -> 187.1/284.9,
+  d32 189.0/406.1 -> 189.4/406.2 (tie).
+- 03:54Z **check c3bab7fd = v109 (003a510): 2.0822x [2.051, 2.113], 10,864 us** (board 2.0860 -> NOT submitted): d1 67.5/75.2,
+  d16 128.8/210.7, d32 166.4/316.6, v1 111.5/127.5, v16 273.0/372.3, v32 354.1/533.0. H200 tuner T=16: {g24x False} +1.3 sl /
+  +1.0 full (G24X holds on H200); T=32 picked {tk2h 4} sl, {tk2h 4, lt:o} full again. v16/v32 code unchanged vs v108: their
+  -0..+33 us moves are run noise. Budget 10-27 after s71: 13 checks / 5 submits.

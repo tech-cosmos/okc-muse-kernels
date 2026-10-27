@@ -1,7 +1,8 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
 BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
-s70: **main = v108 = v107 + proj s58 g27mc + moe n17 TK2G_PAR4** (H100 d16 -1.1/-2.5, d32 -3.1/-2.0 us; tests 13/13, replay 0/160, cold prepare 137 s). Budget 10-27 left: 14 checks / 5 submits.
+s71: **main = v109 = v108 + proj s59 G24X + moe n18 L2H mode 4** (H100 d16 -2.2/-5.7 us, rest tie; tests 13/13, replay 0/240). Check c3bab7fd 2.0822x (< board, not submitted; H200 tuner: G24X -1 us at T=16). Budget 10-27 left: 13 checks / 5 submits. Submit only after stacking another win onto v109 and a check > 2.0860.
+s70: main was v108 = v107 + proj s58 g27mc + moe n17 TK2G_PAR4** (H100 d16 -1.1/-2.5, d32 -3.1/-2.0 us; tests 13/13, replay 0/160, cold prepare 137 s). Budget 10-27 left: 14 checks / 5 submits.
 
 OLDER BEST = submit b9685e03 = v103, 2.0606x (s67; d1 70.3/77.0, d16 133.4/216.1, d32 164.7/320.7, v1 114.0/122.9, v16 271.3/360.5, v32 352.9/520.7). #1 2.380x.
 
