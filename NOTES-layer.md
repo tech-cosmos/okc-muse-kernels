@@ -2012,3 +2012,24 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   * To ship it as a TUNE[128] option: escape fixups (headers; per-row x[t][col] * (v - 2^-15) in the epilogue, s == 0 slab
     only), the pack into _g12_prepare (pack30 in dev/s99_g30.py), PDL, and replay/route tests. T=256 = 2x MMA (n256 or
     two passes), not tried.
+
+## s100 (2026-10-27 15:39Z-, night4 session 49): g30 integrated: T=128 unpool on the 12-bit wgmma GEMM (main v135); 0 judge runs
+- Budget 10-27: layer checks 20/20 used (reset 00:00Z), 4 submits left (unusable without a check).
+- g30_src.cu = s99 dev kernel (split W/x rings NS10/NW10, S=1 only) + proj s91's in-fragment escape patch (r-proj
+  dev/s91/g30e.cu @15:43Z: esc_patch/esc_pop: the thread owning an escape's (row, k) A-fragment half overwrites it with
+  v = true/scale, exact in BF16; prepare drops g30 if any v isn't BF16-exact/normal) + PDL (W bulk loads before
+  griddepcontrol.wait, x after; launch_dependents at start). layer.py: _g30_build (on _BUILD_POOL), _pack30, _g30_prepare
+  (in _g19_prepare; F.linear check), _linear T=128 path, G30_PDL / G30_TRIG (second boundary = g30's PDL secondary).
+- First escape form (epilogue acc += x[t][col] * (v - 2^-15), x gathers on the tail): 28.1 us vs 21.6 without escapes:
+  DEAD. In-fragment: 22.4 vs cuBLAS 25.6 us (H100 cold L2, reference unpooler, ~3.2k escapes).
+- Exactness: dev/s100_g30exact.py (x = one-hot rows over every escape column + 256 random: out == W bitwise): 0 mismatches
+  on seeds 0/1/7 (~20M weights each). dev/s100_g30t.py: rel err = cuBLAS's (1.66e-3).
+- In-layer H100 ab_flag (4 rounds x seeds 99/7/13, v16 = T=128): g30 unpool sl -4.1/-4.5/-5.2, full -5.3/-4.7/-5.5 us.
+  G30_TRIG: -0.6..-1.5 more (4 rounds x 2 seeds); G30_PDL (g30 as secondary) ~0, kept on. H100 tuner (bench prepare) picked
+  g30 at T=128 full; sliding picked the twf_split/lt stack (g30 was not combinable then; now g30 is in TUNE_BASE[128] so
+  every option set includes it; escape hatches {g30:unpool False} and {g30 False + twf_split 66 + lt:o + lt:unpool}).
+- T=256 form (dev/s100_g30_tt2.cu: WG w = token half w over all stages, x stage 32 KB, no reduce): exact, but 38.9-40.7 vs
+  cuBLAS 27.6 us for every ring depth (NS2 4-6 / NW 2-16): each CTA must ingest 2 MB of x (per-SM ingest ~50 GB/s,
+  proj s16/s28): DEAD. g30 is a T=128-only kernel.
+- validate --quick (with g30:o option) ALL OK: test 13/13, scored 0/12, opt 0/316, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/464, cold prepare 121.8 s. o on g30 standalone 10.2 vs cuBLAS 10.5 us (tie): TUNE[128] option only. qkv (36 row groups) / FR pooler (S2, -1 us standalone) not built.
+- First check after 00:00Z = main v135; read the H200 'layer tune T=128' lines ({g30:unpool False} should lose by ~4-5 us).

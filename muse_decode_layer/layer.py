@@ -756,6 +756,15 @@ _G14_SRC = None  # @@G14@@
 _G19_SRC = None  # @@G19@@
 _G24_SRC = None  # @@G24@@
 _G27_SRC = None  # @@G27@@
+_G30_SRC = None  # @@G30@@
+# s100 g30 (g30_src.cu = layer s99 dev/s99_g30.cu + PDL + proj s91's in-fragment escape patch): T=128 wgmma GEMM over the 12-bit
+# weights decoded into register A-fragments (H100 cold-L2 unp 8192x4096 22.4 vs cuBLAS 25.6 us; in-layer ab_flag 4 rounds x 3 seeds
+# v16 sl -4.1..-5.2, full -4.5..-5.5 us; G30_TRIG another -0.6..-1.5). In TUNE_BASE[128]; TUNE option {g30:unpool: False}.
+G30_KEYS = ("unpool", "o")  # o: H100 standalone 10.2 vs cuBLAS 10.5 us (tie): TUNE option g30:o only
+G30_TOKENS = 128
+G30_PDL = 1  # launch g30 as a PDL secondary (W streams before griddepcontrol.wait)
+G30_TRIG = True  # the second boundary is g30's PDL secondary (g30 triggers at start)
+_G30 = {}
 # proj s57 gemv27 (g27_src.cu = r-proj muse_bf16_proj/dev/s57/gemv27.cu): o at T=16/32 without cross-block split-K: a
 # block owns RGB whole 16-row groups, its warps split k (KQ), partials summed in smem, plain FP32 stores (no out zeroing,
 # fence, epoch barrier or atomics; deterministic); ns >= 100 = PD: each warp's whole W slice (ns - 100 atoms) is streamed
@@ -2395,6 +2404,7 @@ def _g19_prepare(state):
         else:
             print("layer gemv19 config dropped:", key, m, c)
     _g24_prepare(state, w, comp, g)
+    _g30_prepare(state, w, comp, g)
     del comp
 
 
@@ -2470,6 +2480,72 @@ def _g24_prepare(state, w, comp, g):
         else:
             print("layer gemv24 config dropped:", key, m, c)
     _g27_prepare(state, w, comp, g, packs)
+
+
+def _g30_build():
+    if not G30_KEYS or _G30_SRC is None:
+        return
+    if "lib" not in _G30:
+        try:
+            import hashlib
+            from torch.utils.cpp_extension import load_inline
+            _G30["lib"] = load_inline(
+                name="layer_g30_" + hashlib.sha256(_G30_SRC.encode()).hexdigest()[:10],
+                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
+                cuda_sources=_G30_SRC, functions=["g30_gemm"],
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"], extra_ldflags=["-lcuda"])
+        except Exception as ex:  # noqa: BLE001
+            print("layer g30 build failed:", ex)
+            _G30["lib"] = None
+
+
+def _pack30(code, sm):
+    """[N, K] codes / sign|mantissa bytes -> [N/64][K/64][6144 B] stages: DEC3 bytes [2][128 thr][16], words [128][4]
+    (thread = (w, gq, q) of the wgmma A fragment; layer s99 dev/s99_g30.py pack30)."""
+    n, k = code.shape
+    G, KS = n // 64, k // 64
+    # row = 16 w + 8 rr + gq ; k = 16 j + 8 kh + 2 q + h ; element e = (kh, rr, h) ; thread = (w, gq, q)
+    perm = lambda t: t.view(G, 4, 2, 8, KS, 4, 2, 4, 2).permute(0, 4, 1, 3, 7, 5, 6, 2, 8).reshape(G, KS, 128, 4, 8)  # noqa: E731
+    b3, v = _dec3(perm(sm), perm(code))
+    Sb = b3.view(G, KS, 128, 2, 16).permute(0, 1, 3, 2, 4).reshape(G, KS, 4096)
+    Nb = v.contiguous().view(torch.uint8).view(G, KS, 2048)
+    return torch.cat([Sb, Nb], 2).contiguous()
+
+
+def _g30_prepare(state, w, comp, g):
+    state["g30"] = {}
+    if not G30_KEYS or _G30_SRC is None:
+        return
+    _g30_build()
+    lib = _G30["lib"]
+    if lib is None:
+        return
+    dev = state["unpool"].device
+    for key in G30_KEYS:
+        if key not in comp:
+            comp[key] = _compress(w[key])
+        if comp[key] is None or w[key].shape[0] % 64 or w[key].shape[1] % 128:
+            continue
+        code, sm, hdr, scale = comp[key]
+        v = hdr[:, :, 1]
+        if not torch.equal(v.bfloat16().float(), v) or bool(((v != 0) & (v.abs() < 2.0 ** -126)).any()):
+            print("layer g30 dropped (escape value not exact in BF16):", key)  # g30 patches escapes as BF16 A halves
+            continue
+        e = (_pack30(code, sm), hdr.contiguous(), scale)
+        x = torch.randn((G30_TOKENS, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
+        out = torch.full((G30_TOKENS, w[key].shape[0]), float("nan"), dtype=torch.bfloat16, device=dev)
+        try:
+            lib.g30_gemm(x, e[0], e[1], out, e[2], 0)
+            torch.cuda.synchronize()
+            ref = F.linear(x, w[key]).float()
+            ok = ((out.float() - ref).norm() / ref.norm()).item() < 1e-2
+        except Exception as ex:  # noqa: BLE001
+            print("layer g30 failed:", key, ex)
+            ok = False
+        if ok:
+            state["g30"][key] = e
+        else:
+            print("layer g30 dropped:", key)
 
 
 def _g27_build():
@@ -2565,7 +2641,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"cslpw": True},
             {"cslpw": True, "g14alt:qkv_gate": 3}, {"cslpw": True, "g14alt:qkv_gate": 2},
             {"cslpw": True, "pr8_npf": 206}, {"cslpw": True, "pr8_npf": 220}, {"cslpw": True, "pr8_npf": 112}),  # s91: pr8 bulk PF depth on the H200 (H100 can't judge it)  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
-        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
+        128: ({}, {"g30:unpool": False}, {"g30:unpool": False, "twf_split": 66, "lt:o": True, "lt:unpool": True}, {"g30:o": True}, {"g30:o": True, "twf_split": 66}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": False},
               {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},
               {"ltalt:pooler": 1}, {"ltalt:pooler": 2}, {"ltalt:pooler": 1, "twf_split": 66, "lt:o": True, "lt:unpool": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
@@ -2587,7 +2663,7 @@ _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate
 TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True, "pr1_rb": 32},
              (8, True): {"nu8": True, "g14alt:qkv_gate": 3}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
-             (128, True): {"fr": True}, (128, False): {"fr": True},
+             (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
              (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
              (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
              (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
@@ -2900,6 +2976,11 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
         lib.g12_gemm(state["g12"][key], x.contiguous(), out, state["g12_ws"], state["g12_cnt"], w.shape[0] // 8,
                      *G12_CFG[key], *pdl)
         return out
+    if x.shape[0] == G30_TOKENS and state is not None and key in state.get("g30", {}) and _opt(state, G30_TOKENS, "g30:" + key, False):
+        e = state["g30"][key]
+        out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
+        _G30["lib"].g30_gemm(x.contiguous(), e[0], e[1], out, e[2], G30_PDL)
+        return out
     alt = _opt(state, x.shape[0], "ltalt:" + key, 0) if state is not None else 0
     cfg = state.get("lt_alt_ok", {}).get((key, x.shape[0], alt)) if alt else None
     if cfg is not None:
@@ -3035,6 +3116,7 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
         pdl = pdl or trig and f is not None
         if f is None:
             f = _linear(moe, state["unpool"], "unpool", state)  # all-gather: identity (zeros)
+            pdl = pdl or (G30_TRIG and tokens == G30_TOKENS and "unpool" in state.get("g30", {}) and _opt(state, tokens, "g30:unpool", False))
     stream2 = torch.empty_like(stream1)
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]
@@ -3325,4 +3407,4 @@ def _kernel_fn(data, state):
     return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
 
 
-_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build)]
+_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build)]

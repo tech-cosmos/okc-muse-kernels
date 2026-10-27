@@ -12992,6 +12992,289 @@ void g27_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
     TORCH_CHECK(false, "g27: no config");
 }
 '''
+_G30_SRC = r'''// s100 "g30" (layer s99 dev/s99_g30.cu, layer form): T=128 GEMM out[128][N] = x[128,K] . W[N,K]^T in BF16 over proj's
+// lossless 12-bit BF16 weights (DEC3 dec8 units, pack30 in layer.py), W decoded straight into wgmma register
+// A-fragments (swap-AB: A = W rows, B = x via TMA SW128, n = 128 tokens). CTA = 64 W rows x all K: producer warp 8
+// streams the 6 KB packed W stages (G30_NW ring), warp 9 the 16 KB x boxes (G30_NS ring); 2 consumer WGs take
+// alternate 64-k stages, summed through smem; epilogue staged token-major, 16 B stores. Escapes (proj s91, r-proj
+// dev/s91/g30e.cu): an escape decodes to 2^-15; the thread owning (row, k) in its A fragment overwrites that BF16 half
+// with v = true / scale from the header [N][ESC] float2 (col bits, v; empty slot (0, 2^-15)): exact like a plain BF16
+// GEMM (prepare() checks v is exact in BF16). Candidates live in registers as keys col<<18|rr<<16|bits; one compare per stage. PDL: W streams before griddepcontrol.wait (weights only), x after it; dependents triggered at start.
+// H100 cold-L2 unp 8192x4096 21.6 vs cuBLAS 25.7 us (layer s99, NS10/NW10).
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <cudaTypedefs.h>
+#include <cuda_bf16.h>
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <stdint.h>
+
+#ifndef G30_NS
+#define G30_NS 10
+#endif
+#ifndef G30_NW
+#define G30_NW 10
+#endif
+#ifndef G30_ESC
+#define G30_ESC 8
+#endif
+#define G30_MTOK 128
+#define G30_XBOX 16384
+#define G30_WST 6144
+
+namespace g30 {
+__device__ __forceinline__ uint32_t smem_u32(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }
+__device__ __forceinline__ void mbar_init(uint64_t* b, int c) {
+  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(smem_u32(b)), "r"(c));
+}
+__device__ __forceinline__ void mbar_expect_tx(uint64_t* b, uint32_t tx) {
+  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(smem_u32(b)), "r"(tx) : "memory");
+}
+__device__ __forceinline__ void mbar_arrive(uint64_t* b) {
+  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" :: "r"(smem_u32(b)) : "memory");
+}
+__device__ __forceinline__ void mbar_wait(uint64_t* b, uint32_t ph) {
+  asm volatile(
+      "{\n .reg .pred p;\n G30_WAIT:\n"
+      " mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
+      " @!p bra G30_WAIT;\n}\n" :: "r"(smem_u32(b)), "r"(ph) : "memory");
+}
+__device__ __forceinline__ void tma2d(void* dst, const CUtensorMap* m, int c0, int c1, uint64_t* b) {
+  asm volatile(
+      "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
+      :: "r"(smem_u32(dst)), "l"(m), "r"(c0), "r"(c1), "r"(smem_u32(b)) : "memory");
+}
+__device__ __forceinline__ void bulk1d(void* dst, const void* src, uint32_t n, uint64_t* b) {
+  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+               :: "r"(smem_u32(dst)), "l"(src), "r"(n), "r"(smem_u32(b)) : "memory");
+}
+__device__ __forceinline__ uint64_t dsw128(uint32_t a) {
+  return (uint64_t)((a & 0x3FFFF) >> 4) | ((uint64_t)1 << 16) | ((uint64_t)64 << 32) | ((uint64_t)1 << 62);
+}
+__device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {
+  unsigned r;
+  asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
+  return r;
+}
+// patch the half (kh, rr, h) of j's A fragment with BF16 bits vb: a[4 j + 2 kh + rr] (m16n8k16 A layout), h = high half
+__device__ __forceinline__ void esc_patch(unsigned (&a)[16], unsigned key) {
+  const int kk = (key >> 18) & 63, idx = 4 * (kk >> 4) + 2 * ((kk >> 3) & 1) + ((key >> 16) & 1);
+  const unsigned vb = key & 0xFFFFu, sel = (kk & 1) ? 0x5410u : 0x3254u;
+#pragma unroll
+  for (int u = 0; u < 16; u++)
+    if (u == idx) a[u] = __byte_perm(a[u], vb, sel);
+}
+template <int NC>
+__device__ __forceinline__ unsigned esc_pop(unsigned (&c)[NC]) {  // smallest key (= smallest col), removed; ~0u: none
+  unsigned m = c[0];
+#pragma unroll
+  for (int u = 1; u < NC; u++) m = min(m, c[u]);
+#pragma unroll
+  for (int u = 0; u < NC; u++) c[u] = c[u] == m ? ~0u : c[u];
+  return m;
+}
+template <int P>
+__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel3) {
+  const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
+  const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);
+  unsigned p;
+  asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
+  return lop_aob(sh, 0x87008700u, p);
+}
+#define G30_D8(i) "+f"(d[i]), "+f"(d[i + 1]), "+f"(d[i + 2]), "+f"(d[i + 3]), "+f"(d[i + 4]), "+f"(d[i + 5]), "+f"(d[i + 6]), "+f"(d[i + 7])
+__device__ __forceinline__ void wg_mma_rs(float* d, unsigned a0, unsigned a1, unsigned a2, unsigned a3, uint64_t db) {
+  asm volatile(
+      "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
+      "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,"
+      "%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63},"
+      " {%64,%65,%66,%67}, %68, 1, 1, 1, 0;\n"
+      : G30_D8(0), G30_D8(8), G30_D8(16), G30_D8(24), G30_D8(32), G30_D8(40), G30_D8(48), G30_D8(56)
+      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db));
+}
+
+__global__ void __launch_bounds__(320, 1)
+g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ wp, __nv_bfloat16* __restrict__ out,
+           const float2* __restrict__ hdr, int N, int KS, float scale) {
+  // KS = k-stages; wp = [G][KS][WST]
+  extern __shared__ __align__(1024) uint8_t smraw[];
+  uint8_t* sm = (uint8_t*)(((uintptr_t)smraw + 1023) & ~(uintptr_t)1023);
+  uint8_t* xs = sm;                                  // NS x 16 KB
+  uint8_t* ws = sm + G30_NS * G30_XBOX;              // NW x 6 KB
+  uint64_t* full = (uint64_t*)(ws + G30_NW * G30_WST);  // x ring
+  uint64_t* empty = full + G30_NS;
+  uint64_t* wfull = empty + G30_NS;                  // W ring
+  uint64_t* wempty = wfull + G30_NW;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int g = blockIdx.x;
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  if (tid == 0) {
+    for (int i = 0; i < G30_NS; i++) { mbar_init(&full[i], 1); mbar_init(&empty[i], 1); }
+    for (int i = 0; i < G30_NW; i++) { mbar_init(&wfull[i], 1); mbar_init(&wempty[i], 1); }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  __syncthreads();
+  if (warp == 8) {  // W: weights only, may run before the producer kernel is done
+    if (lane == 0) {
+      const uint8_t* src = wp + (size_t)g * KS * G30_WST;
+      for (int i = 0; i < KS; i++) {
+        const int st = i % G30_NW, ph = (i / G30_NW) & 1;
+        mbar_wait(&wempty[st], ph ^ 1);
+        mbar_expect_tx(&wfull[st], G30_WST);
+        bulk1d(ws + st * G30_WST, src + (size_t)i * G30_WST, G30_WST, &wfull[st]);
+      }
+    }
+    return;
+  }
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // x (and out's memory) belong to the previous kernels
+  if (warp == 9) {
+    if (lane == 0) {
+      for (int i = 0; i < KS; i++) {
+        const int st = i % G30_NS, ph = (i / G30_NS) & 1;
+        mbar_wait(&empty[st], ph ^ 1);
+        mbar_expect_tx(&full[st], G30_XBOX);
+        tma2d(xs + st * G30_XBOX, &tmX, i * 64, 0, &full[st]);
+      }
+    }
+    return;
+  }
+  const int wg = warp >> 2, t = tid & 127;
+  float d[64];
+#pragma unroll
+  for (int j = 0; j < 64; j++) d[j] = 0.f;
+#if G30_ESC
+  unsigned cand[2 * G30_ESC], nxt;
+  {
+    const int q = t & 3;
+#pragma unroll
+    for (int rr = 0; rr < 2; rr++)
+#pragma unroll
+      for (int e = 0; e < G30_ESC; e++) {
+        const float2 hv = __ldg(hdr + (size_t)(g * 64 + (t >> 5) * 16 + 8 * rr + ((t & 31) >> 2)) * G30_ESC + e);
+        const int col = __float_as_int(hv.x);
+        const bool mine = hv.y != 0x1p-15f && ((col >> 1) & 3) == q && ((col >> 6) & 1) == wg;
+        cand[rr * G30_ESC + e] = mine ? ((unsigned)col << 18) | ((unsigned)rr << 16) | (__float_as_uint(hv.y) >> 16) : ~0u;
+      }
+    nxt = esc_pop(cand);
+  }
+#define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); nxt = esc_pop(cand); } }
+#else
+#define G30_FIX(a)
+#endif
+  unsigned A0[16], A1[16];
+  int prev = -1;
+#define G30_DEC(a, j, S0, S1, NW)                            \
+    a[4 * j + 0] = decw<0>(S0, NW, 0x4140u);                 \
+    a[4 * j + 1] = decw<1>(S0, NW, 0x4342u);                 \
+    a[4 * j + 2] = decw<2>(S1, NW, 0x4140u);                 \
+    a[4 * j + 3] = decw<3>(S1, NW, 0x4342u);
+#define G30_STEP(a, pa)                                                                                     \
+  {                                                                                                         \
+    const int st = i % G30_NS, ph = (i / G30_NS) & 1, sw = i % G30_NW, pw = (i / G30_NW) & 1;              \
+    mbar_wait(&wfull[sw], pw);                                                                              \
+    mbar_wait(&full[st], ph);                                                                               \
+    const uint8_t* wst = ws + sw * G30_WST;                                                                 \
+    const uint4 s01 = *(const uint4*)(wst + t * 16), s23 = *(const uint4*)(wst + 2048 + t * 16);            \
+    const uint4 nw = *(const uint4*)(wst + 4096 + t * 16);                                                  \
+    G30_DEC(a, 0, s01.x, s01.y, nw.x) G30_DEC(a, 1, s01.z, s01.w, nw.y) G30_DEC(a, 2, s23.x, s23.y, nw.z)   \
+    G30_DEC(a, 3, s23.z, s23.w, nw.w) G30_FIX(a)                                                            \
+    asm volatile("wgmma.fence.sync.aligned;" ::: "memory");                                                 \
+    const uint32_t b = smem_u32(xs + st * G30_XBOX);                                                        \
+    _Pragma("unroll") for (int j = 0; j < 4; j++) wg_mma_rs(d, a[4 * j], a[4 * j + 1], a[4 * j + 2], a[4 * j + 3], dsw128(b + j * 32)); \
+    asm volatile("wgmma.commit_group.sync.aligned;" ::: "memory");                                          \
+    asm volatile("wgmma.wait_group.sync.aligned 1;" ::: "memory");                                          \
+    _Pragma("unroll") for (int j = 0; j < 16; j++) asm volatile("" : "+r"(pa[j]));                          \
+    if (prev >= 0 && t == 0) { mbar_arrive(&empty[prev % G30_NS]); mbar_arrive(&wempty[prev % G30_NW]); }   \
+    prev = i;                                                                                               \
+    i += 2;                                                                                                 \
+  }
+  int i = wg;
+  while (i < KS) {
+    G30_STEP(A0, A1)
+    if (i >= KS) break;
+    G30_STEP(A1, A0)
+  }
+  asm volatile("wgmma.wait_group.sync.aligned 0;" ::: "memory");
+#pragma unroll
+  for (int j = 0; j < 16; j++) asm volatile("" : "+r"(A0[j]), "+r"(A1[j]));
+#pragma unroll
+  for (int j = 0; j < 64; j++) asm volatile("" : "+f"(d[j]));
+  if (prev >= 0 && t == 0) { mbar_arrive(&empty[prev % G30_NS]); mbar_arrive(&wempty[prev % G30_NW]); }
+  // reduce WG1 into WG0 through smem (the x ring is free once both WGs are done: barrier over the 256 consumer threads)
+  float* red = (float*)xs;
+  asm volatile("bar.sync 1, 256;" ::: "memory");
+  if (wg == 1) {
+#pragma unroll
+    for (int j = 0; j < 64; j++) red[j * 128 + t] = d[j];
+  }
+  asm volatile("bar.sync 1, 256;" ::: "memory");
+  if (wg == 1) return;
+#pragma unroll
+  for (int j = 0; j < 64; j++) d[j] += red[j * 128 + t];
+  // acc layout (m64n128): d[4*jn + 2*h + e] = row r0 + 8h, token 8*jn + tok + e
+  const int r0 = (warp & 3) * 16 + (lane >> 2);
+  const int tok = 2 * (lane & 3);
+  // stage the tile token-major in smem, then coalesced 16 B stores (128 B per token row)
+  __nv_bfloat16* stg = (__nv_bfloat16*)(xs + 32768);  // [128 tok][64 rows] (+8 pad)
+#pragma unroll
+  for (int jn = 0; jn < 16; jn++)
+#pragma unroll
+    for (int h = 0; h < 2; h++)
+#pragma unroll
+      for (int q = 0; q < 2; q++) stg[(8 * jn + tok + q) * 72 + r0 + 8 * h] = __float2bfloat16(d[4 * jn + 2 * h + q] * scale);
+  asm volatile("bar.sync 2, 128;" ::: "memory");
+#pragma unroll
+  for (int q = 0; q < 8; q++) {
+    const int idx = q * 128 + t, tk = idx >> 3, c = idx & 7;
+    *(uint4*)(out + (size_t)tk * N + g * 64 + c * 8) = *(const uint4*)(stg + tk * 72 + c * 8);
+  }
+}
+
+static PFN_cuTensorMapEncodeTiled_v12000 g_enc = nullptr;
+static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, uint32_t b0, uint32_t b1) {
+  if (!g_enc) {
+    cudaDriverEntryPointQueryResult q;
+    cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled", (void**)&g_enc, 12000, cudaEnableDefault, &q);
+  }
+  cuuint64_t dims[2] = {inner, outer}, strides[1] = {inner * 2};
+  cuuint32_t box[2] = {b0, b1}, es[2] = {1, 1};
+  CUresult r = g_enc(m, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, (void*)p, dims, strides, box, es,
+                     CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                     CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  TORCH_CHECK(r == CUDA_SUCCESS, "g30 tensor map encode failed ", (int)r);
+}
+}  // namespace g30
+
+// out [128][N] BF16 = x [128][K] @ W^T; wp = pack30 stages, hdr = [N][G30_ESC] float2; pdl: launch as a PDL secondary
+void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale, int64_t pdl) {
+  const int K = x.size(1), N = out.size(1);
+  TORCH_CHECK(x.size(0) == G30_MTOK && x.is_contiguous() && K % 64 == 0 && N % 64 == 0 && out.size(0) == G30_MTOK);
+  CUtensorMap tx;
+  g30::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
+  const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512;
+  static bool once = false;
+  if (!once) { cudaFuncSetAttribute(g30::g30_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(N / 64);
+  cfg.blockDim = dim3(320);
+  cfg.dynamicSmemBytes = smem;
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  at[0].val.programmaticStreamSerializationAllowed = pdl ? 1 : 0;
+  cfg.attrs = at; cfg.numAttrs = 1;
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, g30::g30_kernel, tx, (const uint8_t*)wp.data_ptr(), (__nv_bfloat16*)out.data_ptr(),
+                                 (const float2*)hdr.data_ptr(), N, K / 64,
+                                 (float)scale) == cudaSuccess, "g30 launch failed");
+}
+'''
+# s100 g30 (g30_src.cu = layer s99 dev/s99_g30.cu + PDL + proj s91's in-fragment escape patch): T=128 wgmma GEMM over the 12-bit
+# weights decoded into register A-fragments (H100 cold-L2 unp 8192x4096 22.4 vs cuBLAS 25.6 us; in-layer ab_flag 4 rounds x 3 seeds
+# v16 sl -4.1..-5.2, full -4.5..-5.5 us; G30_TRIG another -0.6..-1.5). In TUNE_BASE[128]; TUNE option {g30:unpool: False}.
+G30_KEYS = ("unpool", "o")  # o: H100 standalone 10.2 vs cuBLAS 10.5 us (tie): TUNE option g30:o only
+G30_TOKENS = 128
+G30_PDL = 1  # launch g30 as a PDL secondary (W streams before griddepcontrol.wait)
+G30_TRIG = True  # the second boundary is g30's PDL secondary (g30 triggers at start)
+_G30 = {}
 # proj s57 gemv27 (g27_src.cu = r-proj muse_bf16_proj/dev/s57/gemv27.cu): o at T=16/32 without cross-block split-K: a
 # block owns RGB whole 16-row groups, its warps split k (KQ), partials summed in smem, plain FP32 stores (no out zeroing,
 # fence, epoch barrier or atomics; deterministic); ns >= 100 = PD: each warp's whole W slice (ns - 100 atoms) is streamed
@@ -16191,6 +16474,7 @@ def _g19_prepare(state):
         else:
             print("layer gemv19 config dropped:", key, m, c)
     _g24_prepare(state, w, comp, g)
+    _g30_prepare(state, w, comp, g)
     del comp
 
 
@@ -16266,6 +16550,72 @@ def _g24_prepare(state, w, comp, g):
         else:
             print("layer gemv24 config dropped:", key, m, c)
     _g27_prepare(state, w, comp, g, packs)
+
+
+def _g30_build():
+    if not G30_KEYS or _G30_SRC is None:
+        return
+    if "lib" not in _G30:
+        try:
+            import hashlib
+            from torch.utils.cpp_extension import load_inline
+            _G30["lib"] = load_inline(
+                name="layer_g30_" + hashlib.sha256(_G30_SRC.encode()).hexdigest()[:10],
+                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
+                cuda_sources=_G30_SRC, functions=["g30_gemm"],
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"], extra_ldflags=["-lcuda"])
+        except Exception as ex:  # noqa: BLE001
+            print("layer g30 build failed:", ex)
+            _G30["lib"] = None
+
+
+def _pack30(code, sm):
+    """[N, K] codes / sign|mantissa bytes -> [N/64][K/64][6144 B] stages: DEC3 bytes [2][128 thr][16], words [128][4]
+    (thread = (w, gq, q) of the wgmma A fragment; layer s99 dev/s99_g30.py pack30)."""
+    n, k = code.shape
+    G, KS = n // 64, k // 64
+    # row = 16 w + 8 rr + gq ; k = 16 j + 8 kh + 2 q + h ; element e = (kh, rr, h) ; thread = (w, gq, q)
+    perm = lambda t: t.view(G, 4, 2, 8, KS, 4, 2, 4, 2).permute(0, 4, 1, 3, 7, 5, 6, 2, 8).reshape(G, KS, 128, 4, 8)  # noqa: E731
+    b3, v = _dec3(perm(sm), perm(code))
+    Sb = b3.view(G, KS, 128, 2, 16).permute(0, 1, 3, 2, 4).reshape(G, KS, 4096)
+    Nb = v.contiguous().view(torch.uint8).view(G, KS, 2048)
+    return torch.cat([Sb, Nb], 2).contiguous()
+
+
+def _g30_prepare(state, w, comp, g):
+    state["g30"] = {}
+    if not G30_KEYS or _G30_SRC is None:
+        return
+    _g30_build()
+    lib = _G30["lib"]
+    if lib is None:
+        return
+    dev = state["unpool"].device
+    for key in G30_KEYS:
+        if key not in comp:
+            comp[key] = _compress(w[key])
+        if comp[key] is None or w[key].shape[0] % 64 or w[key].shape[1] % 128:
+            continue
+        code, sm, hdr, scale = comp[key]
+        v = hdr[:, :, 1]
+        if not torch.equal(v.bfloat16().float(), v) or bool(((v != 0) & (v.abs() < 2.0 ** -126)).any()):
+            print("layer g30 dropped (escape value not exact in BF16):", key)  # g30 patches escapes as BF16 A halves
+            continue
+        e = (_pack30(code, sm), hdr.contiguous(), scale)
+        x = torch.randn((G30_TOKENS, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
+        out = torch.full((G30_TOKENS, w[key].shape[0]), float("nan"), dtype=torch.bfloat16, device=dev)
+        try:
+            lib.g30_gemm(x, e[0], e[1], out, e[2], 0)
+            torch.cuda.synchronize()
+            ref = F.linear(x, w[key]).float()
+            ok = ((out.float() - ref).norm() / ref.norm()).item() < 1e-2
+        except Exception as ex:  # noqa: BLE001
+            print("layer g30 failed:", key, ex)
+            ok = False
+        if ok:
+            state["g30"][key] = e
+        else:
+            print("layer g30 dropped:", key)
 
 
 def _g27_build():
@@ -16361,7 +16711,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"cslpw": True},
             {"cslpw": True, "g14alt:qkv_gate": 3}, {"cslpw": True, "g14alt:qkv_gate": 2},
             {"cslpw": True, "pr8_npf": 206}, {"cslpw": True, "pr8_npf": 220}, {"cslpw": True, "pr8_npf": 112}),  # s91: pr8 bulk PF depth on the H200 (H100 can't judge it)  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
-        128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
+        128: ({}, {"g30:unpool": False}, {"g30:unpool": False, "twf_split": 66, "lt:o": True, "lt:unpool": True}, {"g30:o": True}, {"g30:o": True, "twf_split": 66}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": False},
               {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},
               {"ltalt:pooler": 1}, {"ltalt:pooler": 2}, {"ltalt:pooler": 1, "twf_split": 66, "lt:o": True, "lt:unpool": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
@@ -16383,7 +16733,7 @@ _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate
 TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True, "pr1_rb": 32},
              (8, True): {"nu8": True, "g14alt:qkv_gate": 3}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
-             (128, True): {"fr": True}, (128, False): {"fr": True},
+             (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
              (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
              (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
              (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
@@ -16696,6 +17046,11 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
         lib.g12_gemm(state["g12"][key], x.contiguous(), out, state["g12_ws"], state["g12_cnt"], w.shape[0] // 8,
                      *G12_CFG[key], *pdl)
         return out
+    if x.shape[0] == G30_TOKENS and state is not None and key in state.get("g30", {}) and _opt(state, G30_TOKENS, "g30:" + key, False):
+        e = state["g30"][key]
+        out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
+        _G30["lib"].g30_gemm(x.contiguous(), e[0], e[1], out, e[2], G30_PDL)
+        return out
     alt = _opt(state, x.shape[0], "ltalt:" + key, 0) if state is not None else 0
     cfg = state.get("lt_alt_ok", {}).get((key, x.shape[0], alt)) if alt else None
     if cfg is not None:
@@ -16831,6 +17186,7 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
         pdl = pdl or trig and f is not None
         if f is None:
             f = _linear(moe, state["unpool"], "unpool", state)  # all-gather: identity (zeros)
+            pdl = pdl or (G30_TRIG and tokens == G30_TOKENS and "unpool" in state.get("g30", {}) and _opt(state, tokens, "g30:unpool", False))
     stream2 = torch.empty_like(stream1)
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]
@@ -17121,4 +17477,4 @@ def _kernel_fn(data, state):
     return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
 
 
-_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build)]
+_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build)]
