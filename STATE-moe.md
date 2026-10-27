@@ -69,6 +69,12 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 22 (05:35-05:50Z): DQW (dq rotations as IMAD.WIDE on the FMA pipe, bitwise) DEAD: consumer-bound proxy T16 +1.9,
+  T32 +3.9, T64 +15 us; layer routings v32 +15.7 (H100; same SM as H200, no check spent). ncu: tk2f consumer is NOT pipe-bound
+  (ALU 50%, FMA-heavy 34%, issue 50%; stalls wait 0.92 / long_sb 0.79 / throttle 0.40 per issue): it is LATENCY-bound
+  (2 consumer warps per SMSP). n20's ALU-pipe hypothesis was wrong. Next decode-consumer ideas must add ILP / cut dependent
+  chains, not move ops between pipes. Checks today still 12/20. NEXT unchanged from s21 (layer's H200 tuner on twq 73988).
+
 ## Night4 session 21 (05:13Z-): moe_twq K-split tail (TWQ_SPLIT / twq flags | items << 8 | log2 parts << 16): H200 v16 -10.6 us
   (check 1ebfc1e3: q4 209.9 -> s33h 199.3, every seed; v32 -2). Store-then-ticket, last part sums in part order (deterministic).
   Off by default in moe (board bs128 uses twm). Layer port tools/n21/patch_layer_twq.py + TUNE {"twq": 73988} at T=128 (posted).

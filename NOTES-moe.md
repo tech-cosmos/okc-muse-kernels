@@ -1346,3 +1346,24 @@
   => **twq + 33-item half split = -10.6 H200 us at v16** (~5% of the experts; ~+0.3..0.4% layer if sliding takes it). Quarters
   lose to halves on the H200 too. Handed to layer as TUNE candidates at T=128 (twq 73988 = 4|33<<8|1<<16, 73996 = 12|...).
   Decode shapes unchanged (dec = sq only this run: d1 29.8, d16 65.2, d32 86.4, v1 64.4).
+
+## Night4 session 22 (2026-10-27 05:35Z - 05:50Z; moe checks 12/20 used today, none this session) -- DQW: dq() on the FMA pipe DEAD; consumer is latency-bound
+- Tested n20's corollary ("H200 decode consumer is ALU-pipe-bound: move dq work to the FMA pipe"): DQW = 1 computes dq()'s two
+  rotations as mul.wide.u32 q, 2^10 / 2^13 (IMAD.WIDE.U32) + one LOP3 (lo | hi) & M (ptxas keeps it: 5 ALU-pipe ops per dq
+  instead of 7). Bitwise = DQW 0 (tools/n22/dqw_ab.py, all layer routings), bench test 15/15.
+- H100 moe-only, layer routings (cold, 2 rounds): d1 +0.6, d16 +0.2, d32 +1.0, v1 +1.1, v16 +3.5, v32 +15.7 us.
+  Consumer-bound proxy (tools/n22/dqw_warm.py: 1 expert, L2-resident, 5 calls/graph): T8 +0.2, T16 +1.9, T32 +3.9, T64 +15.3.
+  The SM is the same on the H200, so no judge check spent. DEAD (code kept: #define DQW / python DQW = 0; _lib() caches one
+  library per DQW value, kernel_fn uses _lib() in DIAG builds so a DIAG variant {"DQW": 1} would work, at +~95 s compile).
+- WHY (ncu, tools/n22/ncu_pipe.py, moe_tk2f gs8 SQ, 1 expert T=32 warm): the consumer is NOT pipe-bound:
+    DQW 0: 39.7 us, ALU pipe 50.0%, FMA 28.8%, FMA-heavy 33.9%, tensor 17.0%, issue active 49.9%
+    DQW 1: 44.2 us, ALU 34.8%, FMA 35.1%, FMA-heavy 49.3%, issue active 43.9%  (same instruction count 13.75M)
+  9 warps/SM (8 consumers + producer, 160 regs, occupancy 14%), 4.49 cycles per issued instruction per warp. Stall reasons per
+  issue: selected 1.0, wait 0.92 (fixed-latency chains dq -> HMMA), long_scoreboard 0.79, not_selected 0.44, math_pipe_throttle
+  0.40, barrier 0.29, dispatch 0.20, short_scoreboard 0.16. SASS stall samples spread thin: top = gemm2 readiness spin (BRA 4.9%
+  + CCTL.IVALL 4.0% from the ld.acquire), HMMA 3.8%. => the n20 "ALU-bound" reading was wrong; S6 lost through added
+  dependent instructions (latency), not pipe load. Levers for the decode consumer are ILP/latency (more independent chains
+  per warp, fewer dependent ops per dq), not pipe balancing; the longer IMAD.WIDE latency is what made DQW lose.
+  (Consistent with s24: issue ~50% with 2 warps/SMSP; s24's latency fixes -- stage-ahead LDS, 2 CTAs/SM -- and s13's 2 acc
+  chains (PF & 8) are dead, so the decode consumer has no cheap lever left; the gemm2 readiness spin is ~9% of stall samples
+  in the 1-expert proxy only, and per-segment counters were 0 on the H200 (s12).)

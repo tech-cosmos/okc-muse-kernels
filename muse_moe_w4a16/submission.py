@@ -92,6 +92,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TWM_PB48 0  // n12: build moe_twm<.., PB 48> (python TWM_PB_M); DIAG builds only (+7 s compile)
 #define TK2F_L2H 0       // s21: tk2f weight-copy L2 hints (python TK2F_L2H): 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only; 4 = evict_last every group of a multi-group expert, evict_first else
 #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
+#define DQW 0            // n22: dq() rotations on the FMA pipe (python DQW; DIAG builds both)
 #define NORM_EARLY 0     // n4s1: twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them (python NORM_EARLY)
 #ifndef TK2G_PAR4
 #define TK2G_PAR4 1      // n17: tk2g_bound's 4 calls on 4 warps + 32-bit p (bitwise: same bounds)
@@ -132,8 +133,16 @@ __device__ __forceinline__ uint4 ld_stream(const uint4* p) {
 __device__ __forceinline__ void dq(uint32_t q, uint32_t s0, uint32_t s1, uint32_t* a) {
   const uint32_t M = 0x81C081C0u;
   const uint32_t o0 = q & M;
+#if DQW  // n22: rotations as mul.wide.u32 (IMAD.WIDE, FMA pipe) + one LOP3 (lo | hi) & M: 5 ALU-pipe ops per dq, not 7
+  uint64_t p1, p2;
+  asm("mul.wide.u32 %0, %1, 1024;" : "=l"(p1) : "r"(q));
+  asm("mul.wide.u32 %0, %1, 8192;" : "=l"(p2) : "r"(q));
+  const uint32_t o1 = ((uint32_t)p1 | (uint32_t)(p1 >> 32)) & M;
+  const uint32_t o2 = ((uint32_t)p2 | (uint32_t)(p2 >> 32)) & M;
+#else
   const uint32_t o1 = __funnelshift_l(q, q, 10) & M;
   const uint32_t o2 = __funnelshift_l(q, q, 13) & M;
+#endif
   const uint32_t o3 = ((q & 0x001B001Bu) * 16648u) & M;
   a[0] = bmul(o0, s0);
   a[1] = bmul(o1, s1);
@@ -4867,6 +4876,7 @@ def _gen_wgmma():
 CUDA_SRC = CUDA_SRC.replace("//@@WGMMA@@", _gen_wgmma())
 
 _LIB = None
+_LIBX = {}  # n22: DQW -> library
 _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_gemm2(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
@@ -4919,9 +4929,11 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
 
 def _lib():
     global _LIB
+    _LIB = _LIBX.get(int(DQW))  # n22: one library per DQW value (DIAG variants switch it)
     if _LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = CUDA_SRC.replace("#define TK2F_L2H 0 ", f"#define TK2F_L2H {int(TK2F_L2H)} ")
+        src = src.replace("#define DQW 0 ", f"#define DQW {int(DQW)} ")
         src = src.replace("#define NORM_EARLY 0 ", f"#define NORM_EARLY {int(NORM_EARLY)} ")
         src = src.replace("#define TWM_L2H 0 ", f"#define TWM_L2H {int(TWM_L2H)} ")
         if TK2F_S6 or DIAG:  # n20
@@ -4935,6 +4947,7 @@ def _lib():
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_l2h2", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
+        _LIBX[int(DQW)] = _LIB
     return _LIB
 
 
@@ -5166,6 +5179,7 @@ TWF_DBG = 0
 TWF_SPLIT_M = {}  # s11 per-M override of TWF_SPLIT; judge c1659443 {128: 132, 256: 66}: tie (tail -12 us, twf +10 us)
 TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K halves (FP32 partials, ticket): shorter tail
 TWM_L2H = 1  # s21: same hints in moe_twm's producer (compile time; evict_last if a later pass re-reads). Bitwise = 0. Layer harness H100 (tuner off): v16 -0.8..-2.6 / -2.4..-9, v32 0 us
+DQW = 0  # n22: 1 = dq() rotations as mul.wide (FMA pipe) + LOP3: 5 ALU-pipe ops per 8 weights, not 7 (compile time)
 NORM_EARLY = 1  # n4s1: moe_norm after moe_twm waits per token on its experts' gemm2 flags (runs in twm's drain); compile time
 TK2F_L2H = 4  # s21: tk2f L2 cache hints on the weight copies (see #define TK2F_L2H; compile time, 0 = off). Bitwise = 0. DRAM bytes at d16/d32 = floor (ncu). moe-only layer routings (H100, 5 seeds): d16 -4.9, d32 -2.8, v1 -1.1, d1 -0.5 us (mode 1: d16 -1.2); layer harness (tuner off) mode 1/4: v1 -4..-6, d16 -0.5/-3.5, d32 0
 TK2F_L2H2_RT = None  # n18: run-time L2 hint mode of tk2f's gemm2 rows (None = as gemm13); SQ needs a DIAG build (TK2F_SQRT)
@@ -5455,7 +5469,7 @@ def _tk2f_cfg0(M, st):
 def kernel_fn(data, st):
     cfg = data["config"]
     assert cfg["local_start"] == st["start"] and cfg["local_count"] == st["count"]
-    lib = st["lib"]
+    lib = st["lib"] if not DIAG else _lib()  # n22: DIAG variants may switch DQW (other library)
     x = data["hidden_states"].contiguous()
     ids = data["topk_ids"].contiguous()
     tw = data["topk_weights"].float().contiguous()
