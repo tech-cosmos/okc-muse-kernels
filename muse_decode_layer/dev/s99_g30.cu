@@ -11,7 +11,7 @@
 #include <stdint.h>
 
 #ifndef G30_NS
-#define G30_NS 8
+#define G30_NS 10
 #endif
 #ifndef G30_NOMMA
 #define G30_NOMMA 0
@@ -38,7 +38,7 @@
 #define G30_LOCALREL 0
 #endif
 #ifndef G30_NW
-#define G30_NW G30_NS   // W ring stages (own producer warp); G30_NS = x ring stages
+#define G30_NW 10   // W ring stages (own producer warp); G30_NS = x ring stages (s99 best NS10/NW10)
 #endif
 #ifndef G30_ROT
 #define G30_ROT 0   // CTA g starts its k loop at stage g * KS / gridDim.x (spreads x L2 hot spots)
