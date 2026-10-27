@@ -1,4 +1,17 @@
-# STATE-moe (muse_moe_w4a16)
+# STATE-moe
+
+## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
+Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
+first; layer owns the full kernels (_gd_full d16/d32, _gw_verify v16/v32): don't work on those. Winners -> COORD Handoffs
+(layer ports into r-layer attn_src.py). Precision: FP8 KV, Q >= E4M3, FP32 partials. ~/attn STATE.md dead-ends index = 126
+sessions of history: read it before any idea. Board: #24 2.566x (1468.0 us); #1 pjmullin3 3.032x (1242.3 us).
+Per-us value (overall attention score): d1 sl 1.94 %/us, v1 sl 1.48, d1 full 0.67, v1 full 0.51, d16 sl 0.44, v16 sl 0.35,
+d32 sl 0.24, v32 sl 0.2. (Score = geomean over 6 loads; load = 46 x sliding + 16 x full.)
+H200 per shape (us), 06456b7e (= seed 410dcb6 code, 2.570x): d1 4.34/12.25, d16 7.68/87.03, d32 12.29/167.67,
+v1 5.49/16.60, v16 11.45/104.89, v32 15.51/194.99 (sliding/full). Judge records: median_ns = raw - ~4.28 us replay cost.
+Tools (run from muse_attention_decode/): tools/bench.py test|bench; tools/jsum.py A.json B.json (per-shape deltas of okc
+--json outputs); tools/s31/chk_sc.py (scored sliding shapes vs reference, 3 seeds); tools/s31/csl_ab.py A.py B.py (paired
+H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-CTA clock64 timeline of csl, VAR=... variants).
 
 ## Board
 - Best submit: febfcb1f @72d1274 (SCB), **2.2469x** (2026-10-27 09:20Z; check ed55a5c0 2.2635x). Was 6a92803a 2.190x. Board is a TEST BED only (lead 01:45Z): the layer counts.
@@ -71,41 +84,21 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
-## Night4 session 30 (09:36-09:45Z): no build, no checks (0 left). Lead has not answered the s29 lane-close request (last Human
-  decision 09:28Z); layer (s81) and proj (s76) also wait for lanes. Paper check (NOTES s30): N8 twm items are consumer-limited too
-  (~1020 cyc/17 KB stage = ~33 GB/s/SM = the HBM share), smem byte-LUT dq = same ALU op count. NEXT: the lead's lane decision.
-## Night4 session 29 (09:30-10:00Z): no build, no checks. Big-M lane bound (NOTES s29): v16 twm = bytes 127 + consumer ~9 + drain ~17;
-  v32 = 156 bytes + ~30 N16-N32 consumer (ALU+tensor at floor) + ~20 drain/hot; every listed drain/overlap lever already DEAD.
-  Asked lead to close the lane or reassign (COORD Requests). NEXT: whatever the lead assigns.
-## Night4 session 28 (09:10-09:50Z): no build kept, no checks (20/20 used 10-27). twm overhead bisected (NOTES s28): NOCOPY feed ~2 us/item,
-  full wait ~1-2, LDS->dq latency ~2-3, per-stage S2R tid remat (fix bitwise but v16/v32 noise: DEAD). Microbench 16w x RT2 vs 8w x RT4
-  = only -3..6% (ALU pipe near limit; = twq, which lost). twm kernel-level lane EXHAUSTED; in-layer twm (19163546 v16 sl 157.8) =
-  standalone speed. NEXT (if anything in this lane): scheduling only: v16 drain ~17 us (after s66 split), first wave ~2.7 TB/s.
-## Night4 session 27 (07:54-~09:00Z): SCB kept (above). Checks 20/20 used 10-27 (5ad98078 DIAG, + one plain main check).
-  CLOSED for good (s27 mb_x.py): tensor work does not overlap CUDA-core work even in another warpgroup (RS or SS, dq or FFMA):
-  consumer = ALU + tensor time. dq extraction is minimal (8 ops/8 weights, exhaustive search). twm items carry ~230 cyc/stage
-  of in-kernel overhead over the bare dq+MMA (warm 1-expert timeline, tools/s27m/twm_itl.py): scale decode was ~1/3 (SCB took
-  half of it), full-barrier waits ~1/6 (pairing them is DEAD: v32 +3). NEXT: find the rest of the ~230 cyc (LDS->dq latency at
-  stage start, uniform address math, epilogue) with more timing-only ablations in twm_itl.py; apply SCB-like savings to tk2f.
-## Night4 session 26 (07:34-08:05Z): no build, no checks (18/20 used). PDL load-order audit of all moe kernels: clean (pre-wait
-  loads = LUT / norm weight only; NOTES s26). Idea -9 was dead since s19. Expert kernels sit at their fits in the layer profile
-  baae0e41; open levers: big-M drain (~20 us/call) and tk2f's fixed part. NEXT session: pick ONE of them with a fresh design.
+## Attention: what's on main (r-moe muse_attention_decode/submission.py @ s31) vs checked
+- = 410dcb6 + agent2 halfpfkr (v32 sl cl, csl/nds pt prefetch, nds K-early) + verify 16 on the pre-cl nvs build (_NVS0) +
+  csl/vtk owner fast divides. Check 18cf3bfb 2.5510x (slow node ojkcfmco; previous 362ff219 2.5447x same node). v32 sl
+  14.1-14.4 vs 15.5 (H200-verified win); others tie within noise (per-shape noise up to ~0.7 us between same-node runs).
+  NOT submitted: rule needs a check > board 2.566x. Next check of a NEW change may land on a fast node and qualify.
+- Checks used 2026-10-27: 2/20 (362ff219, 18cf3bfb). Scored 0/10.
+## Attention: ranked ideas / bounds (s31)
+- csl (d1 sl) post-gather tail is ~1.5 us cold H100: compute 0.45, premerge+cluster 0.2, push/slowest-CTA 0.37, owner 0.33.
+  The slowest CTA's 12 random gathers per thread set the push time; owner merge is now ~0.33. No >0.2 us lever seen in the
+  csl structure (many tried in ~/attn s72-s126). Untested: fewer distinct row loads per thread (wider per-lane rows) to cut
+  the max-of-12-latencies tail; 2 query heads per mma (rows 8..15 of the m16 tile are zero today).
+- v16 sl: merge launch (_combine_hb ~2 us) is the gap; 4-CTA clusters don't fit at 1 CTA/SM (30 < 32), 2-CTA S 2 loses.
+  An nvs at 2 CTAs/SM (smaller ring) would let 4-CTA clusters fit (max 62): unexplored.
 
-## Night4 session 25 (07:01-08:00Z): DIAGNOSIS: twq NEVER beat twm (lead 06:41Z question). H200 same check b14b8be4: v16 twm 171.6/169.4 |
-  twq q4 214.5 | HOTQ s66h32ne 191.9 | twm+split66 169.9; v32 twm 218 | q4 278 | s66h32ne 270. n21's split-combine block in tq_item
-  made every twq item slower (H200 q4 186.8 -> 210; H100 bisect 201 -> 220, block alone ~15 us); s21-s24 compared only twq variants
-  to that regressed q4. Layer told to drop twq at T=128 (COORD 07:25Z). twq line DEAD (template-split fix hits ptxas C7512).
-  RULE: every big-M DIAG keeps a twm control (DIAG_VARIANTS has one now). Checks today 18/20.
-  NEXT: twm at v16/v32 = the real big-M path: drain ~22 us (items 36-50 us, 3.5 waves) + first wave ~2.7 TB/s (n15 timeline).
-
-## Night4 sessions 21-24 (twq line, all DEAD per s25: twq loses to twm): n21 twq K-split (TWQ_SPLIT / flags items<<8 | 1<<16),
-  s23 HOTQ (moe_hot<NH 64> beside twq, flags grid<<24), s24 TWQ_NE (moe_norme after twq, flags | 1<<21), TQ_DEEP (tie). Code kept, off.
-  s24 twq timeline (check fccff52d): N8 items ~3.45 TB/s, N16 +15%, N32 +45% for the same bytes (consumer-bound); twq loop
-  166 instr/warp/k-chunk at ~50% issue. s22: DQW (dq on the FMA pipe) dead; the decode consumer is latency-bound (ncu), not pipe-bound.
-
-## Night4 sessions 19-20: WBW (weights before wait) and S6 (6-bit scale codes) both DEAD on the H200 (NOTES n19/n20).
-
-## Older sessions (n3-n17, s6-s7): see NOTES-moe.md (L2H run-time modes, TWM_PB48, BAL, tk2h PF4 are all there).
+## moe sessions n3-n30: see NOTES-moe.md (moe lane closed by lead 2026-10-27 09:45Z, LANE DECISION 2).
 
 ## Ranked ideas
 -9. DEAD (s26 re-read of s19): warp-specialized twm consumer (dq WGs -> BF16 A in smem -> SS wgmma WG) was already

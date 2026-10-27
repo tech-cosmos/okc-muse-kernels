@@ -41,6 +41,33 @@ if "s7loop" in VAR:  # move stamp 7 to right after the 16-partial loop
     i = a.index("g_ts[blockIdx.x * 8 + 7]"); j = a.rindex("if (threadIdx.x == 0", 0, i); k = a.index("\n", i)
     st7 = a[j:k + 1]; a = a[:j] + a[k + 1:]
     assert a.count("        float r = ") == 1; a = a.replace("        float r = ", st7.replace("(0u)", "(__float_as_uint(o0 + o1 + den))") + "        float r = ")
+if "w4" in VAR:  # 4 warps each fold 4 partials, one named barrier, warp 0 finishes
+    o1_ = """    if (warp == 0 && rank < 8) {
+        asm volatile("{\\n\\t.reg .pred p;\\n\\tW: mbarrier.try_wait.parity.shared::cta.b64 p, [%0], 0;\\n\\t@!p bra W;\\n\\t}"
+                     ::"r"(mb) : "memory");"""
+    assert a.count(o1_) == 1, "w4 a"
+    a = a.replace(o1_, o1_.replace("warp == 0 && rank < 8", "rank < 8"))
+    o2_ = """        for (int s = 0; s < 16; ++s) {
+            float w = exp2f(rml[s][0] - M);
+            den += w * rml[s][1];
+            float2 a = *(const float2*)&racc[s][2 * lane];
+            o0 += w * a.x; o1 += w * a.y;
+        }
+"""
+    assert a.count(o2_) == 1, "w4 b"
+    a = a.replace(o2_, """        for (int s4 = 0; s4 < 4; ++s4) {
+            const int s = 4 * warp + s4;
+            float w = exp2f(rml[s][0] - M);
+            den += w * rml[s][1];
+            float2 a = *(const float2*)&racc[s][2 * lane];
+            o0 += w * a.x; o1 += w * a.y;
+        }
+        if (warp) { *(float2*)&lpart[0][warp][0][2 * lane] = make_float2(o0, o1); if (lane == 0) lpart[0][warp][1][0] = den; }
+        asm volatile("bar.sync 1, 128;" ::: "memory");
+        if (warp) return;
+#pragma unroll
+        for (int k = 1; k < 4; ++k) { float2 v = *(const float2*)&lpart[0][k][0][2 * lane]; o0 += v.x; o1 += v.y; den += lpart[0][k][1][0]; }
+""")
 src = a + "namespace vtk" + b + r'''
 void csl_ts(torch::Tensor o) { cudaMemcpyFromSymbol(o.data_ptr(), csl::g_ts, o.numel() * 8); }
 '''

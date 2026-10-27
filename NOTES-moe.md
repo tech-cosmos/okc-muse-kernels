@@ -1561,3 +1561,26 @@
   (2) smem byte-LUT dequant (PRMT byte -> LEA addr -> LDS bf16x2 pair) = 2 ALU ops per 2 weights = today's 8/8: no gain, plus MIO load.
   (3) cvt e2m1x2 is sm_100+ only.
 - NEXT: whatever the lead assigns (see COORD Requests moe n4s29).
+
+## Night4 session 31 (2026-10-27 09:53Z - ~10:30Z) -- NEW LANE muse_attention_decode (lead 09:45Z LANE DECISION 2); 2 attention checks
+- Seeded muse_attention_decode/ from ~/attn 82866c6 (code = main 410dcb6). Its first check was a duplicate of 06456b7e
+  (2.570x, node aa266yoh): per-shape table in STATE. Scored median_ns = raw replay - ~4.28 us.
+- Merged agent2's never-H200-checked branch agent2-exp/halfpfkr (3-way merge on base 4c00ee9, clean): verify 32 sliding
+  nvs `cl` (S 2 pairs as 2-CTA clusters, 9 KB cp.async.bulk DSMEM exchange, in-kernel merge/norm/gate, no _combine_hb)
+  + split start barrier, csl/nds page-table L2 prefetch (batch > 1), nds K-early barrier. Check **362ff219 2.5447x**
+  (node ojkcfmco, slower: unchanged shapes +0.3..0.8): v32 sl **14.07 vs 15.51** (real), d32 sl -0.10, d16 sl +0.17,
+  but v16 sl +0.65: the cl build carries 18 KB more smem + gate registers into the S 4 path.
+- Fix: verify 16 runs a second nvs build = 410dcb6's exact _NVS_SRC (`_NVS0`, name muse_nvs_a2s13h); the cl build only at
+  batch >= 32. Plus csl/vtk owner merge fast divides (`__fdividef` for vscale/den and the sigmoid gate; H100 paired
+  d1 sl -0.19 9/9, v1 sl -0.10 8/9, outputs bitwise). Check **18cf3bfb 2.5510x** (same node ojkcfmco): v16 sl 11.69
+  (fixed), v32 sl 14.39, d1 sl 4.71 (+0.07 vs 362ff219: fast divides invisible on the H200), v1 sl 5.69 (-0.13).
+  Unchanged d1 full moved 12.81 -> 12.07 between the two same-node runs: per-shape noise up to ~0.7 us; batch-1 wins of
+  0.1-0.2 us can't be seen in one check. Not submitted (board 2.566x; rule: check must beat it).
+- csl timeline (tools/s31/cslstamp.py, H100, clock64 per CTA; globaltimer is 0.256 us-granular here, useless): cold,
+  from first CTA entry: K/V landed 1.58 (warm 0.96), P@V done +0.45, premerge sync +0.05, cluster wait +0.16, owner
+  mbarrier +0.37 (= slowest of 16 CTAs + DSMEM push), owner merge+store +0.47 (fast div: +0.33; of that 16-partial loop
+  0.22, norm/gate/store 0.11). The page-table and K stamps coincide (shared load scoreboard), so pt vs K is not split.
+  FP8 mma.sync is emulated on sm_90 (F2FP.F16.E4M3.UNPACK_B + HMMA.16816): a native F16 QK/PV would save only ~16 instrs.
+- DEAD: W4 owner merge (4 warps x 4 partials + bar.sync; stamps -0.08) whole-kernel d1 sl -0.03 5/9, v1 sl +0.13 0/9
+  (vtk is 2 CTAs/SM); csl new-token reciprocal instead of / kscale, / vscale: +0.03 (1/9).
+- Handoff: v32 sliding cl (+ the separate pre-cl nvs build for S 4) to layer (r-layer attn_src.py has neither).
