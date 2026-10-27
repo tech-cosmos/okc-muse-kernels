@@ -21,6 +21,9 @@
 #ifndef G30_NW
 #define G30_NW 10
 #endif
+#ifndef G30_PRE
+#define G30_PRE 1  // proj s94: consumers read + sort the escape header before griddepcontrol.wait
+#endif
 #ifndef G30_ESC
 #define G30_ESC 8
 #endif
@@ -122,8 +125,13 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
     }
     return;
   }
+#if !G30_PRE
   asm volatile("griddepcontrol.wait;" ::: "memory");  // x (and out's memory) belong to the previous kernels
+#endif
   if (warp == 9) {
+#if G30_PRE
+    asm volatile("griddepcontrol.wait;" ::: "memory");  // x belongs to the previous kernels
+#endif
     if (lane == 0) {
       for (int i = 0; i < KS; i++) {
         const int st = i % G30_NS, ph = (i / G30_NS) & 1;
@@ -163,6 +171,9 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
       }
     G30_POP;
   }
+#if G30_PRE
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // consumers: escape header (weights) read before, out written after
+#endif
 #define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); G30_POP } }
 #else
 #define G30_FIX(a)
