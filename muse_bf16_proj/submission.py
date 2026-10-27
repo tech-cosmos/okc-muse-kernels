@@ -7004,10 +7004,12 @@ LT_WS_BYTES = 32 << 20
 # s100: g30 (layer's 12-bit W decoded into wgmma A registers, swap-AB; MTOK 16/32 = proj s95 g30n with a (1, S, 1) cluster
 # split-K + DSMEM reduce; MTOK 128 = layer s99 g30). Per (layer, m): (S, NW, NS) tuner candidates; one build per (m, S, NW, NS).
 BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 16, 16)], ("qkv_gate", 16): [(3, 16, 16), (2, 16, 16)],
-            ("o", 16): [(1, 16, 16), (2, 16, 16)],
-            ("unpooler", 32): [(1, 20, 8), (1, 16, 16)], ("pooler", 32): [(2, 16, 16), (2, 20, 8)], ("qkv_gate", 32): [(3, 16, 16), (2, 20, 8)],
-            ("o", 32): [(1, 20, 8), (2, 20, 8)],
-            ("unpooler", 128): [(1, 10, 10)]}
+            ("unpooler", 32): [(1, 16, 16)], ("pooler", 32): [(2, 16, 16)], ("qkv_gate", 32): [(3, 16, 16)],
+            ("unpooler", 128): [(1, 10, 10)]}  # n5s4: o and the 20/8 rings dropped (H200 never picked them, checks 7ad5148c/7cbaa0fd)
+# n5s4 _diag30k only (print, no picks): g30k (stream-K g30 on G CTAs; G30K_F32 1 = FP32 slabs, 0 = BF16 out via slab+ticket)
+# vs g30 S-split, standalone (first op) and after a 3 us PDL predecessor: does qkv gain from 132 CTAs on the H200?
+DIAG30K = {"qkv_gate": (108, 120, 132), "pooler": (104, 132), "unpooler": (128, 132)}
+DIAG30K_S = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
@@ -7147,11 +7149,33 @@ def _g30_build(c):
         return None
 
 
+_G30K = {}
+
+
+def _g30k_build(c):
+    """c = (MTOK, F32) -> g30k lib (NW16 NS16, up to 6 pieces per tile) for _diag30k (None on failure)."""
+    try:
+        import hashlib
+        dfs = ["-DG30K_ON", f"-DG30K_F32={c[1]}", "-DG30K_MAXP=6", f"-DG30_MTOK={c[0]}", "-DG30_NW=16", "-DG30_NS=16"]
+        return load_inline(
+            name="muse_proj_g30k_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
+            cpp_sources="void g30k_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
+                        "torch::Tensor, torch::Tensor, int64_t);",
+            cuda_sources=_G30_SRC, functions=["g30k_gemm"],
+            extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
+    except Exception as ex:  # noqa: BLE001
+        print("muse_proj g30k build failed:", c, ex)
+        return None
+
+
 if BF16_G30:
     from concurrent.futures import ThreadPoolExecutor
     _cs = sorted({(m, *c) for (_l, m), v in BF16_G30.items() for c in v})
-    with ThreadPoolExecutor(len(_cs)) as _ex:
+    _ks = [(m, f) for m in (16, 32) for f in (1, 0)] if DIAG30K else []
+    with ThreadPoolExecutor(len(_cs) + len(_ks)) as _ex:
+        _fk = [_ex.submit(_g30k_build, c) for c in _ks]
         _G30.update(zip(_cs, _ex.map(_g30_build, _cs)))
+        _G30K.update(zip(_ks, (f.result() for f in _fk)))
 
 ROUTER_FP32_MAX_TOKENS = 8
 
@@ -7405,6 +7429,7 @@ def prepare(weights):
                 continue
             st[("g30", name)] = (_pack30(code, sm), hdr.contiguous(), scale)
     st["pick"] = _tune(st)
+    _diag30k(st)
     _diag19(st)
     _diag19q(st)
     _diag20(st)
@@ -7586,6 +7611,54 @@ def _tune(st, reps=25):
                          for c, t in zip(cands, med)))
     del flush
     return picks
+
+
+def _diag30k(st):
+    """Print only: g30k (FP32 slabs / BF16 via ticket) per grid vs g30 S-split, standalone and after a 3 us predecessor."""
+    if not _G30K or _g19 is None:
+        return
+    g = torch.Generator(device="cuda")
+    g.manual_seed(7)
+    for layer, grids in DIAG30K.items():
+        if ("g30", layer) not in st:
+            continue
+        P_, hdr, scale = st[("g30", layer)]
+        n, k = st[layer].shape
+        KP = k // 128
+        tick = torch.zeros(n // 64, dtype=torch.int32, device="cuda")
+        slab = torch.empty(n // 64 * 6 * 16 * 128, dtype=torch.float32, device="cuda")
+        noz = torch.empty(0, dtype=torch.float32, device="cuda")
+        for m in (16, 32):
+            xs = torch.randn(m, k, generator=g, device="cuda").to(torch.bfloat16)
+            x = xs.clone()
+            out = torch.empty(m, n, dtype=torch.bfloat16, device="cuda")
+            ref = F.linear(x, st[layer]).float()
+            gs = [G for G in grids if (n // 64 * KP) // G >= 2 and KP // ((n // 64 * KP) // G) + 2 <= 6]
+            o32 = {G: torch.zeros(KP // ((n // 64 * KP) // G) + 2, m, n, dtype=torch.float32, device="cuda") for G in gs}
+            fns, names = [], []
+            S = DIAG30K_S[layer]
+            lib = _G30.get((m, S, 16, 16))
+            if lib is not None:
+                fns.append(lambda pdl, lib=lib: lib.g30_gemm(x, P_, hdr, out, scale, pdl)); names.append(f"g30S{S}")
+            for G in gs:
+                if _G30K.get((m, 1)) is not None:
+                    fns.append(lambda pdl, G=G: _G30K[(m, 1)].g30k_gemm(x, P_, hdr, o32[G], scale, pdl, noz, noz, G)); names.append(f"kF{G}")
+                if _G30K.get((m, 0)) is not None:
+                    fns.append(lambda pdl, G=G: _G30K[(m, 0)].g30k_gemm(x, P_, hdr, out, scale, pdl, slab, tick, G)); names.append(f"kB{G}")
+            ok = []
+            for nm, fn in zip(names, fns):
+                fn(0)
+                torch.cuda.synchronize()
+                r = (o32[int(nm[2:])].sum(0) if nm.startswith("kF") else out).bfloat16().float()
+                ok.append(((r - ref).norm() / ref.norm()).item() < 1e-3)
+            pick = st["pick"].get((layer, m))
+            med0 = _graph_medians([lambda: _run(st, layer, x, out, pick)] + [lambda fn=fn: fn(0) for fn in fns])
+            medp = _graph_medians([lambda: _g19.g19_pred(xs, x, 3000)] + [lambda fn=fn: (_g19.g19_pred(xs, x, 3000), fn(1)) for fn in fns])
+            print(f"diag30k {layer} m{m}: standalone pick {pick} {med0[0] * 1e3:.2f} | "
+                  + " ".join(f"{nm}:{t * 1e3:.2f}{'' if o else '(BAD)'}" for nm, t, o in zip(names, med0[1:], ok))
+                  + f" || after 3 us pred (+us over {medp[0] * 1e3:.2f}): "
+                  + " ".join(f"{nm}:{(t - medp[0]) * 1e3:.2f}" for nm, t in zip(names, medp[1:])))
+            del o32
 
 
 def _diag19(st):
