@@ -4421,8 +4421,10 @@ def _plan(cfg, max_pages, device):
             # fix 1 (s106): fixed-reference softmax (reference = tile 0's row max + 14 binades; no row max / alpha /
             # rescale in the loop; overflowing rows -> _combine REDO, exact). H100 paired cold -0.19 us (9/9), warm-L2
             # -0.4 (7/7; -1.1 with pre 0).
+            # spec (s33): seq from the table width (batch 1; redo if the real length differs): H100 paired -0.6 us
+            # (16.85-16.90 vs 17.44-17.50, 3/3; s86's +0.35 predates fix 1). The q phase's seq_lens trip goes.
             return dict(splits=127, block_n=64, warps=4, stages=8, hpp=1, fuse=False, qk8=True, pdt="f32", tsep=True,
-                        pf=True, pre=2, fix=1)
+                        pf=True, pre=2, fix=1, spec=True)
         return dict(splits=128, block_n=128, warps=4, stages=6, hpp=1, fuse=False, qk8=True, pdt="f32")
     if length == 1:
         if HAVE_GLUON and USE_GDEC and hkv % 2 == 0 and cfg["num_q_heads"] // hkv == 8 and cfg["head_dim"] == 64:
