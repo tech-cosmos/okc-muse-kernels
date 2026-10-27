@@ -1977,3 +1977,13 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   (+9 us!) -> default (but the TUNE-off ab_flag full showed -1.9: unexplained; tuner's synthetic full input / TUNE_BASE[(32,False)]
   combo differs; layer: check what TUNE_BASE[(32, False)] sets beside unpool). T=16 sliding g30n:pooler +14 us -> option dropped.
 - Final branch proj/g30n 453790c (T=32 option g30n:unpool only; bench test 13/13 after the option trim). submission md5 52faab7b.
+
+## s97 (2026-10-27 17:28Z-): why the layer tuner rejected g30n:unpool at T=32 full (+9 us in s96's validate)
+- TUNE_BASE[(32, False)] == TUNE_BASE[(32, True)] (same g24/g24sk/tk2h 4/g24:qkv_gate combo): not a base mismatch.
+- A/B in one process (/tmp/pj97/synab.py on r-layer proj/g30n 453790c submission.py md5 52faab7b, TUNE {}, 4 rounds alternating
+  order, bench.time_graph cold L2, median (min) us), off vs g30n:unpool:
+  synth32 full (tuner's _synth_input ctx 80000) 411.19 (410.69) vs 410.99 (410.98) = tie | synth32 sl 206.67 vs 205.30 (-1.4)
+  real d32 sliding 192.73 vs 190.58 (-2.1) | real d32 full 407.05 vs 406.66 (-0.4).
+  => the tuner's +9 at full was a tuner-run artefact (single noisy run of 434 vs 425), not input-dependent. g30n:unpool is
+  sl -1.4..-2.1, full tie..-0.4 on H100. Recommend layer: put {"g30n:unpool": True} in TUNE_BASE[(32, True)] (sliding) or just
+  keep the tuner option; H200 truth from the next layer check's 'layer tune T=32' lines.

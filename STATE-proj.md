@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 17:35 UTC (s97). The s96 tuner '+9 us at T=32 full' for g30n:unpool is an artefact: same-process A/B on the
+tuner's synthetic input = tie at full, -1.4 sl; real d32 sl -2.1, full -0.4. Recommended to layer as sliding default (COORD). NOTES s97.
 Updated 2026-10-27 17:25 UTC (s96). g30n (s95 g30 at T=16/32) wired into the layer on r-layer branch proj/g30n (TUNE options
 "g30n:<key>", off by default). H100 in-layer (TUNE off): unpool T=32 -1.2..-2.1 us (2 runs, all 4 d32 rows) = WIN; pooler S2 +9..11
 (128 cluster CTAs fight the side-stream router), pooler S1 d16 full -0.8 / sl +2.5..3.3; T=16 unpool, qkv S3: tie. Options added:
