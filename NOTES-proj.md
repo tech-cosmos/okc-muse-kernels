@@ -2052,3 +2052,13 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - check 3291ae79 (79fdba1) 1.3502x [1.330, 1.370]; submit a12513ed 1.3483x [1.328, 1.369] = proj board best (was 1.3233).
 - Next ideas: pooler m32 more configs (S2 NW16 NS16, S2 NW12) since H200 ties; m128 g30 at S2 for pooler needs smem trim
   (NS 10 x 16 KB + rbuf 32 KB too big): NS 6; o g30 not worth it.
+- s100b (ffb1ae8): + g30 pooler m32 S2 NW16 NS16, unp m32 S1 NW16 NS16; dropped m128 g30 except unp (pooler S2 NW10 NS6 31.2 vs
+  lt 30.1, qkv S3 NW10 NS4 30.5 vs 20.9 on H100: dead). H100 tune: pool m32 25.63 (vs 20/8 26.72), unp m32 24.10 (vs 25.22).
+  **check 7ad5148c 1.3998x**; H200 tune: pool m32 S2 16/16 19.97 vs 20/8 21.86 vs lt 22.43; unp m32 16/16 19.42 vs 20/8 21.12 vs lt
+  21.57; pool m16 19.49, unp m16 18.85, qkv m16 15.62 / m32 16.32 (g30 S3); o all lt; unp m128 lt 22.66 vs g30 24.58.
+  **submit a0168544 1.3543x** [1.334, 1.375] = proj board best (the check's 1.3998 was a high draw).
+- In-layer H100 (dev/s100/ringab.py, r-layer proj/g30k138 copy, TUNE {}, 4 rounds, d32 sl s99/s7 | full s99/s7):
+  unp20/8 192.62/200.22 | 425.59/430.46 ; unp16/16 192.54/200.13 | 419.78/429.97 ; unp16+g30k104 16/16 191.68/198.98 | 418.88/428.67 ;
+  unp20+g30k104 20/8 191.19/198.77 | 418.90/429.03 => rings tie on H100 in-layer. GEMM bitwise identical across rings; the layer's
+  hidden/stream are NOT bitwise reproducible run-to-run even with one config (A==A False; routing ids equal): pre-existing.
+  Put 16/16 as the T=32 default for g30n unpool + g30k pooler on proj/g30k138 (H200 standalone -1.7..1.9 us, H100 tie).
