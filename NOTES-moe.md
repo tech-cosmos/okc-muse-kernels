@@ -1501,3 +1501,8 @@
   <moe_src.py> (applies to r-layer main's copy: 5 sites, 0 left).
 - DEAD TWM_PAIR (tools/s27m/twm_pair_dead.diff): producer puts each (even, odd) stage pair on full[odd], consumers wait
   once per 2 stages. Bitwise ok, but v32 233.2 -> 236.3, v16 195.2 -> 195.7 cold (one stage less lookahead per wait).
+- Judge: check 5ad98078 (40de385 + DIAG, test run) 2.2576x; H200 diag12 vs b14b8be4 (same DIAG_VARIANTS): d1 30.0/30.0,
+  d16 65.0 -> 64.2, d32 85.8 -> 84.5, v1 64.3 -> 64.5, v16 twm 171.6 -> 166.2 (every seed -3.7..-7.9; repeat 169.4 -> 165.0),
+  v32 twm 218.5 -> 213.7 (repeat 217.7 -> 213.4), q4 / s66h32ne also -2..-3. Plain main check ed55a5c0 2.2635x
+  (bs1 26.8, bs8 63.6, bs16 89.7, bs32 124.8, bs128 206.4, bs256 245.6 us) -> submit febfcb1f 2.2469x (new board best, was 2.190x).
+  Checks 20/20 used on 10-27; 1/10 submits.
