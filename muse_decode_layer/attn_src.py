@@ -2821,6 +2821,7 @@ DOT_DTYPE = tl.float16
 # Programmatic dependent launch of the merge kernel (off in the CPU interpreter).
 USE_PDL = True
 LZ = 10  # _gw_verify softmax: 10 = fixed reference after LZ_PK exact tiles + REDO (s105), 3 = exact per-warp lazy max (s79), 0 = per-tile row max + rescale
+CB_HB_TRIG = False  # layer n5s4: _combine_hb triggers its PDL dependents at start (the o GEMM waits on it)
 MERGE1 = True  # one-pass merges issue the accumulator loads before the max reduction
 USE_GDEC = True  # decode full layers at batch * hkv > 2 on the Gluon kernel (_gd_full)
 USE_GSLIDE = False  # batched sliding decode on _gd_full too (H100 win, H200 loss)
@@ -4349,10 +4350,12 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
 def _combine_hb(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
                 HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, M: tl.constexpr,
                 D: tl.constexpr, S: tl.constexpr, S_PAD: tl.constexpr, SB: tl.constexpr, HB: tl.constexpr,
-                PDL: tl.constexpr, ONE: tl.constexpr = True, QSS: tl.constexpr = 0):
+                PDL: tl.constexpr, ONE: tl.constexpr = True, QSS: tl.constexpr = 0, TRIG: tl.constexpr = False):
     """_combine for HB adjacent query heads of one KV head per program: their partial rows are
     contiguous in every split, so each split's [HB, D] block is one contiguous read. Faster on
     sliding layers (fewer, fuller programs); full layers keep _combine."""
+    if TRIG:  # layer n5s4: the PDL o GEMM (g30n: W ring streams before its griddepcontrol.wait) may launch now
+        gdc_launch_dependents()
     tok = tl.program_id(0)
     head0 = tl.program_id(1) * HB
     b = tok // L
@@ -4733,7 +4736,7 @@ def _verify_nvs(data, cfg):
     _combine_hb[(batch * length, hq // 2)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=hq // hkv, L=length, M=rows, D=d, S=S, S_PAD=triton.next_power_of_2(S), SB=S, HB=2,
-        ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL)
+        ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
     return out
 
 
@@ -4754,7 +4757,7 @@ def _decode_nds(data, cfg):
     _combine_hb[(batch, hq // 2)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=rows, L=1, M=rows, D=d, S=S, S_PAD=S, SB=S, HB=2,
-        ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL)
+        ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
     return out
 
 
@@ -4848,7 +4851,7 @@ def kernel_fn(data: Inputs) -> torch.Tensor:
         _combine_hb[(batch * length, hq // hb)](
             qkv, pacc, pml, data["v_scale"], out,
             HQ=hq, HKV=hkv, G=group, L=length, M=rows, D=d, S=splits, S_PAD=triton.next_power_of_2(splits),
-            SB=sb, HB=hb, ONE=MERGE1 and not sep, PDL=USE_PDL, num_warps=plan.get("cw", 4), launch_pdl=USE_PDL)
+            SB=sb, HB=hb, ONE=MERGE1 and not sep, PDL=USE_PDL, num_warps=plan.get("cw", 4), launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
         return out
     _combine[(batch * length, hq)](
         qkv, pacc, pml, data["v_scale"], out,
@@ -4900,7 +4903,7 @@ def _verify_gluon(data, cfg, plan):
         _combine_hb[(batch * length, hq // hb)](
             qkv, pacc, pml, data["v_scale"], out,
             HQ=hq, HKV=hkv, G=group, L=length, M=rows, D=d, S=s, S_PAD=triton.next_power_of_2(s),
-            SB=triton.next_power_of_2(s), HB=hb, ONE=MERGE1, PDL=USE_PDL, num_warps=plan.get("cw", 1), launch_pdl=USE_PDL)
+            SB=triton.next_power_of_2(s), HB=hb, ONE=MERGE1, PDL=USE_PDL, num_warps=plan.get("cw", 1), launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
         return out
     _combine[(batch * length, hq)](
         qkv, pacc, pml, data["v_scale"], out,

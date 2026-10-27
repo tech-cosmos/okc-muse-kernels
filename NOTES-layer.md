@@ -2192,3 +2192,29 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   g30 unpool 164.8-193.2 (18 us after norm2 = ~2 TB/s on 36 MB, still the biggest non-expert post-dependency slice) | bnd -195.7.
 - Git gotcha: `git merge --no-ff` + `git pull --rebase` LINEARIZES the merge and DROPS the merge commit's own extra changes (my notes vanished;
   code tree was identical). Restored by `git checkout <merge> -- NOTES STATE`. Next time: commit notes separately, or `git pull --rebase=merges`.
+
+## night5 s4 (2026-10-27 21:07Z-, okc-night5 session 4): v142 = v141 + g30n o at T=16/32; 0 judge runs
+- Layer checks 20/20 for 10-27 (resets 00:00Z). Board #33 at 2.1339x; #1 pjmullin3 2.399x, #10 2.249x, #20 2.172x.
+- Routing census (reference router, 5 seeds, sliding): local routes / distinct local experts: d1 2-5 / 2-5, d16 24-30 / 7-10,
+  d32 48-57 / 8-10, v1 10-16 / 6-8, v16 163-181 / 15-19, v32 320-355 / 18-23 (x 28.3 MB NVFP4+scales per expert).
+- DEAD (standalone H100, /tmp/lay_s4/qk_sk.py): qkv at T=16/32 as g30k stream-K on more CTAs (proj's "qkv on 132 CTAs" item).
+  qkv_gate 2304x8192, 12-bit, graph cold L2, minus empty graph: m16 g30n S3 (108 CTAs) 15.6 | g30k G72 17.2, G96 15.7, G108 14.8-15.1,
+  G120 15.7, G132 15.8; m32 g30n 16.35 | G108 15.6-15.9, G132 16.4. CTA count is not qkv's limit (ramp/latency is); FP32-red
+  variant not worth building.
+- NEW g30n o (layer.py G30N_CFG ("o", 16/32): (1, 16, 16), existing builds): o = 8192x1024, K 1024, so each of the 128 CTAs'
+  W share (~98 KB 12-bit) is about its 16-stage ring: as a PDL secondary the W loads before griddepcontrol.wait. o_pf (attention's
+  L2 prefetch of o's weight, O_PF[32] 0.5) now points at the g30 pack when g30n runs o.
+  H100 ab_flag TUNE {} (variants/n5s4_off.py), 4 rounds A B A, seeds 99/7, us:
+    d32 sl 194.35/203.06 -> 192.62/201.32, full 422.27/431.52 -> 419.78/429.81; d16 sl (vs g27) 190.49/154.77 -> 191.42/155.38 (+0.8),
+    d16 full 299.94/281.37 -> 297.53/278.94 (-2.4). Repeat d32 sl: 195.56/204.13 -> 193.70/202.36.
+  Full layers gain more: _red_fin already triggers dependents early (rf_trig), so o's W ring fills during the merge.
+- _combine_hb early trigger (attn_src CB_HB_TRIG, TRIG constexpr on the nds/nvs/gluon launch sites): d32 sl with g30n o -0.3/-0.4 us
+  = noise; left False (code kept, inert).
+- v142: TUNE_BASE (32, sl/full) and (16, full) += {"g30n:o": True}; TUNE[32] += {g30n:o False}, {g30n:o False, lt:o True};
+  TUNE[16] += {g30n:o True} (sl), {g30n:o False}, {g30n:o False, g27:o False}. Note: g30n is checked before g27/g24/lt in _g19,
+  so with g30n:o on, options that only set lt:o/g27:o/g24:o/g19:o are no-ops.
+- v142 validate --quick ALL OK: test 13/13, scored 0/12, opt 0/354, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/528,
+  cold prepare 174.2 s (v141 153.6; +5 tuner candidates and other agents' load; still <= 190 s). H100 tuner agrees: T=32 sl default
+  (g30n o) 217.4 vs {g30n:o False} 219.2, full 436.6 vs 438.0; T=16 full 312.1 vs 313.9; picks T=32 g30k104+unp+qkv as in v141.
+- **main = v142.** 00:00Z check 1 = v142 (covers v140 streams + v141 g30k/g30n/pr32 + g30n o). Read 'layer tune T=16/32' lines:
+  {g30n:o False} must lose at T=32 sl/full and T=16 full; if it wins on the H200, move g30n:o back to an option.

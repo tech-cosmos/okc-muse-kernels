@@ -2894,6 +2894,7 @@ DOT_DTYPE = tl.float16
 # Programmatic dependent launch of the merge kernel (off in the CPU interpreter).
 USE_PDL = True
 LZ = 10  # _gw_verify softmax: 10 = fixed reference after LZ_PK exact tiles + REDO (s105), 3 = exact per-warp lazy max (s79), 0 = per-tile row max + rescale
+CB_HB_TRIG = False  # layer n5s4: _combine_hb triggers its PDL dependents at start (the o GEMM waits on it)
 MERGE1 = True  # one-pass merges issue the accumulator loads before the max reduction
 USE_GDEC = True  # decode full layers at batch * hkv > 2 on the Gluon kernel (_gd_full)
 USE_GSLIDE = False  # batched sliding decode on _gd_full too (H100 win, H200 loss)
@@ -4422,10 +4423,12 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
 def _combine_hb(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
                 HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, M: tl.constexpr,
                 D: tl.constexpr, S: tl.constexpr, S_PAD: tl.constexpr, SB: tl.constexpr, HB: tl.constexpr,
-                PDL: tl.constexpr, ONE: tl.constexpr = True, QSS: tl.constexpr = 0):
+                PDL: tl.constexpr, ONE: tl.constexpr = True, QSS: tl.constexpr = 0, TRIG: tl.constexpr = False):
     """_combine for HB adjacent query heads of one KV head per program: their partial rows are
     contiguous in every split, so each split's [HB, D] block is one contiguous read. Faster on
     sliding layers (fewer, fuller programs); full layers keep _combine."""
+    if TRIG:  # layer n5s4: the PDL o GEMM (g30n: W ring streams before its griddepcontrol.wait) may launch now
+        gdc_launch_dependents()
     tok = tl.program_id(0)
     head0 = tl.program_id(1) * HB
     b = tok // L
@@ -4806,7 +4809,7 @@ def _verify_nvs(data, cfg):
     _combine_hb[(batch * length, hq // 2)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=hq // hkv, L=length, M=rows, D=d, S=S, S_PAD=triton.next_power_of_2(S), SB=S, HB=2,
-        ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL)
+        ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
     return out
 
 
@@ -4827,7 +4830,7 @@ def _decode_nds(data, cfg):
     _combine_hb[(batch, hq // 2)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=rows, L=1, M=rows, D=d, S=S, S_PAD=S, SB=S, HB=2,
-        ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL)
+        ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
     return out
 
 
@@ -4921,7 +4924,7 @@ def attn_kernel_fn(data: Inputs) -> torch.Tensor:
         _combine_hb[(batch * length, hq // hb)](
             qkv, pacc, pml, data["v_scale"], out,
             HQ=hq, HKV=hkv, G=group, L=length, M=rows, D=d, S=splits, S_PAD=triton.next_power_of_2(splits),
-            SB=sb, HB=hb, ONE=MERGE1 and not sep, PDL=USE_PDL, num_warps=plan.get("cw", 4), launch_pdl=USE_PDL)
+            SB=sb, HB=hb, ONE=MERGE1 and not sep, PDL=USE_PDL, num_warps=plan.get("cw", 4), launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
         return out
     _combine[(batch * length, hq)](
         qkv, pacc, pml, data["v_scale"], out,
@@ -4973,7 +4976,7 @@ def _verify_gluon(data, cfg, plan):
         _combine_hb[(batch * length, hq // hb)](
             qkv, pacc, pml, data["v_scale"], out,
             HQ=hq, HKV=hkv, G=group, L=length, M=rows, D=d, S=s, S_PAD=triton.next_power_of_2(s),
-            SB=triton.next_power_of_2(s), HB=hb, ONE=MERGE1, PDL=USE_PDL, num_warps=plan.get("cw", 1), launch_pdl=USE_PDL)
+            SB=triton.next_power_of_2(s), HB=hb, ONE=MERGE1, PDL=USE_PDL, num_warps=plan.get("cw", 1), launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
         return out
     _combine[(batch * length, hq)](
         qkv, pacc, pml, data["v_scale"], out,
@@ -14273,7 +14276,8 @@ _G30 = {}
 # unpool/pooler/qkv on g30. One build per (MTOK, S, NW, NS); NW >= 16 keeps 1 CTA/SM (2 CTAs/SM under PDL +5 us). H100 standalone
 # after a 3 us PDL pred vs g24: d32 unp 17.3 vs 20.3, pool 18.9 vs 21.5, qkv 12.3 vs 13.4; d16 unp 17.2 vs 18.7, pool 18.4 vs 18.75.
 G30N_CFG = {("unpool", 32): (1, 16, 16), ("pooler", 32): (1, 20, 8), ("qkv_gate", 32): (3, 16, 16),
-            ("unpool", 16): (1, 16, 16), ("pooler", 16): (1, 16, 16), ("qkv_gate", 16): (3, 16, 16)}  # (S, NW, NS)
+            ("unpool", 16): (1, 16, 16), ("pooler", 16): (1, 16, 16), ("qkv_gate", 16): (3, 16, 16),
+            ("o", 32): (1, 16, 16), ("o", 16): (1, 16, 16)}  # (S, NW, NS); n5s4: o (K 1024: each CTA's W share ~ its ring)
 G30N_DEFAULT_ON = set()  # (key, T) on without TUNE; otherwise TUNE option "g30n:<key>"
 # s96 H100 in-layer (TUNE off, 3 rounds x seeds 99/7): unpool T=32 -1.2..-2.1 us (2 runs); pooler S2 +9..11 (128 cluster CTAs vs the
 # side-stream router), S1 d16 sl +2.5..3.3 full -0.8; T=16 unpool / qkv S3 tie. TUNE option: T=32 g30n:unpool (validate tuner: sl picks it -1.0..-1.4 us, full +9 us -> default; T=16 g30n:pooler sl +14 us, dropped).
@@ -17855,9 +17859,10 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24:o": False}, {"g24:qkv_gate": False},
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
              {"g27:o": False},  # s84: attention plan (full layers only)
-             {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"pr32": True},  # n5s3: moe pr32; night5 s1: g30n at T=16 (H100 tie: H200 decides); n5s3: qkv S3 built again (uneven K split)
+             {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"pr32": True},
+             {"g30n:o": True}, {"g30n:o": False}, {"g30n:o": False, "g27:o": False},  # n5s4 g30n o (base at 16 full); n5s3: moe pr32; night5 s1: g30n at T=16 (H100 tie: H200 decides); n5s3: qkv S3 built again (uneven K split)
              ),
-        32: ({}, {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"pr32": True}, {"pr32": True, "g30n:unpool": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"g30k:pooler": 104}, {"g30k:pooler": 120}, {"g30k:pooler": 104, "g30n:unpool": True}, {"g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
+        32: ({}, {"g30n:o": False}, {"g30n:o": False, "lt:o": True}, {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"pr32": True}, {"pr32": True, "g30n:unpool": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"g30k:pooler": 104}, {"g30k:pooler": 120}, {"g30k:pooler": 104, "g30n:unpool": True}, {"g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
@@ -17898,9 +17903,12 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
              (8, True): {"nu8": True, "g14alt:qkv_gate": 3}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
              (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
-             (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
-             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
+             (16, False): {**_G24_ALL, "g30n:o": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True},
+             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True},
              (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
+# n5s4: g30n o (T=32 sl+full, T=16 full; 12-bit o, W ring filled under PDL before the attention ends): H100 ab_flag TUNE {}, 4 rounds
+# x seeds 99/7 (3 runs): d32 sl -1.6/-1.5, -1.9/-1.8, full -2.2/-1.8; d16 full -2.4/-2.4, d16 sl +0.8/+0.7 (vs g27: option only).
+# Escape options {g30n:o: False} (+ lt:o) in TUNE[16]/TUNE[32]: g30n is checked before g27/g24/lt for o, so lt:o/g27:o options need it off.
 # s76: T=32 {tk2h 4, g24:qkv_gate} (proj s66 combo) in the base: both H200 tuners of checks baae0e41 / 1b9a63fb picked it (+-lt:o):
 # sl -1.4 / -4.5, full -3.8 / -5.3 us vs the old base. Options that set tk2h / g24:qkv_gate override it.
 # proj s54: T=32 pooler+unpool on stream-K g24 (g24sk): H100 ab_flag 5 rounds x 2 seeds d32 sl -1.3/-1.9, full -1.5/-1.1 us;
@@ -18456,6 +18464,9 @@ def _kernel_fn(data, state):
         e = state.get("g19", {}).get(("o", tokens)) if "o" in G19_ON and _opt(state, tokens, "g19:o", ("o", tokens) not in G19_DEFAULT_OFF) else None
         e27 = _g27_sel(state, "o", tokens)  # proj s57: gemv27's pack when it runs o
         w = e27[0] if e27 is not None else e[0] if e is not None else dense["o"]
+        e30 = state.get("g30n", {}).get(("o", tokens))
+        if e30 is not None and _opt(state, tokens, "g30n:o", ("o", tokens) in G30N_DEFAULT_ON):  # n5s4: g30n o reads its pack
+            w = e30[1][0]
         o_pf = (w.data_ptr(), int(w.numel() * w.element_size() * pf_frac) & ~15)
     o = attn_kernel_fn({
         "o_pf": o_pf, "csl_pw": csl_pw, "nvs_cl": _opt(state, tokens, "nvscl", NVS_CL),
