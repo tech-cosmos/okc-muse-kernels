@@ -15321,7 +15321,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g27:o": True}, {"tk2h": 4, "g24:qkv_gate": True}, {"tk2h": 4, "lt:o": True, "g24:qkv_gate": True},
              {"g24sk2:pooler": True}, {"g24sk2:unpool": True}, {"g24sk2:pooler": True, "g24sk2:unpool": True},
              {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
-             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}),  # proj s69: g24sk2 = SK (4,3,12)  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
+             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}, {"tk2h": 0, "g24:qkv_gate": False}),  # s76: old base  # proj s69: g24sk2 = SK (4,3,12)  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
@@ -15343,9 +15343,11 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
 _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
 TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True, "bal": True, **_G24_ALL},
-             (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True},
-             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True},
+             (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
+             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
              (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
+# s76: T=32 {tk2h 4, g24:qkv_gate} (proj s66 combo) in the base: both H200 tuners of checks baae0e41 / 1b9a63fb picked it (+-lt:o):
+# sl -1.4 / -4.5, full -3.8 / -5.3 us vs the old base. Options that set tk2h / g24:qkv_gate override it.
 # proj s54: T=32 pooler+unpool on stream-K g24 (g24sk): H100 ab_flag 5 rounds x 2 seeds d32 sl -1.3/-1.9, full -1.5/-1.1 us;
 # g24sk at T=16 +0.4..0.9 and qkv at T=32 +1..1.5 on the H100 (W-bound): TUNE candidates only.
 # H100 ab_flag 4 rounds x 3 seeds, TUNE {}: d16 sl/full -2.9/-3.0 us, d32 sl/full -1.5/-1.8 (o on g24 at T=32 sl +2.3; qkv tie/-1)

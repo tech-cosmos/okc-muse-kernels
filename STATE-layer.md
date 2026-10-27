@@ -1,10 +1,11 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
 BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
-s75: **main = v120 = v111 behavior** (moe_src has moe n21 twq split code, off). moe n21 twq K-split DEAD in-layer on the H200:
-check a0bcbbf4 v118 2.0866x (tuner options: synthetic sl twq73988 298 vs default 287, not picked; not submitted = same behavior
-as board), check 2f7349ee v119 2.0855x (split forced at T=128 sl: v16 sl 282.2 us, ratio 1.888 vs 1.92-1.93). Budget 10-27 left:
-8 checks / 5 submits. Checks v109-v119 all 2.058-2.087 (= v108 within noise).
+s76: **main = v122** = v120 - every twq option at T=128 (moe 07:25Z: the layer's T=128 default is moe_twm; twq is ~+5 us in-layer;
+HOTQ check baae0e41 2.0772x: hot32 = twq 4, split +6) + proj s66 T=32 combos (H200 tuner PICKED {tk2h 4, lt:o, g24:qkv_gate} on both
+types in baae0e41 AND 1b9a63fb: -1..-5 us d32; v123 puts it in TUNE_BASE[32]) + proj s69 g24sk2 T=32 options (tie on H200).
+Checks s76: baae0e41 v121 2.0772x, 1b9a63fb v122 2.081x (d32 160.5/308.0 best yet); not submitted (< 2.0860). Budget 10-27 left: 6 checks /
+5 submits. **main = v123, unchecked**: check it once more wins are stacked; submit if a check beats 2.0860x.
 
 Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).

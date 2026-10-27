@@ -1595,3 +1595,11 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - v122 also = + proj s69 g24sk2 (SK g24 (4,3,12) at T=32 pooler/unpool; r-proj dev/s69/g24sk2_layer.patch, clean on 34a1bdc) as TUNE[32]
   options, + one more combo {g24sk2 both, tk2h 4, lt:o, g24:qkv_gate}.
 - v122 tests: forced (variants/v122_fsk2.py) scored decode 32 x3 0 bad, replay decode 32 seeds 11,23 0/80; bench test 13/13; cold prepare 114.5 s.
+- 07:26Z CHECK 1b9a63fb v122 (5a986d9) 2.081x [2.050, 2.112], 10,870 us (not submitted, < 2.0860): d1 67.7/78.6, d16 128.2/203.6,
+  d32 **160.5/308.0** (best d32 yet; board 173.3/326.8), v1 116.0/121.5 (v1 sl +7 = noise, code unchanged), v16 281.2/370.9,
+  v32 361.4/518.3. H200 tuner T=32 sl: default 174.2 | {tk2h 4, g24:qkv_gate} 169.7 | +lt:o 169.6 | g24sk2 pool/unp/both 174.0/173.2/174.0 |
+  sk2 both + combo 169.6 PICKED; full 330.9 | 325.6 | 325.3 PICKED | sk2 331.2/330.6/331.9 | sk2+combo 325.7. => g24sk2 tie (dead on
+  its own), the s66 combo wins again (-4.5 / -5.3 us). T=128 picked fr both types.
+- v123: TUNE_BASE[(32, *)] += {tk2h 4, g24:qkv_gate} (2 H200 tuners agreed, s35 policy); TUNE[32] += {tk2h 0, g24:qkv_gate False}
+  (= old base). Tests: forced tune {} at T=32 (variants/v123_fbase.py = the new base) scored decode 32 x3 0 bad, replay seed 11 0/40;
+  bench test 13/13. Not checked (behavior = what v122's tuner picked; check it with the next real win stacked).
