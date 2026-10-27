@@ -67,3 +67,28 @@ int64_t lt_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tens
   lt_free(p);
   return st;
 }
+
+// Print-only diag helper (s68): every valid algo-66 config for the shape as cfg tuples [N, 8] (stages auto, swizzle 0,
+// reduction scheme 2 when split): tiles from the algo caps x custom options cust_lo..cust_hi x cluster shapes x split-K.
+torch::Tensor lt_cands(int64_t m, int64_t n, int64_t k, int64_t wsbytes, int64_t cust_lo, int64_t cust_hi) {
+  cublasLtMatmulAlgo_t a;
+  std::vector<int64_t> keep;
+  if (cublasLtMatmulAlgoInit(lt_handle(), CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF,
+                             CUDA_R_16BF, 66, &a) == CUBLAS_STATUS_SUCCESS) {
+    size_t sz = 0;
+    cublasLtMatmulAlgoCapGetAttribute(&a, CUBLASLT_ALGO_CAP_TILE_IDS, nullptr, 0, &sz);
+    std::vector<int> tiles(sz / 4);
+    cublasLtMatmulAlgoCapGetAttribute(&a, CUBLASLT_ALGO_CAP_TILE_IDS, tiles.data(), sz, &sz);
+    const int clusters[] = {0, 2, 3, 4, 5, 6, 8};
+    const int sks[] = {1, 2, 3, 4, 6, 8};
+    for (int t : tiles) for (int64_t cu = cust_lo; cu <= cust_hi; cu++) for (int c : clusters) for (int sk : sks) {
+      std::vector<int64_t> cfg = {66, t, 35, sk, sk > 1 ? 2 : 0, 0, cu, c};
+      LtPlan p;
+      if (lt_make(p, m, n, k, cfg, wsbytes) == 0) keep.insert(keep.end(), cfg.begin(), cfg.end());
+      lt_free(p);
+    }
+  }
+  auto out = torch::empty({(int64_t)keep.size() / 8, 8}, torch::kInt64);
+  if (!keep.empty()) memcpy(out.data_ptr<int64_t>(), keep.data(), keep.size() * 8);
+  return out;
+}

@@ -192,6 +192,7 @@ DIAG27 = {}
 DIAG61 = [("pooler", (16, 1024, 4, 3, 12, 2, 1), 108), ("unpooler", (16, 1024, 2, 4, 16, 2, 1), 132),
           ("pooler", (32, 512, 4, 3, 12, 2, 1), 108), ("pooler", (32, 512, 2, 4, 16, 2, 257), 108),
           ("unpooler", (32, 512, 4, 3, 12, 2, 1), 132), ("unpooler", (32, 512, 2, 4, 16, 2, 257), 132)]
+DIAG61 = []  # s68: s61 diag done (check e25a1d4d: XSP/DF dead on the H200); keeps prepare() short
 DIAG61_BITS = [("base", 0), ("xsp", 1 << 19), ("df", 1 << 20), ("xsp+df", 3 << 19), ("EZprobe", 1 << 17)]
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
@@ -324,8 +325,9 @@ except Exception as _e:  # noqa: BLE001
 try:
     _lt = load_inline(
         name="muse_proj_lt1",
-        cpp_sources="int64_t lt_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::vector<int64_t>);",
-        cuda_sources=_LT_SRC, functions=["lt_gemm"], extra_ldflags=["-lcublasLt"],
+        cpp_sources="int64_t lt_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::vector<int64_t>);\n"
+                    "torch::Tensor lt_cands(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+        cuda_sources=_LT_SRC, functions=["lt_gemm", "lt_cands"], extra_ldflags=["-lcublasLt"],
         extra_cuda_cflags=["-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj cuBLASLt build failed, using F.linear:", _e)
@@ -566,6 +568,7 @@ def prepare(weights):
     _diag61(st)
     _diag_slab(st)
     _diag_ext(st)
+    _diag_lte(st)
     st["rpick"] = _tune_router(st)
     return st
 
@@ -1103,6 +1106,87 @@ def _diag_ext(st):
                       f"(first call {jit:.1f} s, maxdiff {err:.3g})")
             except Exception as e:
                 print(f"diagext {layer} m{m} failed: {type(e).__name__}: {str(e)[:300]}")
+
+
+# s68: _diag_lte only (print): H200 screen of EVERY algo-66 cuBLASLt config (lt_cands: tiles x cluster x split-K, custom 0,
+# workspace <= LT_WS_BYTES 32 MB; the layer has 4 MB) per shape, eager after a read flush with the GPU kept behind the host; the top
+# DIAG_LTE_TOP get all custom options, the best of those are re-timed as graph replays (like _tune) vs F.linear and
+# this shape's lt_cfg.txt candidates. The H100 sweep (dev/lte.py) chose lt_cfg.txt; the H200 ranks configs differently.
+DIAG_LTE = [("pooler", 128), ("unpooler", 128), ("qkv_gate", 128), ("o", 128), ("pooler", 256), ("unpooler", 256),
+            ("qkv_gate", 256), ("o", 256), ("qkv_gate", 32), ("o", 32)]
+DIAG_LTE_TOP = 12
+DIAG_LTE_CAP = 110.0  # s
+
+
+def _diag_lte(st):
+    import time
+    if _lt is None or not DIAG_LTE or not hasattr(_lt, "lt_cands"):
+        return
+    t0 = time.time()
+    flush = torch.zeros(256 << 20, dtype=torch.uint8, device="cuda").view(torch.int64)
+    sink = torch.zeros((), dtype=torch.int64, device="cuda")
+    ws = st["ltws"]
+    g = torch.Generator(device="cuda")
+    g.manual_seed(11)
+
+    def screen(w, x, out, cfgs):
+        for c in cfgs:  # untimed first launch of each kernel (lazy module load costs ms on the first call)
+            _lt.lt_gemm(w, x, out, ws, c)
+        times = {}
+        for b in range(0, len(cfgs), 48):
+            torch.cuda.synchronize()
+            torch.cuda._sleep(100_000_000)  # ~55 ms > 48 host-side plan setups: no launch gap is timed
+            evs = []
+            for c in cfgs[b:b + 48]:
+                torch.sum(flush, 0, out=sink)
+                e0, e1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                e0.record()
+                ok = _lt.lt_gemm(w, x, out, ws, c) == 0
+                e1.record()
+                evs.append((tuple(c), ok, e0, e1))
+            torch.cuda.synchronize()
+            for c, ok, e0, e1 in evs:
+                if ok:
+                    times[c] = e0.elapsed_time(e1) * 1e3
+        return times
+
+    for layer, m in DIAG_LTE:
+        if time.time() - t0 > DIAG_LTE_CAP:
+            print("diaglte: time cap")
+            break
+        try:
+            t1 = time.time()
+            w = st[layer]
+            n, k = w.shape
+            x = torch.randn(m, k, generator=g, device=w.device).to(torch.bfloat16)
+            out = torch.empty(m, n, dtype=torch.bfloat16, device=w.device)
+            ref = F.linear(x, w).float()
+            cfgs = _lt.lt_cands(m, n, k, ws.numel(), 0, 0).tolist()
+            ta = screen(w, x, out, cfgs)
+            top = sorted(ta, key=ta.get)[:DIAG_LTE_TOP]
+            tb = screen(w, x, out, [list(c[:6]) + [cu, c[7]] for c in top for cu in range(8)])
+            tb.update({c: ta[c] for c in top})
+            best = []
+            for c in sorted(tb, key=tb.get):
+                if len(best) >= 8:
+                    break
+                if any(c[1] == b[1] and c[3] == b[3] and c[7] == b[7] for b in best):
+                    continue  # one custom option per (tile, split, cluster)
+                if _lt.lt_gemm(w, x, out, ws, list(c)) != 0:
+                    continue
+                torch.cuda.synchronize()
+                if ((out.float() - ref).norm() / ref.norm()).item() < 1e-3:
+                    best.append(c)
+            mine = [tuple(c) for c in BF16_LT.get((layer, m), []) if tuple(c) not in best]
+            fns = [lambda: torch.mm(x, w.t(), out=out)]  # = F.linear's cuBLAS path
+            fns += [(lambda c=c: _lt.lt_gemm(w, x, out, ws, list(c))) for c in best + mine]
+            med = _graph_medians(fns)
+            print(f"diaglte {layer} m{m}: {len(cfgs)} cfgs, {time.time() - t1:.1f} s; F {med[0] * 1e3:.2f} | new "
+                  + " ".join(f"{c}:{t * 1e3:.2f}/{tb[c]:.1f}" for c, t in zip(best, med[1:]))
+                  + " | lt_cfg " + " ".join(f"{c}:{t * 1e3:.2f}" for c, t in zip(mine, med[1 + len(best):])))
+        except Exception as e:  # noqa: BLE001
+            print(f"diaglte {layer} m{m} failed: {type(e).__name__}: {str(e)[:300]}")
+    del flush
 
 
 def _diag19_stream():
