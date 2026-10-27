@@ -1510,7 +1510,7 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   Forced (TUNE {} + TUNE_BASE[32] g24sk2 both) scored decode 32 3 seeds x 2 types PASS; H100 ab_flag 3 rounds x seeds 99,7:
   sl +1.2/+0.3, full +0.9/+0.6 us (W-bound H100, expected; s56 said +1.2..1.7). H200 tuner decides. No judge runs.
 
-## s70 (2026-10-27 07:17-07:40Z real UTC, sandbox okc-night4, session 27): cuBLAS nvjet + PDL via capture-graph edge surgery = DEAD
+## s70 (2026-10-27 07:17-07:30Z, sandbox okc-night4, session 27): cuBLAS nvjet + PDL via capture-graph edge surgery = DEAD
 - Target: layer s12 idle budget item "T>=16 cuBLAS no-PDL gaps ~1.6%" (v16/v32 sliding: 4 nvjet GEMMs ~70/88 us in-layer,
   judge 2f7349ee). cuBLASLt has no PDL option (cublasLt.h: no pdl/programmatic), so tried forcing it from outside.
 - Mechanism (works, dev/s70/*.py): cuBLAS itself calls cudaStreamGetCaptureInfo without edge data, so setting programmatic
