@@ -1858,3 +1858,18 @@
   "multicast buys nothing"). On the H200 (HBM 1.45x) the W stream drops to ~12-13 us and per-CTA x ingest (1 MB per 64-row CTA
   ~ 15 us at ~65-70 GB/s/SM) may become the bound: then R2 (128 rows/CTA, 0.5 MB x) forms win there and not here. Only an
   H200 run can rank g30 forms.
+
+## Night4 session 44 (2026-10-27 16:13Z - ~16:35Z) -- attention lane: verify 1 full softmax-reference probes (all dead); 0 checks
+- Per-load speedups of board run 957cabd7 (vs SGLang H200): d1 3.66x, v1 3.20x, d16 2.55x, d32 2.33x, v16 2.11x, v32 2.09x
+  (full shapes 1.97-2.58x, sliding 2.47-4.69x). #1 (3.03x) needs ~+17% geomean: not reachable from the full kernels alone
+  (s40 bounds), so the #1 team must be far ahead on batch-1 and/or sliding shapes too.
+- **Constant softmax reference (FREF) DEAD by arithmetic**: qk_scale_factor = 5.473, so scores reach ~63 * rms(k) log2 units
+  and row maxima spread over far more than FP16's ~30 usable binades; built it (reference 12, underflow guard -> REDO) and
+  every split REDOed (6.9 ms). Any fixed reference must come from the data (as FIX 1 = tile 0's max + 14 does).
+- **FIXL** (FIX 1 reference taken inside the pipelined loop's first tile, `if start == lo`, no pre-pass; bitwise = FIX 1):
+  H100 v1 full +0.35 us (6/6 pairs: 17.1-17.3 vs 16.8-16.9); with pre 1 +0.6. The runtime branch in the pipelined loop costs
+  more than the pre-pass's 1.1 us timeline slot (which overlaps the PRE-prefetched gathers).
+- fix 0 (online max per tile) vs fix 1: +1.2 us H100 (18.05-18.21 vs 16.83-16.93): the max/alpha chain costs ~0.12 us/tile.
+- **L2D** (FIXED loop keeps [64, 64] FP32 running sums, one reduction after the loop instead of tl.sum(p, 1) per tile):
+  +1.7 us (6/6; 32 more registers per thread). Dead.
+- No code change on main. Attention budget 10-27: checks 13/20, scored 2/10 (none spent).
