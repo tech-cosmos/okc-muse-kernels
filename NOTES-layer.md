@@ -2110,3 +2110,9 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   than cuBLAS FR before escapes, FP32 router out and the slab sum. Uneven splits leave unsplit CTAs doing 2x K (~S1 time), and
   128-row CTAs were dead in s99. So the fused pooler+router g30 is DEAD whatever the router-lo format. g30 at T=128 = unpool only (v136).
 - main unchanged = v136; first check after 00:00Z = v136 (read 'layer tune T=128': g30:unpool False must lose).
+
+## s106 (2026-10-27 17:19Z-17:30Z, night4 session 55): no build, 0 judge runs
+- Checks 20/20 used for 10-27 (4 submits left, unusable without a check win); sandbox moves ~18:00Z (STOP ~17:55Z).
+- proj s96 claimed the g30 T=16/32 port into the layer (branch proj/g30n; proj STATE s95: d32 qkv -1.1 pool -2.6 unp -2.9 o -1.3,
+  d16 qkv -0.5 pool -0.4 unp -1.5 us per call on H100 vs g24). Not duplicated here (same files).
+- 00:00Z plan: check main v136 first; then v136 + proj/g30n after proj's validate ALL OK and cold prepare <= 200 s.

@@ -2,6 +2,9 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+s106: no build (sandbox moves ~18:00Z; checks 20/20; proj claimed the g30 T=16/32 port, branch proj/g30n: qkv/pool/unp/o, H100 per call d32 -1.1/-2.6/-2.9/-1.3, d16 -0.5/-0.4/-1.5 us vs g24).
+  **00:00Z plan:** check 1 = main v136 (submit if > 2.1339x, or per the 09:28Z rule). check 2 = v136 + proj/g30n once proj's validate is ALL OK
+  (read 'layer tune T=16/T=32' g30 lines; d32 is the target, ~-8 us/layer H100 = ~+0.4%). Before merging: cold prepare <= 200 s (2nd g30 lib).
 s105: one-launch pooler+router g30 DEAD (H100: S2 + any router rows = 136 CTAs = 2 waves 43.7 us; S3 33.8, S1 37.0 vs cuBLAS FR 29.3; NOTES s105). Queue empty. main = v136. 0 runs.
 s104: **main = v136** = v135 + proj g30_sort + G30_PRE (proj/g30pre 88ba088); validate --quick ALL OK, cold 117.8 s; H100 v16 tie (bitwise equal). Lead 16:45Z (2) qkv/FR-pooler g30 = s101/s102 DEAD; only one-launch pooler+router g30 left (<= -4 us H100; router lo rows do not 12-bit compress: 18 esc/row, needs raw BF16 stages; queued). **First check after 00:00Z = v136.** 0 runs.
 s103: no build (SMEM-resident T=1 pooler preload dead on paper: csl latency contention, NOTES s103). Board #30. 0 runs.
