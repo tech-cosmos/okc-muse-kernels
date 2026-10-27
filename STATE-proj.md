@@ -1,5 +1,5 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 06:15 UTC (s64: gemv28 = x as wgmma A + W decoded into smem as wide-N B (dev/s64): correct but DEAD in this form: H100 pool m32 20.9 vs g24 20.7, m16 19.8-21.1 vs 18.5; NOW m32 19.5 vs g24 15.8; the decoder->MMA mbarrier handoff chain costs ~0.33 us/stage (~= one stage of HBM time). s63: G24P = pooler EZ at T=32 as a layer TUNE option, dev/s63/g24p_layer.patch: correct, H100 loses
+Updated 2026-10-27 07:10 UTC (s65: g27 PD at M=8 (12-bit o at T=8, dev/s65) correct, standalone H100 4.77 vs cuBLAS 7.84 us, but LOSES in the layer v1: sl +0.9..1.0, full +3..3.8 us (pre-wait W stream + whole-RF blocks slow vtk/attn_split): DEAD. s64: gemv28 = x as wgmma A + W decoded into smem as wide-N B (dev/s64): correct but DEAD in this form: H100 pool m32 20.9 vs g24 20.7, m16 19.8-21.1 vs 18.5; NOW m32 19.5 vs g24 15.8; the decoder->MMA mbarrier handoff chain costs ~0.33 us/stage (~= one stage of HBM time). s63: G24P = pooler EZ at T=32 as a layer TUNE option, dev/s63/g24p_layer.patch: correct, H100 loses
 +2..5 us (router-critical there), H200 bound -1..-1.5 us: handoff for the H200 tuner. Pooler grid >108 at T=32: dead (layer s18 H200). s62: layer's HYBRID BF16+12-bit rows g24 (dev/s62, HY mode, correct) DEAD: H100 consumer-only a BF16 row
 costs the same as a 12-bit row at m32 (m16 -4..8%), so only bytes grow. s61: g24 m32 consumer anatomy (clock64, dev/s61): latency-bound; per warp setup zero/fence/epoch +
 barrier spin ~15 kcyc, x arrives ~3 us after the wait; XSP / DF (runtime npre bits 19/20) correct but DEAD on H200 (check e25a1d4d
@@ -137,4 +137,5 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 3. PD (pre-wait decode into registers) for other T=16 g24 calls where a warp slice fits (qkv/pool need split-K: g24 PD).
 3b. (s64) g28 ping-pong variant (MMA WGs decode their own B tiles, no cross-WG handoff per stage, KA>=2, BN 256 at 384 thr):
    only if a NOW skeleton shows < ~0.1 us/stage on the H100 first (NOTES s64).
+3c. (s65) Dead too: g27 PD at T=8 for o. Remaining v1 item: none cheap (pr8 tail balancing ~0.1-0.2%, NOTES s37/38).
 4. Below the line: pr8 K-split tail, 11-bit, g22/g23/DeepGEMM m128/256, hybrid BF16 rows (s62): dead.

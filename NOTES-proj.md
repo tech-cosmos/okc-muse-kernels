@@ -1425,3 +1425,14 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   then issues async wgmma, no cross-WG mbarrier chain per stage; FA3-style) with KA>=2 and BN=256 at 384 threads.
   Not worth more before that skeleton is shown < ~0.1 us/stage in NOW mode on the H100.
 - No judge runs this session.
+
+## s65 (2026-10-27 06:15-07:10Z, sandbox okc-night4, session 22): g27 PD at M=8 (12-bit o at T=8 = v1) = DEAD in the layer
+- Picked from the layer's H200 profile a0bcbbf4: v1 o is BF16 g12 (8.2 sl / 6.8 full us incl. its PDL wait); g27 PD had
+  never been built for M=8. dev/s65/gemv27.cu = s58 file + NT == 1 in gemm_pd (one ldmatrix.x4 = both k16 halves of the
+  atom's 8 x rows: xrow = (lane & 7) * XS + (lane >> 3) * 16). dev/s65/g27.py = s58 harness copy.
+- Standalone H100, o (n 8192, k 1024), after a 3 us PDL pred, ESCW adversarial escapes all correct (us): m8 cuBLAS 7.84 |
+  (4,4,108,4) 4.77 | (4,4,108,2) 8.59 | (4,4,108,8) 7.58 | (8,4,104,2) 8.42 | (8,4,104,4) 5.97; m16 (4,4,108,4) 6.08 vs 8.42.
+- Layer copy /tmp/pj65/L (r-layer 6145e6d + g27_src.cu = s65 file + G27_CFG ("o", 8): (8,4,4,108,4,0)), ab_flag 4 rounds,
+  seeds 99,7, G27_ON without/with ("o", 8): verify 1 sliding 141.56/115.87 -> 142.44/116.88 (+0.9/+1.0), full
+  155.05/129.70 -> 158.85/132.70 (+3.8/+3.0); verify 16 untouched (tie). DEAD: the pre-wait W stream + whole-RF blocks
+  hurt vtk / _attn_split+_combine more than o gains (same lesson as pr1 npf / PR1_BND). No handoff. No judge runs.
