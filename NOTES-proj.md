@@ -1455,3 +1455,19 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   Suggested to layer: a generic stacking pass (merge the winner with singles that beat default in the same run, one ABBA
   confirm) would harvest these everywhere, but combos then need correctness tests (tuner does not check outputs).
 - No judge runs this session.
+
+## s67 (2026-10-27 06:33-07:10Z, sandbox okc-night4, session 24): oracle bound for the T=16/32 side-stream router+routing = too small
+- Item picked from the layer's H200 profile 2f7349ee: d16 sl _router_split 5.6 + _routing 4.0 us (d32 6.4 + 4.2) run on the
+  side stream beside the g24 pooler (108 blocks). Question: is a fused router+routing kernel (gemv7 hi/lo + pr8-style
+  finisher) worth building?
+- Oracle (dev/s67/route_oracle.py, exec'd by r-layer tools/ab_flag.py in a copy /tmp/pj67/L of r-layer 016bcb3): _route at
+  T=16/32 returns cached ids/lids/wts (same input), i.e. NO router/routing kernels at all. H100, 5 rounds, seed 99 (us):
+  d16 sl 188.10 -> 184.90 (-3.2), full 289.02 -> 285.57 (-3.5); d32 sl 192.46 -> 189.57 (-2.9), full 407.76 -> 405.60 (-2.2);
+  d1 tie (control). Score upper bound ~0.3% d16 + ~0.2% d32 = ~0.55% on the H100.
+- On the H200 the bound is smaller: the H100 saving ~= the router's 8 MB hi/lo W stream competing with the HBM-bound pooler
+  (8 MB / 3.3 TB/s = 2.4 us); on the H200 the pooler is consumer-bound at ~2.3-2.9 TB/s of 4.8 (spare HBM), the side chain
+  (9.6 us) ends well before the pooler (17.6 us), and more SMs for the pooler buy little (diag61: G132 vs G108 ~0.4 us).
+  A real fused kernel would get part of the bound. => DEAD on paper (< ~0.1-0.2% on the H200); not built.
+- Also re-checked before building: expert-weight L2 prefetch beside the T=16/32 pooler is dead (layer s55: prefetch blocks
+  delay the router; tk2f uses 10-25% of prefetched bytes) and at d1 (layer s38). Nothing new >= 1% in proj's lane.
+- No judge runs this session.
