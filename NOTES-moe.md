@@ -1367,3 +1367,19 @@
   (Consistent with s24: issue ~50% with 2 warps/SMSP; s24's latency fixes -- stage-ahead LDS, 2 CTAs/SM -- and s13's 2 acc
   chains (PF & 8) are dead, so the decode consumer has no cheap lever left; the gemm2 readiness spin is ~9% of stall samples
   in the 1-expert proxy only, and per-segment counters were 0 on the H200 (s12).)
+
+## Night4 session 23 (2026-10-27 05:45Z - ; moe checks 13/20 after this session's DIAG) -- HOTQ: moe_hot<NH 64> beside moe_twq at v16
+- Skipped s21's NEXT (store-then-ticket for twm): twm's s11 combine takes the ticket only AFTER its main loop, so the
+  "spin" on the other half is just the other half's store (~0); the twq gain came from twq having no split at all.
+- Why HOTQ: layer v16 routings (5 seeds) have 17-19 experts, the top 2 with 36..49 tokens. twq (what the layer runs at v16)
+  has only 32-token passes (64 do not fit its registers), so those experts are dequantized twice (~10% extra dq work).
+- Built: moe_hot<NSTG, SA, NH> (NH 64: experts with 33..64 tokens, one N 64 pass, x box m[3]; NH 128 = s29 unchanged), chosen
+  by moe_set_hot bit 4. moe_twq flags bit 20 = hx (as twm's hx): skip 33..64-token experts, no griddepcontrol.wait at entry,
+  wait at the end (moe_norm, twq's PDL secondary, must see moe_hot's Y). Python HOTQ_M = {M: grid} or the twq flags
+  q | grid << 24 (bits 24..30; the layer's "twq" TUNE value). Off by default.
+- Correctness: tools/s23/hq_t.py 0/26 bad, BITWISE equal to plain twq (random/skewed bs33-257 + layer v16/v32, eager + 3
+  replays); flags form == HOTQ_M form bitwise; bench test 15/15.
+- H100 moe-only, layer v16 routings (tools/s22/proxy.py, 3 rounds, us): q4 220.5 | h8 318 h12 252 h16 225.5 h24 214.8 h32 215.3
+  h40 216.2 h48 217.3; s33h (n21 split) 214.5 | s33h32 210.0 s33h40 209.8. (H100 twm 195: the H100 misranks twq/twm, DRAM-bound.)
+- Layer port: tools/s23/patch_layer_hotq.py <moe_src.py> (applies to r-layer moe_src.py @ s75), then TUNE at T=128
+  {"twq": 73988 | 32 << 24} (= 536944900).

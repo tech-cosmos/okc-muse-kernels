@@ -1,6 +1,6 @@
 # s23 layer port: moe_hot<NH 64> beside moe_twq (33..64-token experts in one N 64 pass) into the layer's moe_src.py.
 # python tools/s23/patch_layer_hotq.py <path/to/moe_src.py>   then TUNE option at T=128 e.g. {"twq": 73988 | 32 << 24}
-# (= 536944644: twq + n21 33-item half split + moe_hot<64> on 32 CTAs). Needs n21's twq (K split) already in moe_src.py.
+# (= 536944900: twq + n21 33-item half split + moe_hot<64> on 32 CTAs). Needs n21's twq (K split) already in moe_src.py.
 import sys
 p = sys.argv[1]; s = open(p).read()
 def rep(a, b, n=1):
