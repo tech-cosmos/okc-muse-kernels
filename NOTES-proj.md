@@ -2125,7 +2125,7 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   stage precomputed in prepare so only stages with escapes branch; or patch in smem W stage pre-decode). Then port to g30k/g30n in the
   layer (proj branch) and A/B in-layer. Gate on an H200 diag like _diag30e (it is still in sub_template, DIAG30E = {} to re-enable).
 
-## n5s5 (2026-10-27 22:43Z-23:35Z, night5 session 5): g30 escapes via a fixup warp reading x from the smem ring (G30_FXS): DEAD; 0 checks
+## n5s5 (2026-10-27 22:43Z-00:05Z, night5 session 5): G30_FXS fixup warp DEAD; G30_PL smem key list WIN (check 73b3e2e7, submit eb166fc0 1.3574)
 - Built G30_FXS in dev/n5s4/g30e_src.cu (on top of FXW + HSM): the fixup warp rank-sorts the tile's escapes by (col, row) before
   the wait, then walks the x ring stage by stage (waits full[st], reads x[tok][col] from the SW128 box, lane = token, FP32 cneg/cpos
   sums in smem), and is a 2nd arrival on each x stage's empty barrier; consumers wait the fixup's fbar before the WG reduce (the

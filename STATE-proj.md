@@ -1,7 +1,9 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 23:35 UTC (night5 n5s5 = session 5). g30 escape path: fixup warp reading x from the smem ring (G30_FXS, exact) is
-DEAD on H100 (qkv m32 after pred 13.8 vs in-loop patch 13.0 vs no-esc 11.7; just gating the x ring on the extra warp costs 0.8 us).
-All off-loop escape forms (ESCM, FXW, FXS) lose: the in-loop patch stays; escape line parked (NOTES n5s5). Checks 10-27: 13/20, scored 3/10.
+Updated 2026-10-28 00:05 UTC (night5 n5s5 = session 5). **G30_PL WIN**: g30's in-loop escape patch made cheaper (sorted keys in a
+per-thread smem list: pop = 1 LDS, fragment idx precomputed; MTOK <= 32 only, +17 KB smem). H200 diag b3ff96fb m32 -0.2..-0.5 us/call.
+**proj board best: submit eb166fc0 (34b7483) 1.3574x** (check 73b3e2e7 1.3771). Layer: branch proj/g30pl 19d3f19 (v144 + PL), validate ALL
+OK, cold 156.2 s, Handoff posted. Dead: fixup warp reading x from smem (G30_FXS, +0.8..1.4 us H100). Checks 10-27: 15/20, scored 4/10.
+NEXT: watch layer merge proj/g30pl; then the T=128 g30 (PL doesn't fit smem there: shrink rings or keep keys in fewer bytes).
 Updated 2026-10-28 00:00 UTC (night5 n5s4 = session 4). **FOUND: g30's escape path costs 1.5-2.0 us per call on the H200** (check 198e7084,
 _diag30e g30 vs -DG30_ESC=0, m32 after a 3 us pred: qkv 12.9 vs 11.35, pooler 16.6 vs 14.7, unpool 15.2 vs 13.1; standalone -0.6..1.2) =
 ~4-5 us per d16/d32 load (~0.8% layer) if escapes were free. Cause (H100 bisection): in-loop patch events stall the warpgroup's wgmma.
@@ -47,7 +49,7 @@ DSMEM K-cluster reduce (dev/s93, G30_KC=1/2) DEAD: cluster+reduce ~2-2.5 us; qkv
 s82/s83 (nu8d race found+fixed in layer; tools/stream_fuzz.py): see NOTES.
 Older session headers (s46-s80): see NOTES-proj.md (sessions are logged there in order).
 ## Board
-- **Best: submit a0168544 = ffb1ae8, 1.3543x** (s100b, g30 picks + m32 rings 16/16). Before: a12513ed 1.3483x. Before: 1ff4721e87c844c2 = ca7e557, 1.3233x (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
+- **Best: submit eb166fc0 = 34b7483, 1.3574x** (n5s5, G30_PL). Before: a0168544 = ffb1ae8, 1.3543x (s100b, g30 picks + m32 rings 16/16). Before: a12513ed 1.3483x. Before: 1ff4721e87c844c2 = ca7e557, 1.3233x (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
