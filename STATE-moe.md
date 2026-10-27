@@ -93,6 +93,10 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - s37: d1 full 2-warp tile split closed on paper (= splits 1023, which loses on the H200). Lane request to the lead still open.
 - s38: no lane answer, no build, 0 checks (NOTES s38).
 - s39: same; verify full (1.96-2.0x) is our lowest attention shape but consumer-bound and closed (NOTES s39).
+- s40 H200 DIAG d5bf959a (tools/s40/mkdiag.py): random-row gather ceiling ~4.1 TB/s (d32 floor 159, d16 79; dense 144/72).
+  Decode full at 92-95% of it (headroom d32<=9, d16<=7 us). Verify full consumer-bound (all-L2 v32 170 / v16 93 vs main 188/102,
+  floors 157/80): headroom only via a faster _gw_verify consumer. Full kernels at perfect overlap = ~-4% attention score max.
+- Checks used 2026-10-27: 13/20, scored 2/10.
 ## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)
 - Floors (pt trip + 20.5 MB random 128-B rows, all in flight, incl. launch): ~8.0 us d1 and v1; dense 7.4.
 - Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.

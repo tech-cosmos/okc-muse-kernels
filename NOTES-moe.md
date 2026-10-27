@@ -1749,3 +1749,29 @@
   native nvf all dead) and layer s84 closed full attention in-layer on the H200. Even verify full at decode-full speed is
   only ~-4% of the attention geomean, so #1's 16% lead is not in a single shape we know how to attack.
 - No new design; left the shared GPU to layer/proj. Attention budget 10-27: checks 12/20, scored 2/10 (no tie checks).
+
+## Night4 session 40 (2026-10-27 14:17Z - ~14:45Z) -- attention lane: H200 bounds of the batch-16/32 FULL kernels (1 DIAG check)
+- Still no lane answer (newest moe Human decision 09:45Z). Layer closed full attention in-layer (s84) and moved to lane 3, so
+  the full kernels' H200 bound was the one unmeasured number: ~/attn hdiag5's d32 floors were never run on the H200 (my s32
+  ran only batch-1). Built tools/s40/mkdiag.py (DIAG copy, NEVER submit; from tools/s32): per scored full shape, after the
+  first eager call: main, main with all-L2 page table (= consumer-only time), main with per-request consecutive rows (dense
+  DRAM order), hfloor random-row gather floors R2/R4/R8 (all K+V 128-B rows, all in flight), dense floor. 40 cold replays.
+- **Check d5bf959a (DIAG; timed shapes = main code): 2.5754x** (node noise; per shape within +-0.6 of 76983f6b except d1 sl).
+  H200 us (median, cold L2, minus empty graph):
+  | shape | main | all-L2 (consumer) | main seq rows | random floor R2/R4/R8 | dense floor |
+  | d16 full | 86.4 | 62.1 | 83.3 | 79.3/79.4/80.0 | 72.5 |
+  | d32 full | 168.3 | 119.9 | 158.8 | 159.4/159.3/159.3 | 144.1 |
+  | v16 full | 101.8 | 92.7 | 100.8 | 80.5/80.6/80.7 | 73.4 |
+  | v32 full | 187.9 | 169.7 | 184.2 | 157.2/157.1/157.5 | 142.5 |
+  (H100 same tool: d16 117.6 / floor 111.0 / dense 103.5; v32 240.1 / 221.0 / 205.9.)
+- Readings:
+  * The H200 random 128-B row gather ceiling is ~4.1 TB/s (d32 ~655 MB in 159 us), ~10% under dense (4.55 TB/s); TASK.md's
+    126 us floor (4.8 TB/s) is not reachable with page-1 random rows. Deeper in-flight (R8) does not help.
+  * Decode full is memory-bound at 92-95% of that ceiling: headroom d32 <= 9 us, d16 <= 7 us (the overlap loss between a
+    consumer of 120/62 us and the gather stream). Even with dense rows main would only reach 159/83.
+  * Verify full is CONSUMER-bound: all-L2 time is 90% (v32 170) / 91% (v16 93) of main, and above the gather floor at v32.
+    Headroom = consumer speed: v32 up to ~31 us, v16 ~21 us if the consumer fell under the floor (this is the known
+    _gw_verify issue-bound consumer; ~/attn s12-s125 dead-ends: poly exp2, f16 ex2, FP8 PV, WS variants, native nvf).
+  * Upper bound on the attention score from all four full kernels at perfect overlap: ~ -4% (d32 -9, d16 -7, v32 -31,
+    v16 -21 us). The #1 team's 16% lead cannot come from the full kernels alone; per-shape unknown.
+- Attention budget 10-27: checks 13/20, scored 2/10. Tool commit 14e41ff.
