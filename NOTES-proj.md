@@ -1534,3 +1534,22 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - dev/g13.py repaired (it packed the pre-DEC3 layout -> wrong results; now packs with submission._pack13). H100 qkv m1 sweep
   (us, cuBLAS 17.8): U2V4P1 13.41, U2V2P2 13.39, U2V4P2 14.54, U2V2P3 13.73 (g132); VT512 g264: U1V2P1 13.98, U1V1P2 13.12,
   U1V1P4 16.51, U1V1B2P2 13.47. Deeper register prefetch does not help (regs); within noise of main. qkv g13: no lever.
+
+## s71 (2026-10-27 07:33-07:50Z, sandbox okc-night4, session 28): d1 headroom re-bounded; pr1 SPF (smem prefill) DEAD
+- Read lead 06:41Z + layer s74 per-load table: proj-owned gaps are qkv/pool/unp at T=16/32 (consumer-bound g24, s60-s64),
+  T=128/256 cuBLAS (ingest-bound, g22 s16) and d1 GEMVs. Re-checked d1 (highest %/us) on the H100 (dev/s71/cmp.py,
+  bench.time_graph, empty graph subtracted): bare readers of 28.4 / 58 / 16.8 MB: ld.global.nc g264x1024 11.90 / 21.18 /
+  8.45 us, g132x1024 12.61 / 22.56 / 8.83; TMA bulk ring (dev/s71/tma.py, 1 issuing thread, g132) S4x32KB 12.00 / 21.62 /
+  8.54, S2x32KB 12.06 / 21.70 / 8.58 (g264 rings slower). Slope ~3.2 TB/s + ~3 us fixed. g13 qkv (main cfgs) 13.02-13.47.
+  Row-quantum tail: none (QN=2112 rows 12.22 vs 2304 13.06 = the byte slope; dev/g13.py now takes QN). So g13 qkv =
+  best reader + ~1.1 us (H100), + 0.9 (H200 s17): <= ~0.25% layer. Not built (a TMA-ring g13 'g13t' could take ~0.5 of it).
+- pr1 SPF (dev/s71/pr1_spf_layer.patch on r-layer ecbad82 pr1_src.cu): npf bits 8-11 = spf rounds of pooler chunks
+  (after the PF register ones) cp.async.bulk'd into dynamic smem BEFORE griddepcontrol.wait (48 KB per round per block),
+  bit 12 = throttled (one round in flight); consumers read those rounds from smem (mbarrier). Correct: d1 sl/full x seeds
+  99,7 x {1,2,3 rounds, throttled 2,3} bitwise == spf 0 (24/24, dev/s71/eq.py); oversize spf errors (pr1 really runs).
+  H100 layer ab_flag (TUNE off, 4 rounds, seeds 99/7), d1 us vs spf 0: 1 round +0.8, 2 +1.5, 3 +2.5; throttled 1 +1.6,
+  2 +3.0 (sl and full alike). DEAD, monotonic in prefilled bytes = the same as the H200 tuner's verdict on pr1_npf (L2
+  form). The boundary window is NOT HBM-idle in practice (pr1 blocks land while o's tail still streams; the boundary's
+  loads queue behind it). Consequence for the layer's T=1 o+bnd+pr1 megakernel idea: its 'spare HBM in the bnd window'
+  term is ~0; only launch/PDL gaps remain (~1-2 us bound). Not handed off.
+- No judge runs. Lane status -> Request to lead (COORD s71).

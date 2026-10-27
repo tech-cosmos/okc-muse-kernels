@@ -1,16 +1,13 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 07:30 UTC (s70: forcing PDL onto cuBLAS nvjet via capture-graph edge surgery DEAD: nvjet has no griddepcontrol.wait
-(18/30 wrong as a secondary), LaunchCompletion edge after it -0.2..0.7 us = noise; dev/s70, NOTES s70. s69: g24 refill batching G24_FB DEAD (fence costs nothing; batching drains the ring); T=32 SK (4,3,12) for pooler/unpool = H200 proxy -0.6 us each (s56 H200 diag -1.15 pool), handed to layer as TUNE[32] g24sk2 options, dev/s69/g24sk2_layer.patch. s68: H200 full cuBLASLt algo-66 screen (_diag_lte, check f45aa794 1.3247x): H100 sweep picks hold everywhere except pooler m128 (66,124,35,1,0,0,0,4) 24.06 vs 25.22 (layer's 143 cfg 26.75): lt_cfg updated, layer handoff LT_ALT/TUNE[128] ltalt:pooler; the T=128/256 gap is not a config problem. NOTE: s67's '07:10' stamp was ahead of real UTC. s67: oracle (no router/routing kernels at T=16/32, dev/s67/route_oracle.py with r-layer ab_flag) H100 d16 -3.2/-3.5, d32 -2.9/-2.2 us = ~0.55% bound, smaller on the H200 (router W hides under the consumer-bound pooler): fused router+routing DEAD on paper. s66: mined 8 layer H200 tuner logs (dev/s66/tune_stats.py): the tuner keeps one option set, so consistent singles (T=32 g24:qkv_gate -0.84 full 8/8, -0.57 sl) never stack with tk2h 4: handoff dev/s66/tune32_stack_layer.patch (TUNE[32] combos; tests 0 bad). s65: g27 PD at M=8 (12-bit o at T=8, dev/s65) correct, standalone H100 4.77 vs cuBLAS 7.84 us, but LOSES in the layer v1: sl +0.9..1.0, full +3..3.8 us (pre-wait W stream + whole-RF blocks slow vtk/attn_split): DEAD. s64: gemv28 = x as wgmma A + W decoded into smem as wide-N B (dev/s64): correct but DEAD in this form: H100 pool m32 20.9 vs g24 20.7, m16 19.8-21.1 vs 18.5; NOW m32 19.5 vs g24 15.8; the decoder->MMA mbarrier handoff chain costs ~0.33 us/stage (~= one stage of HBM time). s63: G24P = pooler EZ at T=32 as a layer TUNE option, dev/s63/g24p_layer.patch: correct, H100 loses
-+2..5 us (router-critical there), H200 bound -1..-1.5 us: handoff for the H200 tuner. Pooler grid >108 at T=32: dead (layer s18 H200). s62: layer's HYBRID BF16+12-bit rows g24 (dev/s62, HY mode, correct) DEAD: H100 consumer-only a BF16 row
-costs the same as a 12-bit row at m32 (m16 -4..8%), so only bytes grow. s61: g24 m32 consumer anatomy (clock64, dev/s61): latency-bound; per warp setup zero/fence/epoch +
-barrier spin ~15 kcyc, x arrives ~3 us after the wait; XSP / DF (runtime npre bits 19/20) correct but DEAD on H200 (check e25a1d4d
-diag61); EZ upper bound pool m32 -1.0..1.5 us -> Request to layer (T=32 pooler EZ as TUNE option). s60: wgmma (RS/SS, m64n16/32k16) for g24 m16/m32 DEAD: consumer-only not faster than mma.sync
-(H100 NOW pool m16 13.3 vs 11.2, m32 15.9 vs 15.2); trace: per-task decode ~2.4 + mma ~2.8 us ADD (no overlap). s59: G24X = qkv g24 EZ across calls (unpool zeroes next call's qkv out): H100 layer v108 d16 sl -1.86
-full -0.62 us, handoff dev/s59/g24x_layer.patch (tests 13/13, replay 0/160). s58: FIXED main's broken cpp decls (0cfca9f regex; native libs fell back to torch); g27 G27_MC 1
-(x by spread bulk copies) H100 layer d16 sl -1.8 full -1.05 us; H200 (check a4962d70) o m16 4.42 vs 5.28, m32 6.27 vs lt 6.72;
-handoff dev/s58/g27mc_inc_layer.patch (on r-layer d4fd834, + T=32 TUNE option). g24 XSP (same trick in g24) DEAD. s57: gemv27 o T=16 for the layer: H200 o m16 5.25 vs g24 6.43 us after pred; handoff
-dev/s57/g27_layer.patch, H100 layer d16 sl -0.8..-1.0. Older: s55: g24 tail balancing / KC1024 / XPAR / lazy zero all dead. s54: gemv24 SK = stream-K over ring stages (template r|256): H100 layer d32 pool+unp
--1.1..-1.9 us/shape, handoff dev/s54/g24sk_layer.patch; DIAG24 carries SK twins. s53: gemv24 (per-warp TMA rings, no producer warp) = H100 layer WIN at T=16/32 (-0.5..-3.5 us/layer, tuner options); handoff dev/s53/g24_layer.patch; print-only _diag24 queued for the 00:00Z check. Checks 20/20 until 00:00Z).
+Updated 2026-10-27 07:50 UTC (s71). Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
+LANE STATUS (s71): proj's own items are exhausted to <= ~0.2-0.3% layer each; Request to lead (COORD s71) for a new lane.
+s71 DEAD: pr1 SPF (pooler W into smem before the wait, d1): H100 +0.8/+1.5/+2.5 us for 1/2/3 rounds (dev/s71, NOTES s71).
+Bounds measured (H100 unless said): d1 qkv g13 = bare stream + ~0.9 us (H200 s17) / +1.1 us (H100 s71: 13.0 vs best ldg/TMA
+reader 11.9-12.0; no row-quantum tail: 2112 rows 12.22 vs 2304 13.06 = pure slope). T=16/32 g24 = consumer latency-bound
+(s60-s64). T=128/256: per-SM L2->smem ingest ~50 GB/s (s16) makes x+W+partials traffic the limit for any own GEMM (g22
+dead); cuBLASLt configs H200-screened (s68). T>=16 nvjet cannot be a PDL secondary (s70). d1 overlap ideas closed (s46).
+Handoff results (layer s76): s66 TUNE[32] combo {tk2h 4, g24:qkv_gate} WON both H200 tuners (-1..-5 us d32) -> layer
+TUNE_BASE[32] v123; g24sk2 (s69) tie (dropped). Still unjudged: ltalt:pooler@128 (s68).
 ## Board
 - **Best: submit 1ff4721e87c844c2 = ca7e557, 1.3233x** (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
@@ -129,9 +126,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## it is one local array summed explicitly + operand fences (NOTES s60). g24 R=2 at m32 dead too.
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
-0d. Layer: watch for g24sk2 (Handoffs proj s69) in 'layer tune T=32' lines (vs default and tk2h4+g24:qkv combo).
+00. FIRST: read the lead's answer to the s71 lane Request in ~/COORD.md. If none: g13t (TMA-ring g13 for d1 qkv, <= -0.5 us).
 0c. Layer: watch for s68 ltalt:pooler at T=128 (Handoffs proj s68) in a layer check's 'layer tune T=128' lines.
-0b. Layer: watch for the s66 TUNE[32] combos {tk2h 4(, lt:o), g24:qkv_gate} in a layer check (tune T=32 lines).
 0a. Layer: watch for G24P (Handoffs proj s63) in a layer check; read 'layer tune T=32' {'g24p': True} vs default (sl/full).
 0. Layer: watch for G24X (Handoffs proj s59) in a layer check; read the 'layer tune T=16' {'g24x': False} entry.
 1. Layer: watch for g27 (Handoffs proj s57/s58) in a layer check; read its "layer tune T=16" g27:o line.

@@ -1,0 +1,80 @@
+--- /home/daytona/r-layer/muse_decode_layer/pr1_src.cu	2026-10-26 19:59:38.031496843 +0000
++++ pr1_src.cu	2026-10-27 07:44:13.843803921 +0000
+@@ -287,9 +287,39 @@
+ #pragma unroll
+     for (int p = 0; p < PF; ++p)
+         if (c + p * G < nch) load(p, c + p * G);
++    // proj s71 SPF (npf bits 8-11 = rounds, bit 12 = throttled): the next spf rounds of chunks (after the PF register
++    // ones) bulk-copied into dynamic smem before griddepcontrol.wait (W only: fills the boundary's HBM-idle window);
++    // throttled = one round (NV chunks) in flight per block at a time
++    const int spf = (a.npf >> 8) & 15, npf = a.npf & 255;
++    extern __shared__ __align__(128) unsigned char spf_sm[];
++    __shared__ __align__(8) unsigned long long spf_bar[4];
++    constexpr int SPB = CE + CE / 2;  // bytes per chunk: sign|mantissa + codes
++    if (spf && threadIdx.x == 0) {
++        for (int r = 0; r < spf; ++r)
++            asm volatile("mbarrier.init.shared.b64 [%0], 1;" :: "r"((unsigned)__cvta_generic_to_shared(&spf_bar[r])));
++        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
++        for (int r = 0; r < spf; ++r) {
++            const unsigned bar = (unsigned)__cvta_generic_to_shared(&spf_bar[r]);
++            int nb_ = 0;
++            for (int v = 0; v < NV; ++v) nb_ += (pb * NV + v + (PF + r) * G < nch) ? SPB : 0;
++            asm volatile("mbarrier.arrive.expect_tx.shared.b64 _, [%0], %1;" :: "r"(bar), "r"(nb_) : "memory");
++            for (int v = 0; v < NV; ++v) {
++                const int ch = pb * NV + v + (PF + r) * G;
++                if (ch < nch) {
++                    const unsigned d = (unsigned)__cvta_generic_to_shared(spf_sm + (r * NV + v) * SPB);
++                    asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
++                                 :: "r"(d), "l"(a.S + (long)ch * (CE / 16)), "r"(CE), "r"(bar) : "memory");
++                    asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
++                                 :: "r"(d + CE), "l"(a.N + (long)ch * (CE / 16)), "r"(CE / 2), "r"(bar) : "memory");
++                }
++            }
++            if ((a.npf >> 12) & 1)
++                asm volatile("{ .reg .pred P; W1: mbarrier.try_wait.parity.shared.b64 P, [%0], 0; @!P bra W1; }" :: "r"(bar) : "memory");
++        }
++    }
+     // L2 prefetch of the next npf chunks (bytes + codes) while the boundary still runs
+     if (t == 0)
+-        for (int p = PF; p < PF + a.npf; ++p) {
++        for (int p = PF; p < PF + npf; ++p) {
+             const int ch = c + p * G;
+             if (ch < nch) {
+                 asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }" :: "l"(a.S + (long)ch * (CE / 16)), "r"(CE) : "memory");
+@@ -340,8 +370,19 @@
+                 float acc[U];
+ #pragma unroll
+                 for (int u = 0; u < U; ++u) acc[u] = dot16(s[p][u], nb[p][u], xs + XI((u * 4096 + t * 16) % KK));
+-                const int cn = cc + PF * G;
+-                if (cn < nch) load(p, cn);
++                const int cn = cc + PF * G, q = j + p;  // cn = round q + PF of this vb
++                if (cn < nch) {
++                    if (q < spf) {  // proj s71 SPF: from the smem prefill
++                        const unsigned bar = (unsigned)__cvta_generic_to_shared(&spf_bar[q]);
++                        asm volatile("{ .reg .pred P; W2: mbarrier.try_wait.parity.shared.b64 P, [%0], 0; @!P bra W2; }" :: "r"(bar) : "memory");
++                        const unsigned char* b = spf_sm + (q * NV + vg) * SPB;
++#pragma unroll
++                        for (int u = 0; u < U; ++u) {
++                            s[p][u] = *reinterpret_cast<const uint4*>(b + (u * 256 + t) * 16);
++                            nb[p][u] = *reinterpret_cast<const uint2*>(b + CE + (u * 256 + t) * 8);
++                        }
++                    } else load(p, cn);
++                }
+ #pragma unroll
+                 for (int u = 0; u < U; ++u) {
+                     float v = acc[u];
+@@ -406,12 +447,13 @@
+         a.beta = bt[3].data_ptr<float>(); a.gain = bt[4].data_ptr<float>(); a.s_out = bt[5].data_ptr<float>();
+         a.h_out = (__nv_bfloat16*)bt[6].data_ptr(); a.eps_post = (float)eps_post; a.eps = (float)eps; a.bnd = 1;
+     }
+-    cudaLaunchConfig_t lc = {}; lc.gridDim = blocks; lc.dynamicSmemBytes = 0;
++    cudaLaunchConfig_t lc = {}; lc.gridDim = blocks; lc.dynamicSmemBytes = ((npf >> 8) & 15) * nv * u * 4096 * 3 / 2;  // s71 SPF
+     lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
+     la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+     la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0;
+ #define PR1_CASE(U_, V_, P_, R_) \
+     if (u == U_ && nv == V_ && pf == P_ && r == R_) { lc.blockDim = 256 * V_; \
++        if (lc.dynamicSmemBytes) C10_CUDA_CHECK(cudaFuncSetAttribute(pr1::fused<U_, V_, P_, R_>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lc.dynamicSmemBytes)); \
+         C10_CUDA_CHECK(cudaLaunchKernelEx(&lc, pr1::fused<U_, V_, P_, R_>, a, (int)rb)); return; }
+     PR1_CONFIGS
+     TORCH_CHECK(false, "pr1: no config");

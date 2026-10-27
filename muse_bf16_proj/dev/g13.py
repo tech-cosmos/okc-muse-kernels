@@ -49,7 +49,7 @@ if __name__ == "__main__":
     cfgs = [tuple(map(int, c.split(","))) + (256,) for c in sys.argv[1].split(";")]
     cfgs = [c[:5] for c in cfgs]  # (u, nv, minb, pf, vt): vt defaults to 256
     grids = [int(g) for g in (sys.argv[2:] or ["132"])]
-    SH = [("qkv", 2304, 8192), ("o", 8192, 1024), ("pool", 4096, 8192), ("unp1k", 1024, 4096), ("unp", 8192, 4096)]
+    SH = [("qkv", int(os.environ.get("QN", 2304)), 8192), ("o", 8192, 1024), ("pool", 4096, 8192), ("unp1k", 1024, 4096), ("unp", 8192, 4096)]
     only = os.environ.get("SH")
     SH = [s for s in SH if not only or s[0] in only.split(",")]
     ks = sorted({k for _, _, k in SH})
