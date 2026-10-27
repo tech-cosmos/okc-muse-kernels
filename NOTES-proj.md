@@ -1614,3 +1614,10 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   => not the FMA pipe, not smem, not latency/ILP, accumulator width only ~10%. Fits a per-HGMMA cost to the co-resident warp
   of ~12 + 0.33*N cycles (N8 14, N32 19, N64 33 per HGMMA): RS wgmma steals issue/RF from other warps on the SMSP.
   The only lever is fewer HGMMA per weight byte = larger N per pass (moe_hot already). moe's conclusion STANDS; nothing to build.
+
+## s74 (2026-10-27 08:51-09:05Z, night4 session 31): no build, no judge runs
+- No lead answer to the s71/s73 lane Request. Re-read layer STATE s74 per-load H200 table: proj-owned gaps = g24 pool+unp
+  d16 35 / d32 48 us (vs ~19 us bytes floor each) = the only >1% weighted proj item, and its consumer levers are all
+  measured dead (s16-s64: wgmma g20/s60/g28, 2 blocks/SM, hybrid BF16 rows, SWP/ILV2, rings, XSP/DF, EZ/G24P). Sub-12-bit
+  format closed (s49: VL coding -6.7% bytes, ~0.25%). Other gaps are experts (moe/layer) and frozen attention.
+- Re-asked the lead (COORD Requests s74). Checks 10-27 still 8/20 used, scored 1/10.

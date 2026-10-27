@@ -1,5 +1,5 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 09:00 UTC (s73).
+Updated 2026-10-27 09:05 UTC (s74). S74: no build; lane ask re-posted (3rd); no proj item >0.3% (NOTES s74).
 S73: re-tested moe's 'dq ALU || RS wgmma never overlap' (H100, 5 controls): it STANDS (per-HGMMA cost ~12+0.33N cyc to the
 co-resident warp; NOTES s73). No expert item left for a second builder. Lane Request to lead still open. Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
 S72: a GUEST carrier (other lanes' builds timed inside proj checks) was BANNED by the lead (08:13Z) and REMOVED; never
