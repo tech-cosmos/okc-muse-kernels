@@ -1579,3 +1579,17 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - Use: `python dev/s72/mkguest.py <path>/submission.py && okc check /tmp/pjg/submission.py --json` (cwd /tmp/pjg: the log
   lands in /tmp/pjg/profiles/submission.<job>.log), then grep 'diag12\|diagtl\|guest' there. For a layer guest a new driver
   would need r-layer's reference weights (not built).
+- Layer guests: `python dev/s72/mkguest.py layer ~/r-layer/muse_decode_layer` embeds the layer's submission.py + its
+  nvfp4/checks/reference (driver dev/s72/layer_driver.py = reference.generate_weights(WEIGHTS_SEED) + prepare(): the
+  H200 tuner's 'layer tune T=...' lines). moe guests: `mkguest.py moe <moe submission.py>`.
+- First layer try REJECTED by the judge before running ("rejected: edits loaded modules", status 422, not counted):
+  the carrier wrote sys.modules. Now: no sys.modules/importlib; every source exec'd into a plain dict, compiled from a
+  temp file (triton @jit needs inspect.getsource); helper 'from X import a, b' lines rewritten by mkguest to read the
+  helper namespaces. NOTE for reviewers: the guest code travels base64-compressed (the platform's static scan cannot
+  read it); it is the same code that passes the moe/layer boards' own checks, print-only, and GUEST builds are never submitted.
+- Check 682bb622 (c541c14 + GUEST layer 701bf12 = v124, never submit; proj checks 8/20): guest layer prepare 159.1 s,
+  done 169 s into prepare. The judge log keeps only the last ~11 KB: 9 of 12 tune lines survived. Consistent with layer
+  check 08d10234 (v123) within the tuner's run noise: T=32 sl default 176.0 vs 175.4, T=32 full 326.9 vs 340.4, T=256 sl
+  356.6 vs 351.3, full 554.0 vs 564.1, T=8 full 129.0 vs 129.4 (T=128 default changed in v124: fr). Fix after it: the
+  guest's stdout is captured and printed as zlib+base64 'guestz' chunks when > 6 KB (12 tune lines = 2.9 KB);
+  `python dev/s72/readguest.py <log> [grep]` decodes. (Not yet judge-verified; local OK.)

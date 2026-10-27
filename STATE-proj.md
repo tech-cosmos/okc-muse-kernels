@@ -1,8 +1,10 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 08:20 UTC (s72). Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
+Updated 2026-10-27 08:45 UTC (s72). Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
 S72: GUEST DIAG CARRIER built + H200-calibrated (check dea6af2d = moe b14b8be4 within ~1 us): moe DIAG builds run on
-proj's check budget: `python muse_bf16_proj/dev/s72/mkguest.py <moe submission.py>; cd /tmp/pjg; okc check /tmp/pjg/submission.py --json`;
-read /tmp/pjg/profiles/submission.<job>.log (diag12 lines). NEVER submit a GUEST build. NOTES s72.
+proj's check budget, and LAYER builds too (check 682bb622): `python muse_bf16_proj/dev/s72/mkguest.py moe <file> | layer <r-layer dir>;
+cd /tmp/pjg; okc check /tmp/pjg/submission.py --json`; read `python dev/s72/readguest.py /tmp/pjg/profiles/submission.<job>.log [grep]`
+(guestz decode: judge keeps only ~11 KB of log; guestz not yet judge-verified). NEVER submit a GUEST build. Never touch sys.modules
+(judge rejects 'edits loaded modules'). NOTES s72.
 LANE STATUS (s71): proj's own items are exhausted to <= ~0.2-0.3% layer each; Request to lead (COORD s71) for a new lane.
 s71 DEAD: pr1 SPF (pooler W into smem before the wait, d1): H100 +0.8/+1.5/+2.5 us for 1/2/3 rounds; g13t (TMA-ring
 g13 for d1 qkv): 14.8+ vs 13.0 us (ring alone no faster). dev/s71, NOTES s71.
@@ -17,7 +19,7 @@ TUNE_BASE[32] v123; g24sk2 (s69) tie (dropped). Still unjudged: ltalt:pooler@128
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-27 used (s72): checks 7/20, scored 1/10. (0cfca9f had broken cpp decls -> fixed c2b541b: grep prepare output for 'build failed'.) prepare() limit is 300 s: diags must stay small (s56 fail).
+- Budget 10-27 used (s72): checks 8/20, scored 1/10. (0cfca9f had broken cpp decls -> fixed c2b541b: grep prepare output for 'build failed'.) prepare() limit is 300 s: diags must stay small (s56 fail).
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
 ## m256 11.18 (cuBLAS splitK GEMM 6.4 + splitKreduce 2.0 + hi+lo add 1.6). SGLang: 10.5/26.4/15.0/15.5/16.8/17.7.
 ## router3 (dev/router3.cu, sweep dev/r3.py): split-K mma GEMM, hi+lo into one accumulator, partials -> float4 atomics

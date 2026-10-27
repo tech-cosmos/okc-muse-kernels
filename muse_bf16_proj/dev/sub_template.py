@@ -1332,15 +1332,25 @@ def _diag_guest():
         exec(compile(src, f, "exec"), ns)
         return ns
 
-    sub, env = None, {}
+    import contextlib, io
+    sub, env, buf = None, {}, io.StringIO()
     try:
-        for name in g.get("order", list(mods)):
-            env[name] = load(name, mods[name], env)
-        sub = load("sub", g["sub"], env)
-        exec(compile(g["driver"], f"{tmp}/driver.py", "exec"), {"sub": sub, "torch": torch, "mods": env,
-                                                                 "T_LIMIT": _T_IMPORT + GUEST_CAP})
+        with contextlib.redirect_stdout(buf):  # the judge keeps only the log's last ~11 KB: see the guestz lines below
+            for name in g.get("order", list(mods)):
+                env[name] = load(name, mods[name], env)
+            sub = load("sub", g["sub"], env)
+            exec(compile(g["driver"], f"{tmp}/driver.py", "exec"), {"sub": sub, "torch": torch, "mods": env,
+                                                                     "T_LIMIT": _T_IMPORT + GUEST_CAP})
     except Exception as e:
         print(f"guest failed: {type(e).__name__}: {str(e)[:400]}", flush=True)
+    out = buf.getvalue()
+    if len(out) < 6000:
+        print(out, end="", flush=True)
+    else:  # zlib + base64 in 900-char lines; decode with dev/s72/readguest.py <log>
+        z = base64.b64encode(zlib.compress(out.encode(), 9)).decode()
+        for i in range(0, len(z), 900):
+            print(f"guestz {i // 900} {z[i:i + 900]}", flush=True)
+        print(f"guestz end {len(out)} B", flush=True)
     print(f"guest done at {time.time() - _T_IMPORT:.0f} s since import", flush=True)
     del sub, env
     torch.cuda.synchronize()
