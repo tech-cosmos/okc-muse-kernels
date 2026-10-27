@@ -1385,7 +1385,7 @@ _moe__CPP = _moe__CPP + "int64_t moe_set_upf(int64_t, int64_t, int64_t, int64_t)
 # sum_k (y w1)^2 (moe_norm3's tot) by atomics into float row 64 of y32 (zeroed by the pre-expert _rmsnorm_gain), so the
 # layer's nu8 kernel can do norm3 + the unpool slice split over k (no norm3 launch, W in smem before its wait).
 # w1 via moe_set_ss() (a host static read at launch / capture time, as moe_set_upf).
-_a = "                                             int& ph, int& rb) {\n  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152;"
+_a = "                                             int& ph, int& rb) {\n  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * ((PF & 1024) ? 1120 : 1152);"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("int& ph, int& rb) {", "int& ph, int& rb, const float* w1x = nullptr, float* ssx = nullptr) {")
                                       + "\n  float ssa = 0.f;  // s26 NU8 (PF & 16)")

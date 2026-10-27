@@ -4483,6 +4483,20 @@ __device__ __forceinline__ uint32_t sca(uint32_t w) {
   return __byte_perm(w, 0u, 0x4040u | (K << 8) | K) * 16u + 0x77007700u;
 }
 
+// layer s73 (moe n20 S6, r-moe 4a87466): 6-bit block-scale codes (prepare _s6_pack: c = e4m3 byte - 80, all scales in
+// [80, 143]). Per lane and SQ stage (KPS 2) 8 codes k = 4 h + r: n = the low nibbles (bits 4k), hw = the high 2 bits
+// (bits 2k). One PRMT puts the nibble in bits 4-7 and the high bits in 8-9 of each half; | 0x7C00 = (c + 80) * 16 +
+// 0x7700: the same bf16x2 as sca<r>() of the original byte, 2 instructions per scale.
+__device__ __forceinline__ void s6dec(uint32_t n, uint32_t hw, int h, uint32_t* sc) {
+  const uint32_t n4 = n << 4;
+#pragma unroll
+  for (int r = 0; r < 4; ++r) {
+    const uint32_t b = 2 * h + (r >> 1), c = 4 + h;
+    const uint32_t x = __byte_perm((r & 1) ? n : n4, hw >> (2 * r), b | (c << 4) | (b << 8) | (c << 12));
+    sc[r] = (x & 0x03F003F0u) | 0x7C007C00u;
+  }
+}
+
 __device__ __forceinline__ uint32_t u4get(const uint4& v, int i) {
   return i == 0 ? v.x : i == 1 ? v.y : i == 2 ? v.z : v.w;
 }
@@ -7513,11 +7527,12 @@ int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 // once earlier kernels free their SMs. cnt lives in the state, zero between calls: moe_norm2 (after this kernel) zeroes it again (a memset node cost ~2.5 us).
 // layer s68 (moe n14 TK2F_SQ, r-moe 01326b4): SQ = Wq is the single-copy repack (prepare _sq_pack: [E][RPE][NQ][SB bytes]
 // = {tile lr chunks, tile lr + RPE chunks, scales}, exactly the stage's smem image): ONE bulk copy per stage instead of 3.
-template <int NRT, int NC, int NSTG, int KPS, bool SQ = false>
+template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false>
 __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
                                              int r1, const int* s_rs, const int* s_e, uint4* smem, uint64_t* full,
                                              uint64_t* empty, int& st, int& ph, int& i) {
-  constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * 1152, KB = NC * KPS;
+  constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * (S6 ? 1120 : 1152), KB = NC * KPS;
+  static_assert(!S6 || (SQ && KPS == 2), "S6: SQ stages, KPS 2");
   int a = 0;
 #if TK2F_L2H
   // s21: an expert with > 8 tokens is streamed once per 8-token group; the groups' rows sit 256 rows apart (other
@@ -7572,7 +7587,8 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
                                              int& ph, int& rb) {
-  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152;
+  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * ((PF & 1024) ? 1120 : 1152);
+  constexpr bool S6 = (PF & 1024) != 0;  // layer s73 (moe n20): 6-bit scale codes
   constexpr bool BAL = (PF & 32) != 0;  // moe n8 BAL: per-segment counters cnt[64 + j]
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   uint4 xf[NQ][2];
@@ -7639,19 +7655,26 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       mbar_wait(&full[st], ph);
       const uint4* sw4 = wsm + st * (SB / 16);
       uint4 wv0[KPS], wv1[KPS];
-      uint32_t sw[KPS];
+      uint32_t sw[KPS], s6n = 0, s6h = 0;
 #pragma unroll
       for (int h = 0; h < KPS; ++h) {
         wv0[h] = sw4[h * SW];
         wv1[h] = sw4[(KPS + h) * SW];
-        sw[h] = reinterpret_cast<const uint32_t*>(sw4 + 2 * KPS * SW - warp * 32 - lane)[(h * NC + warp) * 32 + lane];
+        if (!S6) sw[h] = reinterpret_cast<const uint32_t*>(sw4 + 2 * KPS * SW - warp * 32 - lane)[(h * NC + warp) * 32 + lane];
+      }
+      if (S6) {
+        const uint32_t* sb = reinterpret_cast<const uint32_t*>(sw4 + 2 * KPS * SW - warp * 32 - lane);
+        s6n = sb[warp * 32 + lane];
+        s6h = reinterpret_cast<const unsigned short*>(sb + NC * 32)[warp * 32 + lane];
       }
       const int cs = st;  // s10: arrive on empty only AFTER the stage's registers are used (see below)
       if (++st == NSTG) { st = 0; ph ^= 1; }
 #pragma unroll
       for (int h = 0; h < KPS; ++h) {
         uint32_t sc[4];
-        if (SA) {
+        if (S6) {
+          s6dec(s6n, s6h, h, sc);
+        } else if (SA) {
           sc[0] = sca<0>(sw[h]); sc[1] = sca<1>(sw[h]); sc[2] = sca<2>(sw[h]); sc[3] = sca<3>(sw[h]);
         } else {
           sc[0] = slut[sw[h] & 0xFF]; sc[1] = slut[(sw[h] >> 8) & 0xFF]; sc[2] = slut[(sw[h] >> 16) & 0xFF];
@@ -7731,7 +7754,8 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
 // it against both 8-token groups (TWO): group 0's x fragments in registers (xf), group 1's in smem (xs, lane-private,
 // written by the same lane at the segment change). Dequant is ~70% of a row's instructions, so a 2-group row costs
 // ~1.15x a 1-group row instead of 2x. s_red holds 2 groups x 2 tiles (double-buffered).
-template <int NRT, int NC, int NSTG, bool GATED_, int KPS, bool SA, bool TWO, bool RTG = false, bool SLOT = false>
+template <int NRT, int NC, int NSTG, bool GATED_, int KPS, bool SA, bool TWO, bool RTG = false, bool SLOT = false,
+          bool S6 = false>
 __device__ __forceinline__ void tk2g_row(const uint32_t* slut, const uint4 (&xf)[64 / NC][2], const uint4* xs, void* Out,
                                          int rp, int off, int n, float gsc, float* s_red, uint4* smem, uint64_t* full,
                                          uint64_t* empty, int& st, int& ph, int& rb, bool gated_rt = false,
@@ -7740,7 +7764,7 @@ __device__ __forceinline__ void tk2g_row(const uint32_t* slut, const uint4 (&xf)
   // RTG (s12): gated is a run-time flag (gemm13 and gemm2 share ONE main-loop body: i-cache), RPE from it
   const bool GATED = RTG ? gated_rt : GATED_;
   const int RPE = RTG ? (gated_rt ? 256 : 128) : NRT / 2;
-  constexpr int NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152, NG = TWO ? 2 : 1;
+  constexpr int NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * (S6 ? 1120 : 1152), NG = TWO ? 2 : 1;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const uint4* wsm = smem + warp * 32 + lane;
   float acc[NG][2][4];
@@ -7760,19 +7784,26 @@ __device__ __forceinline__ void tk2g_row(const uint32_t* slut, const uint4 (&xf)
     mbar_wait(&full[st], ph);
     const uint4* sw4 = wsm + st * (SB / 16);
     uint4 wv0[KPS], wv1[KPS];
-    uint32_t sw[KPS];
+    uint32_t sw[KPS], s6n = 0, s6h = 0;
 #pragma unroll
     for (int h = 0; h < KPS; ++h) {
       wv0[h] = sw4[h * SW];
       wv1[h] = sw4[(KPS + h) * SW];
-      sw[h] = reinterpret_cast<const uint32_t*>(sw4 + 2 * KPS * SW - warp * 32 - lane)[(h * NC + warp) * 32 + lane];
+      if (!S6) sw[h] = reinterpret_cast<const uint32_t*>(sw4 + 2 * KPS * SW - warp * 32 - lane)[(h * NC + warp) * 32 + lane];
+    }
+    if (S6) {  // layer s73 (moe n20)
+      const uint32_t* sb = reinterpret_cast<const uint32_t*>(sw4 + 2 * KPS * SW - warp * 32 - lane);
+      s6n = sb[warp * 32 + lane];
+      s6h = reinterpret_cast<const unsigned short*>(sb + NC * 32)[warp * 32 + lane];
     }
     const int cs = st;
     if (++st == NSTG) { st = 0; ph ^= 1; }
 #pragma unroll
     for (int h = 0; h < KPS; ++h) {
       uint32_t sc[4];
-      if (SA) {
+      if (S6) {
+        s6dec(s6n, s6h, h, sc);
+      } else if (SA) {
         sc[0] = sca<0>(sw[h]); sc[1] = sca<1>(sw[h]); sc[2] = sca<2>(sw[h]); sc[3] = sca<3>(sw[h]);
       } else {
         sc[0] = slut[sw[h] & 0xFF]; sc[1] = slut[(sw[h] >> 8) & 0xFF]; sc[2] = slut[(sw[h] >> 16) & 0xFF];
@@ -7903,7 +7934,7 @@ __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* 
 // s12 MERGED consumer (tk2h): both phases in ONE run-time loop, so the kernel holds one main-loop body per row kind
 // (GS 8: 1 body; GS 16: 2) instead of 2 / 4. GS16's loss was instruction-cache misses: ncu stall_no_instruction at
 // layer d1 923 -> 9418 (118 KB kernel vs 65 KB) with no 2-group row at all.
-template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false, bool SLOT = false>
+template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false, bool SLOT = false, bool S6 = false>
 __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* __restrict__ gs13,
                                              const float* __restrict__ gs2, const __nv_bfloat16* X,
                                              __nv_bfloat16* inter, float* Y, int* cnt, int need, int a0, int a1, int b0,
@@ -7964,9 +7995,9 @@ __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* 
         }
       }
       if (GS == 16 && n > 8)
-        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
+        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, SLOT, S6>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
       else
-        tk2g_row<0, NC, NSTG, false, KPS, SA, false, true, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
+        tk2g_row<0, NC, NSTG, false, KPS, SA, false, true, SLOT, S6>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
       if (gated && (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
         if (tid == 0) {
@@ -8494,8 +8525,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     if (lane == 0) {
       int i = 0;
       constexpr bool SQ = (PF & 512) != 0;  // layer s68 (moe n14): single-copy stages (Wq13 / Wq2 = the _sq_pack buffers)
-      tk2f_produce<512, NC, NSTG, KPS, SQ>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i);
-      tk2f_produce<256, NC, NSTG, KPS, SQ>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i);
+      constexpr bool S6 = (PF & 1024) != 0;  // layer s73 (moe n20): 6-bit scale codes (the _s6_pack buffers)
+      tk2f_produce<512, NC, NSTG, KPS, SQ, S6>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i);
+      tk2f_produce<256, NC, NSTG, KPS, SQ, S6>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i);
     }
     return;
   }
@@ -8510,7 +8542,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   int rb = 0;
   if constexpr (MRG) {
     asm volatile("griddepcontrol.wait;" ::: "memory");  // layer s58: x is the PDL predecessor's output (TK2FX/TK2FJ)
-    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
+    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0, (PF & 1024) != 0>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
                                         s_srt, s_red, smem, smem + NSTG * NC * KPS * 72, full, empty, st, ph, rb);
     return;
   }
@@ -8582,10 +8614,18 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
     (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
     cnt_.data_ptr()
+  const bool s6 = cfg >= 20000000;  // layer s73 (moe n20 S6): + 20000000 = SQ with 6-bit scale codes (_s6_pack buffers)
   const bool sq = cfg >= 10000000;  // layer s68 (moe n14 SQ): + 10000000 = single-copy stages (w13_ / w2_ = _sq_pack buffers)
   cfg %= 10000000;
   const bool bal = cfg >= 1000000;  // moe n8: + 1000000 = BAL (PF | 32; SA pf 4 / 5 only)
   cfg %= 1000000;
+  if (s6) {  // SA 84204 (+ BAL), tk2h GS16 + PF4
+    if (cfg >= 140000 && cfg < 150000 && cfg % 1000 == 4)
+      return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4 | 512 | 1024>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+    TORCH_CHECK(cfg == 184204, "moe_tk2f S6: cfg ", cfg);
+    if (bal) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 36 | 512 | 1024>(0, TK2F_ARGS0);
+    return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512 | 1024>(0, TK2F_ARGS0);
+  }
   if (sq) {  // SA 84204 only (+ BAL): d1 slot, T = 16 / 32
     if (cfg >= 140000 && cfg < 150000 && cfg % 1000 == 4)  // moe n16: tk2h GS16 + PF4 on SQ stages
       return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4 | 512>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
@@ -8877,6 +8917,22 @@ def _moe__sq_pack(wq, s2, nq=4):
     return torch.cat((w[:, 0], w[:, 1], sc), dim=-1).contiguous()
 
 
+def _moe__s6_pack(wq, s2, nq=4):
+    """layer s73 (moe n20 S6): as _sq_pack, but the stage's scales as 6-bit codes c = e4m3 byte - 80 (caller checked
+    80 <= byte <= 0x7E): per (lr, q) {tile lr, tile lr + NRT/2, nibbles int32 [8 warps][32 lanes], high bits int16
+    [8][32]}; lane word bits 4k / 2k hold code k = 4 h + r. 17920 B/stage (lossless)."""
+    E, nrt = wq.shape[0], wq.shape[1]
+    w = wq.reshape(E, 2, nrt // 2, nq, -1)
+    c = s2.contiguous().view(torch.uint8).reshape(E, nrt // 2, nq, 2, 8, 32, 4).long() - 80  # E lr q h warp lane r
+    c = c.permute(0, 1, 2, 4, 5, 3, 6).reshape(E, nrt // 2, nq, 8, 32, 8)                     # ... warp lane k
+    k = torch.arange(8, device=c.device)
+    nib = ((c & 15) << (4 * k)).sum(-1)
+    hi = ((c >> 4) << (2 * k)).sum(-1)
+    nib = (nib - ((nib >> 31) << 32)).to(torch.int32).reshape(E, nrt // 2, nq, 256)
+    hi = (hi - ((hi >> 15) << 16)).to(torch.int16).reshape(E, nrt // 2, nq, 256).view(torch.int32)
+    return torch.cat((w[:, 0], w[:, 1], nib, hi), dim=-1).contiguous()
+
+
 def _moe__pair_scales(ps):
     """_pack_scales output [NRT, K/512, 32, 16] -> uint8 [NRT/2, K/64, 32 lanes, 4]: per (row-tile pair rp, k chunk)
     each lane's 4 bytes (tile rp rows g, g+8, tile rp + NRT/2 rows g, g+8)."""
@@ -8934,7 +8990,15 @@ def _moe_prepare(weights):
     st["w2q"] = torch.stack(w2q)
     st["w2s"] = torch.stack(w2s)
     del w13q, w13s, w2q, w2s
-    if _moe_TK2F_SQ:  # layer s68 (moe n14): tk2f single-copy stage images (lossless repack of w13q/w2q + w13s2/w2s2)
+    # layer s73 (moe n20 S6): needs every block scale byte in [80, 0x7E] (positive normal, value >= 8), else 8-bit SQ
+    s6 = _moe_TK2F_SQ and _moe_TK2F_S6 and all(bool(((b >= 80) & (b <= 0x7E)).all()) for b in (
+        st["w13s2"].view(torch.uint8), st["w2s2"].view(torch.uint8)))
+    if s6:
+        st["w13s6"] = _moe__s6_pack(st["w13q"], st["w13s2"])
+        st["w2s6"] = _moe__s6_pack(st["w2q"], st["w2s2"])
+        for a_, b_ in (("w13s6", "w13s2"), ("w2s6", "w2s2")):  # lossless round trip
+            assert torch.equal(_moe__s6_unpack(st[a_]), st[b_].reshape(st[b_].shape[:4])), a_
+    if _moe_TK2F_SQ and (not s6 or _moe_TK2F_S6_KEEPSQ):  # layer s68 (moe n14): tk2f single-copy stage images (lossless repack of w13q/w2q + w13s2/w2s2)
         st["w13sq"] = _moe__sq_pack(st["w13q"], st["w13s2"])
         st["w2sq"] = _moe__sq_pack(st["w2q"], st["w2s2"])
     if _moe_TW_CFG:
@@ -9178,14 +9242,32 @@ def _moe__tk2f_cfg(M, st):
     return _moe__tk2f_cfg0(M, st) + (1000000 if M in _moe_TK2F_BAL_M and _moe_TK2SA and st["sa"] else 0)
 
 
+_moe_TK2F_S6 = 1  # layer s73 (moe n20, r-moe 4a87466): 6-bit scale-code SQ stages when every scale byte is in [80, 0x7E]
+_moe_TK2F_S6_ON = True  # run tk2f / tk2h on them (False: the 8-bit SQ stages; needs TK2F_S6_KEEPSQ)
+_moe_TK2F_S6_KEEPSQ = False  # also build the 8-bit SQ images when S6 is on (A/B tests)
+
+
+def _moe__s6_unpack(p):
+    """inverse of _s6_pack's scale part -> int32 view of the paired scales (prepare-time round-trip check)."""
+    E, rpe, nq = p.shape[0], p.shape[1], p.shape[2]
+    t = p[..., -384:]
+    nib = t[..., :256].reshape(E, rpe, nq, 8, 32, 1).long() & 0xFFFFFFFF
+    hi = t[..., 256:].contiguous().view(torch.int16).reshape(E, rpe, nq, 8, 32, 1).long() & 0xFFFF
+    k = torch.arange(8, device=p.device)
+    c = ((nib >> (4 * k)) & 15) | (((hi >> (2 * k)) & 3) << 4)                 # E lr q warp lane k(= 4h + r)
+    c = (c + 80).reshape(E, rpe, nq, 8, 32, 2, 4).permute(0, 1, 2, 5, 3, 4, 6)  # E lr q h warp lane r
+    return c.to(torch.uint8).contiguous().view(torch.int32).reshape(E, rpe, nq * 16, 32)
+
+
 _moe_TK2F_SQ = 1  # layer s68 (moe n14, H200 d32 -1.5, d16 -0.55 us, bitwise = off): 184204 (+ BAL) on the _sq_pack buffers
 
 
 def _moe__tk2f_w(c, st):
     """(cfg, w13, w2) for moe_tk2f_launch: SA 84204 (+ BAL) -> + 10000000 on the single-copy buffers (SQ)."""
-    if _moe_TK2F_SQ and "w13sq" in st and c % 1000000 == 184204:
-        return c + 10000000, st["w13sq"], st["w2sq"]
-    if _moe_TK2F_SQ and "w13sq" in st and 140000 <= c % 1000000 < 150000 and c % 1000 == 4:  # moe n16 tk2h on SQ
+    sq = c % 1000000 == 184204 or (140000 <= c % 1000000 < 150000 and c % 1000 == 4)  # 84204 (+ BAL) / moe n16 tk2h
+    if _moe_TK2F_SQ and sq and _moe_TK2F_S6_ON and "w13s6" in st:  # layer s73 (moe n20 S6)
+        return c + 20000000, st["w13s6"], st["w2s6"]
+    if _moe_TK2F_SQ and sq and "w13sq" in st:
         return c + 10000000, st["w13sq"], st["w2sq"]
     return c, st["w13q"], st["w2q"]
 
@@ -13599,7 +13681,7 @@ _moe__CPP = _moe__CPP + "int64_t moe_set_upf(int64_t, int64_t, int64_t, int64_t)
 # sum_k (y w1)^2 (moe_norm3's tot) by atomics into float row 64 of y32 (zeroed by the pre-expert _rmsnorm_gain), so the
 # layer's nu8 kernel can do norm3 + the unpool slice split over k (no norm3 launch, W in smem before its wait).
 # w1 via moe_set_ss() (a host static read at launch / capture time, as moe_set_upf).
-_a = "                                             int& ph, int& rb) {\n  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152;"
+_a = "                                             int& ph, int& rb) {\n  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * ((PF & 1024) ? 1120 : 1152);"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("int& ph, int& rb) {", "int& ph, int& rb, const float* w1x = nullptr, float* ssx = nullptr) {")
                                       + "\n  float ssa = 0.f;  // s26 NU8 (PF & 16)")
