@@ -3,6 +3,7 @@ python tools/validate.py [submission.py] [--quick] [--skip=step,...] [--only=ste
 Runs, each as its own process (logs in /tmp/validate/<tag>/<step>.log), then prints one summary line per step and a
 NOTES-ready line:
   test     bench.py test (the judge's 13 tests)
+  attn     tools/attn_probe.py 8 passes (4 --quick): attention key coverage (probe V one-hots), 29 shapes
   scored   tools/scored_test.py all scored shapes x 2 seeds (1 with --quick)
   opt      tools/opt_test.py every TUNE option forced on TUNE_BASE x 1 seed
   tk2f     tools/tk2f_stress.py 300 (75 --quick): tk2f vs fallback, bitwise
@@ -63,6 +64,7 @@ def p_prep(t):
 
 STEPS = [
     ("test", [PY, "bench.py", "test", sub], {}, p_test),
+    ("attn", [PY, "tools/attn_probe.py", sub, "--passes=" + ("4" if quick else "8")], {}, p_bad),
     ("scored", [PY, "tools/scored_test.py", sub, "", "1" if quick else "2"], {}, p_bad),
     ("opt", [PY, "tools/opt_test.py", sub, "1"], {}, p_bad),
     ("tk2f", [PY, "tools/tk2f_stress.py", "75" if quick else "300"], {"SUB": sub}, p_bad),
@@ -100,7 +102,7 @@ for name, cmd, env, parse in STEPS:
     print(line, flush=True)
     if not ok:
         print("   tail:", *txt.strip().splitlines()[-4:], sep="\n     ", flush=True)
-short = {"test": "bench test", "scored": "scored", "opt": "opt_test", "tk2f": "tk2f_stress", "replay": "replay",
+short = {"test": "bench test", "attn": "attn_probe", "scored": "scored", "opt": "opt_test", "tk2f": "tk2f_stress", "replay": "replay",
          "route": "route_judge", "prep": "cold prepare"}
 parts = []
 for name, ok, b, n, extra in res:
