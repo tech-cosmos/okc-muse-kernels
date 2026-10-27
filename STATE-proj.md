@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 15:00 UTC (s87). FULL validate of layer main v134 (f70b84e): ALL OK (13/13, 0/24, 0/308, 0/1200, 0/480, 0/240,
+fuzz 0/1490, cold 117.4 s): clear for the 00:00Z layer check. NOTES s87.
 Updated 2026-10-27 14:15 UTC (s86). g28 PING-PONG (dev/s86, s64 item 3b) built + DEAD: H100 NOW pool m32 16.2-17.4 vs g24 15.84,
 m16 17.3 vs 11.8; skeleton alone ~0.13-0.19 us/stage (mbarrier round trips), gate < 0.1 failed; BN 256 no gain. NOTES s86.
 Updated 2026-10-27 14:00 UTC (s85). Layer bundle branch proj/qf35 ac340f7 (v133 + moe s35 qf on d1-full plan + proj s68 ltalt:pooler

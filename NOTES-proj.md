@@ -1781,3 +1781,10 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   hide each other's decode (lockstep). s64's gate (< 0.1 us/stage skeleton) fails, and NOW m32 >= g24's on every variant.
 - Verdict: x-as-A wgmma with smem-decoded W is dead in both forms (s64 3-role, s86 ping-pong); m16 always loses (m64 padding).
   g24 (mma.sync, W in registers) stays the T=16/32 engine. No judge runs (proj 10-27: 8/20 checks, 1/10 scored).
+
+## s87 (2026-10-27 14:17-15:00Z, night4 session 44): lane (b): FULL validate of layer main v134 (f70b84e); 0 judge runs
+- No open Requests/Handoffs for proj; layer merged proj/qf35 as v134 (s94) after only a --quick validate of the combination.
+- /tmp copy of v134 muse_decode_layer (build.py regenerates submission.py byte-identical), tools/validate.py FULL:
+  ALL OK: bench test 13/13, scored 0/24, opt_test 0/308, tk2f_stress 0/1200, replay 0/480, route_judge 0/240 (worst gap
+  0.0256 drop-lead 0.0179), stream_fuzz 0/1490, cold prepare 117.4 s. => v134 is clear for the 00:00Z layer check.
+- Gotcha: validate.py ignores unknown flags (`--help` starts a full run). Board: layer #29 at 2.134x (#1 2.399x).
