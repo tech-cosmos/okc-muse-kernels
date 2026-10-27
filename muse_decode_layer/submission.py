@@ -12964,6 +12964,12 @@ _G24_ZN = {}  # (key, m) -> zeroed out for that call; cleared at every kernel_fn
 # T=32 (only when the tuner picks g24:qkv_gate, a TUNE[32] option): g24 qkv -0.5/-0.9 us vs without G24X (6 rounds).
 G24X_TOKENS = {16, 32}
 _G24X = []  # the pending buffer of this call (unpool's ZN target)
+# proj s63 G24P (TUNE option "g24p", T in G24P_TOKENS): the same cross-call EZ for the POOLER's FP32 out (persistent
+# state["g24p"][T], zero between calls): the pooler g24 runs EZ on it (no zero + fence + grid epoch barrier; H200 diag61
+# EZ bound pool m32 G108 -1.0..-1.5 us), and the call's g24 unpool zeroes it again as its ZN (pooled is dead after
+# the rmsnorm) when G24X does not use that slot. Fallback: kernel_fn zeroes it at its end.
+G24P_TOKENS = {32}
+_G24P = []
 BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
 G19_ON = {"pooler", "unpool", "qkv_gate", "o"}  # o: H100 tie (cuBLAS after attention)
 G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32), ("qkv_gate", 8), ("o", 8), ("pooler", 8)}  # prepared, used only if TUNE picks them (H100: tie/+3 us)
@@ -15146,6 +15152,8 @@ def _g24_prepare(state, w, comp, g):
             state[sd][(key, m)] = e
             if key == "qkv_gate" and sd == "g24":
                 state.setdefault("g24x", {})[m] = torch.zeros((m, w[key].shape[0]), dtype=torch.float32, device=dev)
+            if key == "pooler" and m in G24P_TOKENS and m not in state.get("g24p", {}):
+                state.setdefault("g24p", {})[m] = torch.zeros((m, w[key].shape[0]), dtype=torch.float32, device=dev)
         else:
             print("layer gemv24 config dropped:", key, m, c)
     _g27_prepare(state, w, comp, g, packs)
@@ -15233,7 +15241,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
              {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True},
              {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True},
-             {"g27:o": True}),
+             {"g27:o": True}, {"g24p": True}, {"g24p": True, "tk2h": 4}, {"g24p": True, "tk2h": 4, "lt:o": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
@@ -15477,6 +15485,8 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
             zo = _G24_ZN[(nk, m)] = torch.empty((m, en[1].shape[0]), dtype=torch.float32, device=x.device)
         elif key == "unpool" and _G24X and _G24X[0].shape[0] == m:  # s59 G24X: zero the next call's qkv out
             zo = _G24X.pop()
+        elif key == "unpool" and _G24P and _G24P[0].shape[0] == m:  # s63 G24P: zero the next call's pooler out
+            zo = _G24P.pop()
         grid = G19_GRID.get((key, m), _G19_SMS)
         ctr = e[3].get(grid)
         if ctr is None:
@@ -15699,21 +15709,29 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
 
 def kernel_fn(data, state):
     _G24X.clear()
+    _G24P.clear()
     r = _kernel_fn(data, state)
     if _G24X:  # s59 G24X: unpool did not zero qkv's persistent out: restore the zero invariant
         _G24X.pop().zero_()
+    if _G24P:  # s63 G24P: same for the pooler's persistent out
+        _G24P.pop().zero_()
     return r
 
 
 def _kernel_fn(data, state):
     cfg = data["config"]
     _G24_ZN.clear()
+    _SLIDING[0] = cfg["window"] > 0  # s73: before the G24X/G24P _opt reads (they read the previous call's flag before)
     if cfg["tokens"] in G24X_TOKENS and _opt(state, cfg["tokens"], "g24x", True) and _g24_sel(state, "qkv_gate", cfg["tokens"]) is not None:
         xb = state.get("g24x", {}).get(cfg["tokens"])
         if xb is not None and _g24_sel(state, "qkv_gate", cfg["tokens"])[4][0] == cfg["tokens"]:
             _G24_ZN[("qkv_gate", cfg["tokens"])] = xb  # zero (invariant): the qkv g24 runs EZ on it
             _G24X.append(xb)
-    _SLIDING[0] = cfg["window"] > 0
+    if cfg["tokens"] in G24P_TOKENS and _opt(state, cfg["tokens"], "g24p", False) and _g24_sel(state, "pooler", cfg["tokens"]) is not None:
+        pb = state.get("g24p", {}).get(cfg["tokens"])
+        if pb is not None and _g24_sel(state, "pooler", cfg["tokens"])[4][0] == cfg["tokens"]:
+            _G24_ZN[("pooler", cfg["tokens"])] = pb  # zero (invariant): the pooler g24 runs EZ on it
+            _G24P.append(pb)
     batch, length, tokens = cfg["batch"], cfg["q_len"], cfg["tokens"]
     hq, d = cfg["num_q_heads"], cfg["head_dim"]
     dense = state["dense"]
