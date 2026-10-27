@@ -1472,3 +1472,32 @@
 - Judge layer profile baae0e41 (v121) for reference: d32 sl tk2f 68.8 us (9-11 experts x 6.97 = HBM fit), v16 sl twm 180 +
   moe_norm 38 (PDL wait), v32 sl twm 230 || moe_hot 211 (grid 32). The expert kernels sit at their fits; what remains in
   moe's lane is the big-M drain (~20 us/call) and tk2f's fixed ~14 us (mostly hidden by layer TK2FX/TK2FJ).
+
+## Night4 session 27 (2026-10-27 07:54Z - ; moe checks 19/20 after this session's DIAG) -- SCB scale decode (kept), overlap closed
+- Lead 07:42Z asked to cut twm's consumer instruction count: (a) byte_perm LUT e2m1->bf16, (b) one HMUL2 per pair for the block
+  scale, (c) warp-specialized dequant re-checked on twm.
+  (a) no gain: the 8-op extraction (o0 = q & M, rotl 10/13 & M, IMAD for the rest) is minimal. Exhaustive search
+      (tools/s27m/dq_tiling_search.py): no layout reaches 7 ops with rotations / shifts / PRMT, single-word or 2-word funnel
+      windows, or rotation + one IMAD.WIDE pair. A PRMT LUT needs 8 selector bits per bf16 value (we have 4) and nibble bit 3
+      is PRMT's sign-replicate flag. (b) already the case (4 HMUL2 per 8 weights). (c) see below: no overlap is possible.
+- NEW microbench (tools/s27m/mb_x.py, from s22/mb_pp.py; 1 CTA, cycles per twm stage, each WG times itself):
+    RT4 N32: WG0 dq alone 522 | WG1 RS-MMA alone 359 | both at once in DIFFERENT warpgroups 862/861 (sum 881)
+             WG1 SS-MMA alone 623 | WG0 dq || WG1 SS 979/981.  RT2 N64: 337 | 357 | 602/555 | SS 372 | 608/551.
+    Same with pure FFMA chains instead of dq (DQV=4): 516 | 354 | 873/880. And int-XOR only (DQV=1): same.
+  => on this H100, tensor-core work and CUDA-core work by OTHER warps do not overlap either (RS or SS A). The s18/s22
+  "dq and wgmma don't overlap" is SM-wide, not RS / register / same-warp: every warp-specialized or pingpong design is
+  closed, and consumer time ~= ALU(dq) + tensor-active(FLOPs incl. N padding). (N24 class already exists in twm.)
+  Padding bound (tools/s27m/pad_bound.py, H200 item model): exact N per expert would save only 0-2.6 us per v16/v32 call.
+- twm in-kernel vs microbench (tools/s27m/twm_itl.py: TWM_TL build, ONE L2-warm expert, per-item durations; H100):
+  items N8 36.6 | N16 40.3 | N24 41.6 | N32 46.2 us vs the bare dq+MMA microbench 28.6 (N8) / 37.7 (N32) us per 64 stages
+  = a constant ~8-9 us (~230 cycles/stage) of in-kernel overhead. Ablations (timing-only /tmp copies):
+    full-barrier wait only every 2nd stage: -0.9 us/item; scale decode removed (constant scales): N8 -2.7, N16 -2.9, N24 -0.7.
+- KEPT (40de385) SCB: scp<P>(w) = __byte_perm(w, 0, 0x4140 / 0x4342) * 16 + 0x77007700 decodes TWO e4m3 scales (one per
+  bf16 half); blo/bhi (PTX mov.b32 {l,h} -> {l,l}/{h,h}) fold into HMUL2's .H0_H0/.H1_H1 operand selectors (SASS checked:
+  64/64 HMUL2 with selectors, PRMT 8 -> 4 per twm k chunk, loop 277 -> 269 instr). Applied at every SA scale site (tw_item,
+  twf, twq, tk2f/tk2h). Bitwise = before on all layer routings (tools/s27m/scb_ab.py, 0 diffs, old-vs-old 0); bench test 0 FAIL.
+  H100 cold layer routings (old -> new us): d1 36.2/36.2, d16 82.6/82.3, d32 104.7/104.2, v1 84.0/83.5, v16 195.9/194.0,
+  v32 235.1/232.1; warm items N8 -1.9 (-5%), N16 -1.8, N24 -1.5, N32 -0.2. Layer port: tools/s27m/patch_layer_scb.py
+  <moe_src.py> (applies to r-layer main's copy: 5 sites, 0 left).
+- DEAD TWM_PAIR (tools/s27m/twm_pair_dead.diff): producer puts each (even, odd) stage pair on full[odd], consumers wait
+  once per 2 stages. Bitwise ok, but v32 233.2 -> 236.3, v16 195.2 -> 195.7 cold (one stage less lookahead per wait).

@@ -18,6 +18,8 @@ tools/mktl_diag.py = same for a per-CTA globaltimer timeline (diagtl lines). H20
 t = 14.1 + 6.97 * experts + 4.4 * extra 8-token groups (us); 6.97 us/expert = 4.06 TB/s (85% of HBM peak).
 
 ## What's on main (submission.py)
+s27 (40de385): SCB: scp<P>() decodes 2 e4m3 scales per PRMT+IMAD, blo/bhi broadcasts fold into HMUL2 .H0_H0/.H1_H1 (free) at
+every SA scale site. Bitwise = before. H200 diag 5ad98078: v16/v32 twm -5, d16/d32 -1 us. Layer port: tools/s27m/patch_layer_scb.py.
 s21: TK2F_L2H = 4 / TWM_L2H = 1: L2 cache hints on tk2f/twm weight copies (compile-time #defines substituted in _lib()).
 (Older options/kernels still in the file -- GS16, DYN, TK2F 0, moe_tw/moe_big/moe_tb/moe_sk/moe_tk: see NOTES s3-s10.)
 s11: M > 32 now runs **moe_twm** (TWF_MIX = 1): moe_twf with the item shape chosen per expert (RT 2 / 64-token passes,
@@ -69,6 +71,12 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 27 (07:54-~09:00Z): SCB kept (above). Checks 20/20 used 10-27 (5ad98078 DIAG, + one plain main check).
+  CLOSED for good (s27 mb_x.py): tensor work does not overlap CUDA-core work even in another warpgroup (RS or SS, dq or FFMA):
+  consumer = ALU + tensor time. dq extraction is minimal (8 ops/8 weights, exhaustive search). twm items carry ~230 cyc/stage
+  of in-kernel overhead over the bare dq+MMA (warm 1-expert timeline, tools/s27m/twm_itl.py): scale decode was ~1/3 (SCB took
+  half of it), full-barrier waits ~1/6 (pairing them is DEAD: v32 +3). NEXT: find the rest of the ~230 cyc (LDS->dq latency at
+  stage start, uniform address math, epilogue) with more timing-only ablations in twm_itl.py; apply SCB-like savings to tk2f.
 ## Night4 session 26 (07:34-08:05Z): no build, no checks (18/20 used). PDL load-order audit of all moe kernels: clean (pre-wait
   loads = LUT / norm weight only; NOTES s26). Idea -9 was dead since s19. Expert kernels sit at their fits in the layer profile
   baae0e41; open levers: big-M drain (~20 us/call) and tk2f's fixed part. NEXT session: pick ONE of them with a fresh design.

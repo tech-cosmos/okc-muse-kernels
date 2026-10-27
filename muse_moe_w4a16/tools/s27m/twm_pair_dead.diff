@@ -1,0 +1,117 @@
+diff --git a/muse_moe_w4a16/submission.py b/muse_moe_w4a16/submission.py
+index 187ab27..8468f3a 100644
+--- a/muse_moe_w4a16/submission.py
++++ b/muse_moe_w4a16/submission.py
+@@ -1778,7 +1778,8 @@ __device__ __forceinline__ void tw_epi(float (&acc)[RT][N / 2], int lane, int wa
+ 
+ // DYN: one main loop for both GEMMs (moe_twf), epilogue picked by g2 at run time
+ template <int RT, int KG, int N, int NSTG, bool GATED, int NW, bool DYN = false, bool SA = false, int STRIDE = 0,
+-          int XBO = 0>  // s29: XBO = x tile bytes (weights' offset in the stage) when != the TWC default
++          int XBO = 0,  // s29: XBO = x tile bytes (weights' offset in the stage) when != the TWC default
++          bool PAIR = false>  // s27 TWM_PAIR: stage pairs share full[odd stage] (moe_twm only)
+ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
+                                         const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
+                                         const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out,
+@@ -1797,7 +1798,9 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
+ #pragma unroll 1
+   for (int kc = 0; kc < nkc; ++kc) {
+     const char* sb = smem + st * (STRIDE ? STRIDE : C::STG);
+-    if (kc) mbar_wait(&full[st], ph);
++    if (PAIR) {
++      if (!(kc & 1) && kc) mbar_wait(&full[st + 1], ph);  // s27: odd stages arrived with the pair
++    } else if (kc) mbar_wait(&full[st], ph);
+     uint4 wv[RT];
+ #pragma unroll
+     for (int r = 0; r < RT; ++r) wv[r] = reinterpret_cast<const uint4*>(sb + XBv)[(warp * RT + r) * 32 + lane];
+@@ -2485,6 +2488,9 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
+ // s11 moe_twm = moe_twf with the item shape chosen PER EXPERT: experts with > 32 tokens run RT 2 items with 64-token
+ // passes (each dequantized weight serves 64 tokens; packing w*b2), the others RT 4 items with 32-token passes (w*b4).
+ // Stage stride = the RT 4 stage (the RT 2 stage is smaller and uses the same x / weight / scale offsets scheme).
++#ifndef TWM_PAIR
++#define TWM_PAIR 1  // s27: moe_twm consumers wait on a full barrier once per 2 stages (producer: pair -> full[odd])
++#endif
+ #ifndef TWM_TL
+ #define TWM_TL 0
+ #endif
+@@ -2509,7 +2515,7 @@ __device__ __forceinline__ unsigned long long gtimer() {
+ // weights at 12 KB, scales at 16 KB. Gated: warp 2i = gate tile, 2i+1 = its up tile; the up warp hands its FP32
+ // accumulators to the gate warp through the item's LAST ring slot (24 KB <= one stage; after a consumer barrier:
+ // the other warpgroup may still be reading that slot), released only afterwards.
+-template <int N, int NSTG, bool SA, int STRIDE>
++template <int N, int NSTG, bool SA, int STRIDE, bool PAIR = false>
+ __device__ __forceinline__ void tw_hot(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
+                                        const uint32_t* slut, int warp, int lane, int nv, int off, int rb2, float gsc,
+                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, bool g2) {
+@@ -2523,7 +2529,9 @@ __device__ __forceinline__ void tw_hot(const char* smem, uint64_t* full, uint64_
+ #pragma unroll 1
+   for (int kc = 0; kc < 64; ++kc) {
+     const char* sb = smem + st * STRIDE;
+-    if (kc) mbar_wait(&full[st], ph);
++    if (PAIR) {
++      if (!(kc & 1) && kc) mbar_wait(&full[st + 1], ph);  // s27: odd stages arrived with the pair
++    } else if (kc) mbar_wait(&full[st], ph);
+     const uint4 wv = reinterpret_cast<const uint4*>(sb + XB)[warp * 32 + lane];
+     const uint32_t word = *reinterpret_cast<const uint16_t*>(sb + so);
+     uint32_t s0, s1;
+@@ -2768,7 +2776,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+       if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+       if (item >= nitems) {
+         s_item[st] = -1;
+-        mbar_arrive(&full[st]);
++        mbar_arrive(&full[TWM_PAIR ? st + 1 : st]);
+         break;
+       }
+       int g2, a, p, rb, h, j;
+@@ -2802,19 +2810,22 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+         if (kc != k0 && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+         char* sb = smem + st * STRIDE;
+         if (kc == k0) s_item[st] = item;
+-        mbar_expect_tx(&full[st], bytes);
+-        tma2d(sb, map, kc * 64, off, &full[st]);
++        // s27 TWM_PAIR: both stages of an (even, odd) pair complete on full[odd]: one arrive with both stages' bytes
++        // (every item has an even number of k chunks: 64, or 32 for K halves, so items start on even stages)
++        uint64_t* fb = TWM_PAIR ? &full[st | 1] : &full[st];
++        if (!TWM_PAIR || !(st & 1)) mbar_expect_tx(fb, TWM_PAIR ? 2 * bytes : bytes);
++        tma2d(sb, map, kc * 64, off, fb);
+ #if TWM_L2H
+         {  // s21: evict_last if a later pass of this expert re-reads these weights, else evict_first
+           uint64_t pol;
+           if (off + PS < s_off[e + 1]) asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol));
+           else asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol));
+-          bulk_g2s_h(sb + xo, wsrc + (size_t)kc * WB, wbytes, &full[st], pol);
+-          bulk_g2s_h(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, &full[st], pol);
++          bulk_g2s_h(sb + xo, wsrc + (size_t)kc * WB, wbytes, fb, pol);
++          bulk_g2s_h(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, fb, pol);
+         }
+ #else
+-        bulk_g2s(sb + xo, wsrc + (size_t)kc * WB, wbytes, &full[st]);
+-        bulk_g2s(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, &full[st]);
++        bulk_g2s(sb + xo, wsrc + (size_t)kc * WB, wbytes, fb);
++        bulk_g2s(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, fb);
+ #endif
+         if (++st == NSTG) { st = 0; ph ^= 1; }
+       }
+@@ -2831,7 +2842,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+   if (tl && tid == 0) tl[0] = gtimer();
+ #endif
+   for (;;) {
+-    mbar_wait(&full[st], ph);
++    mbar_wait(&full[TWM_PAIR ? st + 1 : st], ph);  // s27 TWM_PAIR: items start on even stages
+     const int item = s_item[st];
+ #if TWM_TL
+     if (tl && tid == 0) {
+@@ -2851,11 +2862,11 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
+     // n15: descriptor instead of the raw item: g2 | class << 1 | half (K split) << 3 | pass << 4 | nv << 8 | e << 16
+     if (tl && tid == 0 && ntl < 20) tl[4 + 3 * ntl] = g2 | (cl << 1) | ((h >= 0) << 3) | (min(p, 15) << 4) | (nv << 8) | (e << 16);
+ #endif
+-#define TWI(RT, NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
++#define TWI(RT, NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA, STRIDE, 0, TWM_PAIR>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
+                                                         h < 0 ? 64 : 32, pt, tick + j, &s_flag, h ? -16384 : 16384)
+     if (cl == 3) {
+-      if (nv <= 80) tw_hot<80, NSTG, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
+-      else tw_hot<96, NSTG, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
++      if (nv <= 80) tw_hot<80, NSTG, SA, STRIDE, TWM_PAIR>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
++      else tw_hot<96, NSTG, SA, STRIDE, TWM_PAIR>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
+     } else if (!big) {
+       switch ((nv + 7) >> 3) {
+         case 1: TWI(4, 8); break;
