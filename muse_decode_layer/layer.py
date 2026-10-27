@@ -875,6 +875,11 @@ PR8_CFG = {8: (8, 8, 4, 128, 1, 212)}
 # s88: light pr8 (TUNE pr8l): 2 row groups per block = 512 thr, 256 blocks, 2/SM (~107 KB smem: x as a 2-of-4-piece ring,
 # xp = XP | XR << 4), so blocks co-reside with the o GEMM's tail and start their W ramp earlier.
 PR8L_ALTS = []  # s88 DEAD (H100): light/ring alts, e.g. (8, 8, 4, 256, 4 | 1 << 4, 212) = 512 thr 2/SM (v1 sl tie, +0.6..0.9 us), (8, 8, 4, 128, 4 | 2 << 4, 212) heavy ring +1.3; with OB8 +1.1..1.6. TUNE pr8l: 1-based index
+
+
+def _pr8_cfg(state, tokens):  # s91: TUNE pr8_npf = pr8's bulk L2 prefetch depth (runtime arg; W only, so pre-wait 1xx is safe too)
+    c = PR8L_ALTS[_opt(state, tokens, "pr8l", 0) - 1] if _opt(state, tokens, "pr8l", 0) else PR8_CFG[tokens]
+    return (*c[:5], _opt(state, tokens, "pr8_npf", c[5]))
 PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 0)}  # s35: npf 4 -> 0 (H200 tuner picked npf 0 at T=1 sliding in both logged checks: -0.8/-2.3 us)
 PR1_PF_ALT = (2,)  # s23: pr1 pooler PF (rows in flight per virtual block) alternatives, TUNE option "pr1_pf" (H200 GEMVs ~2.5 TB/s)
 OB8_LATE = False  # s86: ob8 triggers pr8 after its W loop (else at start)
@@ -2555,7 +2560,8 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
             {"cslpw": True},
-            {"cslpw": True, "g14alt:qkv_gate": 3}, {"cslpw": True, "g14alt:qkv_gate": 2}),  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
+            {"cslpw": True, "g14alt:qkv_gate": 3}, {"cslpw": True, "g14alt:qkv_gate": 2},
+            {"cslpw": True, "pr8_npf": 206}, {"cslpw": True, "pr8_npf": 220}, {"cslpw": True, "pr8_npf": 112}),  # s91: pr8 bulk PF depth on the H200 (H100 can't judge it)  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": False},
               {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
@@ -3223,7 +3229,7 @@ def _kernel_fn(data, state):
             part = torch.empty(8 * tokens * N_EXPERTS, dtype=torch.float32, device=dev)
             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
-                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *(PR8L_ALTS[_opt(state, tokens, "pr8l", 0) - 1] if _opt(state, tokens, "pr8l", 0) else PR8_CFG[tokens]), 1)
+                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)
     else:
         side_stream.wait_stream(main_stream)
         with torch.cuda.stream(side_stream):

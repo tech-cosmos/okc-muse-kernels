@@ -1879,3 +1879,13 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   from router rows aligned with the stream's mean direction (data), bias alone predicts weakly; s55 bounded expert L2
   prefetch at <= ~1 us anyway. Not built.
 - Budget 10-27: layer checks 20/20 used, 4 submits left (nothing beats the board). First check after 00:00Z: main v132.
+
+## s91 (2026-10-27 12:53Z-, night4 session 40): v133 = v132 + TUNE[8] pr8_npf options (H200 decides pr8 bulk-PF depth)
+- No layer checks until 00:00Z (20/20 used). Every listed lane is closed (STATE). Cheapest open H200 question: pr8's stream rate
+  (H200 21.3 us vs pr1 17.5 at d1 for ~the same bytes); H100 can't judge it. pr8 bulk L2 prefetch depth is a runtime arg
+  (npf: 2xx = 'xx' atoms after the wait (main 212), 1xx = before the wait; W only, so pre-wait is safe), so no new compile.
+- layer.py `_pr8_cfg(state, tokens)` reads TUNE `pr8_npf`; TUNE[8] += {cslpw, pr8_npf 206 / 220 / 112} (cslpw = the H200
+  sliding pick on 35dd53d0). H100 tuner: npf 220 -0.9 sl / -0.6 full vs {cslpw} (noise level); 112 +0.9/+2.3; 206 +0.8/+0.4.
+- opt_test T=8 3 seeds 0/108; validate --quick ALL OK (13/13, scored 0/12, opt 0/302, tk2f 0/300, replay 0/240, route 0/240
+  gap 0.0256, fuzz 0/449, cold prepare 118.5 s). Readout for the 00:00Z check: 'layer tune T=8' pr8_npf entries vs {cslpw}.
+- 0 judge runs. First check after 00:00Z: main v133.
