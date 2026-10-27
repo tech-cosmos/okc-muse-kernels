@@ -2097,3 +2097,30 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   So the lead's ">= 3.5 TB/s" g30 target can't come from cheaper decode: what's left is fewer bytes (the ~11-bit format,
   s17 estimate) or hiding the ramp/tail behind the neighbours (PDL overlap), not consumer work. qkv (36 tiles x S3 = 108 CTAs,
   28 MB) is the most latency-bound (2.2 TB/s): a 132-CTA uneven split (g30k-style stream-K for qkv) is the one structural item.
+
+## n5s4 (2026-10-27 21:03Z-00:00Z, night5 session 4): qkv stream-K (dead) -> g30 ESCAPES cost 1-2 us/call on the H200 (open)
+- qkv g30k stream-K on 132 CTAs (lead/STATE idea): H100 (dev/s4k = s99 script, cold, layer cfgs 16/16): FP32-slab g30k G108 12.7 vs
+  g30 S3 13.5-14.3 standalone, G132 no better than G108 (H100 at ~2.9 TB/s marginal). H200 **check 6d9063a1 (e1a9d6e) 1.3733x**
+  (_diag30k, print only): qkv m16/m32 kF132 15.97/16.45 vs g30 S3 16.19/16.67 standalone, 11.39/12.06 vs 11.62/12.32 after a 3 us
+  pred = **-0.2 us only, and only as FP32 slabs** (BF16 via ticket +4..5). DEAD. Also on the H200: pooler g30 S2 beats g30k G104 by
+  3.2-4.5 us standalone/after pred (m16 15.36 vs 18.88, m32 16.19 vs 19.39); unpool g30 S1 beats g30k G128 by ~1.1-1.4.
+  (Same check: o + 20/8 g30 rings dropped from proj's tuner (H200 never picked them); picks unchanged, 1.3733 = noise, not submitted.)
+- g30 fixed cost (dev/n5s4/kfit.py, H100 qkv m16 S3): t = 3.9 us + 2.92 TB/s marginal (108 CTAs: near H100 HBM); at 54 CTAs 1.82 TB/s.
+- **Escape path cost** (dev/n5s4/kfix.py H100; H200 **check 198e7084 (bedd245) 1.3677x**, _diag30e = g30 vs -DG30_ESC=0, wrong output,
+  timing only, m32): H200 standalone qkv 13.6 vs 12.5, pooler 17.5 vs 16.4, unpool 16.2 vs 15.6; **after a 3 us PDL pred qkv 12.9 vs
+  11.35, pooler 16.6 vs 14.7, unpool 15.2 vs 13.1** (= -1.5/-2.0/-2.0 us per call; in-layer pooler+unpool are PDL secondaries:
+  ~4-5 us per d16/d32 load if escapes were free, ~0.8% layer). H100 after pred: qkv 12.8 vs 11.3, unp -0.9, pool -0.4.
+- Where (H100 bisection, dev/n5s4/escdbg.py on dev/n5s4/g30e_src.cu = g30 + debug switches; qkv m32 S3 after pred, OLD 12.8, no-esc 11.3):
+  header __ldg+sort are NOT it alone (bitonic sort network instead of the 120-step bubble chain: 12.50 vs 12.64; header by bulk copy
+  into smem from the W producer (G30_HSM): 12.53); skipping the sort (=fewer in-loop patches run) 11.58 -> the cost is the in-loop
+  patch EVENTS (~1 escape per stage per WG at qkv: the patching thread delays its warpgroup's next wgmma).
+  Tried moving the work off the loop, all exact (one-hot bit-exact, dev/n5s4/escm.py) but NOT faster:
+  (1) ESCM 1/2: after-loop FP32 fixup d += x*(-2^-15), += x*v per owned token (x from L2): 12.6-13.1 (end-of-kernel x/header round trip);
+  (2) FXW: a 11th "fixup" warp builds smem sums cneg/cpos per (row, token) during the loop (ballot-compacted escape list, lane = token,
+      16-48 x loads in flight), WG0 ends with d = (d - cneg) + cpos: FXNOP (structure only) 11.54, full 13.1-14.0 -> its L2 x loads
+      apparently don't complete under the saturated W stream within the ~8 us loop. Not understood yet.
+- NEXT (the lead item for proj): globaltimer timeline of the FXW warp (when do header/x loads land vs loop end?); if loads are the
+  problem, read x from the smem ring instead (fixup warp joins each stage's empty barrier (count 2) and picks the escape columns out of
+  the SW128 x box while the stage is resident: no global loads at all). Alternative: cheaper in-loop patch (a per-WG escape mask per
+  stage precomputed in prepare so only stages with escapes branch; or patch in smem W stage pre-decode). Then port to g30k/g30n in the
+  layer (proj branch) and A/B in-layer. Gate on an H200 diag like _diag30e (it is still in sub_template, DIAG30E = {} to re-enable).

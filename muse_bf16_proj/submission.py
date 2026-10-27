@@ -7008,7 +7008,11 @@ BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 1
             ("unpooler", 128): [(1, 10, 10)]}  # n5s4: o and the 20/8 rings dropped (H200 never picked them, checks 7ad5148c/7cbaa0fd)
 # n5s4 _diag30k only (print, no picks): g30k (stream-K g30 on G CTAs; G30K_F32 1 = FP32 slabs, 0 = BF16 out via slab+ticket)
 # vs g30 S-split, standalone (first op) and after a 3 us PDL predecessor: does qkv gain from 132 CTAs on the H200?
-DIAG30K = {"qkv_gate": (108, 120, 132), "pooler": (104, 132), "unpooler": (128, 132)}
+DIAG30K = {}  # n5s4 diag done (check 6d9063a1: qkv kF132 only -0.2 us vs g30 S3; pooler/unpool g30k lose 1-3 us; NOTES n5s4)
+# n5s4 _diag30e only (print, no picks): g30 with the escape path compiled out (G30_ESC 0: WRONG output, timing only) vs g30,
+# m32, standalone and after a 3 us PDL predecessor = the H200 upper bound of a cheaper escape format.
+DIAG30E = {}  # n5s4 diag done (check 198e7084: escapes cost H200 qkv/pool/unp m32 1.2/1.1/0.6 us standalone, 1.5/2.0/2.0 after a pred; NOTES n5s4); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
+DIAG30E_M = 32
 DIAG30K_S = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
@@ -7135,10 +7139,10 @@ _G30 = {}
 
 
 def _g30_build(c):
-    """c = (MTOK, S, NW, NS) -> g30 lib (None on failure)."""
+    """c = (MTOK, S, NW, NS[, ESC]) -> g30 lib (None on failure)."""
     try:
         import hashlib
-        dfs = [f"-DG30_MTOK={c[0]}", f"-DG30_S={c[1]}", f"-DG30_NW={c[2]}", f"-DG30_NS={c[3]}"]
+        dfs = [f"-DG30_MTOK={c[0]}", f"-DG30_S={c[1]}", f"-DG30_NW={c[2]}", f"-DG30_NS={c[3]}"] + [f"-DG30_ESC={e}" for e in c[4:]]
         return load_inline(
             name="muse_proj_g30_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
             cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
@@ -7172,10 +7176,13 @@ if BF16_G30:
     from concurrent.futures import ThreadPoolExecutor
     _cs = sorted({(m, *c) for (_l, m), v in BF16_G30.items() for c in v})
     _ks = [(m, f) for m in (16, 32) for f in (1, 0)] if DIAG30K else []
-    with ThreadPoolExecutor(len(_cs) + len(_ks)) as _ex:
+    _es = sorted({(DIAG30E_M, S, 16, 16, 0) for S in DIAG30E.values()})
+    with ThreadPoolExecutor(len(_cs) + len(_ks) + len(_es)) as _ex:
         _fk = [_ex.submit(_g30k_build, c) for c in _ks]
+        _fe = [_ex.submit(_g30_build, c) for c in _es]
         _G30.update(zip(_cs, _ex.map(_g30_build, _cs)))
         _G30K.update(zip(_ks, (f.result() for f in _fk)))
+        _G30.update(zip(_es, (f.result() for f in _fe)))
 
 ROUTER_FP32_MAX_TOKENS = 8
 
@@ -7430,6 +7437,7 @@ def prepare(weights):
             st[("g30", name)] = (_pack30(code, sm), hdr.contiguous(), scale)
     st["pick"] = _tune(st)
     _diag30k(st)
+    _diag30e(st)
     _diag19(st)
     _diag19q(st)
     _diag20(st)
@@ -7611,6 +7619,31 @@ def _tune(st, reps=25):
                          for c, t in zip(cands, med)))
     del flush
     return picks
+
+
+def _diag30e(st):
+    """Print only: g30 vs g30 without the escape path (wrong output, timing only), standalone and after a 3 us predecessor."""
+    if _g19 is None:
+        return
+    g = torch.Generator(device="cuda")
+    g.manual_seed(8)
+    m = DIAG30E_M
+    for layer, S in DIAG30E.items():
+        a, b = _G30.get((m, S, 16, 16)), _G30.get((m, S, 16, 16, 0))
+        if ("g30", layer) not in st or a is None or b is None:
+            continue
+        P_, hdr, scale = st[("g30", layer)]
+        n, k = st[layer].shape
+        xs = torch.randn(m, k, generator=g, device="cuda").to(torch.bfloat16)
+        x = xs.clone()
+        out = torch.empty(m, n, dtype=torch.bfloat16, device="cuda")
+        fns = [lambda pdl: a.g30_gemm(x, P_, hdr, out, scale, pdl), lambda pdl: b.g30_gemm(x, P_, hdr, out, scale, pdl)]
+        med0 = _graph_medians([lambda: None] + [lambda fn=fn: fn(0) for fn in fns] * 2)
+        medp = _graph_medians([lambda: _g19.g19_pred(xs, x, 3000)] + [lambda fn=fn: (_g19.g19_pred(xs, x, 3000), fn(1)) for fn in fns] * 2)
+        print(f"diag30e {layer} m{m} S{S}: standalone (+us over an empty graph {med0[0] * 1e3:.2f}) g30 "
+              + "/".join(f"{(t - med0[0]) * 1e3:.2f}" for t in med0[1::2]) + " noesc " + "/".join(f"{(t - med0[0]) * 1e3:.2f}" for t in med0[2::2])
+              + f" || after 3 us pred (+us over {medp[0] * 1e3:.2f}) g30 " + "/".join(f"{(t - medp[0]) * 1e3:.2f}" for t in medp[1::2])
+              + " noesc " + "/".join(f"{(t - medp[0]) * 1e3:.2f}" for t in medp[2::2]))
 
 
 def _diag30k(st):

@@ -223,7 +223,7 @@ BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 1
 DIAG30K = {}  # n5s4 diag done (check 6d9063a1: qkv kF132 only -0.2 us vs g30 S3; pooler/unpool g30k lose 1-3 us; NOTES n5s4)
 # n5s4 _diag30e only (print, no picks): g30 with the escape path compiled out (G30_ESC 0: WRONG output, timing only) vs g30,
 # m32, standalone and after a 3 us PDL predecessor = the H200 upper bound of a cheaper escape format.
-DIAG30E = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
+DIAG30E = {}  # n5s4 diag done (check 198e7084: escapes cost H200 qkv/pool/unp m32 1.2/1.1/0.6 us standalone, 1.5/2.0/2.0 after a pred; NOTES n5s4); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 DIAG30E_M = 32
 DIAG30K_S = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})

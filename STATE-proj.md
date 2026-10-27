@@ -1,4 +1,10 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-28 00:00 UTC (night5 n5s4 = session 4). **FOUND: g30's escape path costs 1.5-2.0 us per call on the H200** (check 198e7084,
+_diag30e g30 vs -DG30_ESC=0, m32 after a 3 us pred: qkv 12.9 vs 11.35, pooler 16.6 vs 14.7, unpool 15.2 vs 13.1; standalone -0.6..1.2) =
+~4-5 us per d16/d32 load (~0.8% layer) if escapes were free. Cause (H100 bisection): in-loop patch events stall the warpgroup's wgmma.
+Exact off-loop variants built (dev/n5s4/g30e_src.cu: ESCM end-fixup, FXW fixup warp) but not yet faster: NEXT = timeline the FXW warp /
+x from the smem ring (NOTES n5s4). Dead: qkv stream-K on 132 CTAs (H200 -0.2 us, check 6d9063a1); ~11-bit format (3-bit exp window
+escapes 5-7%). H200 also says g30 S2 pooler beats layer's g30k G104 by 3.2 us in isolation (told layer). Checks 10-27: 13/20, scored 3/10.
 Updated 2026-10-27 20:55 UTC (night5 n5s3 = session 3). r-layer branch **proj/g30k139 deb4a62** = main v139 + g30k138 + g30n qkv_gate
 actually built (v139 skipped it: K % 384 guard; kernel splits K unevenly) + moe pr32 TUNE option (embedded, prebuilt). validate ALL OK,
 cold 162.2 s; H100 tuner T=32 picks g30k104+g30n unp+qkv (sl 214.8 vs 220.1, full 433.3 vs 438.0). Proposed as the 00:00Z layer bundle.
