@@ -1,26 +1,17 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
 BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
+s72: **main = v111 = v109 behavior** (v110 added QSS at verify sliding nvs as a T=128 TUNE option: H100 tie/loss, H200 tuner tie -> removed;
+code path kept off). Check 0f12113f v110 2.0766x (not submitted). Oracle: moe_norm2 removal at d16/d32 = +1.5..3 us (dead). Budget 10-27 left: 12 checks / 5 submits.
 s71: **main = v109 = v108 + proj s59 G24X + moe n18 L2H mode 4** (H100 d16 -2.2/-5.7 us, rest tie; tests 13/13, replay 0/240). Check c3bab7fd 2.0822x (< board, not submitted; H200 tuner: G24X -1 us at T=16). Budget 10-27 left: 13 checks / 5 submits. Submit only after stacking another win onto v109 and a check > 2.0860.
-s70: main was v108 = v107 + proj s58 g27mc + moe n17 TK2G_PAR4** (H100 d16 -1.1/-2.5, d32 -3.1/-2.0 us; tests 13/13, replay 0/160, cold prepare 137 s). Budget 10-27 left: 14 checks / 5 submits.
 
-OLDER BEST = submit b9685e03 = v103, 2.0606x (s67; d1 70.3/77.0, d16 133.4/216.1, d32 164.7/320.7, v1 114.0/122.9, v16 271.3/360.5, v32 352.9/520.7). #1 2.380x.
-
-s68: **main = v105 = v103 + v104 (all JIT builds concurrent: cold import+prepare 314 s -> 111 s on the H100, lead 00:48Z
-done) + moe n14 TK2F_SQ at T>1** (bitwise; H100 tie at T>1, +0.7 at d1 so off there). Check 18504372 = v105 2.0871x (best check); submit acce7f04 = v105 2.0525x (noise, board stays b9685e03 2.0606x).
-Budget 10-27 after s68: 17 checks / 7 submits. Resubmitting v105 unchanged is NOT allowed: stack a new win first.
 Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
-
-s69: **main = v107 = v105 + proj s56 g24 pooler T=16 cfg (4,3,12) + proj s57 g27 (T=16 o; build on _BUILD_POOL) + moe n16
-tk2h on SQ stages (tuner option {tk2h 4} at T=32 only; dropped from TUNE[16])**. Cold prepare 115 s. Checks: 71f451bb v106
-(tk2h 4 as T=32 default) 2.0726x; 7fda724c v107 2.0424x (slow machine draw). H200 in-layer tuner: tk2h W3 loses (+3 / +10 us
-sl, tie / +10 full) despite moe-only -1.7; g27 ties. **Submit 08b0704a = v106: 2.0678x NEW BOARD BEST (#25)**: d1 68.7/76.4, d16 124.1/210.7, d32 162.1/314.6, v1 111.0/121.9, v16 269.9/361.9, v32 353.1/538.0. Budget 10-27 left: 15 checks / 6 submits.
-Judge noise dominates: identical-ish code 2.04-2.09x across checks; per-shape T=32 moves 5-10%.
+Judge noise dominates: identical-ish code 2.04-2.12x across checks; per-shape T=32 moves 5-10%.
 
 ## NEXT
-1. Integrate new moe/proj Handoffs on top of v103 (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
-   cold compile < ~5.5 min), then check; submit only if the check beats 2.0606x.
+1. Integrate new moe/proj Handoffs on top of main (v111) (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
+   cold compile < ~5.5 min), then check; submit only if the check beats 2.0860x.
 2. Weakest ratios on the board run: d32 sl 1.589, v16 sl 1.923, d16 sl 1.976: experts (tk2f/twm) are moe's lane; ask moe.
 3. okc check can exceed a 600 s tool timeout: run it in the background, poll `okc jobs`, read with `okc status <job> --json`.
 
@@ -114,6 +105,8 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
    program); qkv/o g19 at T=32; csl overlapped with g13; T=8 norm3+unpool cluster fusion.
 
 ## Dead ends (details in NOTES)
+- s72: QSS (2-slab split-K qkv bmm, slabs summed at load) at verify sliding T=128/256 (nvs FP32 loads +1.6 us; H200 tie);
+  moe_norm2 -> unpool prologue fusion (oracle: norm2 is free, it hosts the unpool's PDL window).
 - s62: csl PW at d1 (+1.3..1.7 us: csl CTAs crowd g13 / lose KV_PF's warm rows); g19 full smem carveout so csl co-resides
   with the d16 qkv (csl starts at 2.8 us but its gathers slow g19 17.3 -> 20.6: net +0.3..0.6; kept as TUNE cslcarve).
 - s61: nds at d16 sliding (+4..4.6 us); pooler W L2 prefetch at T=16/32 (g19 consumer-bound, warm L2 no faster); qkv T=16/32 at

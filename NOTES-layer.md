@@ -1482,3 +1482,29 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   d16 128.8/210.7, d32 166.4/316.6, v1 111.5/127.5, v16 273.0/372.3, v32 354.1/533.0. H200 tuner T=16: {g24x False} +1.3 sl /
   +1.0 full (G24X holds on H200); T=32 picked {tk2h 4} sl, {tk2h 4, lt:o} full again. v16/v32 code unchanged vs v108: their
   -0..+33 us moves are run noise. Budget 10-27 after s71: 13 checks / 5 submits.
+
+## s72 (2026-10-27 04:07Z-, session 21): v110 = v109 + QSS at verify sliding T=128 (TUNE option); probes
+- No new Handoffs (moe n19 WBW dead; proj s61 diag only). Board: #34 at 2.0860x (#1 colinlikescode 2.380x, 9,505 us).
+- H200 per-op rates from profile c3bab7fd (bytes / kernel time): d32 sl tk2f 283 MB in 71.7 us = 3.95 TB/s (at HBM);
+  d1 g13 qkv 28 MB 10.8 us = 2.6 TB/s (first op), pr1 58 MB 17.5 = 3.3; v16 sl qkv lt (tst_48x64) 37.7 MB 16.9 = 2.2,
+  unpool ~21 = 3.2, pooler 26.4 beside pr3 router. H100 F.linear standalone (cold): n4096 k8192 m16-128 26.8-27.2 us
+  (2.5 TB/s, flat in m), n2304 k8192 m128 20.0, m256 22.4; bmm split-K 2 slabs m128 16.7 (+torch sum 22.1), S4 17.0;
+  m256 S2 21.5, S4 19.6 (/tmp/s72/gemm.py, qkv.py).
+- DEAD (oracle, H100 /tmp/s72/orc.py, 3 rounds x seeds 7,11): moe_norm2/3 replaced by a bare cnt.zero_() (wrong
+  output, timing bound) at d16/d32 = SLOWER +1.5..3.0 us (d16 sl 154.1 -> 156.5, d32 sl 199.1 -> 201.3): norm2 itself
+  is ~free, its value is the unpool's PDL pre-wait window. A norm2 -> unpool-prologue fusion has nothing to win.
+- v110: QSS (2 FP32 split-K qkv slabs from one bmm, summed in FP32 + rounded to BF16 at load) extended to verify
+  sliding nvs (attn_src `_NVS_SRC`: consumer/nvs templated on QT, qld8/qld4 helpers as nds; host `nvs(..., qss)`)
+  + `_combine_hb` QSS=; layer `_kernel_fn` QSS condition adds length 8 / nvs (QSS_VERIFY). H100 timeline v16 sl:
+  qkv bmm 18.4 vs lt 19.4 us, but nvs 12.8 vs 11.2 (FP32 slab query loads on its critical start): ab_flag 3 rounds x
+  seeds 7,11: v16 sl -0.9/+0.0, v32 sl +2.0/+1.5 (full untouched). Default off; TUNE[128] += {qss: True} (H100 tuner
+  349.5 vs 352.2 default, noise). Tests 13/13, scored verify x3 forced 0 bad, replay verify 16 x seeds 11,23 forced
+  0/40. Cold prepare (fresh caches) 115.7 s (join 90.5, tune 24.5).
+- Posted to proj (Requests): hybrid pooler/unpool at T=16/32 (part of the rows BF16 on some SMs = HBM-bound, the rest
+  12-bit g24 = issue-bound), model -1..-3 us per GEMM on H200; needs the G72 proxy or an H200 diag.
+- 04:37Z **check 0f12113f = v110 (9937f2e): 2.0766x [2.045, 2.108], 10,893 us** (board 2.0860 -> NOT submitted): d1 68.9/76.4,
+  d16 131.2/215.0, d32 162.8/317.5, v1 114.6/124.3, v16 272.5/359.0, v32 355.8/539.3. H200 tuner T=128: {qss: True} sl
+  306.4 vs default 306.0, full 368.6 vs 368.3 -> QSS at verify is DEAD on the H200 too; candidate removed (v111 = v110 minus
+  the TUNE entry; code path kept, off). Budget 10-27 after s72: 12 checks / 5 submits.
+- Layer-side idea list is exhausted on the measured terms (see STATE dead ends); the remaining levers are moe's experts and
+  proj's T=16/32 g24 (consumer-bound at m32) and T=128/256 cuBLAS GEMMs.

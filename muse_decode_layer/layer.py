@@ -2525,7 +2525,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
               {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
-              {"fr": True, "twf_split": 66}, {"qss": True}),
+              {"fr": True, "twf_split": 66}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
@@ -2883,8 +2883,9 @@ NU8_DEFAULT = False
 # rounded to BF16 (RN) at each load: bit-identical to the torch cast it drops (H200 ea9421fa: 1.2-1.3 us per layer).
 QF32 = True
 QSS_NS = 2  # proj s22: H200 (proj check ccf41026, tuner us) qkv T=32 bmm 2 slabs 16.03 vs cuBLASLt split-K + reduce 17.50
-QSS_VERIFY = True  # s72: QSS also at verify sliding (nvs + _combine_hb load the slabs): TUNE option at T=128 only
+QSS_VERIFY = True  # s72: QSS also at verify sliding (nvs + _combine_hb load the slabs) when the qss option is on (default off at T=128/256)
 # (H100 ab_flag 3 rounds x seeds 7,11: v16 sl -0.9/+0.0, v32 sl +2.0/+1.5 us; nvs's FP32 slab loads +1.6 us vs bmm -1.0)
+# H200 tuner (check 0f12113f): T=128 sl {qss: True} 306.4 vs default 306.0, full 368.6 vs 368.3: DEAD, candidate removed
 QSS_DEFAULT = {32: True}  # tokens -> default of TUNE option qss (H100 layer, options pinned: d32 sliding -1.5, full -1.5 us)
 # s34 O_PF {tokens: fraction}: sliding attention (csl/nds/nvs) L2-prefetches the first fraction of o's weight once each
 # CTA's K/V loads are out (HBM idles in the latency-bound attention; o then starts L2-warm). H100 ab_flag: d32 sliding
