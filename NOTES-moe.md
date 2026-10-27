@@ -1885,3 +1885,18 @@
   in-grid merges (s95/s113), FPIPE/ping-pong (s101/s113), my s33/s35/s44 v1/d1 probes. Batch-1 sliding: csl/vtk mined
   (s72-s126 + my s31/s36). I found no lever with a mechanism not already measured dead: no build, GPU left to layer/proj.
 - Attention budget 10-27 unchanged: checks 13/20, scored 2/10. Lane request posted to the lead (COORD Requests).
+
+## Night4 session 46 (2026-10-27 16:40Z - ~17:00Z) -- no lane answer; last unbuilt attention item bounded dead from data; 0 checks
+- COORD: no lead entry since 13:30Z (LANE DECISION 4); moe s45 lane request open; layer s102/s103 and proj also report empty queues.
+- d1 full "2-warp program splitting each tile" (the last unbuilt item, s35): DEAD on existing data, not built. s33's per-SM
+  saturation (1/2/4 one-warp programs per SM: 0.66/0.92/1.67 us per tile = SM throughput 0.66/0.46/0.42 us per tile) shows
+  _gd_full/_attn_split at ~4 programs/SM (511 programs on 132 SMs) is already issue-throughput-bound, not chain-latency-bound:
+  splitting a tile over 2 warps adds warps to a saturated SM and leaves total instructions unchanged (consistent with splits
+  640/1023 measured dead on the H200). The only lever there is fewer instructions per tile (the Gluon F2FP upcast + block-diagonal
+  waste), which ~/attn tqk/tpv measured dead.
+- Re-read the latest layer H200 profile (940a4fca d1): tk2f 27.8 sl / 21.0 full, pr1 18, g13 qkv 11, boundary 2x3.1, n2u 5.3,
+  csl 4.0 us. Every item is owned + closed (tk2f layer s81, pr1 proj, boundary/glue layer s78).
+- Twm consumer bound re-derived (v16: ~900M weights x 1.5 dq instr = ~40 us of full-rate issue on the H200 vs 43 us stream):
+  it needs < ~1 instr/weight AND > 50% issue efficiency; INT8/FP8 tensor paths fail on the 16-wide NVFP4 block scale (k32 MMAs
+  span two scale blocks) and BF16 x exactness. Nothing new to build.
+- Attention budget 10-27: checks 13/20, scored 2/10 (unused; main = checked tie 76983f6b, no resubmit).
