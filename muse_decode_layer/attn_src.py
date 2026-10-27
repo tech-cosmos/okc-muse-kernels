@@ -3386,7 +3386,8 @@ if HAVE_GLUON:
                  SEP: gl.constexpr = False, Q16: gl.constexpr = True, KST: gl.constexpr = True,
                  BAL: gl.constexpr = False, B: gl.constexpr = 1, B_PAD: gl.constexpr = 32, NP: gl.constexpr = 1,
                  NID: gl.constexpr = 1, RED: gl.constexpr = False, red_ptr=None, rcnt_ptr=None, out_ptr=None,
-                 NR: gl.constexpr = 4, epi=True, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0, DX: gl.constexpr = 0):
+                 NR: gl.constexpr = 4, epi=True, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0, DX: gl.constexpr = 0,
+                 QF: gl.constexpr = False):
         # DX (layer s84 DIAG probes, wrong results, tuner timing only): 1 = no math after tile 0 (gathers only),
         # 2 = every tile re-gathers the same rows (all-L2).
         h = gl.program_id(2) * 2
@@ -3452,6 +3453,12 @@ if HAVE_GLUON:
         n_g = gl.arange(0, BN, layout=gl.SliceLayout(1, BL))
         c_g = gl.arange(0, C, layout=gl.SliceLayout(0, BL))
         all_c = c_g[None, :] >= 0
+        r = gl.arange(0, M, layout=gl.SliceLayout(1, BL))
+        hp = r // G
+        q_ok = (c_g // D)[None, :] == hp[:, None]
+        if QF:
+            # moe s35 qf: the query rows before the first copies (a load issued behind the gathers waits for them).
+            xq = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], q_ok, QSS)
         # The first NS - 1 tiles in flight (cp.async zero-fills rows past hi instead of reading them).
         for j in gl.static_range(NS - 1):
             t = lo + j * BN + n_g
@@ -3470,11 +3477,11 @@ if HAVE_GLUON:
 
         # Block-diagonal queries: row r is query head (h + r // G) * G + r % G, nonzero only in its own KV head's
         # D columns. RMSNorm, then E4M3.
-        r = gl.arange(0, M, layout=gl.SliceLayout(1, BL))
-        hp = r // G
-        q_ok = (c_g // D)[None, :] == hp[:, None]
-        x = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], q_ok,
-                   QSS).to(gl.bfloat16).to(gl.float32)
+        if QF:
+            x = xq.to(gl.bfloat16).to(gl.float32)
+        else:
+            x = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], q_ok,
+                       QSS).to(gl.bfloat16).to(gl.float32)
         x = gl.where(q_ok, x, 0.0)
         rs = gl.rsqrt(gl.sum(x * x, 1) / D + 1e-5)[:, None]
         if ROPE:
@@ -3685,16 +3692,16 @@ if HAVE_GLUON:
                  BAL: gl.constexpr = False, B: gl.constexpr = 1, B_PAD: gl.constexpr = 32, NP: gl.constexpr = 1,
                  NID: gl.constexpr = 1, SPEC: gl.constexpr = 0, RED: gl.constexpr = False, red_ptr=None,
                  rcnt_ptr=None, out_ptr=None, NR: gl.constexpr = 4, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0,
-                 DX: gl.constexpr = 0):
+                 DX: gl.constexpr = 0, QF: gl.constexpr = False):
         # SPEC > 0 (batch 1, page 1): seq = table width - 1 known from the shape (SGLang slices the page table to the
         # batch's longest length); start on it, redo with the real length if it differs (as in _attn_split).
         if SPEC > 0:
             real = gl.load(seq_ptr + gl.program_id(1))
-            _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW, QSS, DX)
+            _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW, QSS, DX, QF)
             if real != SPEC:
-                _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX)
+                _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF)
         else:
-            _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX)
+            _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF)
 
     @gluon.jit
     def _gw_verify(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale,
@@ -4565,6 +4572,7 @@ def _plan(cfg, max_pages, device):
         # 4-warp _red_fin program (reads 16 KB instead of 512 x 2 KB slots): H100 paired 14.55 -> 13.85 us (8/8).
         return dict(gdec=True, splits=511, block_n=32, stages=2, pdt="f32", csb=512, cw=8,
                     spec=True,  # seq from the table width (see _gd_full): H100 paired -0.59 us (13/13)
+                    qf=True,  # moe s35: query rows before the first copies: H200 DIAG -0.28 us (5/5 pairs), H100 tie
                     red=True)
     if heads <= (2 if length == 1 else 4):
         # (Session 18's hpp 2 / block_n 64 for decode 1 full won on the H100, 18.0 -> 17.4 us, but lost on the
@@ -5003,7 +5011,7 @@ def _decode_gluon(data, cfg, plan):
             HQ=hq, HKV=hkv, G=group, D=d, PAGE=cfg["page_size"], MAX_PAGES=page_table.shape[1], S=splits,
             BN=plan["block_n"], NS=plan["stages"], WINDOW=cfg["window"], ROPE=bool(cfg["rope_theta"]),
             Q16=plan.get("q16", True), KST=plan.get("kst", True), BAL=True, B=batch, B_PAD=b_pad, NP=progs, NID=nid,
-            **(_red_args(batch, group, d, nid, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, num_warps=1)
+            **(_red_args(batch, group, d, nid, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, QF=plan.get("qf", False), num_warps=1)
         if red:
             _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, nid, True)
             return out
@@ -5027,7 +5035,7 @@ def _decode_gluon(data, cfg, plan):
         ROPE=bool(cfg["rope_theta"]), SEP=sep, Q16=plan.get("q16", True),
         KST=plan.get("kst", True),
         SPEC=page_table.shape[1] - 1 if plan.get("spec") and batch == 1 and cfg["page_size"] == 1 else 0,
-        **(_red_args(batch, group, d, s, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, num_warps=1)
+        **(_red_args(batch, group, d, s, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, QF=plan.get("qf", False), num_warps=1)
     if red:
         _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, s, False)
         return out
