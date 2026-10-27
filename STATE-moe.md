@@ -75,8 +75,11 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   Paper result: v32 hot chain (hot128 -> hot64 -> twq) saves 0 passes (twm + hot128 = 1 pass/expert on every layer seed): not built.
   v16 per seed is linear in #experts (17: 187, 18: 193, 19: 202 us = ~7.5 us/expert + ~60 us fixed vs tk2f's 14 us fixed):
   seed 13 is just 19 experts. The big-M gap is that ~45 us of extra fixed/drain/consumer cost, not passes.
-  NEXT: H200 twq+hot timeline (tools/mktl_diag.py style, DIAG_TL with twq flags | 2) to split the ~60 us fixed part at v16
-  (first-wave ramp, gemm13->gemm2 waits, drain, norm) before building anything else big-M.
+  H200 twq timeline (check fccff52d, tools/s24/mktl_twq.py): item = 1 MB; N8 43 us (~3.45 TB/s aggregate), N16 49, N24 58, N32 62 us
+  = consumer-bound, worse with N. TQ_DEEP (3 wgmma groups in flight) bitwise but DEAD (tie). twq N8 loop = 166 instr/warp/k-chunk
+  (~100 dq, ~50 per-stage overhead), ~50% issue. Checks today 17/20.
+  NEXT: twq KPS 2 (2 k-chunks per stage: halve the ~50 per-stage instr; tk2f got -3..4% from it) and, for N16-N32 items, why
+  HGMMA time adds instead of overlapping (ncu on deep_warm.py's T40/32-token case: tensor-pipe vs issue stalls).
 
 ## Night4 session 23 (05:45Z-): HOTQ = moe_hot<NH 64> (33..64-token experts, ONE N 64 pass) beside moe_twq at v16 (twq flags
   bit 20 skips them; hot grid in twq flags bits 24..30 or HOTQ_M). Bitwise = twq (tools/s23/hq_t.py 0/26). H200 moe-only v16:
