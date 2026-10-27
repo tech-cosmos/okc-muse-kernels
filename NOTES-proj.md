@@ -1357,3 +1357,11 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   on the H100 (G132 and G88 W-bound). Correct with ESCW adversarial escapes (all 4 combos, qkv/o/pool/unp m16/m32).
 - => only the H200 (consumer-bound) can judge them: print-only _diag61 in submission (layer cfgs + grids, variants base |
   xsp | df | xsp+df | EZprobe).
+- H200 check e25a1d4d199245ed (079f7b4, diag61 print-only): 1.2925x (not a beat of 1.3233; no submit). diag61 (us over a
+  3 us pred; base | xsp | df | xsp+df | EZprobe): pool m16 (4,3,12) G108 15.14 | 15.17 | 15.01 | 15.14 | 14.30;
+  unp m16 (2,4,16) G132 14.72 | 15.62 | 14.98 | 14.66 | 13.70; pool m32 (4,3,12) G108 20.99 | 21.18 | 21.38 | 21.54 | 20.03;
+  pool m32 SK (2,4,16) G108 20.86 | 20.74 | 20.86 | 20.61 | 19.33; unp m32 (4,3,12) G132 16.93 | 17.47 | 16.93 | 16.77 | 17.02;
+  unp m32 SK 17.28 | 17.31 | 17.50 | 17.34 | 17.18.
+  => XSP and DF DEAD on the H200 too (ties +-0.3, xsp worse at unp). Removing zero/fence/epoch is worth at most -1.0..-1.5 us
+  for the pooler at T=32 (unp m32 0): the layer's g24z chain (o zeroes pooler's out) at T=32 was judged on the H100 (where
+  it cannot show); Request posted to layer: H200 TUNE option. Diag stays in main (small: cold local test 169 s).

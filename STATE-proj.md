@@ -1,6 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-27 04:20 UTC (s60: wgmma (RS/SS, m64n16/32k16) for g24 m16/m32 DEAD: consumer-only not faster than mma.sync
+Updated 2026-10-27 05:30 UTC (s61: g24 m32 consumer anatomy (clock64, dev/s61): latency-bound; per warp setup zero/fence/epoch +
+barrier spin ~15 kcyc, x arrives ~3 us after the wait; XSP / DF (runtime npre bits 19/20) correct but DEAD on H200 (check e25a1d4d
+diag61); EZ upper bound pool m32 -1.0..1.5 us -> Request to layer (T=32 pooler EZ as TUNE option). s60: wgmma (RS/SS, m64n16/32k16) for g24 m16/m32 DEAD: consumer-only not faster than mma.sync
 (H100 NOW pool m16 13.3 vs 11.2, m32 15.9 vs 15.2); trace: per-task decode ~2.4 + mma ~2.8 us ADD (no overlap). s59: G24X = qkv g24 EZ across calls (unpool zeroes next call's qkv out): H100 layer v108 d16 sl -1.86
 full -0.62 us, handoff dev/s59/g24x_layer.patch (tests 13/13, replay 0/160). s58: FIXED main's broken cpp decls (0cfca9f regex; native libs fell back to torch); g27 G27_MC 1
 (x by spread bulk copies) H100 layer d16 sl -1.8 full -1.05 us; H200 (check a4962d70) o m16 4.42 vs 5.28, m32 6.27 vs lt 6.72;
@@ -13,7 +15,7 @@ dev/s57/g27_layer.patch, H100 layer d16 sl -0.8..-1.0. Older: s55: g24 tail bala
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-27 used (s58): checks 4/20, scored 1/10. (0cfca9f had broken cpp decls -> fixed c2b541b: grep prepare output for 'build failed'.) prepare() limit is 300 s: diags must stay small (s56 fail).
+- Budget 10-27 used (s61): checks 5/20, scored 1/10. (0cfca9f had broken cpp decls -> fixed c2b541b: grep prepare output for 'build failed'.) prepare() limit is 300 s: diags must stay small (s56 fail).
 
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
 ## m256 11.18 (cuBLAS splitK GEMM 6.4 + splitKreduce 2.0 + hi+lo add 1.6). SGLang: 10.5/26.4/15.0/15.5/16.8/17.7.
@@ -139,12 +141,14 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s59: G24X (dev/s59/g24x_layer.patch): first-op qkv g24 = setup round trips behind the W stream; EZ across calls -1.3/-1.9 us standalone.
 ## s60: wgmma WG mode (dev/s60/gemv24.cu, RR bit 9) correct but DEAD; nvcc drops a 2nd wgmma accumulator's sum unless
 ## it is one local array summed explicitly + operand fences (NOTES s60). g24 R=2 at m32 dead too.
+## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
+0a. Layer: watch the s61 Request (T=32 pooler EZ TUNE option, H200 <= -1.5 us).
 0. Layer: watch for G24X (Handoffs proj s59) in a layer check; read the 'layer tune T=16' {'g24x': False} entry.
 1. Layer: watch for g27 (Handoffs proj s57/s58) in a layer check; read its "layer tune T=16" g27:o line.
 2. g27-style (no cross-block split-K, PD) for other T=16/32 calls is limited by registers (PD 127 regs x 512 thr): look at
    2 CTAs/SM g27 with fewer regs that keeps x reads per SM low (x is read by every block: +4 MB = +3 us at m16).
-2b. m32 consumer: decode and mma.sync ADD per warp (s60 trace); try software-pipelining decode of atom i+1 between the
+2b. m32 consumer (s61: latency-bound at 3 warps/SMSP, compiler interleaving within a stage already good): try software-pipelining decode of atom i+1 between the
    mma.syncs of atom i (interleaved issue in one warp), or split roles (decode warps write A frags to smem, mma warps ldsm).
 3. PD (pre-wait decode into registers) for other T=16 g24 calls where a warp slice fits (qkv/pool need split-K: g24 PD).
 4. Below the line: pr8 K-split tail (~0.1%), 11-bit (~0.2-0.3%), g22/g23/DeepGEMM m128/256 (dead).
