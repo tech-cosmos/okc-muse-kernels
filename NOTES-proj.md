@@ -1987,3 +1987,6 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   => the tuner's +9 at full was a tuner-run artefact (single noisy run of 434 vs 425), not input-dependent. g30n:unpool is
   sl -1.4..-2.1, full tie..-0.4 on H100. Recommend layer: put {"g30n:unpool": True} in TUNE_BASE[(32, True)] (sliding) or just
   keep the tuner option; H200 truth from the next layer check's 'layer tune T=32' lines.
+
+## s98 (2026-10-27 17:45Z-17:52Z): wrap-up only (sandbox moves ~18:00Z)
+- Copied /tmp/pj97/synab.{py,log} into muse_bf16_proj/dev/s97/ so the s97 A/B survives the move. No GPU work, 0 checks.

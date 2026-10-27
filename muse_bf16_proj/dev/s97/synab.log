@@ -1,0 +1,7 @@
+env: torch 2.14.1+cu130, triton 3.8.0
+/home/daytona/okc/lib/python3.12/site-packages/torch/cuda/graphs.py:630: UserWarning: The CUDA Graph is empty. This usually means that the graph was attempted to be captured on wrong device or stream. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/cuda/CUDAGraph.cpp:249.)
+  super().capture_end_pre()
+synth32 full                 [0]  411.19 ( 410.69)  [1]  410.99 ( 410.98)
+synth32 sl                   [0]  206.67 ( 206.24)  [1]  205.30 ( 204.80)
+real decode 32 sliding       [0]  192.73 ( 191.74)  [1]  190.58 ( 190.45)
+real decode 32 full          [0]  407.05 ( 406.30)  [1]  406.66 ( 406.16)

@@ -1,4 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 17:50 UTC (s98, wrap-up before the sandbox move). s97 A/B script saved to muse_bf16_proj/dev/s97/synab.py
+(+log; run from a layer clone dir with bench.py: `python synab.py <submission.py> <rounds>`). NEXT on the new sandbox: (1) check COORD
+for layer's verdict on proj/g30n (H200 'layer tune T=32' lines); (2) pooler g30n with fewer CTAs (S1 at <=100 CTAs so the side-stream
+router keeps SMs) only if lead agrees (moe s49 proposed the same: coordinate, one owner); (3) validate any new layer bundle. 0 checks.
 Updated 2026-10-27 17:35 UTC (s97). The s96 tuner '+9 us at T=32 full' for g30n:unpool is an artefact: same-process A/B on the
 tuner's synthetic input = tie at full, -1.4 sl; real d32 sl -2.1, full -0.4. Recommended to layer as sliding default (COORD). NOTES s97.
 Updated 2026-10-27 17:25 UTC (s96). g30n (s95 g30 at T=16/32) wired into the layer on r-layer branch proj/g30n (TUNE options
