@@ -1442,3 +1442,17 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - H100 ab_files 4 rounds v105 vs v106 (tuner on): d16 sl 192.1 -> 191.3, full 292.8 -> 291.0; d32 sl 192.2 -> 195.8 (+3.6,
   H100 DRAM-bound tk2h; H200 decides via the tuner line), full 411.4 -> 409.1.
 - Tests: bench test 13/13 (twice), replay decode seeds 11,23 0/160 + d32 0/20, cold prepare (fresh caches) 115.0 s (join 89.9, tune 24.4).
+- 02:31Z **check 71f451bb = v106 (2c64a0a): 2.0726x [2.042, 2.104], 10,914 us** (board 2.0606, best check v105 2.0871):
+  d1 67.4/76.1, d16 132.3/209.9, d32 171.5/316.5, v1 115.3/125.2, v16 285.3/361.9, v32 341.9/514.7 (v16/v32 code unchanged
+  vs v105: -13..+13 us per shape = run noise). H200 tuner: T=32 sl default (tk2h 4) 172.4 vs {tk2h 0} 169.4, {tk2h 3} 180.4;
+  full 348.3 vs 348.2 / 357.6 => tk2h W3 SQ does NOT win in the layer (moe-only -1.7): back to a tuner option (v107).
+  T=16: {g27:o False} 177.1 vs default 177.1 sl, 236.6 vs 236.4 full (g27 ties in-layer); g24 all-off +1.7/+3.4 (g24 holds).
+  {tk2fj False} looked -1 us on all 4 lines here but flips sign across the last 5 runs (noise).
+- 02:47Z **check 7fda724c = v107 (tk2h back to tuner-only): 2.0424x [2.012, 2.073], 11,075 us**: d1 68.6/77.2, d16 128.1/213.3,
+  d32 176.3/325.8, v1 114.5/121.4, v16 275.7/365.4, v32 363.7/539.0. Slow run overall (H200 tuner T=32 sl default 190.1 us vs
+  172.4 in 71f451bb for near-identical code): run-to-run machine noise ~5-10% on T=32. Tuner: {tk2h 4} 200.7 vs 190.1 sl,
+  357.8 vs 347.8 full (W3 loses in-layer in both checks), {tk2h 3} tie this time (+8..10 last time); g27 off tie again.
+- 02:55Z submit of v106 (2c64a0a; its check 71f451bb 2.0726 beat the board 2.0606; v107 differs only by the T=32 tk2h default).
+- 03:02Z **submit 08b0704a = v106 (2c64a0a): 2.0678x [2.037, 2.099], 10,939 us/step: NEW BOARD BEST, layer board #25** (#1 colinlikescode
+  2.380x). d1 68.7/76.4, d16 124.1/210.7, d32 162.1/314.6, v1 111.0/121.9, v16 269.9/361.9, v32 353.1/538.0.
+  Budget 10-27 after s69: 15 checks / 6 submits left. main = v107 (tk2h tuner-only); v106 vs v107 differ only in the T=32 default.

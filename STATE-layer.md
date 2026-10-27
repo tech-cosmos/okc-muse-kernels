@@ -1,17 +1,18 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-27 01:30Z (s67): **main = v103 = v102 + proj s56 g24z (T=16 zero-ahead chain qkv->o->pooler->unpool). BOARD BEST =
-submit b9685e03 = v103, 2.0606x, 10,977 us/step, layer board #30** (#1 2.380x). Previous: 129ad449 = v102 2.0398x; 703d3a7e = v70 1.9954x.
-Per shape (H200 us, b9685e03): d1 70.3/77.0, d16 133.4/216.1, d32 164.7/320.7, v1 114.0/122.9, v16 271.3/360.5, v32 352.9/520.7.
-Checks: c973ab6f v102 2.0817x, 0eb3484a v103 2.065x. Check->submit spread ~1-2% (d1/v1 routing draw moves 5-13 us).
-H200 tuner picks per run are in NOTES s67 (T=32 {tk2h 4, lt:o} flips sign between runs: tuner-only; g24z wins on H200).
-
+PREVIOUS BEST = submit b9685e03 = v103, 2.0606x (s67; d1 70.3/77.0, d16 133.4/216.1, d32 164.7/320.7, v1 114.0/122.9, v16 271.3/360.5, v32 352.9/520.7). #1 2.380x.
 
 s68: **main = v105 = v103 + v104 (all JIT builds concurrent: cold import+prepare 314 s -> 111 s on the H100, lead 00:48Z
 done) + moe n14 TK2F_SQ at T>1** (bitwise; H100 tie at T>1, +0.7 at d1 so off there). Check 18504372 = v105 2.0871x (best check); submit acce7f04 = v105 2.0525x (noise, board stays b9685e03 2.0606x).
 Budget 10-27 after s68: 17 checks / 7 submits. Resubmitting v105 unchanged is NOT allowed: stack a new win first.
 Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
+
+s69: **main = v107 = v105 + proj s56 g24 pooler T=16 cfg (4,3,12) + proj s57 g27 (T=16 o; build on _BUILD_POOL) + moe n16
+tk2h on SQ stages (tuner option {tk2h 4} at T=32 only; dropped from TUNE[16])**. Cold prepare 115 s. Checks: 71f451bb v106
+(tk2h 4 as T=32 default) 2.0726x; 7fda724c v107 2.0424x (slow machine draw). H200 in-layer tuner: tk2h W3 loses (+3 / +10 us
+sl, tie / +10 full) despite moe-only -1.7; g27 ties. **Submit 08b0704a = v106: 2.0678x NEW BOARD BEST (#25)**: d1 68.7/76.4, d16 124.1/210.7, d32 162.1/314.6, v1 111.0/121.9, v16 269.9/361.9, v32 353.1/538.0. Budget 10-27 left: 15 checks / 6 submits.
+Judge noise dominates: identical-ish code 2.04-2.09x across checks; per-shape T=32 moves 5-10%.
 
 ## NEXT
 1. Integrate new moe/proj Handoffs on top of v103 (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
