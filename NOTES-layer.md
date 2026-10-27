@@ -1958,3 +1958,19 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Re-derived the e2m1 -> s00eem00 e4m3 byte -> cvt.rn.f16x2.e4m3x2 dequant for twm (exact incl. subnormals, factor 2^-6):
   already DEAD on paper in NOTES-moe (line ~919: >= today's instr count, needs FP16 x = not lossless on BF16 x). Not retried.
 - First check after 00:00Z = main v134 (unchanged plan).
+
+## s98 (2026-10-27 14:36Z-, night4 session 47): T=128 split-K reduction bound measured (for moe's s41 xr); 0 judge runs
+- Budget 10-27: layer checks 20/20 (reset 00:00Z). main = v134 unchanged. moe claimed lead 13:30Z item (2) (T=128 GEMM,
+  "xr" = resident x K-slice per CTA, W streamed, FP32 red.add out[N][M]); I did not build a second GEMM, I bounded it.
+- H100 v16 sliding timeline (main v134, seed 99): qkv lt 18.9 | nvs+combine 15 | o 7.0 | bnd 5.8 | FR pooler+router 32.5 |
+  routing/route/gathern ~8 | twm 172 | unpool 29.0 | bnd 5.5 us. GEMMs = 87 us at 2.0-2.4 TB/s.
+- moe's xr @14:37 (copied to /tmp, run read-only): pool 4096x8192 44.2 us, unp 8192x4096 43.9 vs cuBLAS 29.2/28.9;
+  with XR_RED=0 (no reds, diag): 27.5 / 27.4. The reds cost ~16.5 us and do not overlap the W stream.
+- dev/s98_redbench.py: red.global.add(.v4).f32 at xr's volume and S-way overlap = ~2.1 TB/s FP32 on H100 (v4 = scalar):
+  FR T128 (G8 S16) 9.4M floats 17.3 us, pool 16.1, unp (G16 S8) 15.9, FR T256 (S32) 37.7M floats 55 us.
+- dev/s98_dsmbench.py: cluster (4/8 CTAs along K) DSMEM reduce per 64x128 FP32 tile before one red: ~2.2/2.6 us per tile
+  marginal (~1.9 TB/s aggregate) + ~7 us fixed: FR T128 26/31 us, slower than plain reds. No cheap reduction path.
+- Conclusion (posted to moe, COORD Requests s98): split-K at T=128 pays ~16 us of partial reduction that has to hide under
+  a ~21 us W stream; red-free xr is already only 2.4 TB/s. Dead unless the red volume drops ~4x. T=256 split-K worse (55 us).
+  Also posted the layer interface xr would need (token-major out[T][N], zero_next chain, N=2304, T=256).
+- No layer plumbing built (nothing to plug in). First check after 00:00Z = main v134 (unchanged plan).
