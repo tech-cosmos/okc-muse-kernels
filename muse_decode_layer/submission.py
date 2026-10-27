@@ -4478,6 +4478,15 @@ __device__ __forceinline__ void dq(uint32_t q, uint32_t s0, uint32_t s1, uint32_
 
 // s9 SA: e4m3 block scale byte k of w -> bf16x2 (both halves) of value * 2^118 without the LUT: exact for positive
 // normal scales (prepare() checks all of them, else SA = 0): bf16 bits = (e << 7 | m << 4) + (238 << 7).
+// s27 SCB (r-moe): two scales per decode: scp<P>(w) = bf16 halves (byte 2P, byte 2P + 1) in the format of sca<>; the
+// broadcast of one half (blo / bhi) folds into HMUL2's .H0_H0 / .H1_H1 operand selector (free). Bitwise = sca<>.
+template <int P>
+__device__ __forceinline__ uint32_t scp(uint32_t w) {
+  return __byte_perm(w, 0u, P ? 0x4342u : 0x4140u) * 16u + 0x77007700u;
+}
+__device__ __forceinline__ uint32_t blo(uint32_t p) { uint32_t r; asm("{.reg .b16 l,h; mov.b32 {l,h}, %1; mov.b32 %0, {l,l};}" : "=r"(r) : "r"(p)); return r; }
+__device__ __forceinline__ uint32_t bhi(uint32_t p) { uint32_t r; asm("{.reg .b16 l,h; mov.b32 {l,h}, %1; mov.b32 %0, {h,h};}" : "=r"(r) : "r"(p)); return r; }
+
 template <int K>
 __device__ __forceinline__ uint32_t sca(uint32_t w) {
   return __byte_perm(w, 0u, 0x4040u | (K << 8) | K) * 16u + 0x77007700u;
@@ -6093,8 +6102,9 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
     for (int r = 0; r < RT; ++r) {
       const uint32_t sw = sc[r >> 1] >> ((r & 1) * 16);
       if (SA) {
-        s0[r] = (r & 1) ? sca<2>(sc[r >> 1]) : sca<0>(sc[r >> 1]);
-        s1[r] = (r & 1) ? sca<3>(sc[r >> 1]) : sca<1>(sc[r >> 1]);
+        const uint32_t pr = (r & 1) ? scp<1>(sc[r >> 1]) : scp<0>(sc[r >> 1]);
+        s0[r] = blo(pr);
+        s1[r] = bhi(pr);
       } else {
         s0[r] = slut[sw & 0xFF];
         s1[r] = slut[(sw >> 8) & 0xFF];
@@ -6715,7 +6725,7 @@ __device__ __forceinline__ void tw_hot(const char* smem, uint64_t* full, uint64_
     const uint32_t word = *reinterpret_cast<const uint16_t*>(sb + so);
     uint32_t s0, s1;
     if (SA) {
-      s0 = sca<0>(word); s1 = sca<1>(word);
+      const uint32_t pr = scp<0>(word); s0 = blo(pr); s1 = bhi(pr);
     } else {
       s0 = slut[word & 0xFF]; s1 = slut[word >> 8];
     }
@@ -7296,7 +7306,8 @@ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64
     const uint32_t word = __byte_perm(v.x, v.y, sel);
     uint32_t s0[2], s1[2];
     if (SA) {
-      s0[0] = sca<0>(word); s1[0] = sca<1>(word); s0[1] = sca<2>(word); s1[1] = sca<3>(word);
+      const uint32_t p0 = scp<0>(word), p1 = scp<1>(word);
+      s0[0] = blo(p0); s1[0] = bhi(p0); s0[1] = blo(p1); s1[1] = bhi(p1);
     } else {
       s0[0] = slut[word & 0xFF]; s1[0] = slut[(word >> 8) & 0xFF];
       s0[1] = slut[(word >> 16) & 0xFF]; s1[1] = slut[word >> 24];
@@ -7736,7 +7747,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
         if (S6) {
           s6dec(s6n, s6h, h, sc);
         } else if (SA) {
-          sc[0] = sca<0>(sw[h]); sc[1] = sca<1>(sw[h]); sc[2] = sca<2>(sw[h]); sc[3] = sca<3>(sw[h]);
+          { const uint32_t p0 = scp<0>(sw[h]), p1 = scp<1>(sw[h]); sc[0] = blo(p0); sc[1] = bhi(p0); sc[2] = blo(p1); sc[3] = bhi(p1); }
         } else {
           sc[0] = slut[sw[h] & 0xFF]; sc[1] = slut[(sw[h] >> 8) & 0xFF]; sc[2] = slut[(sw[h] >> 16) & 0xFF];
           sc[3] = slut[sw[h] >> 24];
@@ -7865,7 +7876,7 @@ __device__ __forceinline__ void tk2g_row(const uint32_t* slut, const uint4 (&xf)
       if (S6) {
         s6dec(s6n, s6h, h, sc);
       } else if (SA) {
-        sc[0] = sca<0>(sw[h]); sc[1] = sca<1>(sw[h]); sc[2] = sca<2>(sw[h]); sc[3] = sca<3>(sw[h]);
+        { const uint32_t p0 = scp<0>(sw[h]), p1 = scp<1>(sw[h]); sc[0] = blo(p0); sc[1] = bhi(p0); sc[2] = blo(p1); sc[3] = bhi(p1); }
       } else {
         sc[0] = slut[sw[h] & 0xFF]; sc[1] = slut[(sw[h] >> 8) & 0xFF]; sc[2] = slut[(sw[h] >> 16) & 0xFF];
         sc[3] = slut[sw[h] >> 24];
