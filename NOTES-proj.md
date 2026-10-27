@@ -1958,3 +1958,22 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   Caveat: g24.py's cuBLAS reads ~1 us higher than s95_g30n.py's for qkv (17.8 vs 16.8) and ~0 for pool/unp: the qkv margin may be ~1 us smaller.
   Since G30_MTOK/G30_S are compile-time, the layer needs one build per (MTOK, S, NW, NS) combo (or a template). Per-call savings (H100):
   d32 qkv -1.1, pool -2.6, unp -2.9, o -1.3; d16 qkv -0.5, pool -0.4, unp -1.5.
+
+## s96 (2026-10-27 17:15Z-): g30n (s95 g30 at T=16/32) in-layer on r-layer branch proj/g30n
+- Clone /tmp/pj96 (shared repo, branch proj/g30n off main 7c950dd = layer v136). g30_src.cu := r-proj dev/s95/g30_src.cu
+  (superset: MTOK 128 / S 1 defaults = layer's T=128 g30). layer.py: G30N_CFG {(key, T): (S, NW, NS)}, one load_inline per
+  (MTOK, S, NW, NS) (-D flags, prebuilt in _BUILD_POOL), _g30n_prepare (reuses T=128 packs, else _compress+_pack30, rel-err
+  check), _g19 dispatch first: option "g30n:<key>" (default G30N_DEFAULT_ON = set()), BF16 out; pops _G24_ZN for its key.
+- H100 in-layer, tools/ab_flag.py, TUNE = {}, 3 rounds x seeds 99/7, median us (A = off):
+  d32: unpool g30n sl 193.3->192.0 / 199.3->198.1, full 409.1->408.0 / 417.8->415.9 (-1.2..-1.9: small WIN);
+       pooler S2 +9.5..+11 (all 4); +qkv S3 on top of unp+pool tie.
+  d16: unpool +0..+0.8 (tie/loss), pooler S2 +9..+10, qkv S3 tie, unp+qkv tie.
+  Pooler loss = SM contention with the side-stream router (g24 pooler deliberately runs on 108 CTAs; S2 = 128 CTAs w/ clusters).
+- Pooler S1 (64 CTAs; G30N_CFG pooler (1,20,8)/(1,16,16)) A/B: d16 sl +3.3/+2.4, full -0.9/-0.8; d32 sl +0.7/+1.4, full +1.9/+1.1:
+  most of S2's +10 was the router contention; still no win -> pooler g30n not offered.
+- validate --quick (with TUNE[32] g30n:unpool + TUNE[16] g30n:pooler options): ALL OK (test 13/13, scored 0/12, opt 0/320,
+  tk2f 0/300, replay 0/240, route 0/240 worst gap 0.0256, fuzz 0/471), cold prepare 122.3 s (main v136: 117.8).
+  Tuner lines (H100): T=32 sliding default 216.4-217.3 vs g30n:unpool 215.3-215.9 -> picked; T=32 FULL default ~425 vs g30n 434
+  (+9 us!) -> default (but the TUNE-off ab_flag full showed -1.9: unexplained; tuner's synthetic full input / TUNE_BASE[(32,False)]
+  combo differs; layer: check what TUNE_BASE[(32, False)] sets beside unpool). T=16 sliding g30n:pooler +14 us -> option dropped.
+- Final branch proj/g30n 453790c (T=32 option g30n:unpool only; bench test 13/13 after the option trim). submission md5 52faab7b.

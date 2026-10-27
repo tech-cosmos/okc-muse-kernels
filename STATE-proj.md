@@ -1,4 +1,9 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 17:25 UTC (s96). g30n (s95 g30 at T=16/32) wired into the layer on r-layer branch proj/g30n (TUNE options
+"g30n:<key>", off by default). H100 in-layer (TUNE off): unpool T=32 -1.2..-2.1 us (2 runs, all 4 d32 rows) = WIN; pooler S2 +9..11
+(128 cluster CTAs fight the side-stream router), pooler S1 d16 full -0.8 / sl +2.5..3.3; T=16 unpool, qkv S3: tie. Options added:
+TUNE[32] {g30n:unpool} only (proj/g30n 453790c; validate ALL OK, cold 122.3 s; H100 tuner picks it at T=32 sl -1.0..-1.4,
+rejects at full: +9 us there, unexplained). Pooler g30n (S1/S2) and T=16 all dead in-layer. NOTES s96.
 Updated 2026-10-27 17:40 UTC (s95). g30 at T=32/16 BUILT (dev/s95: G30_MTOK 32/16 + G30_S 2 cluster split-K with DSMEM reduce):
 bit-exact; H100 after a 3 us PDL pred: unp m32 17.4 vs g24 20.3, pool m32 (S2) 18.9 vs g24 21.5, unp m16 17.2 vs 18.7, pool m16 tie.
 Needs NW>=16 (1 CTA/SM) under PDL. G30_S<=4: qkv S3 m32 12.3 vs g24 13.4; o 5.7/6.0 vs 6.8/7.3.
@@ -129,7 +134,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s88: WPB 20-32 / R=2 ILP dead; NOW profile: loop ~47% of warp time, setup ~29%, task ends ~19% (dev/s88 ncu tools).
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
-0000. (s95) g30 T=16/32 (dev/s95, exact): H100 per call d32 qkv -1.1 pool -2.6 unp -2.9 o -1.3; d16 qkv -0.5 pool -0.4 unp -1.5 us
+0000. (s96) DONE as branch proj/g30n (see header); next: layer merges + H200 check; pooler g30n only with fewer CTAs (S1) or router moved.
+00000. (s95, old) g30 T=16/32 (dev/s95, exact): H100 per call d32 qkv -1.1 pool -2.6 unp -2.9 o -1.3; d16 qkv -0.5 pool -0.4 unp -1.5 us
    vs g24. If moe/layer haven't, port on an r-layer branch: second g30 lib per (MTOK, S, NW, NS) (unp S1 NW20 NS8, pool S2 NW20 NS16,
    qkv S3 NW16 NS16; layer.py _g30_build keyed by DEFS), TUNE options g30:<key> at T=16/32 in _g19's dispatch (BF16 out; _tail's
    boundary takes BF16 via RB=dtype; unpool's g24 ZN/G24X/G24P zero-ahead then falls back to kernel_fn's zero_()), in-layer ab2
