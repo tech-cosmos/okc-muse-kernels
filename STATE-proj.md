@@ -7,11 +7,6 @@ Updated 2026-10-27 (s94). G30_PRE (escape header read before the PDL wait) on r-
 in-layer H100 v16 medians sl 0/-1.6/-0.9, full -1.5/-2.2/-0.3 us, bitwise equal: small likely-win, handed to layer. NOTES s94.
 Updated 2026-10-27 16:55 UTC (s93). g30_sort in-layer = TIE (r-layer branch proj/g30sort ad581f9, bitwise same). g30 split-K with
 DSMEM K-cluster reduce (dev/s93, G30_KC=1/2) DEAD: cluster+reduce ~2-2.5 us; qkv S3 18.9 vs cuBLAS 19.8, pool S2 loses. NOTES s93.
-Updated 2026-10-27 16:50 UTC (s92). g30 ESC_FIX cheaper: candidates sorted once, pop = register shift (dev/s92/g30_sort_layer.diff
-on layer f7a1cdc g30_src.cu): H100 unp T=128 -0.33..0.4 us natural, -1.5 adversarial; bitwise == layer g30, one-hot exact. Handoffs proj s92.
-Updated 2026-10-27 16:10 UTC (s91). g30 ESCAPES (layer s99 T=128 12-bit wgmma GEMM): escape value patched into the owning
-thread's register A fragment (exact; H100 +0.4..0.9 us; still -3.5..4.5 us vs cuBLAS). Patch muse_bf16_proj/dev/s91/g30_esc_layer.patch
-on layer 857a9cb s99_g30.cu, test dev/s91/g30e.py (ESCW=1 adversarial). Handoffs proj s91. NOTES s91.
 s82/s83 (nu8d race found+fixed in layer; tools/stream_fuzz.py): see NOTES.
 Older session headers (s46-s80): see NOTES-proj.md (sessions are logged there in order).
 ## Board
@@ -143,9 +138,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
    (s91) g30 escapes handed to layer: help layer integrate g30 at T=128 (qkv shape, T=256, PDL, TUNE option) if asked;
    validate its bundle (tools/validate.py on proj/validate) before its check.
 00. LANE (b) (lead 08:55Z): read COORD Requests for layer bundles; port + validate on proj/<name> branches (tools/validate.py on proj/validate).
-0c. Layer: watch for s68 ltalt:pooler at T=128 (Handoffs proj s68) in a layer check's 'layer tune T=128' lines.
 0a. Layer: watch for G24P (Handoffs proj s63) in a layer check; read 'layer tune T=32' {'g24p': True} vs default (sl/full).
-0. Layer: watch for G24X (Handoffs proj s59) in a layer check; read the 'layer tune T=16' {'g24x': False} entry.
 1. Layer: watch for g27 (Handoffs proj s57/s58) in a layer check; read its "layer tune T=16" g27:o line.
 2. g27-style (no cross-block split-K, PD) for other T=16/32 calls is limited by registers (PD 127 regs x 512 thr): look at
    2 CTAs/SM g27 with fewer regs that keeps x reads per SM low (x is read by every block: +4 MB = +3 us at m16).
