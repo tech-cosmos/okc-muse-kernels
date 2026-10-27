@@ -2142,3 +2142,15 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   smem) costs more than the in-loop patch. The in-loop patch stays. Remaining untried ideas, each worth <= ~0.5 us/call on H100:
   per-thread key list in smem (pop = 1 LDS instead of a 16-MOV shift), key with precomputed fragment index. Not pursuing now.
 - dev/n5s4/escm.py takes NEWDEFS="<-D...>" for the new-source variant. Do NOT run G30_DBG_FXSNG (hangs the GPU).
+- **G30_PL (WIN, now on main for MTOK <= 32)**: the in-loop patch kept, but cheaper: the sorted escape keys go to a per-thread smem list
+  (plist[e][256], key = stage << 21 | h << 20 | fragment idx << 16 | BF16 bits, sentinel ~0) before the PDL wait; per stage the check
+  is one compare, a taken pop is 1 LDS (was a 16-register shift) and the fragment index is precomputed. +17 KB smem: does NOT fit
+  the T=128 rings (NS10 x 16 KB + NW10 x 6 KB): first try failed bench test with 'g30 launch failed' -> G30_PL = (G30_MTOK <= 32).
+  g30k (same file) keeps the old G30_FIX (#undef/#define before G30K_ON; layer validate caught the macro leak: g30k build failed).
+  One-hot bit-exact m16/m32 qkv/pool/unp; bench test 39/39, bench esc PASS.
+  H100 after pred (escm.py NEWOLD=1 NEWDEFS=-DG30_PL=1): qkv m32 -0.5, pool -0.2, unp tie (noise).
+  **H200 check b3ff96fb (bc2ff78) 1.3626x** (_diag30e PL vs g30, print only, m32): standalone -0.3/-0.4/-0.4, after a 3 us pred
+  -0.2/-0.2/-0.5 us (qkv/pool/unp). **Check 73b3e2e7 (34b7483) 1.3771x** (PL on: pooler m32 now picks g30 20.03 vs lt 22.24);
+  **submit eb166fc0 1.3574x = proj board best** (was 1.3543).
+- Layer port: r-layer branch proj/g30pl (worktree /tmp/pjpl off main 4b30a76 = v144): g30_src.cu patch only (g30n uses g30_kernel ->
+  PL at T=8/16/32; g30k unchanged).

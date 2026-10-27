@@ -381,6 +381,10 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
 }
 
 #ifdef G30K_ON
+#if G30_PL && G30_ESC  // g30k keeps the register-shift escape pop (G30_PL is g30's only)
+#undef G30_FIX
+#define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); G30_POP } }
+#endif
 // proj s99 "g30k": g30 (MTOK 16/32) as a stream-K GEMM on a runtime grid G (e.g. 104 CTAs, leaving SMs to the side-stream
 // router). The (64-row tile, 128-k stage pair) units are split evenly over the G CTAs in tile-major order; a CTA's range
 // covers parts of <= 2-3 tiles (segments). W/x rings and the escape path are g30's; ring slots run on one counter across
