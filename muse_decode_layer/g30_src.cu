@@ -111,6 +111,13 @@ __device__ __forceinline__ void wg_mma_rs(float* d, unsigned a0, unsigned a1, un
       " {%8,%9,%10,%11}, %12, 1, 1, 1, 0;\n"
       : G30_D8(0)
       : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db));
+#elif G30_MTOK == 8
+  asm volatile(
+      "wgmma.mma_async.sync.aligned.m64n8k16.f32.bf16.bf16 "
+      "{%0,%1,%2,%3},"
+      " {%4,%5,%6,%7}, %8, 1, 1, 1, 0;\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db));
 #else
 #error G30_MTOK
 #endif
@@ -300,9 +307,9 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
       for (int q = 0; q < 2; q++) stg[(8 * jn + tok + q) * 72 + r0 + 8 * h] = __float2bfloat16(d[4 * jn + 2 * h + q] * scale);
   asm volatile("bar.sync 2, 128;" ::: "memory");
 #pragma unroll
-  for (int q = 0; q < G30_MTOK / 16; q++) {
+  for (int q = 0; q < (G30_MTOK * 8 + 127) / 128; q++) {  // layer n5s5: MTOK 8 = 64 uint4 (threads 0..63)
     const int idx = q * 128 + t, tk = idx >> 3, c = idx & 7;
-    *(uint4*)(out + (size_t)tk * N + g * 64 + c * 8) = *(const uint4*)(stg + tk * 72 + c * 8);
+    if (G30_MTOK >= 16 || idx < G30_MTOK * 8) *(uint4*)(out + (size_t)tk * N + g * 64 + c * 8) = *(const uint4*)(stg + tk * 72 + c * 8);
   }
 }
 

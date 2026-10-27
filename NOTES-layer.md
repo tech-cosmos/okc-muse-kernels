@@ -2222,3 +2222,23 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   version; moe's later uncommitted PR_HL edits NOT taken). pr32 stays a TUNE option. validate --quick ALL OK: test 13/13, scored
   0/12, opt 0/354, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/528, cold prepare 155.6 s.
 - **main = v143.** 00:00Z check 1 = v143. Idea not built: g30 at MTOK 8 for the T=8 o (v1; o = g12 BF16 8.1 us H200, OB8 path).
+
+## night5 s5 (2026-10-27 22:01Z-, okc-night5 session 5): v144 = v143 + g30n G30_MTOK 8 (T=8 o tuner option); 0 judge runs
+- Layer checks 20/20 for 10-27 (resets 00:00Z; 4 submits left, unusable without a check). Board #33 at 2.1339x; #1 pjmullin3 2.399x.
+- g30_src.cu: G30_MTOK 8 = wgmma m64n8k16 (4 FP32 acc/thread), final store loop generalized (MTOK 8 = 64 uint4, threads 0..63;
+  MTOK >= 16 unchanged: same loop count, guard constant-true). x stage = 1 KB (8 tok x 64 k, SW128 = one atom).
+- Standalone H100 (/tmp/lay_s5/o8.py, o = [8192, 1024], m 8, cold L2, minus empty graph): g30n S1 NW16/NS16 8.0 us, NW24 8.15,
+  NS32 8.15; cuBLAS 8.9. rel err 7e-5 vs F.linear (FP32 order; not bitwise, like the T=16/32 g30n).
+- In-layer H100 ab_flag (TUNE {}, seeds 99/7, 4 rounds A B A), v1 = verify 1:
+  NW16/NS16: sl 143.63/116.58 -> 144.15/117.42 (+0.5..0.8), full 157.60/129.61 -> 158.34/130.72 (+0.7..1.1): loses.
+  NW8/NS8:   sl 143.41/116.66 -> 142.62/116.39 (-0.3..-0.8), full 156.62/129.89 -> 158.20/130.87 (+1.0..1.6): weighted wash.
+- Why (timelines /tmp/lay_s5/tl_*.txt, v1 sl): o ends ~29 us either way; g12 o ends 7.4 us after vtk, g30 NW16 8.8, NW8 6.2;
+  pr8 (pooler+router, PDL secondary of the boundary, ~34 us H100) is the long pole and ends at ~55 us whatever o does
+  (= s88: "pr8 ends at the same time whatever precedes it"). A faster T=8 o does not shorten v1; only pr8's own stream does.
+- v144: G30N_CFG ("o", 8): (1, 8, 8); TUNE[8] += {g30n:o True} (H200 tuner decides per window; default off). ob8 is now also off
+  when g30n:o runs at T=8 (OB8 is False anyway).
+- Not tried (dead on paper): qkv at T=8 on g30n S3 (s4: m16 g30n S3 15.6 us standalone vs g14 m8 14.6 in-layer; cold-stream ramp-bound).
+- v144 validate --quick ALL OK: test 13/13, scored 0/12, opt 0/356 (+2 = g30n:o forced at T=8 sl/full), tk2f 0/300, replay 0/240,
+  route 0/240 (gap 0.0256), fuzz 0/530, cold prepare 155.6 s. H100 tuner T=8 sl: default 145.9 | {g30n:o} 146.8 (picked nu8d/nu8x off);
+  T=8 full: default 159.2 | {g30n:o} 158.9 (picked cslpw + pr8_npf 220). H200 decides at 00:00Z.
+- **main = v144.** 00:00Z check 1 = v144 (= v143 + this option; nothing else changed). Read 'layer tune T=8' {g30n:o} lines too.
