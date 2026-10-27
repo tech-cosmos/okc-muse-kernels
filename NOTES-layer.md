@@ -1889,3 +1889,21 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - opt_test T=8 3 seeds 0/108; validate --quick ALL OK (13/13, scored 0/12, opt 0/302, tk2f 0/300, replay 0/240, route 0/240
   gap 0.0256, fuzz 0/449, cold prepare 118.5 s). Readout for the 00:00Z check: 'layer tune T=8' pr8_npf entries vs {cslpw}.
 - 0 judge runs. First check after 00:00Z: main v133.
+
+## s92 (2026-10-27 13:02Z-, night4 session 41): verify-load gap re-audit (no build); 0 judge runs
+- Budget 10-27: layer checks 20/20 used, 4 submits left (nothing beats the board). main = v133 unchanged.
+- H100 timelines (main v133): v16 sl 297 us = qkv cuBLAS 18.6, nvs+combine 14, o 7, bnd 6.0, FR pooler+router 33.8, routing+
+  route+gather ~8, twm 172 (88-260), norm tail 2.3, unpool 28.5, bnd 5.5. v32 full: qkv 22.1, gw_verify 241 (new_tokens/
+  combine_bal overlap its tail, +4 us), o 10.3, bnd 9.5, FR 39.0, routegather 8.9, hot||twm 239 (335-574), unpool 33.4, bnd 9.2.
+- Where the verify gap is (H200 940a4fca profile + tools/route_hist.py): local experts touched v16 17-18, v32 18-21 (~25.5 MB
+  each) -> stream-rate (4.06 TB/s, moe fit) experts ~111 us v16 / ~125 us v32 vs twm 168 / ~208 us span: ~57 / ~80 us above
+  stream rate = ~3.1% + ~3.5% weighted = the largest single slice of the gap to #1. moe measured it dq-bound (s18-s30: dq ALU
+  serializes with RS wgmma, WS dq->smem->SS no overlap, scaled LUT/byte LUT no fewer ops, cvt e2m1x2 sm_100 only, FP8/FP16
+  MMA not lossless on BF16 x). Lead closed twm 09:45Z. A cross-SM split (dq SMs -> BF16 in L2 -> SS wgmma SMs) needs ~4x the
+  expert bytes through L2 twice (~3.6 GB at v16): dead on paper.
+- cuBLAS GEMMs at T=128/256 on the H200: qkv 16.9 / 20.5 us (37.7 MB), FR pooler+router 25.8 / 33.6 (75 MB), unpool 21.2
+  (67 MB) = 2.2-3.2 TB/s; to 4.0 TB/s would be ~1-1.5% total, but proj's own m128/256 GEMMs (g22, g23, DeepGEMM bf16_gemm_nt,
+  lt algo sweeps) all lost (proj STATE s16/s25/s28). Not retried.
+- Boundary at T=256: ~9.5 us H100 each vs ~6-7 us for its ~24 MB (FP32 stream in/out + BF16 branch/h): <= ~0.15%; BND_SPLIT
+  already noise (s74). Not built.
+- Next: first check after 00:00Z = main v133 (read 'layer tune T=8' pr8_npf lines). No open >= 1% lever outside twm dq.
