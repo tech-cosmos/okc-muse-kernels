@@ -1675,7 +1675,7 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Posted under COORD Requests (s79). No proj judge runs.
 - Exhaustive attn_probe --passes=0 --only='verify 32': sliding 33/33, full 1335/1335 PASS (worst 2.07e-3).
 
-## s80 (2026-10-27 10:49-11:30Z): lane (b) idle (nothing new since v128); pr8 probes for lead 10:50Z T=8 chain: DEAD
+## s80 (2026-10-27 10:49-10:58Z): lane (b) idle (nothing new since v128); pr8 probes for lead 10:50Z T=8 chain: DEAD
 - No judge runs. No new layer/moe bundle since v128 (validated s79). Lead 10:50Z gave layer the T=1/T=8 serial chain
   (o+bnd+pr1 / o g12+bnd+pr8); proj looked at the pr8 part only (proj's kernel, no layer files touched).
 - H200 (layer check 3df61290 profile 6/7): pr8 GPU time 21.2 / 21.7 us at v1 sl/full (includes its PDL wait for the ~4 us
@@ -1686,3 +1686,9 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - New probe DEFS PR8_PF2A/B/N (dev/pr8.cu): a second bulk L2 prefetch wave inside the loop (at atom A, atoms [B, B+N)):
   A0 B16 N16 26.64, A4 26.02, A8 25.81, A8 N8 24.85, A12 26.02 vs base 24.46 us: DEAD (HBM already saturated in the loop).
 - Conclusion: pr8 has no proj-side lever >~1 us left; layer's T=8 megakernel bound is the bnd removal (layer s78 analysis).
+- s80b (11:00-11:25Z): H100 ORACLE for layer's T=8 o+bnd+pr8 megakernel (lead 10:50Z (a)): /tmp copy of r-layer 536adfd (v128),
+  env PJ_NOBND8 skips the first boundary at T=8 (illegal: pr8 reads stale h, routing garbage; timing of the o->pr8 segment only),
+  tools/timeline.py "verify 1 sliding", A B A B (each arm runs its own prepare tuner: B picked other g14/vtk variants, so only
+  the o-end -> pr8-end segment compares): A 29.5->55.8 = 26.3, 29.0->55.4 = 26.4 us; B 31.3->53.9 = 22.6, 28.0->49.7 = 21.7 us.
+  => removing the bnd launch entirely saves ~4.2 us on that segment (upper bound: a megakernel still does bnd's work + a grid
+  barrier ~1 us): realistic v1 sl ~2-3 us (~0.25-0.35% layer; v1 full ~0.1%). Posted to layer (COORD Requests).
