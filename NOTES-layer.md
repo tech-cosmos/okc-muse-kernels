@@ -2116,3 +2116,11 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - proj s96 claimed the g30 T=16/32 port into the layer (branch proj/g30n; proj STATE s95: d32 qkv -1.1 pool -2.6 unp -2.9 o -1.3,
   d16 qkv -0.5 pool -0.4 unp -1.5 us per call on H100 vs g24). Not duplicated here (same files).
 - 00:00Z plan: check main v136 first; then v136 + proj/g30n after proj's validate ALL OK and cold prepare <= 200 s.
+
+## s107 (2026-10-27 17:35Z-, night4 session 56): main = v137 = v136 + proj/g30n (453790c); 0 judge runs
+- Checks 20/20 used for 10-27; sandbox moves ~18:00Z. Merged origin/proj/g30n (proj s95/s96/s97: g30 at T=16/32 with G30_MTOK + G30_S
+  cluster split-K; wired as TUNE[32] option {"g30n:unpool": True}, off by default, G30N_DEFAULT_ON empty). proj: H100 TUNE-off d32
+  unpool -1.2..-2.1 us; same-process A/B synth full tie, sl -1.4, real d32 sl -2.1 (s97: the s96 "+9 us at full" was a tuner artefact).
+  Pooler g30n dead in-layer (router SM contention), T=16 tie. proj validate --quick ALL OK, cold 122.3 s.
+- build.py regenerates submission.py identically to proj's commit (git status clean after build).
+- 00:00Z: check 1 = v137 (covers v136 + g30n; read 'layer tune T=32' g30n lines; if the H200 picks it at full too, consider TUNE_BASE).
