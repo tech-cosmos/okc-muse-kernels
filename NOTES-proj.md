@@ -1990,3 +1990,46 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 
 ## s98 (2026-10-27 17:45Z-17:52Z): wrap-up only (sandbox moves ~18:00Z)
 - Copied /tmp/pj97/synab.{py,log} into muse_bf16_proj/dev/s97/ so the s97 A/B survives the move. No GPU work, 0 checks.
+
+## s99 (2026-10-27 18:59Z-, sandbox okc-night5, session 1): g30k = stream-K g30 pooler on <= 108 CTAs, FP32 slabs (branch proj/g30k); 0 checks
+- Goal (claimed in COORD, moe s49 idea (a)): a g30 pooler at T=16/32 that leaves SMs to the side-stream router (g30n S2 = 128
+  cluster CTAs lost +9..11 us in-layer, s96). moe s1-night5 claimed a different, overlapping item: one-launch pooler+router+routing.
+- Built dev/s99/g30k_part.cu (appended to g30_src.cu under G30K_ON): (64-row tile, 128-k stage pair) units split evenly over a
+  runtime grid G (tile-major); a CTA's range covers <= 2 tile segments here; rings run on one counter across segments; next
+  segment's escape header prefetched during the current one. Harness dev/s99/s99_g30k.py (one-hot bit-exact over escape columns,
+  5x rerun bitwise, timing after a 3 us PDL pred; run from a copy of r-layer muse_decode_layer with the files in dev/).
+- Reduce forms, H100 standalone pooler m32 (us after pred; g30n S2 19.1-19.3, S1 26.3, cuBLAS 28.2, g24 ~21.5 from s95):
+  (1) BF16 out, slab + per-tile ticket, last piece sums in piece order: G108 24.7, G128 21.7 (DEAD: the end-of-kernel chain
+      stores -> fence/atom -> L2 reads costs 3.5-5.5 us; probes: slab stores +0.9, tickets +1.2, read+sum +1.5; deferring all
+      tickets to one release atom at CTA end (CUTLASS pattern) did not help).
+  (2) NOSLAB probe (wrong results, bound): G96 19.4, G108 19.2, G120 19.2, G128 18.0 -> fewer CTAs cost ~nothing standalone.
+  (3) **F32 slabs (G30K_F32=1)**: each piece writes its FP32 partial (x scale, exact) into slab[piece][T][N] of a persistent
+      zeroed buffer; (tile, slab) pairs no CTA owns stay zero (static in shapes + G); the layer's pooler rmsnorm already sums
+      NS FP32 slabs (bmm path, ROUND to BF16 first). G96 20.7-21.1, **G108 19.9-20.1**, G120 19.8-20.4. One-hot bit-exact, rerun
+      bitwise, err = cuBLAS. 3 slabs at G 96-120.
+- Layer branch proj/g30k (worktree /tmp/pj99w off main 762e210 = v137): G30K_CFG, _g30k_build/_slabs/_prepare (packs shared
+  with g30/g30n; prepare check vs F.linear and unused slabs still zero), dispatch first in _g19 (returns buf[:ns], 3-D).
+  In-layer H100, TUNE off (submission copy with TUNE = {}), seeds 99/7, median us:
+  ab_flag 3 rounds A B B A, G108: d32 sl 196.37/195.78 off vs 194.99/195.33 on (s99), 202.19/201.82 vs 200.80/201.31 (s7);
+  full 423.8 vs 422.1 (s99), 432.0 vs 431.0 (s7) => d32 -0.9..-1.7. d16 sl +2.4 (both seeds), d16 full -0.3..-1.2.
+  G sweep (dev/s99/gsweep.py, 4 rounds alternating order, d32 sl s99/s7 | full s99/s7, off = 194.9/201.4 | 423.5/431.5):
+  G80 +1.3/+1.1 | +0.4/+1.1; G88 0/-0.8 | -1.0/-0.3; G96 -0.6/-1.4 | -1.7/-1.7; **G104 -1.1/-2.0 | -1.7/-1.5**; G112 +0.8/+0.1 |
+  -0.4/+0.4; G120 / G132 +14 us (router starves: a cliff between 112 and 120 on the H100).
+  TUNE options (value = G, one prepared entry per G): T=32 {g30k:pooler 104}, {g30k:pooler 120} (H200 router ~3x faster than
+  H100's: the H200 may take more CTAs), {g30k:pooler 104, g30n:unpool True}; T=16 {g30k:pooler 104}. Default off.
+- validate --quick on proj/g30k (pre-ZN build): ALL OK (test 13/13, scored 0/12, opt 0/326, tk2f 0/300, replay 0/240, route 0/240
+  worst gap 0.0256, fuzz 0/483), cold prepare 150.5 s (main v137 ~125 s: 2 more g30k libs + 4 tuner options).
+  H100 tuner lines (synthetic input, 3 prepare runs): T=32 sl default 220.3/208.7 | g30k 104 219.3/207.7 | g30k 120 233.8/221.4 |
+  **g30k 104 + g30n:unpool 217.5/206.1** (picked) ; T=32 full default 440.3/450.6 | g30k 104 439.4/449.2 | +g30n 438.0/448.3 (picked);
+  T=16 sl default 219.2/230.1 vs g30k 231.3/242.2 (+12 on the tuner's input) ; T=16 full 316.9/323.2 vs 315.9/322.0.
+- ZN added (g30k WG1 zeroes the next g24's FP32 out after its work, like g24's ZN; T=16 pooler -> unpool g24 EZ): standalone m16
+  G104 18.9 us incl. zeroing 512 KB (S2 19.2); odd-length tail checked (0 left nonzero). In-layer d16 (gsweep, TUNE off, 4 rounds):
+  off 190.06/154.97 sl, 300.62/279.74 full | G104 191.51/156.07, 296.64/278.10 | G96 192.02/156.54, 296.56/278.13 | G88 +3.
+  => d16 sl +1.1..1.5 (was +2.4 pre-ZN), d16 full -1.6..-4.0. Tuner decides per (T, sliding).
+- validate --quick on the ZN build: ALL OK (test 13/13, scored 0/12, opt 0/326, tk2f 0/300, replay 0/240, route 0/240, fuzz 0/483),
+  cold prepare 170.7 s (GPU shared with layer's fuzz runs). Branch **proj/g30k 69ec7cb** (on main 762e210 = layer v137),
+  submission md5 2c389b51. Handoff posted in COORD. 0 judge runs (proj checks unused: nothing proj-board-relevant).
+- Pitfall again: `pkill -f "<pattern>"` killed my own shell (pattern in its own command line). Never pkill by a pattern I type.
+- Next ideas: (a) H200 truth from layer's next check tune lines (g30k 104 vs 120: if 120 wins on the H200, try 112/116 there);
+  (b) g30k for qkv at T=32 (36 tiles; g30n S3 108 CTAs standalone 12.3 vs g24 13.4, in-layer tie) and unpool at T=16;
+  (c) if moe's one-launch pooler+router lands, g30k's stream-K split is the natural pooler half for it.

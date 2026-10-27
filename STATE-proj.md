@@ -1,4 +1,10 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 19:40 UTC (night5 s99 = session 1). **g30k BUILT** (stream-K g30 pooler on G <= 112 CTAs, FP32 slabs summed by the
+pooler rmsnorm; no reduce kernel, deterministic, one-hot bit-exact): r-layer branch proj/g30k, TUNE options T=32 {g30k:pooler 104},
+{g30k:pooler 120}, {g30k:pooler 104, g30n:unpool}; T=16 {g30k:pooler 104} (+ ZN zeroing of the unpool g24's out). H100 in-layer TUNE
+off: d32 G104 sl -1.1..-2.0, full -1.5..-1.7 us vs g24 pooler; G>=120 +14 (router starves on H100; H200 router ~3x faster).
+d16 G104 with ZN sl +1.1..1.5, full -1.6..-4.0. H100 tuner picks g30k 104 + g30n:unpool at T=32 (sl -2.6..-2.8, full -2.0..-2.3).
+validate --quick ALL OK, cold prepare 170.7 s; branch proj/g30k 69ec7cb (on v137), Handoff in COORD. NEXT: layer's H200 tune lines; g30k for qkv T=32 / unpool T=16. NOTES s99. moe is building a one-launch pooler+router (COORD claim 19:05Z): overlaps.
 Updated 2026-10-27 17:50 UTC (s98, wrap-up before the sandbox move). s97 A/B script saved to muse_bf16_proj/dev/s97/synab.py
 (+log; run from a layer clone dir with bench.py: `python synab.py <submission.py> <rounds>`). NEXT on the new sandbox: (1) check COORD
 for layer's verdict on proj/g30n (H200 'layer tune T=32' lines); (2) pooler g30n with fewer CTAs (S1 at <=100 CTAs so the side-stream
