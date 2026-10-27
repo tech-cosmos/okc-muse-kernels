@@ -5,6 +5,7 @@ import bench
 from torch.profiler import profile, ProfilerActivity
 sub = bench.load_sub(sys.argv[1]); flt = sys.argv[2]
 w, st = bench.weights_state(sub)
+import os; exec(os.environ.get("STMT", ""), vars(sub))  # s101: module-flag override before capture
 for load, c in bench.SCORED:
     if flt != f"{load} {c['layer']}":
         continue

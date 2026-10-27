@@ -761,6 +761,8 @@ _G30_SRC = None  # @@G30@@
 # weights decoded into register A-fragments (H100 cold-L2 unp 8192x4096 22.4 vs cuBLAS 25.6 us; in-layer ab_flag 4 rounds x 3 seeds
 # v16 sl -4.1..-5.2, full -4.5..-5.5 us; G30_TRIG another -0.6..-1.5). In TUNE_BASE[128]; TUNE option {g30:unpool: False}.
 G30_KEYS = ("unpool", "o")  # o: H100 standalone 10.2 vs cuBLAS 10.5 us (tie): TUNE option g30:o only
+# s101 DEAD: qkv on a split-K g30 (dev/s101_g30split.cu: uneven K ranges, FP32 slabs, ticket, last CTA sums; bit-exact):
+# S3 standalone 21.4 vs cuBLAS 20.0 us (MMA part 16.4, reduce chain +5), in-layer v16 sl +2.5..4.1, full +0.1..2.5 us.
 G30_TOKENS = 128
 G30_PDL = 1  # launch g30 as a PDL secondary (W streams before griddepcontrol.wait)
 G30_TRIG = True  # the second boundary is g30's PDL secondary (g30 triggers at start)

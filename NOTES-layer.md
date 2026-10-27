@@ -2033,3 +2033,21 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   proj s16/s28): DEAD. g30 is a T=128-only kernel.
 - validate --quick (with g30:o option) ALL OK: test 13/13, scored 0/12, opt 0/316, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/464, cold prepare 121.8 s. o on g30 standalone 10.2 vs cuBLAS 10.5 us (tie): TUNE[128] option only. qkv (36 row groups) / FR pooler (S2, -1 us standalone) not built.
 - First check after 00:00Z = main v135; read the H200 'layer tune T=128' lines ({g30:unpool False} should lose by ~4-5 us).
+
+## s101 (2026-10-27 16:04Z-, night4 session 50): qkv on g30 at T=128 built + measured DEAD; main unchanged (v135); 0 judge runs
+- Budget 10-27: layer checks 20/20 (reset 00:00Z), 4 submits left. Board #30 at 2.1339x (#1 pjmullin3 2.399x).
+- H100 timeline v16 sl (main v135): qkv cuBLAS 20.5 us (37.7 MB = 1.84 TB/s, the slowest GEMM per byte at T=128), FR pooler+router
+  torch.mm 32.4 (75 MB, 2.3 TB/s), o 7.0, g30 unpool 24.6, twm 175.
+- Standalone qkv 2304x8192 m128 (cold L2): cuBLAS 19.8-20.5 us also standalone. s99 g30 (no escapes, FP32 slab out, no reduce): S1 35.9,
+  S2 21.0, S4 24.1. dev/s101_g30.cu = uneven K split (CTA s takes stages [s*KT/S, (s+1)*KT/S)): **S3 (108 CTAs) 16.4 us**, S6 20.5, S7 20.1.
+- dev/s101_g30split.cu = g30_src.cu + split-K: escapes filtered per K range, FP32 slabs [S][128][N], __threadfence + self-resetting
+  ticket per row group, the last CTA sums the slabs IN SLAB ORDER (deterministic) and stores BF16; other slabs fetched by cp.async
+  all at once. Bit-exact (dev/s100_g30exact.py one-hot test, qkv S3 seeds 0/1/2/7, unpool S1/S5: 0 mismatches).
+  Real weights (dev/s101_g30real.py): S3 21.4 vs cuBLAS 20.0 us. Ablations: escapes 0.5, fence+ticket 1.4, reduce 3.5 (first form,
+  serial __ldcg loop, was 6.5): the reduce chain after the slowest split is ~5 us, and that kills it.
+- In-layer ab_flag v16 (4 rounds x seeds 99/7): g30 qkv sl +4.1/+3.8 (first reduce +5.1/+5.5), full +0.1/+2.5 us: DEAD. Its H200
+  odds are worse still (g30 is SM-ingest-bound, not HBM-bound). The split-capable kernel also costs unpool +0.7 us at S1 (ABAB 22.5/22.7
+  vs 23.3/23.3), so main keeps the S1-only g30_src.cu; the split form lives only in dev/.
+- Only open route for qkv at T=128: no BF16 reduce at all, i.e. attention sums 3 FP32 slabs at its loads (QSS-style; nvs had +1.6 us for
+  2 slabs) for sliding only, and full layers would still need the BF16 path. Estimated <= -2 us at v16 sl (~0.08%): not built.
+- tools/timeline.py: STMT env (exec'd in the module before capture) to time a flag/TUNE_BASE override.
