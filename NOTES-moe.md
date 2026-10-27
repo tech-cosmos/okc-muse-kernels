@@ -1224,3 +1224,29 @@
     v16 s66 171.3, v32 s66 207.0
   => at d32 tk2h W3 + SQ -1.7 us vs tk2h W3 (the layer's pick) and vs gs8 SQ; d16 keeps gs8 SQ. Handoff + Request posted
   (port note tools/n16/hsq_layer.md). Layer weight ~1.7 x .056 = ~0.1%.
+
+## Night4 session 17 (2026-10-27 02:22Z - ~03:20Z; moe checks 7/20 used today) -- TK2G_PAR4: tk2h weighted split ~2 us faster to start
+- Re-read the layer's H200 profile (acce7f04, v105): decode tk2f is at its HBM floor at d1/v1 (d1 2-3 experts 20.6 us,
+  v1 ~7.6 experts 49 us); d16 65 us vs ~49 floor, d32 75-90 vs ~63 (extra 8-token groups); twm v16 170-177, v32 ~200
+  (dq-bound, s18/s22). Layer v106 now runs tk2h W3 (GS16 + PF4 + SQ) at T=32.
+- New tool tools/n17/mktl_d.py: DIAG copy with kernel-level globaltimer stamps in moe_tk2f (entry, consumer start c0,
+  phase-1 end p1, gemm2 spin end, CTA end, rows per CTA), variants sq (main gs8) / h0 (tk2h W 0) / h3 (tk2h W 3) on the
+  layer's d16/d32 routings; 30 short "diagtd" lines (fit the judge's log_tail). Local dry run 95 s + tests 15/15.
+- H100 timeline FOUND: h3 consumers start at 4.4 us vs 2.3 (sq, h0): tk2g_bound's 4 bounds ran serially on warp 0
+  (smem loads, shuffles, 64-bit division: a latency chain) and every warp, the producer too, waited at the next
+  __syncthreads. FIX TK2G_PAR4 (#define, default 1): bound w on warp w < 4, p in 32-bit (W * b < 2^28). Same bounds:
+  bitwise 138/138 (tools/n17/par4_t.py: W 2/3/4 on layer d16/d32 + 36 random T 9..32, vs a TK2G_PAR4 0 build).
+  H100 h3: c0 4.4 -> 2.6 us; moe-only totals d16 -0.4..2.4, d32 -0.8..1.5 us.
+- H200 check 0d0e6c8d (bdfc090 + mktl_d DIAG, 2.213x test run, never submit), tot = graph replay us (5 seeds, mean):
+    d16: sq 66.1 | h3 67.6 | h0 71.4      d32: sq 87.2 | h3 83.8 | h0 91.0
+  (n16 without PAR4: d32 h16w3sq 84.5 vs sq 86.3 = -1.8; now -3.4: PAR4 ~ -1..1.6 us at d32 on the H200.)
+  Timelines (H200 us, min/med/max over CTAs): h3 is BALANCED on the H200 (d32 s7 p1 45.8/48.9/51.7, spin med 3.3;
+  sq 48.6/49.7/52.2) unlike the H100 (p1 36-52: W3 overshoots when DRAM-bound). h0 (count split) is badly imbalanced
+  (d32 s11 p1 51/53/70, spin med 18): W must stay > 0.
+  d16: h3 ties sq on seeds with a 9-16-token expert (s7 66.1/66.0, s13 66.7/66.7) and loses 2-3 us without one
+  (s11 +2.0, s17 +2.4, s99 +3.0). s99 (no expert > 8 tokens: identical work) shows WHERE: phase 1 p1 median 47.1 vs
+  45.1 (+4% per gated row), phase 2 equal (e - p1 25.6 vs 25.8), c0 +0.3. => tk2h's merged-body gated rows are ~4%
+  slower than tk2f_consume's on the H200. If that is fixed, h3 wins d16 seeds with a hot expert by ~2 us and
+  ties the rest, and d32 gains ~1-2 us more. Suspects (not tested): run-time gated/RPE in tk2g_row (GATED_ vs RTG),
+  tk2f's PF bits the tk2h path lacks (the layer's d16 tk2f is PF 548 = SQ + BAL + slot y32), i-cache of one body.
+- Layer port: tools/n17/par4_layer.md + par4.diff (3 hunks in moe_src.py, device code only). Posted under Handoffs.

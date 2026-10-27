@@ -69,6 +69,12 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 17 (02:22-03:20Z): TK2G_PAR4 = 1 on main (bdfc090): tk2h weighted-split bounds on 4 warps, 32-bit
+  (bitwise 138/138). H100: tk2h W3 consumer start 4.4 -> 2.6 us. H200 check 0d0e6c8d (timeline DIAG tools/n17/mktl_d.py):
+  d32 sq 87.2 | h3 83.8 (n16 w/o PAR4: -1.8, now -3.4); d16 sq 66.1 | h3 67.6; h0 loses (imbalanced). H200: h3 balanced.
+  d16 loss = tk2h's gated (phase-1) rows ~4% slower than tk2f_consume's (s99, identical work). Port note tools/n17/par4_layer.md.
+  NEXT: find the 4% (tk2g_row RTG run-time gated/RPE vs compile-time; PF bits; i-cache) -> h3 at d16 too. Checks today 7/20.
+
 ## Night4 session 16 (01:50-02:50Z): TK2H_SQ = 1 on main (03b61af): tk2h (GS16+PF4, what the layer runs at d32) on the SQ
   single-copy stages, bitwise 348/348. H200 DIAG 8b79cc25: d32 h16w3sq 84.5 vs h16w3 86.2 vs gs8 sq 86.3 (-1.7); d16 tk2h
   still loses (68.8+ vs 65.3). Port note tools/n16/hsq_layer.md, posted to layer. Checks today 6/20.
