@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 14:00 UTC (s85). Layer bundle branch proj/qf35 ac340f7 (v133 + moe s35 qf on d1-full plan + proj s68 ltalt:pooler
+T=128 TUNE): validate ALL OK (full for qf, --quick combined), cold 116.5 s; Request to layer to merge for 00:00Z. NOTES s85.
 Updated 2026-10-27 13:40 UTC (s84). Full validate of layer main v133 (02120df): ALL OK (13/13, 0/24, 0/302, 0/1200, 0/480, 0/240,
 fuzz 0/1476, cold 116.8 s): clear for the 00:00Z layer check. muse_prefill_layer exists but doesn't count overall. NOTES s84.
 Updated 2026-10-27 12:30 UTC (s83). Layer v129 (6621403) took its own nu8d fix. NEW tools/stream_fuzz.py (r-layer branch proj/fuzz

@@ -1748,3 +1748,17 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   NOT count toward the overall board, so no lane needed for it (flagged to the lead in COORD).
 - H200 profile diag81 (layer): g24 pool/unp d16 17.5 us/call, d32 ~24.5 us/call vs ~11 us byte floor; durations include
   pre-wait PDL overlap, so the real gap is smaller; m32 consumer wall (s61/s62) not reopened.
+
+## s85 (2026-10-27 13:20-14:00Z, night4 session 42): lane (b): layer bundle proj/qf35 (2 commits on v133 02120df)
+- No judge runs (proj 10-27: 8/20 checks, 1/10 scored). Board: layer #27 at 2.134x (#1 pjmullin3 2.399x).
+- 321fd5f: moe s35 Handoff `qf` ported into r-layer attn_src.py _gd_full_body/_gd_full (QF constexpr; query rows via
+  _gqldm(.., QSS) issued before the prologue cp.async gathers), plan qf=True on the batch-1 decode-full plan only; both
+  _gd_full launches pass QF=plan.get("qf", False). GD_PTF (page-table loads first) NOT ported: a no-op at that plan's NS 2.
+  attn_probe --only=full 6/6 PASS. H100 ab_files "decode 1 " 8 rounds, both orders x2: d1 full AB -0.11/-0.19, BA +0.05/+0.39
+  us = tie (moe's H100 tie too); H200 evidence = moe DIAGs 95f8158e+1259baad -0.28 us 5/5 pairs.
+  FULL validate: ALL OK 13/13, 0/24, opt 0/302, tk2f 0/1200, replay 0/480, route 0/240 (gap .0256/.0179), fuzz 0/1476, cold 118.9 s.
+- ac340f7: proj s68 Handoff never ported by layer: LT_ALT ("pooler",128) = [(66,124,35,1,0,0,0,4), (66,15,35,1,0,0,2,5)] +
+  TUNE[128] {ltalt:pooler 1}, {ltalt:pooler 2}, {ltalt:pooler 1 + twf_split 66 + lt:o + lt:unpool} (no new compile; runtime
+  cuBLASLt config). opt_test T=128 2 seeds 0/72; H100 tuner picks the ltalt-1 combo at T=128 sl (333.8 vs 336.3 us), full default.
+  validate --quick on the combined bundle ALL OK (opt 0/308, fuzz 0/456, cold 116.5 s).
+- Ask: layer, merge proj/qf35 (ac340f7) into main for the 00:00Z check; read 'layer tune T=128' ltalt lines in its log.
