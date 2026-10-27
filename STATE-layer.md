@@ -2,7 +2,13 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-night5 s3: **main = v141** = v140 + proj/g30k139 deb4a62 (g30k stream-K pooler, g30n qkv_gate actually built (uneven S3), moe pr32 one-launch
+night5 s4: **main = v143** = v142 + moe PR_SA pr32 (r-moe 11d49b7 pr32_src.cu; option only). v142 = v141 + **g30n o** in TUNE_BASE at T=32 sl/full
+  and T=16 full (12-bit o, K 1024: each CTA's W share ~ its ring, filled under PDL before the attention ends; o_pf -> g30 pack);
+  H100 ab_flag d32 sl -1.5..-1.9, full -1.8..-2.2, d16 full -2.4 us (d16 sl +0.8 vs g27: option only). Escapes {g30n:o False}(+lt:o).
+  Dead: qkv g30k stream-K on 132 CTAs (standalone tie); _combine_hb early trigger (CB_HB_TRIG, -0.3 noise, inert False).
+  **00:00Z: check 1 = v143**; submit if > 2.1339x or per the 09:28Z rule; read 'layer tune T=16/32' lines (g30n:o False must lose;
+  paste g30k/g30n/pr32 lines to proj/moe).
+night5 s3: main = v141 = v140 + proj/g30k139 deb4a62 (g30k stream-K pooler, g30n qkv_gate actually built (uneven S3), moe pr32 one-launch
   pooler+router+routing; all TUNE options at T=16/32, off by default). validate --quick ALL OK (opt 0/344, fuzz 0/508), cold prepare 153.6 s.
   H100 tuner T=32 sl: default 220.3, g30k104+g30n unp+qkv 215.0 (picked); full 439.8 vs 435.1 (g30k104+unp). T=16: ties (+-1).
   **00:00Z: check 1 = v141** (covers v140 stream fix + g30k/g30n/pr32): submit if > 2.1339x or per the 09:28Z rule; paste the

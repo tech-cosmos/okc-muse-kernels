@@ -13796,6 +13796,10 @@ __device__ __forceinline__ void wg_mma_rs(float* d, unsigned a0, unsigned a1, un
 #ifndef PR_ROUTER
 #define PR_ROUTER 1
 #endif
+#ifndef PR_SA
+#define PR_SA 1  // n5s3: pair handoffs by st.async + mbarrier complete_tx (rank 1 fires and exits; no fence/bar.sync)
+#endif
+#define PR_RBS (PR_SA ? 3 : G30_S - 1)  // pooler partial slots in rbuf (SA: rank 1 wg0, rank 1 wg1, rank 0 wg1)
 #define PR_NR (PR_ROUTER ? 128 / PR_RKS : 0)  // router stages per CTA
 constexpr int E = 256, TOPK = 8;
 
@@ -13803,9 +13807,13 @@ struct RArgs {
   const uint8_t* rw; float* part; float* logits; int* cnt; const float* bias; const int* ls;
   int* ids; int* lids; float* wts; float mult, reps; int local; unsigned long long* tl;
 };
+__device__ __forceinline__ void st_async4(uint32_t a, float x, float y, float z, float w, uint32_t mb) {
+  asm volatile("st.async.shared::cluster.mbarrier::complete_tx::bytes.v4.f32 [%0], {%1, %2, %3, %4}, [%5];"
+               :: "r"(a), "f"(x), "f"(y), "f"(z), "f"(w), "r"(mb) : "memory");
+}
 __device__ __forceinline__ unsigned long long gtime() { unsigned long long v; asm volatile("mov.u64 %0, %globaltimer;" : "=l"(v)); return v; }
 #ifdef PR_TL
-#define TLX(a_, k) a_.tl[(blockIdx.x * G30_S + blockIdx.y) * 8 + (k)] = gtime();
+#define TLX(a_, k) a_.tl[(blockIdx.x * G30_S + blockIdx.y) * 12 + (k)] = gtime();
 #define TLM(k) if (t == 0) TLX(ra, k)
 #else
 #define TLX(a_, k) {}
@@ -13893,6 +13901,7 @@ __device__ __forceinline__ void finisher(const RArgs& a, uint8_t* sm, uint64_t* 
       lg[row] = s;
     }
     __syncwarp();
+    if (tid == 0) TLX(a, 3)
     route_token(a, lg, bs_, TPF * f + warp, lane, ls);
 #pragma unroll
     for (int i = 0; i < 2 * E / 32; i++) __stcg(a.logits + (TPF * f + warp) * 2 * E + lane + 32 * i, lg[lane + 32 * i]);
@@ -13929,12 +13938,19 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
   const int nst = PR_NR + (i1 - i0);
 #endif
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  if (tid == 0) TLX(ra, 8)
   if (tid == 0) {
     for (int i = 0; i < G30_NS; i++) { mbar_init(&full[i], 1); mbar_init(&empty[i], 1); }
     for (int i = 0; i < G30_NW; i++) { mbar_init(&wfull[i], 1); mbar_init(&wempty[i], 1); }
     mbar_init(rbar, G30_S > 1 ? G30_S - 1 : 1);
     mbar_init(pbar, 1);
     mbar_init(fbar, 1);
+#if PR_SA
+    if (blockIdx.y == 0 && blockIdx.x >= 2) {  // bytes the pushes will complete (may land before or after this)
+      mbar_expect_tx(rbar, 3 * G30_ND * 128 * 4);
+      mbar_expect_tx(pbar, G30_MTOK * 64 * 4);
+    }
+#endif
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
 #if G30_S > 1
@@ -13942,7 +13958,7 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
 #else
   __syncthreads();
 #endif
-  if (g < 0) { finisher(ra, sm, fbar, rbuf + G30_ND * 128 * (G30_S - 1), rred); return; }
+  if (g < 0) { finisher(ra, sm, fbar, rbuf + G30_ND * 128 * PR_RBS, rred); return; }
   if (warp == 10) {  // router partial: (WG0 + WG1) [+ rank 1's via DSMEM] -> part[rg][pair slice], then count it
     asm volatile("bar.sync 3, 288;" ::: "memory");
     if (blockIdx.y == 1) {
@@ -13951,11 +13967,17 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
       asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rm) : "r"(smem_u32(pbar)));
       for (int idx = lane * 4; idx < G30_MTOK * 64; idx += 128) {
         const float4 u = *(const float4*)(rred + idx), v = *(const float4*)(rred + G30_MTOK * 64 + idx);
+#if PR_SA
+        st_async4(rb + idx * 4, u.x + v.x, u.y + v.y, u.z + v.z, u.w + v.w, rm);
+#else
         asm volatile("st.shared::cluster.v4.f32 [%0], {%1, %2, %3, %4};" :: "r"(rb + idx * 4), "f"(u.x + v.x), "f"(u.y + v.y),
                      "f"(u.z + v.z), "f"(u.w + v.w) : "memory");
+#endif
       }
+#if !PR_SA
       __syncwarp();
       if (lane == 0) asm volatile("fence.acq_rel.cluster;\nmbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];" :: "r"(rm) : "memory");
+#endif
       return;
     }
     asm volatile(
@@ -13977,8 +13999,13 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
   }
   if (warp == 8) {  // W: router stages then pooler stages (weights only: before griddepcontrol.wait)
     if (lane == 0) {
+#ifdef PR_L2W  // H200 proxy: every CTA streams group (g & 3)'s weights (~3 MB, L2-resident) = consumer-bound floor
+      const uint8_t* rsrc = ra.rw + ((size_t)(rg & 0) * 128 + (size_t)rks * PR_NR) * PR_RST;
+      const uint8_t* src = wp + ((size_t)(g & 3) * KS + i0) * G30_WST;
+#else
       const uint8_t* rsrc = ra.rw + ((size_t)rg * 128 + (size_t)rks * PR_NR) * PR_RST;
       const uint8_t* src = wp + ((size_t)g * KS + i0) * G30_WST;
+#endif
       for (int i = 0; i < nst; i++) {
         const int st = i % G30_NW, ph = (i / G30_NW) & 1;
         mbar_wait(&wempty[st], ph ^ 1);
@@ -14039,6 +14066,7 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
 #define G30_FIX(a)
 #endif
   asm volatile("griddepcontrol.wait;" ::: "memory");
+  if (tid == 0) TLX(ra, 9)
   unsigned A0[16], A1[16];
   int prev = -1;
 #define PR_WAIT_ST                                                                                          \
@@ -14125,6 +14153,29 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
   for (int j = 0; j < G30_ND; j++) asm volatile("" : "+f"(d[j]));
   if (prev >= 0 && t == 0) { mbar_arrive(&empty[prev % G30_NS]); mbar_arrive(&wempty[prev % G30_NW]); }
   if (wg == 0) TLM(5)
+#if PR_SA
+  // rank 1 (both WGs) and rank 0's WG1 push their accumulators into rank 0's rbuf slots; rank 0's WG0 sums
+  if (blockIdx.y == 1 || wg == 1) {
+    const int slot = blockIdx.y == 1 ? wg : 2;
+    uint32_t rb, rm;
+    asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rb) : "r"(smem_u32(rbuf + slot * G30_ND * 128)));
+    asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rm) : "r"(smem_u32(rbar)));
+#pragma unroll
+    for (int j = 0; j < G30_ND; j += 4) st_async4(rb + ((j >> 2) * 128 + t) * 16, d[j], d[j + 1], d[j + 2], d[j + 3], rm);
+    return;
+  }
+  asm volatile(
+      "{\n .reg .pred p;\n PR32_RW:\n"
+      " mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], 0;\n"
+      " @!p bra PR32_RW;\n}\n" :: "r"(smem_u32(rbar)) : "memory");
+#pragma unroll
+  for (int y = 0; y < 3; y++)
+#pragma unroll
+    for (int j = 0; j < G30_ND; j += 4) {
+      const float4 v = *(const float4*)(rbuf + y * G30_ND * 128 + ((j >> 2) * 128 + t) * 4);
+      d[j] += v.x; d[j + 1] += v.y; d[j + 2] += v.z; d[j + 3] += v.w;
+    }
+#else
   float* red = (float*)xs;
   asm volatile("bar.sync 1, 256;" ::: "memory");
   if (wg == 1) {
@@ -14157,6 +14208,7 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
       for (int j = 0; j < G30_ND; j++) d[j] += rbuf[(y * G30_ND + j) * 128 + t];
   }
 #endif
+#endif  // PR_SA
   const int r0 = (warp & 3) * 16 + (lane >> 2);
   const int tok = 2 * (lane & 3);
   __nv_bfloat16* stg = (__nv_bfloat16*)(xs + G30_MTOK * 256);
@@ -14172,6 +14224,7 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
     const int idx = q * 128 + t, tk = idx >> 3, c = idx & 7;
     *(uint4*)(out + (size_t)tk * N + g * 64 + c * 8) = *(const uint4*)(stg + tk * 72 + c * 8);
   }
+  if (t == 0) TLX(ra, 10)
 }
 
 static PFN_cuTensorMapEncodeTiled_v12000 g_enc = nullptr;
@@ -14201,7 +14254,7 @@ void pr32_launch(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Te
   CUtensorMap tx;
   pr32::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
   static_assert(G30_S == 2, "pr32: pair router reduce needs S = 2");
-  const int smem = G30_NS * G30_XBOX + G30_NW * PR_SLOT + 1024 + 3 * G30_MTOK * 64 * 4 + G30_ND * 128 * 4 * (G30_S - 1) + 1024 + 1024;
+  const int smem = G30_NS * G30_XBOX + G30_NW * PR_SLOT + 1024 + 3 * G30_MTOK * 64 * 4 + G30_ND * 128 * 4 * PR_RBS + 1024 + 1024;
   // finisher: 64 chunks + 8 x [512] logits below the barriers
   TORCH_CHECK(64 * (G30_MTOK / 4) * 256 <= G30_NS * G30_XBOX + G30_NW * PR_SLOT, "pr32: finisher smem");
   static bool once = false;

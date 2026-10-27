@@ -2218,3 +2218,7 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   (g30n o) 217.4 vs {g30n:o False} 219.2, full 436.6 vs 438.0; T=16 full 312.1 vs 313.9; picks T=32 g30k104+unp+qkv as in v141.
 - **main = v142.** 00:00Z check 1 = v142 (covers v140 streams + v141 g30k/g30n/pr32 + g30n o). Read 'layer tune T=16/32' lines:
   {g30n:o False} must lose at T=32 sl/full and T=16 full; if it wins on the H200, move g30n:o back to an option.
+- v143 = v142 + moe n5s3 PR_SA pr32 (pr32_src.cu = r-moe 11d49b7 muse_moe_w4a16/tools/n5s1/pr32_src.cu, the committed handoff
+  version; moe's later uncommitted PR_HL edits NOT taken). pr32 stays a TUNE option. validate --quick ALL OK: test 13/13, scored
+  0/12, opt 0/354, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/528, cold prepare 155.6 s.
+- **main = v143.** 00:00Z check 1 = v143. Idea not built: g30 at MTOK 8 for the T=8 o (v1; o = g12 BF16 8.1 us H200, OB8 path).
