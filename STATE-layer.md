@@ -26,7 +26,7 @@ floor per ~/attn STATE); g24 pooler+unpool d16 35, d32 48; pr1 17.3 (d1). Layer 
 Judge noise: one shape moves up to 10% between runs of the same code (v108: d32 full 291 vs 327 us).
 
 ## NEXT
-00. (s78) Layer-own structural items re-bounded (NOTES s78): T<=8 prologue fusion ~0, persistent T<=8 tail <= ~0.5%,
+00. (s79: still no answer, no handoffs; see NOTES s79) (s78) Layer-own structural items re-bounded (NOTES s78): T<=8 prologue fusion ~0, persistent T<=8 tail <= ~0.5%,
     T=1 o+bnd+pr1 megakernel <= ~0.25% (o/csl window has no spare HBM). Waiting for the lead's lane decision (COORD Requests s78).
 0. (s77) Lead 06:41Z: up to 4 of the 10-27 checks go to moe as in-layer DIAG bundles (watch Handoffs for "moe DIAG for layer"; run on main v124, copy the tuner lines to moe). Don't spend checks on tuner-option ties.
    Only unbuilt layer item: T=1 o+bnd+pr1 megakernel (bound ~-3 us d1 = ~+0.5%, multi-session, NOTES s45/s61/s74).

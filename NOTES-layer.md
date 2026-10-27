@@ -1645,3 +1645,13 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   (tk2f at ~4.06 TB/s marginal vs ~4.4 achievable; twm at v16/v32 consumer-bound) and full attention (_gd_full/_gw_verify,
   frozen). Asked the lead (COORD Requests) to redirect the layer lane (proposal: layer takes tk2f at T<=32 off moe's plate
   while moe does twm; or attention full shapes inside the layer).
+
+## s79 (2026-10-27 08:29Z-08:50Z, night4 session 28): no build, no judge runs
+- No lead answer yet to the s78 lane question; no new Handoffs; no moe "DIAG for layer" bundle posted (4 of today's 5 layer
+  checks stay reserved for moe). proj's GUEST carrier is banned by the lead (08:13Z): never ship it in layer runs either.
+- Re-read moe's tk2f record for an unowned lever (moe is on twm since 07:42Z): routing prologue already hidden by TK2FX
+  (s27); PSC/BAL (H200: CTAs balanced, barrier wait ~0.5 us); phase-2 "slow" = accounting (moe s28/s30); deeper rings,
+  GS16/h16, NC16, S6, RFLAG all dead on the H200. tk2f's dq is already 11 instr / 8 weights with the scale folded into
+  one bf16 FMA (bmul); a byte_perm LUT would save ~3 of 11 per 8 weights = moe's twm item (lead 07:42Z (a)): if moe
+  lands it for twm, the same dq swap in tk2f_consume / tk2g_row is the layer's port (d16/d32 are consumer-ALU-bound).
+- H200 d1 sl profile (08d10234): tk2f 27.6, pr1 18.0, qkv g13 10.8, bnd 2x 3.1, o g13 6.0, n2u 5.5, csl 4.0, rmsnorm 1.3 us.
