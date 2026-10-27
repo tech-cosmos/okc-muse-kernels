@@ -1,6 +1,6 @@
 # STATE-moe
 
-## n5s4 (22:15Z): PR_HL (router hi+lo folded in-CTA, half the partial bytes) exact, chain -1.3 us, end-to-end TIE (chain already
+## n5s4 (21:45Z): PR_HL (router hi+lo folded in-CTA, half the partial bytes) exact, chain -1.3 us, end-to-end TIE (chain already
 hidden after PR_SA): off. pr32 = pooler stream + ~1 us tail now. Pooler-W L2 prefetch during attention bounded:
 H100 best -2 us (half the stream warm), H200 <= ~1 us: not built (NOTES n5s4). Waiting for the 00:00Z v141 H200 pr32 tune lines (NOTES n5s4).
 

@@ -2030,7 +2030,7 @@
 - Next session (after 00:00Z): read the layer's H200 'layer tune T=16/32' pr32 lines (v141 check). If pr32 wins: make sure SA is
   in, then try MTOK16 variants; if it loses, ask layer for a PR_TL timeline DIAG. moe checks reset at 00:00Z (20).
 
-## Night5 session 4 (2026-10-27 21:32Z - 22:10Z) -- pr32 PR_HL (router hi+lo fold in-CTA): tie, kept off; 0 checks
+## Night5 session 4 (2026-10-27 21:32Z - 21:45Z) -- pr32 PR_HL (router hi+lo fold in-CTA): tie, kept off; 0 checks
 - Idea: the finisher chain ingests 64 x 2 KB per finisher and sums [512] hi|lo partials. PR_HL 1 packs each 64-row router
   group as [hi 32 rows | the same 32 lo rows] (host: cat([hi.view(8,32,K), lo.view(8,32,K)], 1)), so warp 10 folds
   r + (r+32) (and WG0 + WG1) before the DSMEM push / partial store: partials [rg][p][T][32], finisher ingest 64 x 1 KB,
