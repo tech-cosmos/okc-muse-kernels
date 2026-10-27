@@ -1994,3 +1994,21 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   ~3 TB/s), pool with S2 + cluster. Then: escape fixups (per-row headers in the epilogue, x from global, s == 0 slab only), T=256
   (MMA ~17 us H100: n256 or two passes), qkv shape (QKV_SIZE x 8192), integration as TUNE[128/256] g30:<key> options. On the H200
   (HBM 4.8 TB/s, L2 not faster) the x L2 traffic matters even more: multicast before any H200 test.
+- s99 continued (same session, all H100 standalone cold-L2, us; cuBLAS 25.5-25.9 unp / 26.3-26.8 pool in the same runs):
+  * Cluster multicast of the x box (G30_CL, dev/s99_g30.cu): first form used mbarrier.arrive.RELEASE.CLUSTER for the remote
+    slot release: 40 us at CL=2 (pathological; cluster launch alone with local release = 22.9). With CUTLASS's plain
+    mbarrier.arrive.shared::cluster: CL=2 23.1 (tie with CL=1 21.9), CL=4 39.8, CL=8 ~77. Multicast DEAD: halving x L2 reads
+    buys nothing, so the s99 "L2-bound by x" reading was wrong.
+  * Split rings (own producer warps; G30_NS = x stages of 16 KB, G30_NW = W stages of 6 KB): x depth matters most (NS4/NW16
+    35.6, NS4/NW24 37.9, NS6/NW16 25.8, NS8/NW8 21.8, NS10/NW8 22.2, NS10/NW10 **21.6** unp / **25.4** pool S2, NS12/NW4 35.0):
+    each CTA's x box from L2 is latency-bound and needs ~128-160 KB in flight next to W. Smem caps the depth (NS12/NW6 no fit).
+  * K-rotation per CTA (G30_ROT, CTA g starts at stage g*KS/grid): WORSE (unp 26.4, pool S2 28.6): lockstep x reads help.
+  * R2 (CTA = 128 W rows, WG w on row group 2g+w over all k, x shared; G30_R2): unp S1 (64 CTAs) 32.4, unp S2 25.7-26.4,
+    pool S2 33.4, pool S4 26.6. Halving x per W byte gains ~2 us but the FP32 slab output (S>1) costs ~6 us. Not better.
+  * Best now: R1 S1 NS10/NW10: unp 8192x4096 21.6 vs cuBLAS 25.7 (-4.1 us, -16%); pool 4096x8192 S2 25.4 vs 26.5 (-1.1, slabs
+    summed by the consumer). qkv (2304 x 8192 = 36 row groups) fits badly (S4 + slabs). At T=128 this is ~-5 us per v16 layer
+    on H100 = ~0.3% total if it held on the H200, which is unmeasured: the kernel is not HBM-bound on the H100 (x latency /
+    SM ingress), so the faster H200 HBM helps cuBLAS more than g30. Gate on an H200 number before building more.
+  * To ship it as a TUNE[128] option: escape fixups (headers; per-row x[t][col] * (v - 2^-15) in the epilogue, s == 0 slab
+    only), the pack into _g12_prepare (pack30 in dev/s99_g30.py), PDL, and replay/route tests. T=256 = 2x MMA (n256 or
+    two passes), not tried.
