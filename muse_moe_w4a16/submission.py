@@ -3085,7 +3085,9 @@ int64_t moe_twm_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 template <int N, int NSTG, bool SA>
 __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
                                         const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
-                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, bool g2) {
+                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, bool g2,
+                                        int nkc = 64, float* part = nullptr, int* tick = nullptr, int* s_flag = nullptr,
+                                        int h = 0, int np = 1) {
   using C = TWC<4, true, 8>;
   constexpr int NA = N / 2, STRIDE = C::STG;
   float acc[2][NA];
@@ -3100,7 +3102,7 @@ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64
   const int so = C::XB + C::WB + (w8 * 32 + lane) * 8;
   int pst = -1;
 #pragma unroll 1
-  for (int kc = 0; kc < 64; ++kc) {
+  for (int kc = 0; kc < nkc; ++kc) {
     const char* sb = smem + st * STRIDE;
     if (kc) mbar_wait(&full[st], ph);
     const uint4* wp = reinterpret_cast<const uint4*>(sb + C::XB);
@@ -3151,6 +3153,31 @@ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64
     for (int i = 0; i < NA; ++i) fence_f(acc[r][i]);
   }
   mbar_arrive(&empty[pst]);
+  if (part) {  // n21 K-split tail item (np parts of 64 / np k chunks, gemm2 only): every part stores its FP32 partial,
+    // then takes a ticket; the last one sums the np partials in part order (deterministic) and runs the epilogue
+    const int ct = warp * 32 + lane;
+#pragma unroll
+    for (int r = 0; r < 2; ++r)
+#pragma unroll
+      for (int i = 0; i < NA; ++i) __stcg(part + (size_t)h * 16384 + (r * NA + i) * 512 + ct, acc[r][i]);
+    __threadfence();
+    asm volatile("bar.sync 1, 512;" ::: "memory");  // s_flag is free (the previous split item is done with it)
+    if (ct == 0) {
+      const int o = atomicAdd(tick, 1);
+      if (o == np - 1) { *tick = 0; __threadfence(); }  // last user: zero for the next call
+      *s_flag = o;
+    }
+    asm volatile("bar.sync 1, 512;" ::: "memory");
+    if (*s_flag != np - 1) return;
+#pragma unroll
+    for (int r = 0; r < 2; ++r)
+#pragma unroll
+      for (int i = 0; i < NA; ++i) {
+        float v = __ldcg(part + (r * NA + i) * 512 + ct);
+        for (int q = 1; q < np; ++q) v += __ldcg(part + (size_t)q * 16384 + (r * NA + i) * 512 + ct);
+        acc[r][i] = v;
+      }
+  }
   if (g2) tw_epi<2, N, false, 16>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
   else tw_epi<2, N, true, 16>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
 }
@@ -3161,16 +3188,19 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
     int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
-    __nv_bfloat16* __restrict__ Y, float* __restrict__ part, int flags) {
+    __nv_bfloat16* __restrict__ Y, float* __restrict__ part, int flags, int* __restrict__ tick) {
   using C = TWC<4, true, 8>;
   constexpr int STRIDE = C::STG, NR13 = TWC<4, true, 8>::NRB, NR2 = TWC<4, false, 8>::NRB;
   extern __shared__ __align__(1024) uint4 smem_tw[];
   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
   __shared__ uint32_t slut[256];
-  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_big[32];
+  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_big[32], s_flag;
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   int* done = meta + 68;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  // n21 K split: the last ~(flags >> 8 & 255) gemm2 items (from an expert boundary) run as 2^(flags >> 16 & 3) K parts
+  const int kq = (flags >> 16) & 3, npt = 1 << kq;
+  int nsplit = kq ? (flags >> 8) & 255 : 0;
   for (int i = tid; i < 256; i += 640) slut[i] = lut[i];
   // n19 WBW (flags & 16): no wait at entry. The PDL primary (moe_gather / moe_routegather) triggers only after its own
   // griddepcontrol.wait, so moe_route's meta / sroutes are complete here (read with __ldcg); only xg (the x TMA source)
@@ -3205,10 +3235,23 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     }
   }
   __syncthreads();
-  const int n13 = s_cum[0][32], nitems = n13 + s_cum[1][32];
-  auto decode = [&](int item, int& g2, int& a, int& p, int& rb) {
+  const int n13 = s_cum[0][32], n2 = s_cum[1][32];
+  int n2f = n2;  // split from an expert boundary: a token's result must not depend on which pass it lands in
+  if (nsplit > 0)
+    for (int a = 32; a >= 0; --a)
+      if (s_cum[1][a] >= n2 - nsplit) n2f = s_cum[1][a];
+  const int ns = n2 - n2f, nitems = n13 + n2f + npt * ns;
+  // item -> (gemm2?, slot a, pass p, row block rb, K part h (-1: whole K), split slot j)
+  auto decode = [&](int item, int& g2, int& a, int& p, int& rb, int& h, int& j) {
     g2 = item >= n13;
-    const int it = g2 ? item - n13 : item;
+    int it = g2 ? item - n13 : item;
+    h = -1;
+    j = 0;
+    if (g2 && it >= n2f) {
+      j = (it - n2f) >> kq;
+      h = (it - n2f) & (npt - 1);
+      it = n2f + j;
+    }
     const int* cum = s_cum[g2];
     a = 0;
     while (cum[a + 1] <= it) ++a;
@@ -3244,10 +3287,11 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
         mbar_arrive(&full[st]);
         break;
       }
-      int g2, a, p, rb;
-      decode(item, g2, a, p, rb);
+      int g2, a, p, rb, h, j;
+      decode(item, g2, a, p, rb, h, j);
       const int e = s_e[a], PS = s_big[a] ? 64 : 32;
       const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
+      const int k0 = h < 0 ? 0 : h * (64 >> kq), k1 = h < 0 ? 64 : k0 + (64 >> kq);
       const int mi = nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
       const int nrb = g2 ? NR2 : NR13;
       const char* wsrc = (g2 ? W2 : W13) + ((size_t)e * nrb + rb) * 64 * C::WB;
@@ -3265,11 +3309,11 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
         }
         asm volatile("fence.proxy.async.global;" ::: "memory");
       }
-      for (int kc = 0; kc < 64; ++kc, ++i) {
-        if (kc && i >= NSTG) { flush(); mbar_wait(&empty[st], ph ^ 1); }
+      for (int kc = k0; kc < k1; ++kc, ++i) {
+        if (kc != k0 && i >= NSTG) { flush(); mbar_wait(&empty[st], ph ^ 1); }
         if ((flags & 32) && np == 2) flush();  // n19 probe: at most 2 stages before the wait
         char* sb = smem + st * STRIDE;
-        if (!kc) s_item[st] = item;
+        if (kc == k0) s_item[st] = item;
         mbar_expect_tx(&full[st], bytes);
         if (np >= 0) { po = off; pm = mi; ++np; }  // np - 1 == st == kc while the ring's first pass fills
         else tma2d(sb, map, kc * 64, off, &full[st]);
@@ -3297,16 +3341,18 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     }
 #endif
     if (item < 0) break;
-    int g2, a, p, rb;
-    decode(item, g2, a, p, rb);
+    int g2, a, p, rb, h, j;
+    decode(item, g2, a, p, rb, h, j);
     const int e = s_e[a], PS = s_big[a] ? 64 : 32;
     const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
     __nv_bfloat16* out = g2 ? Y : Inter;
+    float* pt = h < 0 ? nullptr : part + (size_t)j * npt * 16384;
 #if TWM_TL
     if (tl && tid == 0 && ntl < 20) tl[4 + 3 * ntl] = g2 | (min(p, 15) << 4) | (nv << 8) | (e << 16);  // n15 descriptor
 #endif
-#define TQI(NN) tq_item<NN, NSTG, SA>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2)
+#define TQI(NN) tq_item<NN, NSTG, SA>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
+                                      h < 0 ? 64 : 64 >> kq, pt, tick + j, &s_flag, h, npt)
     switch ((nv + 7) >> 3) {
       case 1: TQI(8); break;
       case 2: TQI(16); break;
@@ -3329,10 +3375,17 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
   }
 }
 
+// n21: clamp the K-split item count to the partial buffer (16384 floats per part) and the ticket words
+static int64_t twq_flags(int64_t f, int64_t npart, int64_t ntk) {
+  const int64_t kq = (f >> 16) & 3, ns = (f >> 8) & 255;
+  if (!kq || !ns) return f & ~((int64_t)0x3FF00);
+  const int64_t m = std::min<int64_t>(ns, std::min<int64_t>(npart / (16384 << kq), ntk));
+  return (f & ~((int64_t)0x3FF00)) | (m << 8) | (m ? kq << 16 : 0);
+}
 template <bool SA>
 static int64_t twq_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
-                      torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, int64_t flags) {
+                      torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, torch::Tensor tk_, int64_t flags) {
   constexpr int NSTG = 8;
   constexpr int SMEM = NSTG * TWC<4, true, 8>::STG + 1024;
   static int grid = 0;
@@ -3350,12 +3403,12 @@ static int64_t twq_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
       (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(),
-      (float*)part_.data_ptr(), (int)flags);
+      (float*)part_.data_ptr(), (int)twq_flags(flags, part_.numel(), tk_.numel()), (int*)tk_.data_ptr());
 }
 int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                        torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
-                       torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, int64_t flags) {
-#define TWQA w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, part_, flags
+                       torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, torch::Tensor tk_, int64_t flags) {
+#define TWQA w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, part_, tk_, flags
   return (g_sa & 1) ? twq_go<true>(TWQA) : twq_go<false>(TWQA);
 #undef TWQA
 }
@@ -4854,7 +4907,7 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, torch::Tensor, torch::Tensor, "
         "torch::Tensor, double);"
         "int64_t moe_twq_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
+        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
         "int64_t moe_stream_launch(torch::Tensor, torch::Tensor, int64_t, int64_t);"
         "int64_t moe_set_pdl(int64_t, int64_t);"
         "int64_t moe_set_blk(int64_t);"
@@ -5095,6 +5148,8 @@ TWM_HOT_M = {}  # s17: per-M override
 TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline,
 #   bit 3 = pass-minor item order; use 4 for plain on)
 TWQ_M = {}  # s17: per-M override, e.g. {128: 4} (proxy: v16 -6.5 proxy-us, v32 +4.6)
+TWQ_SPLIT = (0, 0)  # n21: moe_twq K-split tail (items, log2 parts): the last ~items gemm2 items (from an expert boundary)
+TWQ_SPLIT_M = {}  #   run as 2^parts K slices, FP32 partials summed in part order by the last one (per-M override)
 TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
 TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
 _CFGS = (10, 11, 22, 118)
@@ -5130,11 +5185,15 @@ SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 DIAG = 0
 _DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('decode 1', 17, 1), ('decode 1', 99, 1), ('decode 16', 7, 16), ('decode 16', 11, 16), ('decode 16', 13, 16), ('decode 16', 17, 16), ('decode 16', 99, 16), ('decode 32', 7, 32), ('decode 32', 11, 32), ('decode 32', 13, 32), ('decode 32', 17, 32), ('decode 32', 99, 32), ('verify 1', 7, 8), ('verify 1', 11, 8), ('verify 1', 13, 8), ('verify 1', 17, 8), ('verify 1', 99, 8), ('verify 16', 7, 128), ('verify 16', 11, 128), ('verify 16', 13, 128), ('verify 16', 17, 128), ('verify 16', 99, 128), ('verify 32', 7, 256), ('verify 32', 11, 256), ('verify 32', 13, 256), ('verify 32', 17, 256), ('verify 32', 99, 256)]
 _DIAG_R = "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"
-DIAG_VARIANTS = {  # n20: S6 (6-bit scale codes) vs 8-bit SQ vs S6P (S6 at the SQ stride: aligned starts); h = tk2h W3 at T=32
-    "dec": [("sq", {"TK2F_S6_ON": False}), ("s6", {"TK2F_S6_ON": True}), ("s6p", {"TK2F_S6P": True}),
-            ("hsq", {"TK2F_S6_ON": False, "TK2H_M": {32: 3}}), ("h6p", {"TK2F_S6P": True, "TK2H_M": {32: 3}}),
-            ("sqb", {"TK2F_S6_ON": False}), ("s6pb", {"TK2F_S6P": True})],
-    "big": [("q4", {"RG": 0, "TWQ_M": {128: 4, 256: 4}})],
+DIAG_VARIANTS = {  # n21: moe_twq K-split tail (TWQ_SPLIT = (items, log2 parts)) at T=128/256; b = repeats
+    "dec": [("sq", {})],
+    "big": [("q4", {"RG": 0, "TWQ_M": {128: 4, 256: 4}}),
+            ("s24h", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "TWQ_SPLIT": (24, 1)}),
+            ("s33h", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "TWQ_SPLIT": (33, 1)}),
+            ("s66h", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "TWQ_SPLIT": (66, 1)}),
+            ("s33q", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "TWQ_SPLIT": (33, 2)}),
+            ("q4b", {"RG": 0, "TWQ_M": {128: 4, 256: 4}}),
+            ("s33hb", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "TWQ_SPLIT": (33, 1)})],
 }
 
 
@@ -5472,9 +5531,13 @@ def kernel_fn(data, st):
             if TWQ_M.get(M, TWQ):
                 q = TWQ_M.get(M, TWQ)
                 if RG: q &= ~16  # n19 WBW needs a primary that does not write meta / sroutes (moe_gather, not moe_routegather)
+                qs, qk = TWQ_SPLIT_M.get(M, TWQ_SPLIT)
+                if qs and qk:  # n21: K-split tail (qs items, 2^qk parts each)
+                    q |= (min(qs, 255) << 8) | (qk << 16)
+                    if not DIAG_TL: part = torch.empty((min(qs, 255) << qk) * 16384, dtype=torch.float32, device=dev)
                 if DIAG_TL and TWM_ORDER_M.get(M, TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
                 lib.moe_twq_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["lut"], xg,
-                                   meta, sroutes, inter, y, part, q)
+                                   meta, sroutes, inter, y, part, st["tk"], q)
             elif TWF_MIX and "w2b2" in st:
                 tl = TWM_TAIL_M.get(M, TWM_TAIL) + 4096 * TWM_TAIL13_M.get(M, TWM_TAIL13) + (TWM_ORDER_M.get(M, TWM_ORDER) << 24)
                 tl += (1 << 23) if TWM_HOT_M.get(M, TWM_HOT) else 0
