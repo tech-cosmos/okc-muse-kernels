@@ -2,7 +2,10 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-s86: **main = v129** = v128 + fix of a latent race in the non-default T=8 {pr1: False} path (nu8d rmsnorm read side-stream
+s87: **main = v130** = v129 minus all {pr1: False} TUNE[8] options (lead 11:50Z: never picked on 22 H200 logs incl. board run
+35dd53d0, +1.7..5.8 us; board run clean, no withdraw). validate --quick ALL OK, nu8_race 0/180, cold prepare 147.8 s. 0 judge runs.
+First check after 00:00Z: main v130 + any proj bundle (light pr1/pr8 asked, COORD Requests s87).
+s86: main = v129 = v128 + fix of a latent race in the non-default T=8 {pr1: False} path (nu8d rmsnorm read side-stream
 local_ids before the join; old main failed 7/30 seeds there; tuner never picked it) + inert OB8 code. Lead 10:50Z lane (a) built
 and MEASURED DEAD on H100: OB8 (T=8 o GEMM + first boundary in its epilogue, grid barrier, ob8_src.cu) v1 sl +2.2..2.5, full
 +0.2..0.6 us: pr8/pr1 fill a whole SM (1024 thr x 64 regs) so they cannot ramp beside o blocks; the separate 16-program boundary

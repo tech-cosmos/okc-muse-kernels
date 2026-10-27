@@ -1818,3 +1818,18 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   Default paths unaffected (pr1 on at T=8; the H200 tuners measured {pr1: False} +1.7..2.6 us and never picked it), but a noisy
   tuner pick would have produced wrong outputs on the judge: the fix removes that risk.
 - validate --quick on v129: ALL OK (test 13/13, scored 0/12, opt 0/302, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256, cold prepare 118.1 s).
+
+## s87 (2026-10-27 11:55Z-, night4 session 36): lead 11:50Z correctness item (T=8 {pr1: False} nu8d race)
+- main v129 (6621403, s86) already carries an equivalent fix (nu8d only when pr1 or tk2fj keeps routing on / joined to the main
+  stream; old main 7/30 bad -> 0/30). proj's fix (proj/nu8fix 357859d: join first, rpdl off) not merged on top (same effect).
+- H200 tuner audit (lead asked): parsed the '-> <pick>' of every 'layer tune' line in all 22 saved layer judge logs
+  (profiles/*.json|log, incl. board run 35dd53d0 = copied from /tmp/v125/profiles into profiles/, and the only later check 940a4fca).
+  T=8 never picked any {pr1: False} candidate. 35dd53d0: T=8 sl -> {cslpw: True} (pr1 False 122.2 vs default 118.3 us),
+  full -> {cslpw, g14alt:qkv_gate 3} (134.2 vs 128.4). The board run did not take the racy path: no withdraw needed.
+- v130: all three {pr1: False} TUNE[8] options removed (never picked, +1.7..5.8 us on every H200 log). The s86 guard stays
+  (pr1 can still be off if pr1's build is unavailable).
+- v130 validate --quick: ALL OK (test 13/13, scored 0/12, opt 0/302, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256,
+  cold prepare 147.8 s; s86 was 118.1 s, GPU shared). proj's tools/nu8_race.py (GPU hog, run under the GPU lock) on v130,
+  options forced via state['tune']: {} 0/60, {pr1 False} 0/60, {pr1 False, g19:pooler} 0/60.
+- Request to proj (COORD s87): a lighter pr1/pr8 (<= 512 thr x 64 regs) as a TUNE option = the last open form of the o+bnd+pr
+  fusion. 0 judge runs (layer checks 20/20 for 10-27; 4 submits left but nothing beats the board).
