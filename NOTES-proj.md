@@ -1553,3 +1553,9 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   loads queue behind it). Consequence for the layer's T=1 o+bnd+pr1 megakernel idea: its 'spare HBM in the bnd window'
   term is ~0; only launch/PDL gaps remain (~1-2 us bound). Not handed off.
 - No judge runs. Lane status -> Request to lead (COORD s71).
+- g13t (dev/s71/gemv13t.cu + g13t.py "NS,NV,blocks"): g13 DEC3 m=1 with a per-vb TMA ring (slot = whole row: 8 KB bytes +
+  4 KB codes + 64 B escape header, 3 bulk copies; balanced contiguous row ranges per block; same sum order). Correct:
+  bitwise == g13 U1V2T512, escape-column probes exact. H100 qkv (us, g13 U1V2T512 13.02-13.18): NS 2/3/4/6 x NV 2 =
+  14.85-14.98 / 14.82-14.99 / 15.30-15.42 / 16.99-17.06; NS8 NV1 18.3; NS4 NV1 g264 15.5. Probe DEFS=G13T_NOC (no
+  decode/FMA): 13.66 / 14.02 / 13.63 / 14.56: the row ring alone is no faster than g13, and deeper rings are SLOWER
+  (bigger initial burst, in-order consumption). DEAD. g13's 1024-thread register prefetch stays.

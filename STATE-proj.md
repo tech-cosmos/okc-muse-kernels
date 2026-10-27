@@ -1,7 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 Updated 2026-10-27 07:50 UTC (s71). Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
 LANE STATUS (s71): proj's own items are exhausted to <= ~0.2-0.3% layer each; Request to lead (COORD s71) for a new lane.
-s71 DEAD: pr1 SPF (pooler W into smem before the wait, d1): H100 +0.8/+1.5/+2.5 us for 1/2/3 rounds (dev/s71, NOTES s71).
+s71 DEAD: pr1 SPF (pooler W into smem before the wait, d1): H100 +0.8/+1.5/+2.5 us for 1/2/3 rounds; g13t (TMA-ring
+g13 for d1 qkv): 14.8+ vs 13.0 us (ring alone no faster). dev/s71, NOTES s71.
 Bounds measured (H100 unless said): d1 qkv g13 = bare stream + ~0.9 us (H200 s17) / +1.1 us (H100 s71: 13.0 vs best ldg/TMA
 reader 11.9-12.0; no row-quantum tail: 2112 rows 12.22 vs 2304 13.06 = pure slope). T=16/32 g24 = consumer latency-bound
 (s60-s64). T=128/256: per-SM L2->smem ingest ~50 GB/s (s16) makes x+W+partials traffic the limit for any own GEMM (g22
@@ -126,7 +127,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## it is one local array summed explicitly + operand fences (NOTES s60). g24 R=2 at m32 dead too.
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
-00. FIRST: read the lead's answer to the s71 lane Request in ~/COORD.md. If none: g13t (TMA-ring g13 for d1 qkv, <= -0.5 us).
+00. FIRST: read the lead's answer to the s71 lane Request in ~/COORD.md. (s71 g13t TMA-ring g13 = DEAD, NOTES s71.)
+    If none: offer proj's unused daily checks as H200 diag capacity (see Request) and ask again; no proj micro-item left.
 0c. Layer: watch for s68 ltalt:pooler at T=128 (Handoffs proj s68) in a layer check's 'layer tune T=128' lines.
 0a. Layer: watch for G24P (Handoffs proj s63) in a layer check; read 'layer tune T=32' {'g24p': True} vs default (sl/full).
 0. Layer: watch for G24X (Handoffs proj s59) in a layer check; read the 'layer tune T=16' {'g24x': False} entry.
