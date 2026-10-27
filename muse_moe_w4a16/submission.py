@@ -100,6 +100,8 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TK2G_PAR 1       // n4s5: GS16 weighted split bounds by warp 0 (tk2g_bound) instead of every thread (tk2g_split)
 #endif
 #define TK2H_P4 0        // n6: build only the SA tk2h PF4 kernels (cfg 1x3x004 GS8 / 1x4w004 GS16) without TK2_EXP: layer tuner use
+#define TK2H_REG 1       // n18: tk2h keeps each phase's X/Out/gs pointers in registers (H100: one LDC stall per segment start)
+#define TK2F_SQRT 0      // n18: run-time L2 hint modes (per phase) on SQ stages (PF 576/580; DIAG builds)
 #define TK2_EXP 0        // s12: tk2h (TK2H/PSC) and weighted-split (TK2W) instantiations: H200 diags, no gain (off: compile time)
 
 __device__ __forceinline__ uint32_t bmul(uint32_t a, uint32_t b) {
@@ -3760,6 +3762,9 @@ __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* 
     const float* gs = gated ? gs13 : gs2;
     const __nv_bfloat16* Xp = gated ? X : inter;
     void* Out = gated ? (void*)inter : (void*)Y;
+#if TK2H_REG
+    asm volatile("" : "+l"(Xp), "+l"(Out), "+l"(gs));  // n18: no LDC of the kernel params at every segment start
+#endif
     const int r0 = gated ? a0 : b0, r1 = gated ? a1 : b1;
     int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0;
     float gsc = 0.f;
@@ -4253,7 +4258,8 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   __shared__ float s_rt[FN ? 256 : 1], s_rg[FN ? 256 : 1];
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   constexpr bool FP = (PF & 16) != 0;
-  const int l2hv = (PF & 64) ? l2h : TK2F_L2H;  // n4s3: PF & 64 = run-time L2 hint mode (else the compile-time one)
+  const int l2hv = (PF & 64) ? (l2h & 15) : TK2F_L2H;  // n4s3: PF & 64 = run-time L2 hint mode (else the compile-time one)
+  const int l2h2 = (PF & 64) && (l2h >> 4) ? (l2h >> 4) - 1 : l2hv;  // n18: gemm2 rows' own mode (moe_set_l2h2)
 #define TK2F_SYNC() do { if (FP) asm volatile("bar.sync 4, %0;" ::"n"(NC * 32) : "memory"); else __syncthreads(); } while (0)
   static_assert(!FP || (!DYN && !FN && GS == 8 && MRG == 0), "FP: static GS 8 path only");
   int gen = 0;  // FN: this call's generation (see tk2f_norm); thread 0 only
@@ -4422,7 +4428,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       int i = 0;
       constexpr bool SQ = (PF & 512) != 0;  // n14: single-copy stages (Wq13 / Wq2 = the _sq_pack buffers)
       tk2f_produce<512, NC, NSTG, KPS, SQ>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv);
-      tk2f_produce<256, NC, NSTG, KPS, SQ>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv);
+      tk2f_produce<256, NC, NSTG, KPS, SQ>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2);
     }
     return;
   }
@@ -4462,6 +4468,8 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
 }
 
 static int g_tk2f_l2h = TK2F_L2H;  // n4s3: tk2f L2 hint mode of the next launch (moe_tk2f_launch: cfg / 1000000 - 1)
+static int g_tk2f_l2h2 = -1;  // n18: gemm2 rows' L2 hint mode (-1 = as gemm13); kernel arg l2h bits 4+ = mode + 1
+int64_t moe_set_l2h2(int64_t v) { g_tk2f_l2h2 = (int)v; return 0; }
 template <int NC, int NSTG, int KPS, bool DYN = false, bool FN = false, bool SA = false, int GS = 8, int MRG = 0, int PF = 0>
 static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const void* w2, const void* s2, const void* lut,
                        const void* gs13, const void* gs2, const void* x, const void* ids, int start, int count,
@@ -4481,7 +4489,7 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
       (const float*)gs13, (const float*)gs2, (const __nv_bfloat16*)x, (const int*)ids, nr, start, count, (int*)meta,
       (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D, (const float*)tw, (const float*)w1,
-      (__nv_bfloat16*)out, nr / 8, eps, g_tk2f_l2h);
+      (__nv_bfloat16*)out, nr / 8, eps, g_tk2f_l2h | ((g_tk2f_l2h2 + 1) << 4));
 }
 
 // s9: moe_tk2f with the post-expert norm fused (FN): writes out [M, H] bf16 directly; no moe_norm2 after it.
@@ -4531,11 +4539,17 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 40000 && cfg < 50000 && cfg % 1000 == 4)  // n16: tk2h GS16 + PF4 on SQ stages
       return tk2f_go<8, 4, 2, false, false, true, 16, 1, 516>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
 #endif
-    TORCH_CHECK(sa && g_tk2f_l2h == TK2F_L2H && (cfg == 204 || cfg == 84204), "moe_tk2f SQ: cfg ", cfg);
+#if TK2F_SQRT
+    if (TK2F_L2H && sa && (g_tk2f_l2h != TK2F_L2H || g_tk2f_l2h2 >= 0)) {  // n18: run-time (per-phase) L2 hint modes
+      if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 576>(0, TK2F_ARGS0);
+      if (cfg == 84204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 580>(0, TK2F_ARGS0);
+    }
+#endif
+    TORCH_CHECK(sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0 && (cfg == 204 || cfg == 84204), "moe_tk2f SQ: cfg ", cfg);
     if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 512>(0, TK2F_ARGS0);
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516>(0, TK2F_ARGS0);
   }
-  if (TK2F_L2H && sa && g_tk2f_l2h != TK2F_L2H) {  // n4s3: run-time L2 hint copies of the two default configs (PF | 64)
+  if (TK2F_L2H && sa && (g_tk2f_l2h != TK2F_L2H || g_tk2f_l2h2 >= 0)) {  // n4s3: run-time L2 hint copies of the two default configs (PF | 64)
     if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 64>(0, TK2F_ARGS0);
     if (cfg == 84204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 68>(0, TK2F_ARGS0);
   }
@@ -4765,7 +4779,7 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
         "int64_t moe_stream_launch(torch::Tensor, torch::Tensor, int64_t, int64_t);"
         "int64_t moe_set_pdl(int64_t, int64_t);"
         "int64_t moe_set_blk(int64_t);"
-        "int64_t moe_set_sa(int64_t);"
+        "int64_t moe_set_sa(int64_t);" "int64_t moe_set_l2h2(int64_t);"
         "int64_t moe_set_hot(int64_t);"
         "int64_t moe_hot_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);")
@@ -4779,12 +4793,12 @@ def _lib():
         src = src.replace("#define NORM_EARLY 0 ", f"#define NORM_EARLY {int(NORM_EARLY)} ")
         src = src.replace("#define TWM_L2H 0 ", f"#define TWM_L2H {int(TWM_L2H)} ")
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
-            src = src.replace("#define TK2H_P4 0 ", "#define TK2H_P4 1 ")  # n16 (n14's TK2F_SQ4 / n13's TK2_EXP / TWM_PB48: done)
+            src = src.replace("#define TK2H_P4 0 ", "#define TK2H_P4 1 ").replace("#define TK2F_SQRT 0 ", "#define TK2F_SQRT 1 ")  # n16 (n14's TK2F_SQ4 / n13's TK2_EXP / TWM_PB48: done)
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=src,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                       "moe_gather_launch", "moe_routegather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
-                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
+                                      "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_l2h2", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
     return _LIB
@@ -4992,6 +5006,7 @@ TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K halves 
 TWM_L2H = 1  # s21: same hints in moe_twm's producer (compile time; evict_last if a later pass re-reads). Bitwise = 0. Layer harness H100 (tuner off): v16 -0.8..-2.6 / -2.4..-9, v32 0 us
 NORM_EARLY = 1  # n4s1: moe_norm after moe_twm waits per token on its experts' gemm2 flags (runs in twm's drain); compile time
 TK2F_L2H = 4  # s21: tk2f L2 cache hints on the weight copies (see #define TK2F_L2H; compile time, 0 = off). Bitwise = 0. DRAM bytes at d16/d32 = floor (ncu). moe-only layer routings (H100, 5 seeds): d16 -4.9, d32 -2.8, v1 -1.1, d1 -0.5 us (mode 1: d16 -1.2); layer harness (tuner off) mode 1/4: v1 -4..-6, d16 -0.5/-3.5, d32 0
+TK2F_L2H2_RT = None  # n18: run-time L2 hint mode of tk2f's gemm2 rows (None = as gemm13); SQ needs a DIAG build (TK2F_SQRT)
 TK2F_L2H_RT = None  # n4s3: run-time tk2f L2 hint mode 0..4 (None = TK2F_L2H); passed as cfg + 1000000 * (mode + 1), so the H200 diag / the layer's tuner can pick it
 TK2F_SQ = 1  # n14: tk2f single-copy 18 KB stages (prepare _sq_pack; cfg + 10000000; bitwise = off)
 TK2F = 204  # s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
@@ -5004,11 +5019,10 @@ SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 DIAG = 0
 _DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('decode 1', 17, 1), ('decode 1', 99, 1), ('decode 16', 7, 16), ('decode 16', 11, 16), ('decode 16', 13, 16), ('decode 16', 17, 16), ('decode 16', 99, 16), ('decode 32', 7, 32), ('decode 32', 11, 32), ('decode 32', 13, 32), ('decode 32', 17, 32), ('decode 32', 99, 32), ('verify 1', 7, 8), ('verify 1', 11, 8), ('verify 1', 13, 8), ('verify 1', 17, 8), ('verify 1', 99, 8), ('verify 16', 7, 128), ('verify 16', 11, 128), ('verify 16', 13, 128), ('verify 16', 17, 128), ('verify 16', 99, 128), ('verify 32', 7, 256), ('verify 32', 11, 256), ('verify 32', 13, 256), ('verify 32', 17, 256), ('verify 32', 99, 256)]
 _DIAG_R = "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"
-DIAG_VARIANTS = {  # n16: tk2h (GS16 + PF4) on SQ stages vs 3-copy at d16/d32 (layer runs tk2h at d32); b = repeat
-    "dec": [("sq", {}),
-            ("h16w2", {"TK2H_M": {16: 2, 32: 2}, "TK2H_SQ": 0}), ("h16w2sq", {"TK2H_M": {16: 2, 32: 2}}),
-            ("h16w3", {"TK2H_M": {16: 3, 32: 3}, "TK2H_SQ": 0}), ("h16w3sq", {"TK2H_M": {16: 3, 32: 3}}),
-            ("sqb", {})],
+DIAG_VARIANTS = {  # n18: tk2f L2 hint modes per phase (gemm13 / gemm2) on SQ stages; h3 = tk2h W3 with TK2H_REG; b = repeat
+    "dec": [("sq", {}), ("m33", {"TK2F_L2H_RT": 3}), ("m43", {"TK2F_L2H2_RT": 3}), ("m34", {"TK2F_L2H_RT": 3, "TK2F_L2H2_RT": 4}),
+            ("m11", {"TK2F_L2H_RT": 1}), ("m40", {"TK2F_L2H2_RT": 0}), ("m44", {"TK2F_L2H_RT": 4}),
+            ("h3", {"TK2H_M": {16: 3, 32: 3}}), ("sqb", {})],
     "big": [("s66", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "TWF_SPLIT_M": {128: 66, 256: 66}})],
 }
 
@@ -5247,10 +5261,11 @@ TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_spli
 
 def _tk2f_cfg(M, st):
     c = _tk2f_cfg0(M, st)
-    if TK2F_SQ and "w13sq" in st and TK2F_L2H_RT is None and (c in (100204, 184204) or (
+    rt = TK2F_L2H_RT is not None or TK2F_L2H2_RT is not None
+    if TK2F_SQ and "w13sq" in st and (not rt or DIAG) and (c in (100204, 184204) or (
             TK2H_SQ and 140000 <= c < 150000 and c % 1000 == 4) or (
             "w13sq4" in st and c in (100402, 100403, 184402, 184403))):  # n14 SQ (SA, default configs; KPS 4 in DIAG)
-        return c + 10000000
+        c += 10000000
     return c + (1000000 * (TK2F_L2H_RT + 1) if TK2F_L2H and TK2F_L2H_RT is not None else 0)
 
 
@@ -5289,6 +5304,7 @@ def kernel_fn(data, st):
             return out
         if TK2F:
             c = _tk2f_cfg(M, st)
+            lib.moe_set_l2h2(-1 if TK2F_L2H2_RT is None else TK2F_L2H2_RT)
             if c >= 10000000:  # n14 SQ
                 k = "sq4" if c % 1000 in (402, 403) else "sq"
                 lib.moe_tk2f_launch(st["w13" + k], st["w13s2"], st["w2" + k], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x,
