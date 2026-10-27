@@ -27,8 +27,8 @@
 #ifndef G30_ESC
 #define G30_ESC 8
 #endif
-#ifndef G30_PL
-#define G30_PL 0  // proj n5s5: sorted escape keys in a per-thread smem list (pop = 1 LDS), fragment index precomputed
+#ifndef G30_PL  // proj n5s5 (H200 check b3ff96fb m32 -0.2..-0.5 us): sorted escape keys in a per-thread smem list (pop = 1 LDS),
+#define G30_PL (G30_MTOK <= 32)  // fragment index precomputed; +17 KB smem (does not fit the T=128 rings)
 #endif
 #ifndef G30_MTOK
 #define G30_MTOK 128
