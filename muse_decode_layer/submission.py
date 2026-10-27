@@ -13046,6 +13046,9 @@ _G30_SRC = r'''// s100 "g30" (layer s99 dev/s99_g30.cu, layer form): T=128 GEMM 
 #ifndef G30_ESC
 #define G30_ESC 8
 #endif
+#ifndef G30_PL  // proj n5s5 (H200 check b3ff96fb m32 -0.2..-0.5 us): sorted escape keys in a per-thread smem list (pop = 1 LDS),
+#define G30_PL (G30_MTOK <= 32)  // fragment index precomputed; +17 KB smem (does not fit the T=128 rings)
+#endif
 #ifndef G30_MTOK
 #define G30_MTOK 128
 #endif
@@ -13094,6 +13097,14 @@ __device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) 
 __device__ __forceinline__ void esc_patch(unsigned (&a)[16], unsigned key) {
   const int kk = (key >> 18) & 63, idx = 4 * (kk >> 4) + 2 * ((kk >> 3) & 1) + ((key >> 16) & 1);
   const unsigned vb = key & 0xFFFFu, sel = (kk & 1) ? 0x5410u : 0x3254u;
+#pragma unroll
+  for (int u = 0; u < 16; u++)
+    if (u == idx) a[u] = __byte_perm(a[u], vb, sel);
+}
+// key = stage << 21 | h << 20 | idx << 16 | vb (G30_PL)
+__device__ __forceinline__ void esc_patch2(unsigned (&a)[16], unsigned key) {
+  const int idx = (key >> 16) & 15;
+  const unsigned vb = key & 0xFFFFu, sel = (key & (1u << 20)) ? 0x5410u : 0x3254u;
 #pragma unroll
   for (int u = 0; u < 16; u++)
     if (u == idx) a[u] = __byte_perm(a[u], vb, sel);
@@ -13234,10 +13245,31 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
     G30_POP;
     while ((nxt >> 18) < (unsigned)i0 * 64u) G30_POP  // escapes of the other K split
   }
+#if G30_PL
+  unsigned* plist = (unsigned*)(ws + G30_NW * G30_WST + 1024 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 : 0));  // [2 ESC + 1][256]
+  {
+    const int tc = tid & 255;
+    int e = 0;
+    while (nxt != ~0u) {
+      const int kk = (nxt >> 18) & 63;
+      plist[e * 256 + tc] = ((nxt >> 24) << 21) | ((unsigned)(kk & 1) << 20) |
+                            ((unsigned)(4 * (kk >> 4) + 2 * ((kk >> 3) & 1) + ((nxt >> 16) & 1)) << 16) | (nxt & 0xFFFFu);
+      e++;
+      G30_POP
+    }
+    plist[e * 256 + tc] = ~0u;
+    nxt = plist[tc];
+  }
+  int pp = 256 + (tid & 255);
+#endif
 #if G30_PRE
   asm volatile("griddepcontrol.wait;" ::: "memory");  // consumers: escape header (weights) read before, out written after
 #endif
+#if G30_PL
+#define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) << 21; while (nxt < kend) { esc_patch2(a, nxt); nxt = plist[pp]; pp += 256; } }
+#else
 #define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); G30_POP } }
+#endif
 #else
 #define G30_FIX(a)
 #endif
@@ -13354,7 +13386,8 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
   TORCH_CHECK((K / 64) % 2 == 0 && K / 64 >= 4 * G30_S, "g30: K stages");
   CUtensorMap tx;
   g30::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
-  const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 + 1024 : 0);
+  const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 + 1024 : 0)
+                   + (G30_PL ? (2 * G30_ESC + 1) * 256 * 4 : 0);
   static bool once = false;
   if (!once) { cudaFuncSetAttribute(g30::g30_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
   cudaLaunchConfig_t cfg = {};
@@ -13374,6 +13407,10 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
 }
 
 #ifdef G30K_ON
+#if G30_PL && G30_ESC  // g30k keeps the register-shift escape pop (G30_PL is g30's only)
+#undef G30_FIX
+#define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); G30_POP } }
+#endif
 // proj s99 "g30k": g30 (MTOK 16/32) as a stream-K GEMM on a runtime grid G (e.g. 104 CTAs, leaving SMs to the side-stream
 // router). The (64-row tile, 128-k stage pair) units are split evenly over the G CTAs in tile-major order; a CTA's range
 // covers parts of <= 2-3 tiles (segments). W/x rings and the escape path are g30's; ring slots run on one counter across
