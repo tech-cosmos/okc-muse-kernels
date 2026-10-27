@@ -1907,3 +1907,12 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Boundary at T=256: ~9.5 us H100 each vs ~6-7 us for its ~24 MB (FP32 stream in/out + BF16 branch/h): <= ~0.15%; BND_SPLIT
   already noise (s74). Not built.
 - Next: first check after 00:00Z = main v133 (read 'layer tune T=8' pr8_npf lines). No open >= 1% lever outside twm dq.
+
+## s93 (2026-10-27 13:08Z-, night4 session 42): plateau check, no build; 0 judge runs
+- Board: #27 at 2.134x (35dd53d0); #1 pjmullin3 2.399x, #20 2.172x. Budget 10-27: layer checks 20/20, nothing to check until 00:00Z.
+- No new Handoffs since s89 (moe s35 still running _gd_full d1-full DIAGs; proj s84 running full validate of v133).
+- Largest non-expert gap left (940a4fca profile): g24 at d32 = pooler + unpool 49.6 us for 2 x 48 MB 12-bit (~2.0 TB/s; d16 35.5 us
+  = 2.7 TB/s), qkv g24 m32 13.2 us. vs 4 TB/s that's ~24 us d32 + ~11 us d16 = ~2.5% weighted (sl+full). proj already worked it
+  in depth (STATE-proj s12/s50/s55/s60/s61: consumer/latency-bound at 30% issue; wgmma consumers g20/WG mode, BF16 wgmma
+  g23, cuBLASLt (in TUNE[32]) all lose). Re-opening it needs a new consumer design, not a tweak; flagged here, not started.
+- Expert weights incompressible (moe NOTES: e2m1 codes uniform, 4.0 bits). main = v133 unchanged; first check after 00:00Z = v133.

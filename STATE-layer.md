@@ -2,7 +2,7 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-s92: no build; verify-gap audit (NOTES s92): twm dq-bound ~57/80 us above stream rate at v16/v32 (~6.6% weighted) = biggest gap to #1, closed lane; all else <= ~1%.
+s93: no build (plateau re-check, NOTES s93: d32 g24 pooler+unpool ~2.0 TB/s = biggest non-expert gap, proj-closed). s92: no build; verify-gap audit (NOTES s92): twm dq-bound ~57/80 us above stream rate at v16/v32 (~6.6% weighted) = biggest gap to #1, closed lane; all else <= ~1%.
 s91: **main = v133** = v132 + TUNE[8] {cslpw, pr8_npf 206/220/112} (H200 picks pr8 bulk-PF depth; no new compile; validate ALL OK incl. fuzz, cold 118.5 s). First check after 00:00Z: main v133; read 'layer tune T=8' pr8_npf lines.
 s90: main v132 + proj stream_fuzz tool (validate step fuzz): full fuzz 0/1462 bad. 0 judge runs.
 s89: **main = v132** = v131 + moe s33 verify-1 full attention spec=True (H200 standalone -0.65 us, H100 in-layer ~-0.4; validate
