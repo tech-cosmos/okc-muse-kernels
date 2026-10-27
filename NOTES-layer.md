@@ -2076,3 +2076,18 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   of that it needs a cross-stream spin flag (BND_SPIN was +2 us and racy) and co-residency with o/csl (g13/pr8 fill whole SMs,
   s86). Bound <= ~3 us d1 before those costs. Not built.
 - Plan unchanged: 00:00Z check = main v135 (read 'layer tune T=128': g30:unpool False must lose), submit per the 09:28Z rule.
+
+## s104 (2026-10-27 16:47Z-, night4 session 53): main = v136 = v135 + proj g30_sort + G30_PRE (merge of proj/g30pre 88ba088); 0 judge runs
+- Lead 16:45Z LANE DECISION 5 for layer: (a) g30 for T=128 qkv and FR pooler: both already built + measured DEAD in s101 (qkv split-K
+  reduce chain, in-layer +0.1..4.1 us) and s102 (pooler slabs + own-path router, +7..17 us); nothing new to build there. Only unbuilt
+  form left: ONE g30 launch carrying pooler rows + the router's hi/lo rows (no split-K, router out FP32 [T,512]), s102 bound <= -4 us
+  H100 (~0.15%), needs 136+ CTAs or a rebalanced grid, and the H200 may be x-ingest-bound (moe s43). Queued, not started.
+  (b) G30_PRE merged: g30_src.cu now = proj s92 sorted escape candidates (pop = register shift) + s94 consumers read/sort the
+  escape header before griddepcontrol.wait (header = prepared weight, never written in a replay; out is written only after
+  x arrives, which waits behind warp 9's griddepcontrol.wait; with G30_ESC 0 consumers skip the wait but still order behind x).
+- validate --quick ALL OK: test 13/13, scored 0/12, opt 0/316, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/464,
+  cold prepare 117.8 s.
+- H100 ab_files "verify 16" 6 rounds (tuner on, as shipped): v135 sl 289.28 / full 436.18 vs v136 289.09 / 436.19 us = tie
+  (proj's tuner-off ab: sl 0..-1.6, full -0.3..-2.2). Kept: bitwise equal, no cost. ab_files filter is the full shape name
+  ("verify 16"), "v16" matches nothing and silently times no shape.
+- 00:00Z check = main v136 (read 'layer tune T=128': g30:unpool False must lose).
