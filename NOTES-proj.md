@@ -1292,3 +1292,22 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   after the wait): dev/s58/g24.py H100, us: m16 qkv/pool/unp -0.25/-0.1/-0.06..+0.13 (tie); m32 (512,4,3,12,2) +0.13..
   +0.4 (worse; 2 runs). DEAD: g24 is W-stream-bound and its per-block x chunk is small. (Default in the s58 copy is 1;
   dev/s53/gemv24.cu, the one used everywhere, is unchanged.)
+
+## s59 (2026-10-27 03:02-03:50Z, sandbox okc-night4, session 16): G24X = cross-call EZ for the layer's first-op qkv g24
+- Why qkv (the layer graph's first op, T=16/32) is slow, H100 standalone, no pred (dev/s59/g24.py PRED=-1; us/graph):
+  bare ld.global.v4 reader of qkv's 28.3 MB 12-bit bytes (dev/s59/rd.py) 11.7-12.4 | g24 layer cfg m16 18.5-19.1,
+  m32 20.5-21.1 | cuBLAS 20.6-20.8 | consumer-only (G24_NOW) m16 14.5-14.8. Trace with t0 at kernel ENTRY (G24_TR_ENTRY):
+  m16 (1024,2,4,16,2): 1152 tasks / 132 blocks = ~9 busy warps of 16; idle warps finish their setup (x issue, zero,
+  __threadfence, epoch atomic) at 5.3 us (NOW 2.7): the setup's dependent memory round trips run behind the W stream.
+  G24_NOZ (skip zero + fence + epoch, timing only) = -1.3 (m16) / -1.9 (m32) us. Deeper rings (NS 8-12, AP 4, WPB 8-12)
+  and SK: no gain (not in-flight-bound; consumer ~= stream time, they add).
+- G24X (layer patch dev/s59/g24x_layer.patch, on r-layer 85b5641 = v108): qkv's FP32 out at T in {16, 32} is a
+  persistent zeroed buffer state["g24x"][T]; qkv g24 runs EZ on it (npre bit 17), the same call's g24 unpool zeroes it as
+  its (free) ZN; if unpool is not g24 in that call, kernel_fn (now a wrapper around _kernel_fn) zero_()s it at the end.
+  Invariant: zero between calls (nothing data-derived is kept; like the self-resetting counters). qkv's out is dead after
+  attention (verified: qkv writes the buffer, unpool re-zeroes it, buffer 0 after every call). T=32 acts only if the
+  tuner picks g24:qkv_gate (existing TUNE[32] option); TUNE[16] += {"g24x": False}.
+- H100 layer ab_files TUNE {} A B B A: on 66fda6e-era main (8 rounds) d16 sl -1.56 full -0.68; on v108 (6 rounds)
+  d16 sl 189.97 -> 188.11 (-1.86), full 291.21 -> 290.59 (-0.62). T=32 with g24 qkv forced: G24X -0.5 sl / -0.9 full vs
+  g24 qkv without it, vs QSS default +0.4 / -1.2 (tuner option). Tests 13/13; replay d16 40 x seeds 11,23 0/160;
+  g24 qkv forced at T=32 + g24sk qkv at T=16: d1/d16/d32 0/40 each.
