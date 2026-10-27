@@ -1311,3 +1311,30 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   d16 sl 189.97 -> 188.11 (-1.86), full 291.21 -> 290.59 (-0.62). T=32 with g24 qkv forced: G24X -0.5 sl / -0.9 full vs
   g24 qkv without it, vs QSS default +0.4 / -1.2 (tuner option). Tests 13/13; replay d16 40 x seeds 11,23 0/160;
   g24 qkv forced at T=32 + g24sk qkv at T=16: d1/d16/d32 0/40 each.
+
+## s60 (2026-10-27 03:30-04:20Z, sandbox okc-night4, session 17): wgmma for the layer's g24 m16/m32 = DEAD
+- Why: layer H200 profiles (r-layer profiles/submission.7fda724c / 71f451bb): d32 g24 SK pool+unp 47-49 us for 2 calls
+  (~24/call vs 12-bit floor ~11), d16 g24 x2 ~36 + pooler 18; H200 diag19d (s56): g19 pool m32 NOW 16.3 vs NOW NOMMA 10.6
+  = the mma.sync path is ~1/3 of the consumer. Idea: warpgroup wgmma (A = decoded W from registers, RS) cuts tensor time.
+- dev/s60/gemv24.cu = r-layer g24_src.cu (85b5641) + WG mode (RR bit 9 = 513): task = 4 row groups x KC per warpgroup
+  (warp w % 4 = its row group, same r1 pack as the layer), x copied after the wait with __ldcg into the wgmma B
+  core-matrix layout ((kk * M + q) * 16, LBO = M * 16, SBO = 128, no swizzle), wgmma m64n{16,32}k16 RS, accumulator and
+  A-fragment layouts per warp = mma.m16n8k16's (epilogue + escape fixups unchanged). CORRECT (dev/s60/g24.py asserts:
+  rel err < 1e-5 + exact escape probe), pool/unp/qkv m16/m32. Switches: G24_WG_W1 (3 A register sets, wait_group 1),
+  G24_WG_A2 (2 accumulator chains), G24_WG_NOMMA / G24_WG_NOX / G24_WG_SS (timing probes, wrong results).
+- H100, us over a 3 us PDL pred, G132 (dev/s60/g24.py; r1 = layer's mma.sync g24 with the same cfg):
+  full: pool m32 WG 21.7-22.5 | r1 21.5; m16 20.1-20.4 | r1 ~20.4 (W-bound tie). G88 proxy: pool m16 WG 24.6 | r1 20.5 (loses).
+  consumer-only (G24_NOW): pool m16 WG 13.97 (1 A set) / 13.5 (2 sets) / 13.2 (W1) / 13.3 (A2) / 12.0 (AP 4) | r1 11.2;
+  m32 16.6 / 16.3 / 15.7 / 15.9 / 15.9 | r1 15.2; unp same picture. WG NOMMA 8.9 / 10.4 -> wgmma adds 4.4-5.5 us.
+  SS wgmma (A from smem, probe) worse: 15.1 / 17.7. => at N = 16/32 wgmma (RS or SS) is NOT faster than mma.sync here.
+- Trace (G24_TRACE, NOW, pool m32 r1): warps doing 1 task end at ~5.6 us, 2 tasks at ~11.3: per 16 x 512 task ~5.6 us =
+  decode/skeleton ~2.4 + mma ~2.8-3.1, ADDITIVE (no overlap across the 4 warps/SMSP). mma.sync rate there ~1 per 10 clk
+  per SMSP = saturated: pool m32 tensor time alone ~5.6 us (H100) per SM. The m32 consumer needs decode to overlap mma
+  (mma.sync seems to hold issue), not a different MMA instruction.
+- Compiler trap found (keep in mind for any wgmma code): with two accumulator arrays passed by reference to asm "+f"
+  wgmma wrappers, nvcc DROPPED the final `acc += acc2` (PTX had 8 wgmmas, acc2 results never read; ptxas then deleted
+  those wgmmas: SASS 4 HGMMA, rel err 0.707, while NOW timings looked faster = bogus). Fix: one local float aw[2][NT][4]
+  + explicit sum after the last wait, plus empty-asm "+f" operand fences after every wait_group (CUTLASS style).
+- Also dead (same harness): g24 R=2 at m32 (2 row groups per warp share x fragments): NOW 15.3 (8 warps) vs r1 15.2,
+  full 22.7 vs 21.5.
+- No judge runs this session (proj checks 4/20 used today). Nothing for layer.
