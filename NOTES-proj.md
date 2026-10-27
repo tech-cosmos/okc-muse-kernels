@@ -1876,3 +1876,23 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   G30_R2=1: "g30 launch failed" (also before my code runs its hdr? not debugged; layer measured R2 no better) -> untested.
 - Python side for layer: g30_run(..., scale, hdr) with hdr = _compress's [N][8][2] fp32 as is; prepare check per weight
   `v = hdr[..., 1]; torch.equal(v.bfloat16().float(), v)` else no g30 for that weight (never fails on randn weights: 0 inexact).
+
+## s92 (2026-10-27 15:54-16:50Z, sandbox okc-night4, session 49): g30 escape fix made cheaper (layer s100 ask); 0 judge runs
+- Layer integrated g30 (T=128 12-bit wgmma unpool, my s91 in-fragment escapes) as v135 (r-layer f7a1cdc) and asked for a cheaper
+  ESC_FIX (~0.8 us). Harness dev/s92/t92.py (loads r-layer submission read-only, builds g30 variants CUS=files DEFSETS='a,b|..',
+  ESCW=n adversarial escapes, bitwise vs the first variant + cold-L2 graph timing), exact92.py = layer's one-hot exactness test
+  on a given source (G30CU=file).
+- Diagnosis (SASS of layer g30 esc vs ESC 0): the not-taken path is just SHF+ISETP+BRA; the cost is the TAKEN path: per escape
+  esc_patch (16 ISETP + 16 predicated PRMT) + esc_pop (VIMNMX3 chain 8 deep + 16 ISETP + 16 SEL), ~80 dependent instrs, on the
+  warpgroup's critical path (wgmma waits for the slowest warp; ~3 taken stages per warp at 0.4 esc/row).
+- H100 cold-L2 us, unpool 8192x4096 T=128 (reference weights seed 0, 3276 escapes), 4-6 rounds:
+  layer g30 22.3-22.8 | ESC 0 21.4-22.1 | warp-uniform stage mask (G30_UNI) no gain | ld.shared for W stage (G30_LDS; the
+  compiler emits generic LD.E.128 for smem) no gain | switch/BRX patch (G30_SW) +1 us DEAD | **SORT (candidates sorted once at
+  start by a 16-wide compare-swap network; pop = register shift)**: 21.9-22.2 = **-0.33..-0.4 us** (cost ~0.75 -> ~0.35).
+  Adversarial ESCW=3 (2.6 esc/row, max 7): unp 24.1 -> 22.6 (-1.5), o 8192x1024 11.2 -> 10.6 (-0.6); natural o tie (~-0.05).
+- Exactness: SORT output bitwise == layer g30 on natural + ESCW=3 weights (unpool, o); one-hot exact test 0 mismatches seeds
+  0/1/7/13 (~20M weights each).
+- Handoff: dev/s92/g30_sort.cu (full file) / dev/s92/g30_sort_layer.diff (`patch -p0` from r-layer root onto f7a1cdc's
+  muse_decode_layer/g30_src.cu; drops esc_pop, adds G30_POP + the sort). No interface change.
+- Not measured (standalone can't show it): G30_PRE in g30v.cu = consumers read the escape header before griddepcontrol.wait
+  (weights only); might hide ~0.5 us of header latency in-layer as a PDL secondary. Left as an option for layer (in g30v.cu).

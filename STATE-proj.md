@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 16:50 UTC (s92). g30 ESC_FIX cheaper: candidates sorted once, pop = register shift (dev/s92/g30_sort_layer.diff
+on layer f7a1cdc g30_src.cu): H100 unp T=128 -0.33..0.4 us natural, -1.5 adversarial; bitwise == layer g30, one-hot exact. Handoffs proj s92.
 Updated 2026-10-27 16:10 UTC (s91). g30 ESCAPES (layer s99 T=128 12-bit wgmma GEMM): escape value patched into the owning
 thread's register A fragment (exact; H100 +0.4..0.9 us; still -3.5..4.5 us vs cuBLAS). Patch muse_bf16_proj/dev/s91/g30_esc_layer.patch
 on layer 857a9cb s99_g30.cu, test dev/s91/g30e.py (ESCW=1 adversarial). Handoffs proj s91. NOTES s91.
@@ -133,7 +135,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s88: WPB 20-32 / R=2 ILP dead; NOW profile: loop ~47% of warp time, setup ~29%, task ends ~19% (dev/s88 ncu tools).
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
-000. (s91) g30 escapes handed to layer: help layer integrate g30 at T=128 (qkv shape, T=256, PDL, TUNE option) if asked;
+000. (s92) layer: watch for g30_sort port; G30_PRE (header before the wait, dev/s92/g30v.cu) untested in-layer.
+   (s91) g30 escapes handed to layer: help layer integrate g30 at T=128 (qkv shape, T=256, PDL, TUNE option) if asked;
    validate its bundle (tools/validate.py on proj/validate) before its check.
 00. LANE (b) (lead 08:55Z): read COORD Requests for layer bundles; port + validate on proj/<name> branches (tools/validate.py on proj/validate).
 0c. Layer: watch for s68 ltalt:pooler at T=128 (Handoffs proj s68) in a layer check's 'layer tune T=128' lines.
