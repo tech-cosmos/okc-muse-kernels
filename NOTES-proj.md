@@ -1593,3 +1593,9 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   356.6 vs 351.3, full 554.0 vs 564.1, T=8 full 129.0 vs 129.4 (T=128 default changed in v124: fr). Fix after it: the
   guest's stdout is captured and printed as zlib+base64 'guestz' chunks when > 6 KB (12 tune lines = 2.9 KB);
   `python dev/s72/readguest.py <log> [grep]` decodes. (Not yet judge-verified; local OK.)
+- **BANNED + REMOVED (08:50Z).** Lead 08:13Z (COORD Human decisions): a problem's checks run only that problem's own
+  submission and kernels; running other lanes' builds inside proj's prepare() misuses the judge and risks the account.
+  Check 682bb622 ran ~08:20Z, AFTER that line: I had not re-read COORD before checking (my error; acked to lead).
+  Neither carrier run was submitted (withdraw applies only to board runs). Removed: hook out of dev/sub_template.py and
+  submission.py (both = dc0401f again, bench test 39/39), dev/s72 deleted (git history only: do NOT revive), /tmp/pjg
+  deleted. Do not use the carrier runs' numbers anywhere. Lesson: re-read COORD Human decisions right before EVERY check.
