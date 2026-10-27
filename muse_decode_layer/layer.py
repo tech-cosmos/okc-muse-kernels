@@ -807,6 +807,11 @@ G24_CFG = {("pooler", 16): (16, 1024, 4, 3, 12, 2, 1), ("unpool", 16): (16, 1024
 G24_SKCFG = {("pooler", 16): (16, 1024, 2, 4, 16, 2, 257), ("unpool", 16): (16, 1024, 2, 4, 16, 2, 257),
              ("qkv_gate", 16): (16, 1024, 2, 4, 16, 2, 257), ("pooler", 32): (32, 512, 2, 4, 16, 2, 257),
              ("unpool", 32): (32, 512, 2, 4, 16, 2, 257), ("qkv_gate", 32): (32, 512, 2, 4, 16, 2, 257)}
+# proj s69: stream-K g24 with (4,3,12) at T=32 pooler/unpool (TUNE option g24sk2:<key>, checked before g24sk). proj H100
+# G88 H200 proxy (after a 3 us pred, 2 reps): pool m32 23.9-24.1 vs SK (2,4,16) 24.7-24.9, unp 22.0 vs 22.8-22.9; consumer-only
+# (G24_NOW, G108) pool 17.6 vs 18.4-18.7, unp 17.2 vs 17.9-18.2. proj s56 H200 diag: pool m32 SK (4,3,12) 20.00 vs (2,4,16) 21.15.
+# H100 in-layer it lost (+1.2..1.7 us d32, W-bound there): H200 tuner only.
+G24_SK2CFG = {("pooler", 32): (32, 512, 4, 3, 12, 2, 257), ("unpool", 32): (32, 512, 4, 3, 12, 2, 257)}
 _G24 = {}
 # proj s56 EZ/ZN: within one layer call, each gemv24 zeroes the NEXT gemv24's FP32 out (preallocated, kept in _G24_ZN until
 # that call) as its warps finish; the next one then skips its own zeroing + fence + grid epoch barrier (npre bit 17).
@@ -2391,10 +2396,10 @@ def _g24_build():
             import hashlib
             from torch.utils.cpp_extension import load_inline
             _G24["lib"] = load_inline(
-                name="layer_g24_" + hashlib.sha256(_G24_SRC.encode()).hexdigest()[:10] + "_" + str(len(G24_CFG) + len(G24_SKCFG)),
+                name="layer_g24_" + hashlib.sha256(_G24_SRC.encode()).hexdigest()[:10] + "_" + str(len(G24_CFG) + len(G24_SKCFG) + len(G24_SK2CFG)),
                 cpp_sources="void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
                             "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
-                cuda_sources=_G24_SRC.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(G24_CFG.values()) | set(G24_SKCFG.values())))),
+                cuda_sources=_G24_SRC.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(G24_CFG.values()) | set(G24_SKCFG.values()) | set(G24_SK2CFG.values())))),
                 functions=["g24_gemm"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
         except Exception as ex:  # noqa: BLE001
             print("layer gemv24 build failed:", ex)
@@ -2404,6 +2409,7 @@ def _g24_build():
 def _g24_prepare(state, w, comp, g):
     state["g24"] = {}
     state["g24sk"] = {}
+    state["g24sk2"] = {}
     if not G24_CFG or _G24_SRC is None:
         return
     _g24_build()
@@ -2412,7 +2418,7 @@ def _g24_prepare(state, w, comp, g):
         return
     dev = state["unpool"].device
     packs = {}
-    for sd, (key, m), c in [("g24", k_, v_) for k_, v_ in G24_CFG.items()] + [("g24sk", k_, v_) for k_, v_ in G24_SKCFG.items()]:
+    for sd, (key, m), c in [("g24", k_, v_) for k_, v_ in G24_CFG.items()] + [("g24sk", k_, v_) for k_, v_ in G24_SKCFG.items()] + [("g24sk2", k_, v_) for k_, v_ in G24_SK2CFG.items()]:
         if key not in comp:
             comp[key] = _compress(w[key])
         if comp[key] is None:
@@ -2525,15 +2531,17 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
              {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True},
              {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True},
-             {"g27:o": True}, {"tk2h": 4, "g24:qkv_gate": True}, {"tk2h": 4, "lt:o": True, "g24:qkv_gate": True}),  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
+             {"g27:o": True}, {"tk2h": 4, "g24:qkv_gate": True}, {"tk2h": 4, "lt:o": True, "g24:qkv_gate": True},
+             {"g24sk2:pooler": True}, {"g24sk2:unpool": True}, {"g24sk2:pooler": True, "g24sk2:unpool": True},
+             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
+             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}),  # proj s69: g24sk2 = SK (4,3,12)  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
             {"pr1": False, "g19:pooler": True}, {"pr1": False, "g19:pooler": True, "g19:qkv_gate": True}, {"cslpw": True}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
-              {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
-              {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
-              {"fr": True, "twf_split": 66}, {"twq": 536953348}, {"twq": 536870916}, {"twq": 536953348, "fr": True}),  # s76: moe s23 HOTQ (twq | 66<<8 | 1<<16 | 32<<24 = split66 + moe_hot<64> on 32 CTAs; 536870916 = hot without split)
+              {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
+              {"fr": True, "twf_split": 66}),  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
               # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
@@ -2719,7 +2727,9 @@ def _g24_sel(state, key, m):
         return None
     if _opt(state, m, "g22:" + key, False) and state.get("g22", {}).get((key, m)) is not None:
         return None
-    e = state.get("g24sk", {}).get((key, m)) if _opt(state, m, "g24sk:" + key, False) else None
+    e = state.get("g24sk2", {}).get((key, m)) if _opt(state, m, "g24sk2:" + key, False) else None
+    if e is None:
+        e = state.get("g24sk", {}).get((key, m)) if _opt(state, m, "g24sk:" + key, False) else None
     if e is None:
         e = state.get("g24", {}).get((key, m)) if _opt(state, m, "g24:" + key, False) else None
     return e

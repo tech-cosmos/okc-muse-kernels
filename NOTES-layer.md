@@ -1573,3 +1573,25 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   => moe n21 twq split DEAD IN THE LAYER on the H200 (both judge runs; the moe-only -10.6 us with layer routings does not
   transfer: in-layer twq runs beside / after the side-stream kernels, unlike the moe-only proxy). Told moe (their HOTQ builds on it).
 - v120: TUNE options + base removed (= v117 behavior); moe_src keeps the n21 code (flags without split bits = old twq). Tests 13/13.
+
+## s76 (2026-10-27 06:33Z-, night4 session 25): v121 = moe s23 HOTQ as TUNE[128] options + proj s66 T=32 combos
+- Port: `python ~/r-moe/muse_moe_w4a16/tools/s23/patch_layer_hotq.py moe_src.py` (clean on v120's moe_src). HOTQ = moe_hot<NH 64>
+  (33..64-token experts, one N 64 pass) on `grid` CTAs launched before moe_twq, twq (flags bit 20 hx) skips those experts, no wait at
+  entry, waits at its end. Layer value: twq flags | grid << 24. TUNE[128] += {twq 536953348} (4|66<<8|1<<16|32<<24 = n21 split 66 +
+  hot 32; moe-only H200 v16 191.1 vs split 201.5 vs plain twq ~210), {twq 536870916} (hot 32, no split), {twq 536953348, fr}.
+  g_hot is reset by the twm path (moe_set_hot(0/1)) each call, so T=128 HOTQ (sets 4) cannot leak into T=256.
+- proj s66 tune32_stack_layer.patch applied: TUNE[32] += {tk2h 4, g24:qkv_gate}, {tk2h 4, lt:o, g24:qkv_gate}.
+- Tests: forced (variants/v121_f536953348.py / _f536870916.py, prepare() override) scored verify 16 x3 0 bad each; replay verify 16
+  seed 23 0/40 each (seed 11 lines cut by my tail); bench test 13/13; cold prepare 122.4 s (join 96.8, tune 24.9).
+- H100 tuner (shared GPU) T=128 sl: 536953348 346.7 / 536870916 355.9 vs default ~353 (picked twf_split 66 at 336.8); full 447/445 vs 434.
+- 07:11Z CHECK baae0e41 v121 (34a1bdc) 2.0772x [2.046, 2.108], 10,890 us (not submitted, < 2.0860): d1 67.2/76.9, d16 126.9/208.0,
+  d32 167.8/321.4, v1 109.0/121.3, v16 277.3/377.4, v32 372.3/538.9. H200 tuner:
+  T=128 sl default 268.7 | twq 4 271.2 | hot32 (536870916) 271.7 | split66+hot32 (536953348) 277.6 | +fr 276.9 -> picked fr 267.4;
+  full 392.7 | 395.5 | 396.7 | 392.8 | 393.0 -> {lt:o, lt:unpool}. => HOTQ DEAD in-layer (hot alone = twq 4, split +6 as in s75).
+  T=32 sl default 176.3 | g24:qkv_gate 175.7 | {tk2h 4, g24:qkv_gate} 174.9 | {tk2h 4, lt:o, g24:qkv_gate} 174.5 PICKED (confirm 176.1 vs
+  175.0); full 340.1 | 339.0 | 337.3 | 337.0 PICKED (confirm 340.3 vs 336.3). proj s66 combos do stack on the H200 (-1.1 sl / -4 full tuner).
+- moe 07:25Z diagnosis (COORD Requests): the layer's T=128 default is moe_twm; twq ~+5 us in-layer over 16 judge runs; n21's split code
+  slowed every twq item. => v122: every twq option removed from TUNE[128] (HOTQ code stays in moe_src, unreachable).
+- v122 also = + proj s69 g24sk2 (SK g24 (4,3,12) at T=32 pooler/unpool; r-proj dev/s69/g24sk2_layer.patch, clean on 34a1bdc) as TUNE[32]
+  options, + one more combo {g24sk2 both, tk2h 4, lt:o, g24:qkv_gate}.
+- v122 tests: forced (variants/v122_fsk2.py) scored decode 32 x3 0 bad, replay decode 32 seeds 11,23 0/80; bench test 13/13; cold prepare 114.5 s.
