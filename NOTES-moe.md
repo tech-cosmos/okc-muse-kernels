@@ -1706,3 +1706,18 @@
   native kernels (~/attn s73/s92), fused merges (s36/s43/s50) all measured dead. Remaining idea (unbuilt): shorten the
   per-tile Gluon chain (0.86 us = ~1550 cyc for one warp; F2FP K/V upcasts + block-diagonal waste) -- ~/attn tried tqk/tpv
   (lost on column reductions); a 2-warp program splitting each tile's keys is the untested form.
+
+## Night4 session 36 (2026-10-27 13:14Z - ) -- attention lane: record attempt on main (qf) + csl SASS audit
+- Lead has not answered s34's lane request (COORD Requests). No new Human decision for moe since 09:45Z.
+- csl (d1 sliding) SASS audit (decode<1,...> from the current build): all gathers (12 LDG per thread) are issued
+  first, then the Q RMSNorm/RoPE shuffles and the new-token K/V branch (CTA 15 warp 3: 5 SHFL + RSQ + STG/STS) run
+  under the gather latency; the first gather use is the QK MMA. So the post-gather 0.45 us is the MMA -> max/exp/sum
+  shuffles -> PV chain only; nothing independent left to hoist. "Wider per-lane rows" (1 K + 1 V row per thread,
+  smem re-layout to fragments) would double sector requests (16 B loads of 32 B sectors) for the same one-trip
+  latency: not built. csl is closed for me.
+- **Check 76983f6b** (main 7fe6b59 = board code + qf at d1 full): **2.5964x** (1450.6 us) vs board 2.5962x = tie; NOT
+  submitted. Per shape (us, vs board 957cabd7): d1 sl 3.87 (4.47), d1 full 12.63 (12.19: qf's -0.28 lost in node noise),
+  d16 8.00/87.41, d32 12.04/167.79, v1 5.41/16.02, v16 11.73/104.76, v32 14.02/194.70 (all within +-0.4 of the board run).
+  Attention budget 10-27: checks 12/20, scored 2/10.
+- Session result: no new attention lever; lane request to the lead still open. Next session: if still no answer,
+  don't spend attention checks on ties; the only unbuilt items left are <= 0.1% layer each (d1 full 2-warp tile split).

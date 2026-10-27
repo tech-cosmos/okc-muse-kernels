@@ -88,7 +88,8 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - = 410dcb6 + agent2 halfpfkr (v32 sl cl, csl/nds pt prefetch, nds K-early) + verify 16 on the pre-cl nvs build (_NVS0) +
   csl/vtk owner fast divides. SUBMITTED s32: 90b7ce85 2.5653x (tie with board 2.566x). The same code timed 2.619 / 2.639 /
   2.589x inside s32's DIAG checks (node noise +-3% whole-run): board best stays 2.566x (06456b7e).
-- Checks used 2026-10-27: 9/20 (s32: 5 DIAGs, s33: 2 DIAGs). Scored 2/10 (s33 submit: see NOTES).
+- Checks used 2026-10-27: 12/20 (s32: 5 DIAGs, s33: 2, s35: 2 DIAGs, s36: 76983f6b main+qf 2.5964x = tie, not submitted). Scored 2/10.
+- s36: csl SASS audit: independent work already hoisted under the gathers; csl closed. No open >= 0.1% attention item.
 ## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)
 - Floors (pt trip + 20.5 MB random 128-B rows, all in flight, incl. launch): ~8.0 us d1 and v1; dense 7.4.
 - Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.
