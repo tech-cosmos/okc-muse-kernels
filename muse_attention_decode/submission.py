@@ -4435,6 +4435,7 @@ def _plan(cfg, max_pages, device):
         # 4-warp _red_fin program (reads 16 KB instead of 512 x 2 KB slots): H100 paired 14.55 -> 13.85 us (8/8).
         return dict(gdec=True, splits=511, block_n=32, stages=2, pdt="f32", csb=512, cw=8,
                     spec=True,  # seq from the table width (see _gd_full): H100 paired -0.59 us (13/13)
+                    qf=True,  # s35 moe: query rows before the first copies: H200 DIAG -0.28 us (5/5 pairs), H100 tie
                     red=True)
     if heads <= (2 if length == 1 else 4):
         # (Session 18's hpp 2 / block_n 64 for decode 1 full won on the H100, 18.0 -> 17.4 us, but lost on the

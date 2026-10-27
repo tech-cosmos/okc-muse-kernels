@@ -1679,3 +1679,30 @@
   the per-program page-table trip (pt 320 KB cold), no overlap available at kernel start (nothing earlier in the graph).
 - Conclusion for the lead: every attention item in my STATE list is now measured dead or <= 0.3%. Batch-1 sliding
   (csl/vtk) structure was mined in ~/attn s72-s126; I have no new >= 1% lever. Asking for a lane (COORD Requests).
+
+## Night4 session 35 (2026-10-27 12:48Z - ) -- attention lane: decode 1 full (_gd_full RED) timeline + H200 DIAGs
+- No lead answer to s34's lane request yet; picked d1 full (largest attention gap left: H200 12.2-13.3 vs ~8 us floor).
+- Tool: tools/s35/mktl_d1.py (LOCAL stamp copy, never submit: clock64/globaltimer per _gd_full program: start, q ready,
+  per tile, loop end, partial store, red add end; _red_fin start/after wait/loads/end) + tools/s35/run_d1.py <dir> [reps]
+  (graph replay, 512 MB cold read, OV='{plan json}' env = plan override).
+- **H100 d1 full (511 one-warp programs, 500 of them 5 x 32-key tiles, NS 2), us:** q phase 1.1 | first tile 2.8 after
+  q | then 1.17/tile | store 0.16 | red atomics 0.28 | program 8.8 | last program end 10.0 after first start | _red_fin
+  released 0.5 later, done 1.0 after release | total 11.5. Matches ~/attn s92 (2.9 us fixed chain + gather rate).
+- stages 3/4: first tile arrives LATER (q+t0 3.96 -> 4.9 -> 6.4 us) while later tiles take 0.86 us (= the per-tile
+  compute chain of one warp, ~1550 cyc). On the H100 the whole thing is at the random-gather rate (more bytes in flight
+  only reorder). Without qf, the q-row load queues behind the prologue gathers (q phase 1.1 -> 2.8 -> 4.7 at NS 2/3/4).
+- Built (submission.py, default off / code-identical at NS 2): GD_PTF (prologue page-table loads all first, then the
+  copies) and plan key `qf` (query rows loaded before the first copies). Local H100: ties (13.66 vs 13.76).
+- **H200 DIAG 95f8158e** (tools/s35/mkab.py v1): main 13.28/13.20 | qf 12.75/13.09 (-0.3) | splits 640 (625 programs x 4
+  tiles) 12.86 | qf+640 13.86 | qf stages 3 14.37/14.37, 4 14.62, stages 3 13.65 (deeper stages lose on the H200 too).
+- **H200 DIAG 1259baad** (mkab v2, 3 round-robin repeats): main 13.68/13.70/13.62 | qf 13.12/13.57/13.57 | splits 640
+  13.58/13.44/13.49 | qf+640 14.22/14.16/14.16 (the combination loses every time; not understood, not pursued).
+  => qf: 5/5 H200 pairs over two checks, -0.05..-0.56, mean **-0.28 us** at d1 full. ON MAIN (plan qf=True for the
+  batch-1 gdec plan); tests 16/16. Not submitted: ~0.2% of the attention score is far below whole-run noise; it rides
+  along with the next submit. splits 640 -0.1..-0.4 (4 samples): too small/noisy, left off.
+- Checks today (attention): 11/20 (s35: 95f8158e, 1259baad, both DIAG, never submit). Scored 2/10.
+- Read for the next session: d1 full on the H200 = ~2.9 us fixed chain (q 1.1, first tile pt+gather trips) + 5 tiles x
+  ~0.86 us per-warp compute chain + red 0.45 + _red_fin ~1.5 after the last program. Deeper stages, more/fewer splits,
+  native kernels (~/attn s73/s92), fused merges (s36/s43/s50) all measured dead. Remaining idea (unbuilt): shorten the
+  per-tile Gluon chain (0.86 us = ~1550 cyc for one warp; F2FP K/V upcasts + block-diagonal waste) -- ~/attn tried tqk/tpv
+  (lost on column reductions); a 2-warp program splitting each tile's keys is the untested form.
