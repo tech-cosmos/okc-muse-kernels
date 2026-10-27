@@ -2186,7 +2186,10 @@ LT_DEFAULT_OFF = {("qkv_gate", 16), ("qkv_gate", 32), ("o", 16), ("o", 32), ("o"
                   ("pooler", 16), ("pooler", 32), ("unpool", 16), ("unpool", 32), ("pooler", 256), ("unpool", 256)}
 # s24: alternative cuBLASLt configs, TUNE option "ltalt:<key>" = 1-based index (implies lt): proj s16 H200 qkv m32
 # 17.2-17.3 vs F.linear 17.7-18.1 tuner us.
-LT_ALT = {("qkv_gate", 32): [(66, 27, 35, 3, 2, 0, 2, 4)]}
+# proj s68 (Handoffs; H200 full algo-66 screen, check f45aa794, standalone graph, cold L2): pooler m128
+# (66,124,..,0,4) 24.06 vs LT_CFG 26.75 / (66,15,..,2,5) 25.22 us; in-layer the router runs beside it: tuner decides.
+LT_ALT = {("qkv_gate", 32): [(66, 27, 35, 3, 2, 0, 2, 4)],
+          ("pooler", 128): [(66, 124, 35, 1, 0, 0, 0, 4), (66, 15, 35, 1, 0, 0, 2, 5)]}
 _LT_SRC = None  # @@LT@@
 _LT = {}
 
@@ -2564,7 +2567,8 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"cslpw": True, "pr8_npf": 206}, {"cslpw": True, "pr8_npf": 220}, {"cslpw": True, "pr8_npf": 112}),  # s91: pr8 bulk PF depth on the H200 (H100 can't judge it)  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": False},
-              {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
+              {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},
+              {"ltalt:pooler": 1}, {"ltalt:pooler": 2}, {"ltalt:pooler": 1, "twf_split": 66, "lt:o": True, "lt:unpool": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
               # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
         256: ({}, {"nvscl": False, "sl": True}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
