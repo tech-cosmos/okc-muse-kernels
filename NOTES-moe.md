@@ -1969,3 +1969,14 @@
   redux.sync top-8, shallower W ring (NW 8: the fence after the partial store 4.6 vs 11-16 us at NW 12-16; pooler also faster).
 - Clusters: cudaOccupancyMaxActiveClusters on the H100 with ~200 KB smem: size 2 -> 66 (132 CTAs), 4 -> 30, 8 -> 15, 16 -> 7:
   only pairs fit all 128 streaming CTAs, so in-cluster reduces beyond pairs are out.
+- In-layer H100 (copy /tmp/m5l of r-layer main v137 + tools/n5s1/patch_layer_pr32.py on submission.py, TUNE {} so TUNE_BASE
+  only, tools/ab_flag.py 3 rounds, GPU shared with the other agents), us off -> pr32:
+  d32 sliding 196.75 -> 195.44, full 422.74 -> 421.47; d16 sliding 190.78 -> 191.87, full 300.21 -> 298.77.
+  = tie..-1.4 us: the fused router removes the whole +9..14 us router-contention loss of the g30n pooler (proj s96), but the
+  H100 is HBM-bound here (pr32 = 58.7 MB at ~2.5 TB/s, like g24 + side router), so it cannot show more. H200 tuner = the gate
+  (on the H200 g24 pooler+unpool run at ~2.0 TB/s in-layer at d32).
+- Tests with pr32 forced on (submission_on.py): bench test 13/13 PASS; route_judge 30 inputs x seeds 11,7 x d16/d32 sl/full
+  0/240 fails (worst gap 0.0187 vs FP8-ref 0.0187); replay_test 20 x d16/d32 0/80.
+- Capture gotcha: the pr32 branch must still fork the side stream (side_stream.wait_stream(main)) because later code joins it.
+- Handoff posted (COORD): TUNE option {"pr32": True} at T=16/32, patch tools/n5s1/patch_layer_pr32.py (test form reads the .cu
+  from r-moe at prepare: the integrator must embed it like _G30_SRC and put the build on _BUILD_POOL).

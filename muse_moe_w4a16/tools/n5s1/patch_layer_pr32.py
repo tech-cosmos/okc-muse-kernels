@@ -47,6 +47,7 @@ old = "    else:\n        side_stream.wait_stream(main_stream)\n        with tor
 assert s.count(old) == 1
 new = '''    elif (pr32 := (tokens in PR32_TOKENS and state.get("pr32", {}).get(tokens) is not None
                    and _opt(state, tokens, "pr32", PR32_DEFAULT))):
+        side_stream.wait_stream(main_stream)  # nothing runs there, but the later joins need it forked in the capture
         lib, (wp, hdr, scale), rw = state["pr32"][tokens]
         pooled = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
         topk_ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
