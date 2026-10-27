@@ -370,14 +370,14 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const 
             float2 a = *(const float2*)&racc[s][2 * lane];
             o0 += w * a.x; o1 += w * a.y;
         }
-        float r = vscale / den;
+        float r = __fdividef(vscale, den);  // proj s81 <- moe s31: fast divides in the owner merge (H100 stamps -0.14 us)
         o0 *= r; o1 *= r;
         float s2 = o0 * o0 + o1 * o1;
 #pragma unroll
         for (int o = 16; o; o >>= 1) s2 += __shfl_xor_sync(0xffffffff, s2, o);
         float ni = rsqrtf(s2 / D + 1e-5f);
-        o0 *= ni / (1.f + __expf(-g0));
-        o1 *= ni / (1.f + __expf(-g1));
+        o0 *= __fdividef(ni, 1.f + __expf(-g0));
+        o1 *= __fdividef(ni, 1.f + __expf(-g1));
         *(__nv_bfloat162*)(out + (long)b * HQ * D + (h * 8 + rank) * D + 2 * lane) = __floats2bfloat162_rn(o0, o1);
     }
 }
@@ -731,14 +731,14 @@ __global__ void __launch_bounds__(128) verify(const QT* __restrict__ qkv, const 
             float2 a = *(const float2*)&racc[s][2 * lane];
             o0 += w * a.x; o1 += w * a.y;
         }
-        float r = vscale / den;
+        float r = __fdividef(vscale, den);  // proj s81 <- moe s31: fast divides in the owner merge (H100 stamps -0.14 us)
         o0 *= r; o1 *= r;
         float s2 = o0 * o0 + o1 * o1;
 #pragma unroll
         for (int o = 16; o; o >>= 1) s2 += __shfl_xor_sync(0xffffffff, s2, o);
         float ni = rsqrtf(s2 / D + 1e-5f);
-        o0 *= ni / (1.f + __expf(-g0));
-        o1 *= ni / (1.f + __expf(-g1));
+        o0 *= __fdividef(ni, 1.f + __expf(-g0));
+        o1 *= __fdividef(ni, 1.f + __expf(-g1));
         *(__nv_bfloat162*)(out + (long)tok * HQ * D + (h * 8 + rank) * D + 2 * lane) = __floats2bfloat162_rn(o0, o1);
     }
 }
@@ -2300,7 +2300,7 @@ template <int NS> struct Smem {
     alignas(1024) uint8_t q[2][MR * HD];       // per head FP8 queries [row][d], SW64
     int ptr[8][BN];                            // page 1: page-table entries of tiles i .. i + NV_PFD (ring of 8)
     int lim[8];                                // and each tile's last valid key
-    uint64_t ready[NS], empty[NS];
+    uint64_t ready[NS], empty[NS], readyv[NS];  // proj s81 <- moe s31 (agent2 s19 K-early): readyv = V^T staged
     alignas(1024) uint8_t knew[BN * 128];      // last split: the 8 new keys as a K tile (rows 0-7; rows 8-63 zero)
     alignas(1024) uint8_t vtnew[2][HD * BN];   // and their V^T (key slots 0-7 of group 0; the rest zero)
 };
@@ -2368,6 +2368,10 @@ __device__ __forceinline__ void producer(Smem<NS>& sm, const uint8_t* __restrict
         if (i >= NV_LAG) {
             const int s = (i - NV_LAG) % NS;
             cp_wait<NV_LAG>();
+            asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+            __syncwarp();
+            if ((tid & 31) == 0) mb_arrive(&sm.ready[s]);   // agent2 s19 K-early: QK(i) starts while V(i) is transposed;
+            // P@V waits on readyv (H100 decode 32 -0.06/-0.10 us)
             asm volatile("bar.sync 1, 128;" ::: "memory");
             {
                 const uint32_t vsb = smem_u32(&sm.vs[s][0]), vtb = smem_u32(&sm.vt[s][0][0]);
@@ -2389,7 +2393,7 @@ __device__ __forceinline__ void producer(Smem<NS>& sm, const uint8_t* __restrict
             }
             asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
             __syncwarp();
-            if ((tid & 31) == 0) mb_arrive(&sm.ready[s]);
+            if ((tid & 31) == 0) mb_arrive(&sm.readyv[s]);
         }
     }
 }
@@ -2681,6 +2685,7 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
             const int sp = (i - 1) % NS, sc = i % NS;
             mb_wait(&sm.ready[sc], (i / NS) & 1);
             issue_qk2(s, qa, smem_u32(&sm.k[sc][0]));
+            mb_wait(&sm.readyv[sp], ((i - 1) / NS) & 1);
             fence_regs(pin);
             issue_pv2(o, pin, smem_u32(&sm.vt[sp][0][0]));
             wg_wait<1>();
@@ -2698,6 +2703,7 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
         };
         auto lastt = [&](uint32_t (&pin)[8]) {
             const int sp = (n - 1) % NS;
+            mb_wait(&sm.readyv[sp], ((n - 1) / NS) & 1);
             fence_regs(pin);
             issue_pv2(o, pin, smem_u32(&sm.vt[sp][0][0]));
             wg_wait<0>();
@@ -2745,9 +2751,21 @@ const QT* __restrict__ qkv, const float* __restrict__ cs,
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    if (threadIdx.x == 32) {  // proj s81 <- moe s31 (agent2 s17): L2 prefetch of this CTA's share of the request's plausible
+        // page-table span (agentic lengths: window start >= 0.86 width - 2112). A hint only. H100 decode 32 -0.11..-0.24 us
+        const int rq = S, pb = blockIdx.x / rq, part = blockIdx.x % rq;
+        const int plo = max(0, (int)(maxp * 0.86f) - 2112);
+        const int per = ((maxp - plo + rq - 1) / rq + 3) & ~3;
+        const int a = plo + part * per, e = min(a + per, maxp);
+        if (e > a) {
+            const uintptr_t u = reinterpret_cast<uintptr_t>(pt + (long long)pb * maxp + a) & ~uintptr_t(15);
+            const uintptr_t v = (reinterpret_cast<uintptr_t>(pt + (long long)pb * maxp + e) + 15) & ~uintptr_t(15);
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(u), "r"((unsigned)(v - u)) : "memory");
+        }
+    }
     const int tid = threadIdx.x, wg = tid >> 7;
     if (tid == 0) {
-        for (int i = 0; i < NS; ++i) { mb_init(&sm.ready[i], 4); mb_init(&sm.empty[i], 4); }
+        for (int i = 0; i < NS; ++i) { mb_init(&sm.ready[i], 4); mb_init(&sm.empty[i], 4); mb_init(&sm.readyv[i], 4); }
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
     __syncthreads();
