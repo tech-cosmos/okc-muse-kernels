@@ -1721,3 +1721,13 @@
   Attention budget 10-27: checks 12/20, scored 2/10.
 - Session result: no new attention lever; lane request to the lead still open. Next session: if still no answer,
   don't spend attention checks on ties; the only unbuilt items left are <= 0.1% layer each (d1 full 2-warp tile split).
+
+## Night4 session 37 (2026-10-27 13:26Z - ~13:40Z) -- no lane answer; last unbuilt attention item closed on paper; 0 checks
+- Still no lead answer to the s34 lane request (COORD Requests); newest Human decision for moe is 09:45Z.
+- d1 full "2-warp program splitting each tile" (s35's only unbuilt item) closed on paper: a 2-warp program halves each
+  warp's tiles exactly like splits 1023 (2.5 tiles/program) does, minus the extra atomics. splits 1023 and 640 already
+  lose or tie on the H200 (s32 4fd8b5d5, s35 95f8158e/1259baad), and the H100 timeline runs at the gather rate (1.17 us/tile)
+  not at the per-warp chain (0.86). So the SM's gather/issue throughput limits it, not the warp's latency chain. Not built.
+- Re-read the layer STATE prefetch dead-ends (s6/s14/s55/s61: weight L2 prefetch during attention/csl/tk2f/norm, G10_PFL2,
+  UPF*): every overlap form I could add from the moe side is already measured there. Nothing new to build.
+- Session result: no open moe/attention item; attention budget 10-27 unchanged (12/20 checks, 2/10 scored).
