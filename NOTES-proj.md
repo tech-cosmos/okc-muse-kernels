@@ -1401,3 +1401,27 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   RMSnorm hides pure scale errors, so the invariant check matters more than the tolerance tests here.
 - H100 (W-/router-bound, cannot show it): ab_flag 6 rounds x seeds 7,11 d32 sl +5.7/+3.2, full +1.7/+2.1 us; tuner lines
   g24p +1.5..2.4 vs default. H200 bound (diag61 EZprobe): pool m32 G108 -1.0..-1.5 us minus the unpool's 512 KB ZN tail.
+
+## s64 (2026-10-27 05:05-06:15Z, sandbox okc-night4, session 21): gemv28 = x as wgmma A, W decoded into smem as wide-N B = DEAD (this form)
+- Idea (new orientation; g20/g22/s60 all had W in registers as A with tokens as N): A = x TMA box [64 rows (OOB token rows
+  zero-filled)][64 k] SW128, B = 12-bit W decoded by 2 decoder warpgroups into smem ([BN rows][64 k] BF16, SW128 K-major),
+  wgmma m64nBNk16 SS by an MMA warpgroup (async, overlaps decode), WG3 = TMA producer; stream-K over (BN-row tile, 64-k)
+  stages, red.global.add.v2 flush per run. dev/s64/gemv28.cu + g28.py "M,BN,NS,ND[,KA]" (pack = DEC3 units (row, 8 k),
+  stage = [BN*8 x 8 B][BN*8 x 4 B], tile-major; no escapes yet: checked vs W' like s53). CORRECT first try (rel err < 1e-5).
+- BN=256 does not compile at 512 threads (ptxas caps 128 regs; setmaxnreg does not lift the compile limit): needs 384 thr.
+- H100 pool, us over a 3 us PDL pred (g28.py / g24.py back to back): m32 g28 (128,8,4) 20.94 | (128,6,3) 21.26 | KA2
+  (128,3,2,2) 21.49 vs g24 layer cfg (512,2,4,16,2,257) 20.74; m16 g28 21.06 / KA2 19.76 vs g24 (1024,4,3,12,2) 18.46.
+  Consumer-only (NOW): g28 m32 19.5-20.3, m16 20.5 vs g24 15.84 / 11.81 -> loses on the H200 (consumer-bound) too.
+- Where the time goes (NOW pool m32 (128,8,4), ablations, us): full NOW 19.5 | no decode 17.0 | no wgmma 15.7 | neither
+  14.3 | neither + no x TMA 12.5 | + no flush 12.9 (flush ~0.5) | empty kernel (return after init) 0.8. Trace (globaltimer,
+  block 0): EVERY role advances ~0.33-0.36 us per stage regardless of NS/ND (4/8, 8/2, 8/4) and of try_wait vs test_wait
+  (test_wait worse), proxy fence (none), wgmma fence/commit/wait (none: 13.1). MMA loop ALONE (no waits, other WGs exit,
+  no setmaxnreg): 0.28 us/iter; + no wgmma ops 10.0 total; + no mbarrier arrives 6.0 => each mbarrier.arrive ~65 ns of
+  issue-serialized time, and the 3-role handoff chain costs ~0.3 us per stage = about the H200 HBM time of one 12 KB stage
+  per SM (~0.4 us). Bigger stages (KA=2) cut the handoffs per byte but did not help the full kernel (21.5).
+- Traps: setmaxnreg.inc in a WG hangs if the other WGs exit without setmaxnreg.dec (G28_SOLO hang); ND=1 or NS=1
+  deadlocks (MMA releases stage j-1 only after issuing j); now a host TORCH_CHECK.
+- Verdict: dead in this form. A variant that might still work: ping-pong (each of 2 MMA warpgroups decodes its own B tile
+  then issues async wgmma, no cross-WG mbarrier chain per stage; FA3-style) with KA>=2 and BN=256 at 384 threads.
+  Not worth more before that skeleton is shown < ~0.1 us/stage in NOW mode on the H100.
+- No judge runs this session.
