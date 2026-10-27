@@ -1938,3 +1938,8 @@
   (-1.2..-2.1 us d32 with the TUNE off, the tuner picks it at sl -1.0..-1.4 and rejects it at full); the pooler loses +9..14 us at sl
   because it competes with the router for SMs. g34's pooler also fills the GPU (128 CTAs), so it would hit the same problem.
   => g34 CLOSED, not handed off. The tools/s47 files stay for reference. 0 checks, no GPU time used.
+
+## Night4 session 49 (2026-10-27 17:42Z - 17:47Z) -- wrap-up only (sandbox moves ~18:00Z, STOP ~17:55Z); 0 checks
+- Lane item (g30 at m16/m32) closed in s48 (proj g30n is the faster version and is on layer main v137 as TUNE[32] g30n:unpool).
+  Too little time before the move to start a build; wrote the s50 pick list into STATE (g30n pooler with fewer CTAs, or the
+  attention diag timeline). No GPU time used.

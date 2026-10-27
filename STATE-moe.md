@@ -9,6 +9,9 @@
   17.1 (g34 18.1), pool m16 18.4 (g34 18.4). proj in-layer (s96): g30n:unpool T=32 -1.2..-2.1 us d32 (TUNE option), pooler +9..14 sl
   (router SM contention: any pooler form that fills the GPU hits the same thing; g34 S2 has 128 CTAs too). Nothing left for g34 to add.
   Not handed to layer. Idea only if the pooler is reopened: a pooler form that leaves SMs for the router (fewer CTAs, deeper rings).
+- **s49 (17:42Z, 13 min before the sandbox move): NEXT for s50 on the new machine** = no open moe item from LANE DECISION 5. Pick
+  (a) if lead agrees: g30n pooler that leaves SMs for the router (<= ~100 CTAs, deeper rings; in-layer d32 sl A/B vs g24 is the only gate),
+  else (b) attention lane: H200 per-program timeline of _attn_split v1 / _gd_full d1 via the diag hook (line 'Next' below). Read COORD first.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
