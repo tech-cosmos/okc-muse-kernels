@@ -1510,7 +1510,7 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   Forced (TUNE {} + TUNE_BASE[32] g24sk2 both) scored decode 32 3 seeds x 2 types PASS; H100 ab_flag 3 rounds x seeds 99,7:
   sl +1.2/+0.3, full +0.9/+0.6 us (W-bound H100, expected; s56 said +1.2..1.7). H200 tuner decides. No judge runs.
 
-## s70 (2026-10-27 07:17-07:40Z, sandbox okc-night4, session 27): cuBLAS nvjet + PDL via capture-graph edge surgery = DEAD
+## s70 (2026-10-27 07:17-07:40Z real UTC, sandbox okc-night4, session 27): cuBLAS nvjet + PDL via capture-graph edge surgery = DEAD
 - Target: layer s12 idle budget item "T>=16 cuBLAS no-PDL gaps ~1.6%" (v16/v32 sliding: 4 nvjet GEMMs ~70/88 us in-layer,
   judge 2f7349ee). cuBLASLt has no PDL option (cublasLt.h: no pdl/programmatic), so tried forcing it from outside.
 - Mechanism (works, dev/s70/*.py): cuBLAS itself calls cudaStreamGetCaptureInfo without edge data, so setting programmatic
@@ -1528,3 +1528,6 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - Other T>=16 PDL route (not built): an own CUTLASS sm90 GEMM compiled with GDC (wait_on_dependent_grids) for the T=128/256
   calls; gain = launch latency only (~<=1 us/GEMM, wait sits before any load), needs CUTLASS to tie nvjet. Low.
 - No judge runs this session.
+- Side look (d1 = highest %/us): H100 bench "decode 1" qkv g13 13.15 us (28.4 MB) vs a bare ld.global.nc grid-stride read of
+  the same bytes 11.4-12.0 us (dev-less /tmp/pj70/rd.py, 2.4-2.5 TB/s: not a good reader; s-notes' best reader slope 3.24 TB/s
+  + ~2 us fixed): g13 sits ~1-2 us over a bare stream on both qkv and pooler, as found in s5-s16. No new lever found there.
