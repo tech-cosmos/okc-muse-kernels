@@ -6210,6 +6210,9 @@ _G30_SRC = r'''// s100 "g30" (layer s99 dev/s99_g30.cu, layer form): T=128 GEMM 
 #ifndef G30_ESC
 #define G30_ESC 8
 #endif
+#ifndef G30_PL
+#define G30_PL 0  // proj n5s5: sorted escape keys in a per-thread smem list (pop = 1 LDS), fragment index precomputed
+#endif
 #ifndef G30_MTOK
 #define G30_MTOK 128
 #endif
@@ -6258,6 +6261,14 @@ __device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) 
 __device__ __forceinline__ void esc_patch(unsigned (&a)[16], unsigned key) {
   const int kk = (key >> 18) & 63, idx = 4 * (kk >> 4) + 2 * ((kk >> 3) & 1) + ((key >> 16) & 1);
   const unsigned vb = key & 0xFFFFu, sel = (kk & 1) ? 0x5410u : 0x3254u;
+#pragma unroll
+  for (int u = 0; u < 16; u++)
+    if (u == idx) a[u] = __byte_perm(a[u], vb, sel);
+}
+// key = stage << 21 | h << 20 | idx << 16 | vb (G30_PL)
+__device__ __forceinline__ void esc_patch2(unsigned (&a)[16], unsigned key) {
+  const int idx = (key >> 16) & 15;
+  const unsigned vb = key & 0xFFFFu, sel = (key & (1u << 20)) ? 0x5410u : 0x3254u;
 #pragma unroll
   for (int u = 0; u < 16; u++)
     if (u == idx) a[u] = __byte_perm(a[u], vb, sel);
@@ -6391,10 +6402,31 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
     G30_POP;
     while ((nxt >> 18) < (unsigned)i0 * 64u) G30_POP  // escapes of the other K split
   }
+#if G30_PL
+  unsigned* plist = (unsigned*)(ws + G30_NW * G30_WST + 1024 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 : 0));  // [2 ESC + 1][256]
+  {
+    const int tc = tid & 255;
+    int e = 0;
+    while (nxt != ~0u) {
+      const int kk = (nxt >> 18) & 63;
+      plist[e * 256 + tc] = ((nxt >> 24) << 21) | ((unsigned)(kk & 1) << 20) |
+                            ((unsigned)(4 * (kk >> 4) + 2 * ((kk >> 3) & 1) + ((nxt >> 16) & 1)) << 16) | (nxt & 0xFFFFu);
+      e++;
+      G30_POP
+    }
+    plist[e * 256 + tc] = ~0u;
+    nxt = plist[tc];
+  }
+  int pp = 256 + (tid & 255);
+#endif
 #if G30_PRE
   asm volatile("griddepcontrol.wait;" ::: "memory");  // consumers: escape header (weights) read before, out written after
 #endif
+#if G30_PL
+#define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) << 21; while (nxt < kend) { esc_patch2(a, nxt); nxt = plist[pp]; pp += 256; } }
+#else
 #define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); G30_POP } }
+#endif
 #else
 #define G30_FIX(a)
 #endif
@@ -6511,7 +6543,8 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
   TORCH_CHECK((K / 64) % 2 == 0 && K / 64 >= 4 * G30_S, "g30: K stages");
   CUtensorMap tx;
   g30::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
-  const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 + 1024 : 0);
+  const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 + 1024 : 0)
+                   + (G30_PL ? (2 * G30_ESC + 1) * 256 * 4 : 0);
   static bool once = false;
   if (!once) { cudaFuncSetAttribute(g30::g30_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
   cudaLaunchConfig_t cfg = {};
@@ -7011,8 +7044,9 @@ BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 1
 DIAG30K = {}  # n5s4 diag done (check 6d9063a1: qkv kF132 only -0.2 us vs g30 S3; pooler/unpool g30k lose 1-3 us; NOTES n5s4)
 # n5s4 _diag30e only (print, no picks): g30 with the escape path compiled out (G30_ESC 0: WRONG output, timing only) vs g30,
 # m32, standalone and after a 3 us PDL predecessor = the H200 upper bound of a cheaper escape format.
-DIAG30E = {}  # n5s4 diag done (check 198e7084: escapes cost H200 qkv/pool/unp m32 1.2/1.1/0.6 us standalone, 1.5/2.0/2.0 after a pred; NOTES n5s4); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
+DIAG30E = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}  # n5s5: G30_PL vs g30. n5s4 diag done (check 198e7084: escapes cost H200 qkv/pool/unp m32 1.2/1.1/0.6 us standalone, 1.5/2.0/2.0 after a pred; NOTES n5s4); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 DIAG30E_M = 32
+DIAG30E_V = "G30_PL=1"  # n5s5: the variant timed against g30 ("noesc" column): escape keys in a per-thread smem list (0 = no escape path)
 DIAG30K_S = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
@@ -7142,7 +7176,7 @@ def _g30_build(c):
     """c = (MTOK, S, NW, NS[, ESC]) -> g30 lib (None on failure)."""
     try:
         import hashlib
-        dfs = [f"-DG30_MTOK={c[0]}", f"-DG30_S={c[1]}", f"-DG30_NW={c[2]}", f"-DG30_NS={c[3]}"] + [f"-DG30_ESC={e}" for e in c[4:]]
+        dfs = [f"-DG30_MTOK={c[0]}", f"-DG30_S={c[1]}", f"-DG30_NW={c[2]}", f"-DG30_NS={c[3]}"] + [f"-D{e}" if isinstance(e, str) else f"-DG30_ESC={e}" for e in c[4:]]
         return load_inline(
             name="muse_proj_g30_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
             cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
@@ -7176,7 +7210,7 @@ if BF16_G30:
     from concurrent.futures import ThreadPoolExecutor
     _cs = sorted({(m, *c) for (_l, m), v in BF16_G30.items() for c in v})
     _ks = [(m, f) for m in (16, 32) for f in (1, 0)] if DIAG30K else []
-    _es = sorted({(DIAG30E_M, S, 16, 16, 0) for S in DIAG30E.values()})
+    _es = sorted({(DIAG30E_M, S, 16, 16, DIAG30E_V) for S in DIAG30E.values()})
     with ThreadPoolExecutor(len(_cs) + len(_ks) + len(_es)) as _ex:
         _fk = [_ex.submit(_g30k_build, c) for c in _ks]
         _fe = [_ex.submit(_g30_build, c) for c in _es]
@@ -7629,7 +7663,7 @@ def _diag30e(st):
     g.manual_seed(8)
     m = DIAG30E_M
     for layer, S in DIAG30E.items():
-        a, b = _G30.get((m, S, 16, 16)), _G30.get((m, S, 16, 16, 0))
+        a, b = _G30.get((m, S, 16, 16)), _G30.get((m, S, 16, 16, DIAG30E_V))
         if ("g30", layer) not in st or a is None or b is None:
             continue
         P_, hdr, scale = st[("g30", layer)]
@@ -7641,9 +7675,9 @@ def _diag30e(st):
         med0 = _graph_medians([lambda: None] + [lambda fn=fn: fn(0) for fn in fns] * 2)
         medp = _graph_medians([lambda: _g19.g19_pred(xs, x, 3000)] + [lambda fn=fn: (_g19.g19_pred(xs, x, 3000), fn(1)) for fn in fns] * 2)
         print(f"diag30e {layer} m{m} S{S}: standalone (+us over an empty graph {med0[0] * 1e3:.2f}) g30 "
-              + "/".join(f"{(t - med0[0]) * 1e3:.2f}" for t in med0[1::2]) + " noesc " + "/".join(f"{(t - med0[0]) * 1e3:.2f}" for t in med0[2::2])
+              + "/".join(f"{(t - med0[0]) * 1e3:.2f}" for t in med0[1::2]) + f" {DIAG30E_V} " + "/".join(f"{(t - med0[0]) * 1e3:.2f}" for t in med0[2::2])
               + f" || after 3 us pred (+us over {medp[0] * 1e3:.2f}) g30 " + "/".join(f"{(t - medp[0]) * 1e3:.2f}" for t in medp[1::2])
-              + " noesc " + "/".join(f"{(t - medp[0]) * 1e3:.2f}" for t in medp[2::2]))
+              + f" {DIAG30E_V} " + "/".join(f"{(t - medp[0]) * 1e3:.2f}" for t in medp[2::2]))
 
 
 def _diag30k(st):

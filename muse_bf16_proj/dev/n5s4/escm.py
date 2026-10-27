@@ -19,7 +19,7 @@ def build(src, S, extra=()):
                        extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
 Wall = reference.generate_weights(reference.WEIGHTS_SEED)
 for key, S in KEYS:
-    libs = {"old": build(OLD, S), "escm": build(NEW, S, os.environ.get("NEWDEFS", "").split()), "noesc": build(OLD, S, ["-DG30_ESC=0"])}
+    libs = {"old": build(OLD, S), "escm": build(OLD if os.environ.get("NEWOLD") else NEW, S, os.environ.get("NEWDEFS", "").split()), "noesc": build(OLD, S, ["-DG30_ESC=0"])}
     w = Wall[key]; N, K = w.shape
     code, sm, hdr, scale = L._compress(w)
     P = L._pack30(code, sm)
