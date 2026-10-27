@@ -2063,3 +2063,28 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   hidden/stream are NOT bitwise reproducible run-to-run even with one config (A==A False; routing ids equal): pre-existing.
   Put 16/16 as the T=32 default for g30n unpool + g30k pooler on proj/g30k138 (H200 standalone -1.7..1.9 us, H100 tie).
 - proj/g30k138 2079aae: T=32 rings 16/16 for g30n unpool + g30k pooler; validate --quick ALL OK, cold 149.6 s (md5 161f1435). Session end 20:45Z.
+
+## n5s3 (2026-10-27 20:32Z-, night5 session 3): proj/g30k139 (g30k on v139 + g30n qkv built + moe pr32 option); H200 ring probe
+- Found: layer v139's `_g30n_prepare` skipped qkv_gate (guard `K % (128*S)`, 8192 % 384 != 0) although g30's kernel splits K
+  unevenly (i0/i1 = 2*(y*(KS/2)/S)); proj's own tuner runs qkv S3 fine (H200 picks it: m16 16.03 vs lt 16.51, m32 16.83 vs 17.31).
+  Fix: guard = `K % 128 or K/64 < 4*S` (the kernel's TORCH_CHECK). When qkv runs g30n (BF16 out) the G24X persistent buffer is
+  not armed (no zeroing needed). TUNE[16] += {g30n:qkv_gate}, {unp+qkv} back; TUNE[32] keeps them (they now do something).
+- In-layer H100 ab_flag (TUNE {}, SEEDS 99,7, 4 rounds ABBA), unpool g30n on at 32: d32 sl s99 192.0 -> 191.5, s7 198.2 -> 197.7,
+  full tie; d16 (qkv only): tie.
+- moe's pr32 (r-moe 9508b96 tools/n5s1/pr32_src.cu, committed version: moe had uncommitted edits) integrated with
+  patch_layer_pr32.py + source embedded (build.py "PR32" -> _GPR32_SRC) + _pr32_build on _BUILD_POOL (2 builds 16/32, NW8 NS16).
+  TUNE[16] {pr32}, TUNE[32] {pr32}, {pr32, g30n:unpool}.
+- r-layer branch **proj/g30k139 deb4a62** = main v139 + proj/g30k138 (cherry-picked, TUNE[32] conflict = union) + the above.
+  validate --quick: test 0/13, scored 0/12, opt 0/344, tk2f 0/300, replay 0/240 (route/fuzz/prep below).
+  H100 tuner (validate opt): T=32 sl default 220.1 | unp 216.9 | pr32 217.8 | pr32+unp 216.3 | g30k104+unp 215.3 |
+  **g30k104+unp+qkv 214.8 (picked)**; T=32 full 438.0 | g30k104+unp+qkv 433.3 (picked); T=16 sl picks g30n:unp (218.3 vs 219.3),
+  T=16 full picks g30k104 (311.8 vs 314.2); pr32 at T=16 220.3/314.0 (tie).
+- proj check **7cbaa0fd (ffdacd4) 1.3387x** = H200 probe of g30 rings 20/8 vs 16/16: 16/16 wins every m16/m32 shape (tuner us
+  16/16 vs 20/8: pooler m16 20.00/21.57, m32 20.74/22.40, qkv m16 16.03/16.93, m32 16.83/17.44, unp m16 18.69/20.48,
+  m32 19.62/21.31). Reverted (208e459). The layer's 16/16 rings are right; no 20/8 anywhere.
+- validate --quick on proj/g30k139 deb4a62: **ALL OK** (test 0/13, scored 0/12, opt 0/344, tk2f 0/300, replay 0/240, route 0/240
+  worst gap 0.0256, fuzz 0/513), **cold prepare 162.2 s** (v139 166.5, g30k138 149.6: +2 pr32 builds). Pushed; COORD Request to layer.
+- Next ideas: (a) H200 tune lines of layer's next check (g30n:qkv at T=16/32, pr32, g30k 104 vs 120); (b) the big one remains g30's
+  per-call rate (H200 pooler m16 ~15.5 us after graph cost = ~2.4 TB/s of 12-bit bytes): a consumer oracle (decode off) on the
+  H100 would show whether DEC3 decode or the ring/latency caps it, before any rewrite.
+
