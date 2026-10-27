@@ -69,6 +69,11 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 19 (03:27-04:45Z): moe_twq WBW (weights before griddepcontrol.wait, flags & 16, valid only with RG 0) DEAD:
+  bitwise, but H100 v16 +2.0 / H200 check 9da19e71 v16 +2.5, v32 +2 us (2 stages: +1). Early weight traffic slows the
+  gather -> x path (3rd time: RFLAG, PF2, WBW): no more pre-expert prefetch ideas. Checks today 9/20.
+  NEXT candidates (all small): layer still on TK2F_L2H 1 (port note n18, ~0.25%); phase-2 per-row rate on the H200.
+
 ## Night4 session 18 (02:50-03:50Z): the layer is on TK2F_L2H mode 1 (moe uses 4) -> port note tools/n18/l2h4_layer.md
   (H200 moe-only, mode 1 vs 4: d1 +0.5, d16 +1.6, d32 +1.1, v1 +0.5; H100 in-layer d16 sl -2..4.5). DEAD this session: PF2 (gemm2
   L2 prefetch at the phase switch), per-phase L2 modes (H200 check 1b1d0fbd: 4/4 best), TK2H_REG (neutral; kept, bitwise).
@@ -96,23 +101,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   keep DIAG output <= ~60 short lines). Layer asked to make twf_split 66 default at T=128/256.
   NEXT: first-wave mixing (v16 first 40 us at 2.7 TB/s; v32 w/o hot 1 TB/s) or cheaper N16-N32 items; see NOTES n15 end.
 
-## Night4 session 14 (00:32-01:15Z): TK2F_SQ = 1 ON MAIN (f0c16e9): tk2f single-copy 18 KB stages (prepare _sq_pack ->
-  st w13sq/w2sq, one cp.async.bulk per stage, PF 512, cfg + 10000000; bitwise 228/228). H200 DIAG df253e4c: d32 -1.5,
-  d16 -0.55, d1/v1 0 us (repeatable to 0.1). KPS 4 SQ (36 KB stages): d1/v1 +1, dead. Handoff: tools/n14/sq_layer.md.
-  Copy-pattern lever on tk2f is now mostly spent (probe promised 3x more). Checks today: 3/20 (4a591c7d, ab707ffc, df253e4c).
-  NEXT: lead's item (1) big-M v16/v32 (twm 172/218 us vs stream probe 128/141; drain) -- see Ranked ideas -8/-5.
-
-## Night4 session 13 (22:48Z-00:45Z): H200 DIAG DONE (checks 4a591c7d: diag12 lost to log_tail; ab707ffc: 82 compact lines)
-  RESULTS (NOTES n13): tk2f consumer ceiling gs8 - nm = 1.8/4.2/6.5/3.6 us (d1/d16/d32/v1): consumer work CLOSED.
-  KPS 4 / ER / BAL dead on H200. tk2h W3 d32 -1.9 (d16 loses). RG 0 beats RG 1 (v16 -1.9, v32 -0.9). pb48 v16 -2.4.
-  hot 32 @256 -5.4. Layer told (COORD Requests n13). The judge keeps only ~200 log lines: keep DIAG output compact.
-  (done in n14, below) SINGLE-COPY tk2f stages: prepare() repacks w13/w2 (+ scales) so each tk2f stage (row r, k-chunk pair)
-  is ONE contiguous 18 KB block {W 8K, W 8K, S 2K} -> one cp.async.bulk per stage instead of 3. H200 probe: sq18 vs uq =
-  d32 -4.5, d16 -3.5, v1 -3.5, d1 -1.1 us (~1% layer score if tk2f follows its pattern as it does now: gs8 87.6 = tkp 86.8).
-  Consumer unchanged except stage offsets; lossless repack. Check gemm13's gated pairs (2 W copies = gate + up rows 2048 apart?)
-  and the L2 hint split (evict_last for re-read rows) still work with one copy. Then a DIAG A/B (sq18x8: NSTG 8 no gain).
-
-## Older sessions (n3-n12, s6-s7): see NOTES-moe.md (L2H run-time modes, TWM_PB48, BAL, tk2h PF4 are all there).
+## Older sessions (n3-n14, s6-s7): see NOTES-moe.md (L2H run-time modes, TWM_PB48, BAL, tk2h PF4 are all there).
 
 ## Ranked ideas
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves

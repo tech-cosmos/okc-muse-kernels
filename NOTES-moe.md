@@ -1276,3 +1276,22 @@
   what the layer loses: d1 +0.5, d16 +1.6, d32 +1.1, v1 +0.5 H200 us. H100 IN-LAYER A/B (copy of r-layer 77c0f17, run-time mode
   switch g_l2m, ab_flag, 3 seeds, A B C A): mode 4 = d16 sl -2.1/-4.5/-2.6, d16 full -2.4/-2.0/0, d32 s11 -1.9 sl / -3.2 full,
   others tie; 3/4 is worse than 4/4 at d16. Port note tools/n18/l2h4_layer.md (3 lines, bitwise). Est. ~+0.25% layer score.
+
+## Night4 session 19 (2026-10-27 03:27Z - 04:45Z; moe checks 9/20 used today) -- moe_twq weights-before-wait (WBW): DEAD on H100 + H200
+- Context: layer profile 71f451bb (v106): v16 = moe_twq 170 + moe_norm 42 (twq's tail), v32 = twm 215 || moe_hot 160; d1/v1
+  tk2f near its copy floor (s12 timeline: d1 kernel span 18.7 us for 2-3 experts). Big-M consumer work is closed (s17-s23:
+  dq/wgmma never overlap, no cheaper dq), so tried the one untested fixed cost: twq's prologue behind its PDL primary.
+- WBW = moe_twq flags & 16 (python TWQ / TWQ_M value + 16; kernel_fn strips it when RG = 1): no griddepcontrol.wait at entry;
+  meta / s_off read with __ldcg; the producer claims its first item and issues weight + scale bulk copies for the first NSTG
+  stages, then griddepcontrol.wait, then those stages' x TMAs (flush() before any blocking wait: ring full, gemm2 readiness
+  spin, end). Valid ONLY when the primary is moe_gather / the layer's moe_gathern (they trigger after their own wait, so
+  moe_route's meta is complete). With RG = 1 (moe_routegather writes meta itself after triggering) it HANGS in graph
+  replay (pre-wait meta reads see stale counts -> gemm2 spin forever); eager runs passed by timing luck. Lesson: before any
+  pre-wait read, check WHICH kernel is the PDL primary and whether it writes what you read after its trigger.
+- Bitwise vs plain twq (tools/n19/wbw_t.py, RG 0): 0/26 bad (random bs 33/128/256/257 + skewed + layer v16/v32, 3 replays each).
+- H100 moe-only layer routings (tools/s22/proxy.py, 3 rounds): v16 q4 200.7 | q20 (WBW) 202.7 | q52 (WBW, at most 2 stages
+  before the wait) 202.6 vs 202.1; v32 q4 259.6 | q20 261.0. Monotonic in the prefetch depth, like n18 PF2.
+- H200 check 9da19e71 (DIAG copy, 2.224x test run, never submit), MEAN 5 seeds, maxdiff 0:
+    v16 q4 186.8 / q4b 186.3 | q20 189.0 / q20b 189.1 | q52 187.5;   v32 q4 246.5 / 246.8 | q20 248.7 / 248.1 | q52 246.8
+  => +2.5 us (v16), +2 (v32): early weight traffic slows the gather -> x critical path on the H200 too. DEAD (code kept, off).
+  Third confirmation (RFLAG s27, PF2 n18, WBW n19): HBM is never idle enough before the experts for prefetch to pay.
