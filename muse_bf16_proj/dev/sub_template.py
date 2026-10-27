@@ -217,9 +217,9 @@ LT_WS_BYTES = 32 << 20
 # split-K + DSMEM reduce; MTOK 128 = layer s99 g30). Per (layer, m): (S, NW, NS) tuner candidates; one build per (m, S, NW, NS).
 BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 16, 16)], ("qkv_gate", 16): [(3, 16, 16), (2, 16, 16)],
             ("o", 16): [(1, 16, 16), (2, 16, 16)],
-            ("unpooler", 32): [(1, 20, 8)], ("pooler", 32): [(1, 20, 8), (2, 20, 8)], ("qkv_gate", 32): [(3, 16, 16), (2, 20, 8)],
+            ("unpooler", 32): [(1, 20, 8), (1, 16, 16)], ("pooler", 32): [(2, 16, 16), (2, 20, 8)], ("qkv_gate", 32): [(3, 16, 16), (2, 20, 8)],
             ("o", 32): [(1, 20, 8), (2, 20, 8)],
-            ("unpooler", 128): [(1, 10, 10)], ("pooler", 128): [(1, 10, 10)], ("qkv_gate", 128): [(1, 10, 10)], ("o", 128): [(1, 10, 10)]}
+            ("unpooler", 128): [(1, 10, 10)]}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
