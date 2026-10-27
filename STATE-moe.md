@@ -103,6 +103,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   31.7 vs cuBLAS 27.6: no-load floor 25.5, x ingest 2 MB/CTA binds, CL2 multicast no help). g33 T=128 R2 k-split CTA pair with
   DSMEM push reduce: +3.5..4 us over no-reduce (28.5 vs cuBLAS 25.7) DEAD on H100. g30 T=128 is W-HBM-bound on the H100 (W
   stream+decode alone 20.9 us): H100 can't rank g30 forms; on the H200 x ingest may bind (R2 forms). Told layer (COORD).
+- s45 (NOTES s45): re-audit, no untested lever on any attention shape; lane request to lead (COORD). 0 checks.
 - s44 (NOTES s44): v1 full softmax-reference probes all dead: constant reference (qk_scale_factor 5.47 -> scores span
   ~63 log2 units), FIXL in-loop reference +0.35, L2D 2-D row sums +1.7 us H100. fix 0 = +1.2 us (max chain ~0.12 us/tile).
 ## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)

@@ -1873,3 +1873,15 @@
 - **L2D** (FIXED loop keeps [64, 64] FP32 running sums, one reduction after the loop instead of tl.sum(p, 1) per tile):
   +1.7 us (6/6; 32 more registers per thread). Dead.
 - No code change on main. Attention budget 10-27: checks 13/20, scored 2/10 (none spent).
+
+## Night4 session 45 (2026-10-27 16:21Z - ~16:45Z) -- attention lane: re-audit of remaining headroom vs ~/attn history; no build; 0 checks
+- Board 957cabd7 per shape (H200 us, ours / SGLang): d1 4.47/20.9 sl, 12.19/31.5 full; d16 7.65/27.1, 87.4/200.7; d32 12.2/31.4,
+  168.2/383.7; v1 5.63/23.1, 15.98/36.7; v16 11.5/29.3, 104.0/205.2; v32 13.9/34.3, 194.2/389.5. Score = geomean of the 6
+  loads (46 sl + 16 full); load speedups d1 3.66, v1 3.20, d16 2.55, d32 2.33, v16 2.11, v32 2.09.
+- Largest relative headroom per load (vs measured floors): v32/v16 full (consumer-bound, -31/-21 us max, ~5% score),
+  d1 full (12.2 vs ~8.0 random-gather floor, ~2.5% score), v1 full (16.0 vs ~7.9, ~3.5%). Each one's candidate levers are in
+  ~/attn's dead list: FP8 P@V (s22 ablation: even a free transpose only -4/-10 us all-L2), poly exp2 (s12: issue-bound, not
+  MUFU), f16 ex2, deeper rings / HOIST (d1 full s88-ish: stages 3/4/6 +0.8..2.9), native d1 full cfl (s73: 19 vs 15.8),
+  in-grid merges (s95/s113), FPIPE/ping-pong (s101/s113), my s33/s35/s44 v1/d1 probes. Batch-1 sliding: csl/vtk mined
+  (s72-s126 + my s31/s36). I found no lever with a mechanism not already measured dead: no build, GPU left to layer/proj.
+- Attention budget 10-27 unchanged: checks 13/20, scored 2/10. Lane request posted to the lead (COORD Requests).
