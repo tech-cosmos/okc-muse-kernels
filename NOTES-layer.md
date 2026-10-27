@@ -1603,3 +1603,16 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - v123: TUNE_BASE[(32, *)] += {tk2h 4, g24:qkv_gate} (2 H200 tuners agreed, s35 policy); TUNE[32] += {tk2h 0, g24:qkv_gate False}
   (= old base). Tests: forced tune {} at T=32 (variants/v123_fbase.py = the new base) scored decode 32 x3 0 bad, replay seed 11 0/40;
   bench test 13/13. Not checked (behavior = what v122's tuner picked; check it with the next real win stacked).
+
+## s77 (2026-10-27 07:42Z-, night4 session 26): v124 = TUNE_BASE stacking (proj s66 tune_stats over the last 10 H200 logs)
+- The tuner keeps ONE option set per (T, type), so consistent H200 singles never stack. `python ~/r-proj/muse_bf16_proj/dev/s66/tune_stats.py
+  profiles 10 1,8,16,32,128,256` (mean delta vs default < -0.4 us, >= 4 logs): T=1 sl g13o -0.49 (9/9), pr1_rb 32 -0.50 (8/9),
+  full g13o -0.41 (8/9); T=8 sl g14alt:qkv_gate 3 -1.26 (10/10), cslpw -0.66 (10/10); T=16 sl tk2fj False -0.74 (10/10);
+  T=32 = v123 base; T=128 fr sl -1.89 (9/10) full -1.26 (10/10), + lt:o/lt:unpool sl -0.88 (9/10); T=256 full rg -1.87 (8/9),
+  rg+twf_split 66 -6.3 (6/9, bimodal).
+- v124: TUNE_BASE (1, *) = {g13o, pr1_rb 32}; (8, sl) += g14alt:qkv_gate 3; (16, sl) += tk2fj False; (128, *) = {fr}. Every option now
+  stacks on these (cslpw at T=8, lt:* at T=128, ...). Options added: T=1 {g13o False} (+rb20 / +kv_pf False), T=8 {cslpw, g14alt 3/2},
+  T=128 {fr False}, {twf_split 66, lt:o, lt:unpool}, {gnorm False, lt:unpool}; T=256 rg+twf_split 66 + lt:o / lt:unpool / all lt.
+- Tests (base forced, variants/v124_fbase.py = tune {} everywhere): scored_test all 12 shapes x 2 seeds 0 bad; replay_test seeds 11,23 x 20
+  inputs 0/480; bench test 13/13. tools/opt_test.py (new: every TUNE option set forced on top of the base, eager, 1 seed per shape):
+  0 bad of 300 (all 12 shapes). Cold prepare 120.5 s (join 96.6, tune 23.1). H100 tuner T=256 picked the new rg+twf_split stacks (sl 392.8 vs 403.6 confirm).
