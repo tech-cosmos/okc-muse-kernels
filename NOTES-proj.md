@@ -1673,3 +1673,4 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - H100 ab_flag "verify 32", 6 rounds, SEEDS 99,7, NVS_CL True/False/True: sl s99 373.46/374.98/373.39, s7
   347.38/348.68/347.13 (-1.4..-1.5 us); full 612.4/612.7/613.0, 572.5/573.0/572.7 (tie, cl unused there).
 - Posted under COORD Requests (s79). No proj judge runs.
+- Exhaustive attn_probe --passes=0 --only='verify 32': sliding 33/33, full 1335/1335 PASS (worst 2.07e-3).
