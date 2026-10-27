@@ -2,7 +2,7 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-s96: s95's g24 m32 M-split idea measured DEAD (H100 consumer oracle: 2x warps at m16 only -2.4%, split would double the decode; NOTES s96). s95: no build (plateau). s94: **main = v134** (566828e) = v133 + proj/qf35 (moe s35 d1-full qf + proj s68 TUNE[128] ltalt:pooler; proj full validate ALL OK, cold 116.5 s). First check after 00:00Z = v134.
+s97: plateau, no build, 0 runs (e4m3-cvt dequant re-derived = moe dead end). s96: s95's g24 m32 M-split idea measured DEAD (H100 consumer oracle: 2x warps at m16 only -2.4%, split would double the decode; NOTES s96). s95: no build (plateau). s94: **main = v134** (566828e) = v133 + proj/qf35 (moe s35 d1-full qf + proj s68 TUNE[128] ltalt:pooler; proj full validate ALL OK, cold 116.5 s). First check after 00:00Z = v134.
 s93: no build (plateau re-check, NOTES s93: d32 g24 pooler+unpool ~2.0 TB/s = biggest non-expert gap, proj-closed). s92: no build; verify-gap audit (NOTES s92): twm dq-bound ~57/80 us above stream rate at v16/v32 (~6.6% weighted) = biggest gap to #1, closed lane; all else <= ~1%.
 s91: **main = v133** = v132 + TUNE[8] {cslpw, pr8_npf 206/220/112} (H200 picks pr8 bulk-PF depth; no new compile; validate ALL OK incl. fuzz, cold 118.5 s). First check after 00:00Z: main v133; read 'layer tune T=8' pr8_npf lines.
 s90: main v132 + proj stream_fuzz tool (validate step fuzz): full fuzz 0/1462 bad. 0 judge runs.

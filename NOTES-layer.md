@@ -1951,3 +1951,10 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   24 warps at m16 = -2.4% vs 12 warps: the consumer is per-SM throughput-bound, not warp-latency-bound. A pair split would
   cost ~2 x 11.7 = ~23 us of consumer time vs 15.4 for today's m32: DEAD (both cluster and intra-CTA forms). Not sent to proj.
 - Nothing else open on the layer side (STATE CLOSED list). First check after 00:00Z = main v134 (unchanged plan).
+
+## s97 (2026-10-27 14:19Z-, night4 session 46): plateau, no build; 0 judge runs
+- Board #29 at 2.134x (35dd53d0); #1 pjmullin3 2.399x, #20 2.172x. Layer checks 20/20 used (resets 00:00Z), 4 submits left (unusable without a check).
+- No new Handoffs/Requests for layer; moe s36-s38 and proj s86 report no open item (proj g28 ping-pong m32 consumer DEAD).
+- Re-derived the e2m1 -> s00eem00 e4m3 byte -> cvt.rn.f16x2.e4m3x2 dequant for twm (exact incl. subnormals, factor 2^-6):
+  already DEAD on paper in NOTES-moe (line ~919: >= today's instr count, needs FP16 x = not lossless on BF16 x). Not retried.
+- First check after 00:00Z = main v134 (unchanged plan).
