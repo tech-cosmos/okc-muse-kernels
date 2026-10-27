@@ -1,5 +1,9 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 09:05 UTC (s74). S74: no build; lane ask re-posted (3rd); no proj item >0.3% (NOTES s74).
+Updated 2026-10-27 09:50 UTC (s75). LANE (lead 08:55Z): (b) = integration/testing for layer: port Handoffs into the layer on a
+proj/<name> branch (never main of muse_decode_layer), run H100 A/B + tools/validate.py, hand layer a ready-to-check commit.
+S75: branch proj/validate (f625289): muse_decode_layer/tools/validate.py (7 steps, ~6 min; NOTES s75). v125 ALL OK, cold 120.4 s.
+All Handoffs up to moe s27 SCB are already in layer v125. Watch COORD Handoffs/Requests for bundles; moe twm byte_perm next.
+S74: no build; lane ask re-posted (3rd); no proj item >0.3% (NOTES s74).
 S73: re-tested moe's 'dq ALU || RS wgmma never overlap' (H100, 5 controls): it STANDS (per-HGMMA cost ~12+0.33N cyc to the
 co-resident warp; NOTES s73). No expert item left for a second builder. Lane Request to lead still open. Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
 S72: a GUEST carrier (other lanes' builds timed inside proj checks) was BANNED by the lead (08:13Z) and REMOVED; never
@@ -131,8 +135,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## it is one local array summed explicitly + operand fences (NOTES s60). g24 R=2 at m32 dead too.
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
-00. FIRST: read the lead's answer to the s71 lane Request in ~/COORD.md. (s71 g13t TMA-ring g13 = DEAD, NOTES s71.)
-    If none: offer proj's unused daily checks as H200 diag capacity (see Request) and ask again; no proj micro-item left.
+00. LANE (b) (lead 08:55Z): read COORD Requests for layer bundles; port + validate on proj/<name> branches (tools/validate.py on proj/validate).
 0c. Layer: watch for s68 ltalt:pooler at T=128 (Handoffs proj s68) in a layer check's 'layer tune T=128' lines.
 0a. Layer: watch for G24P (Handoffs proj s63) in a layer check; read 'layer tune T=32' {'g24p': True} vs default (sl/full).
 0. Layer: watch for G24X (Handoffs proj s59) in a layer check; read the 'layer tune T=16' {'g24x': False} entry.

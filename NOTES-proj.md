@@ -1621,3 +1621,14 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   measured dead (s16-s64: wgmma g20/s60/g28, 2 blocks/SM, hybrid BF16 rows, SWP/ILV2, rings, XSP/DF, EZ/G24P). Sub-12-bit
   format closed (s49: VL coding -6.7% bytes, ~0.25%). Other gaps are experts (moe/layer) and frozen attention.
 - Re-asked the lead (COORD Requests s74). Checks 10-27 still 8/20 used, scored 1/10.
+
+## s75 (2026-10-27 09:08Z-09:50Z, night4 session 32): lane (b) started; tools/validate.py; no judge runs
+- Lead 08:55Z answered the lane Request: proj = (b) integration/testing for layer (ports of Handoffs as TUNE options on a
+  proj/<name> branch, H100 A/B, replay/route stress, cold-prepare timer; layer keeps main, checks, submits).
+- Audit: every Handoff is already in layer v125 (moe s27 SCB, n18 TK2F_L2H 4, proj s66 combos, g24x/g27/g24z...). Nothing to port today.
+- Built branch proj/validate (f625289): muse_decode_layer/tools/validate.py [file] [--quick] [--only=..] [--skip=..]: runs
+  bench test, scored_test (2 seeds), opt_test, tk2f_stress 300 (now SUB=<file>), replay_test 11,23, route_judge 11, cold
+  prep_time (fresh ext/triton dirs), each a subprocess, logs /tmp/validate/<tag>/, one line per step + 'NOTES:' line.
+- v125 (2663c2c): ALL OK: bench test 13/13, scored 0/24, opt_test 0/300, tk2f_stress 0/1200, replay 0/480, route_judge 0/240
+  (worst gap 0.0256 / drop-lead 0.0179; limits 0.05 / 0.03), cold prepare 120.4 s. Total ~6 min (GPU idle otherwise).
+- Posted: Handoffs (validate), Requests (proj -> layer: send bundles), Results. Checks 10-27 proj: 8/20, scored 1/10 (unchanged).
