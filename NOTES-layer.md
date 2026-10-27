@@ -1734,3 +1734,33 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   rate (s81 diag), so the bytes are the cost; no new lever found this session (paper only).
 - Paper-bounded and dropped: KV L2 prefetch during the T=16/32 full-layer qkv (HBM spare ~1.8 TB/s x 13 us -> <= ~5 us d32 full
   = ~0.1%); expert weight L2 prefetch beside the pooler at T=128 (same shape as s55's dead XPF: needs real ids, crowds router SMs).
+
+## s84 (2026-10-27 09:49Z-, night4 session 33): lane 2 (full attention in-layer): H200 ceilings DIAG + H200-tunable attention plan (v126)
+- Lead 09:45Z LANE DECISION 2: layer owns full-layer attention (_gd_full d16/d32, _gw_verify v16/v32) in attn_src.py.
+- Read ~/attn record: verify-full consumer mined by 126 sessions (5 native designs s71/s110/s111 lost; FA3 pipelining needs
+  >= 112 regs = 1 CTA/SM; FP8 P@V blocked by the transpose + fixed-reference range; MUFU not the limit). exp/hdiag5 (H200
+  gather floors) was never run.
+- Built (a036793) DIAG probes: attn_src `ATT_DIAG` -> _gd_full DX (11 gathers only after tile 0, 12 all-L2 = same rows every
+  tile) and _gw_verify GX (1 no V widen once the ring is warm, 2 all-L2, 3 no consumer math after the LZ_PK exact tiles,
+  4 = 1+2); results stay finite. Layer: TUNE option "attx" (diag: timed, never picked), set per call (full layers only);
+  `ATT_DIAG_BUILD = True` (sed) makes the DIAG TUNE. DIAG copy cold prepare 115 s (Gluon variants compile fast).
+- 10:01Z CHECK cf5e1621 (DIAG copy variants/diag84.py, never submit) 2.0778x, 10,887 us. H200 whole-layer tuner us (synthetic
+  ctx 80000, fixed lengths):
+      T=16 full  real 229.8 | gathers-only 228.8 | all-L2 210.6
+      T=32 full  real 334.0 | gathers-only 332.8 | all-L2 282.4
+      T=128 full real 351.9 | all-L2 341.0 | no consumer math 373.3 (!)
+      T=256 full real 509.5 | no widen 503.9 | all-L2 489.1 | no consumer math 501.1 | all-L2 + no widen 473.9
+  H100 same probes (cold prepare run): T=16 303.2/293.5/265.9, T=32 422.3/429.9/311.9, T=128 426.5/423.9(allL2)/459.9(nomath),
+  T=256 620.4/598.4/551.9/595.4/535.8.
+  READING: decode full (_gd_full d16/d32) is purely gather-bound on the H200 (math removed: -1.0/-1.2 us). Verify full v32:
+  free memory -20 us, free consumer -8 us, so its producer and consumer are balanced near ~180 us and the overlap loss is
+  ~10-20 us; v16: free memory -11, free consumer +21 (free-running gathers are SLOWER: pacing helps DRAM). Ceiling of all
+  consumer-side work on full attention: ~-1 (d16) -1 (d32) ~0 (v16) -8 (v32) us = ~0.15% total. The only real lever left is
+  the random-128B gather rate itself (d32 full 655 MB in ~166 us = 3.94 TB/s vs moe's contiguous ~4.26: <= ~7% = d32 -12,
+  d16 -6 us = <= ~0.4% total, unproven).
+- v126 (83a4f42) = v125 + TUNE option "aplan" (attn_src ATT_PLAN plan overrides, full layers only; tuner skips "full" options
+  on sliding layers): T=16/32 {stages 3}, {stages 3, dprogs 768}, {block_n 16, stages 4} (more gathers in flight: the gather
+  lever above, chosen on the H200 itself); T=128/256 {lag 2}, {stages 2}. {dprogs 1536} hits an illegal address under graph
+  replay in the tuner (eager runs pass): dropped (latent dbal limit > 1024 programs, not on any default path).
+  H100 tuner: all aplan options tie/lose (T=16 +2..5, T=32 +3..10, T=128 -2.5..0 (confirm tie), T=256 +5..13).
+  validate --quick ALL OK (13/13, scored 0/12, opt 0/320, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256, cold 139.5 s).
