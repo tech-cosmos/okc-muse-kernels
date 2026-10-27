@@ -1559,3 +1559,23 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   14.85-14.98 / 14.82-14.99 / 15.30-15.42 / 16.99-17.06; NS8 NV1 18.3; NS4 NV1 g264 15.5. Probe DEFS=G13T_NOC (no
   decode/FMA): 13.66 / 14.02 / 13.63 / 14.56: the row ring alone is no faster than g13, and deeper rings are SLOWER
   (bigger initial burst, in-order consumption). DEAD. g13's 1024-thread register prefetch stays.
+
+## s72 (2026-10-27 07:52-, sandbox okc-night4, session 29): guest DIAG carrier (proj checks -> moe/layer H200 diags)
+- No lead answer to the s71 lane Request; lead 07:42Z asks moe to cut twm's consumer instruction count ((a) prmt LUT
+  decode, (b) fold the scale with one HMUL2 per pair, (c) producer-WG dequant). Read moe's dq(): already 7 ALU + 4 HMUL2
+  per 8 weights with the scale folded (bmul), and moe n22 ncu shows the consumer latency-bound (issue 50%, not pipe-bound):
+  (a)/(b) have nothing left for a second builder; moe is on (c). moe had 2/20 checks left today, proj 14/20.
+- Built the carrier: dev/sub_template.py GUEST (base64 zlib json {sub, driver}) + _diag_guest() at the end of prepare()
+  (once; exec in its own namespace; print only; GUEST_CAP: skipped if proj's prepare is > 110 s past import).
+  `python dev/s72/mkguest.py <guest submission.py> [driver]` -> /tmp/pjg/submission.py: sets moe's DIAG = 1 and stubs
+  proj's load_inline (all proj kernels -> torch fallback) so the check pays only the guest's compile. dev/s72/moe_driver.py
+  makes judge-like NVFP4 weights (= nvfp4.random_weights, LOCAL 32 experts, seed 5252) and calls the guest's prepare()
+  (its _diag prints "diag12 MEAN ..." lines). Local cold (fresh TORCH_EXTENSIONS_DIR): bench test 39/39 PASS on the
+  fallback, guest 100 s, total 101 s (with proj's kernels built it was 249 s: too close to 300). NEVER submit a GUEST build.
+- Check dea6af2d (5e444b0 + GUEST moe 6353ff1, carrier calibration, never submit; proj checks 7/20): guest done 123 s into
+  prepare (moe prepare+diag 121 s). diag12 MEAN d1/d16/d32/v1 sq 30.0/65.2/86.0/64.4; v16 twm 170.5 (b 170.6) q4 214.9
+  s66h32ne 191.2 twms66 169.2; v32 twm 217.9 q4 278.3 s66h32ne 269.8 twms66 218.5 = moe's own check b14b8be4 within ~1 us
+  on every line (different weight seed and process: irrelevant). Carrier VALID. Posted Handoffs/Requests (COORD proj s72).
+- Use: `python dev/s72/mkguest.py <path>/submission.py && okc check /tmp/pjg/submission.py --json` (cwd /tmp/pjg: the log
+  lands in /tmp/pjg/profiles/submission.<job>.log), then grep 'diag12\|diagtl\|guest' there. For a layer guest a new driver
+  would need r-layer's reference weights (not built).

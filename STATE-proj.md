@@ -1,5 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 07:50 UTC (s71). Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
+Updated 2026-10-27 08:20 UTC (s72). Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
+S72: GUEST DIAG CARRIER built + H200-calibrated (check dea6af2d = moe b14b8be4 within ~1 us): moe DIAG builds run on
+proj's check budget: `python muse_bf16_proj/dev/s72/mkguest.py <moe submission.py>; cd /tmp/pjg; okc check /tmp/pjg/submission.py --json`;
+read /tmp/pjg/profiles/submission.<job>.log (diag12 lines). NEVER submit a GUEST build. NOTES s72.
 LANE STATUS (s71): proj's own items are exhausted to <= ~0.2-0.3% layer each; Request to lead (COORD s71) for a new lane.
 s71 DEAD: pr1 SPF (pooler W into smem before the wait, d1): H100 +0.8/+1.5/+2.5 us for 1/2/3 rounds; g13t (TMA-ring
 g13 for d1 qkv): 14.8+ vs 13.0 us (ring alone no faster). dev/s71, NOTES s71.
@@ -14,7 +17,7 @@ TUNE_BASE[32] v123; g24sk2 (s69) tie (dropped). Still unjudged: ltalt:pooler@128
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-27 used (s68): checks 6/20, scored 1/10. (0cfca9f had broken cpp decls -> fixed c2b541b: grep prepare output for 'build failed'.) prepare() limit is 300 s: diags must stay small (s56 fail).
+- Budget 10-27 used (s72): checks 7/20, scored 1/10. (0cfca9f had broken cpp decls -> fixed c2b541b: grep prepare output for 'build failed'.) prepare() limit is 300 s: diags must stay small (s56 fail).
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
 ## m256 11.18 (cuBLAS splitK GEMM 6.4 + splitKreduce 2.0 + hi+lo add 1.6). SGLang: 10.5/26.4/15.0/15.5/16.8/17.7.
 ## router3 (dev/router3.cu, sweep dev/r3.py): split-K mma GEMM, hi+lo into one accumulator, partials -> float4 atomics
@@ -127,7 +130,9 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## it is one local array summed explicitly + operand fences (NOTES s60). g24 R=2 at m32 dead too.
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
-00. FIRST: read the lead's answer to the s71 lane Request in ~/COORD.md. (s71 g13t TMA-ring g13 = DEAD, NOTES s71.)
+000. FIRST: serve 'proj please run' Requests from moe/layer in ~/COORD.md via the s72 carrier (log job ids, copy
+    diag lines back to the Request + Judge runs). Then:
+00. read the lead's answer to the s71 lane Request in ~/COORD.md. (s71 g13t TMA-ring g13 = DEAD, NOTES s71.)
     If none: offer proj's unused daily checks as H200 diag capacity (see Request) and ask again; no proj micro-item left.
 0c. Layer: watch for s68 ltalt:pooler at T=128 (Handoffs proj s68) in a layer check's 'layer tune T=128' lines.
 0a. Layer: watch for G24P (Handoffs proj s63) in a layer check; read 'layer tune T=32' {'g24p': True} vs default (sl/full).
