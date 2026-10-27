@@ -750,6 +750,15 @@ G24_SKCFG = {("pooler", 16): (16, 1024, 2, 4, 16, 2, 257), ("unpool", 16): (16, 
              ("qkv_gate", 16): (16, 1024, 2, 4, 16, 2, 257), ("pooler", 32): (32, 512, 2, 4, 16, 2, 257),
              ("unpool", 32): (32, 512, 2, 4, 16, 2, 257), ("qkv_gate", 32): (32, 512, 2, 4, 16, 2, 257)}
 _G24 = {}
+# proj s56 EZ/ZN: within one layer call, each gemv24 zeroes the NEXT gemv24's FP32 out (preallocated, kept in _G24_ZN until
+# that call) as its warps finish; the next one then skips its own zeroing + fence + grid epoch barrier (npre bit 17).
+# Needs every kernel launched in between to execute griddepcontrol.wait (or no PDL) so completion is transitive.
+# H100 standalone (graph pred + gemm, us/call): qkv/o/pool/unp m16 -0.4..-1.4; proxy G88 -0.5..-1.3; ZN side +0..0.3.
+G24_ZCHAIN = {"qkv_gate": "o", "o": "pooler", "pooler": "unpool"}
+G24Z_TOKENS = {16}  # T=32: H100 in-layer d32 +1..2.5 us (pooler m32 ZN stores +0.6..1.5, EZ unpool +0.5..1): off
+G24_EZUSE = True  # A/B knob: False = the ZN stores happen but the consumer still zeroes itself
+G24_EZPF = False  # True: the zeroed-ahead out is L2-prefetched before the consumer's griddepcontrol.wait (H100 d16/d32 tie: off)
+_G24_ZN = {}  # (key, m) -> zeroed out for that call; cleared at every kernel_fn start
 BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
 G19_ON = {"pooler", "unpool", "qkv_gate", "o"}  # o: H100 tie (cuBLAS after attention)
 G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32), ("qkv_gate", 8), ("o", 8), ("pooler", 8)}  # prepared, used only if TUNE picks them (H100: tie/+3 us)
@@ -2302,7 +2311,7 @@ def _g24_prepare(state, w, comp, g):
             _G24["lib"] = load_inline(
                 name="layer_g24_" + hashlib.sha256(_G24_SRC.encode()).hexdigest()[:10] + "_" + str(len(G24_CFG) + len(G24_SKCFG)),
                 cpp_sources="void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
-                            "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                            "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
                 cuda_sources=_G24_SRC.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(G24_CFG.values()) | set(G24_SKCFG.values())))),
                 functions=["g24_gemm"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
         except Exception as ex:  # noqa: BLE001
@@ -2326,7 +2335,7 @@ def _g24_prepare(state, w, comp, g):
         x = torch.randn((m, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
         out = torch.full((m, w[key].shape[0]), float("nan"), dtype=torch.float32, device=dev)
         try:
-            lib.g24_gemm(e[0], e[1], e[2], x, out, e[3][grid], c[1], c[2], c[3], c[4], c[5], grid, c[3], c[6])
+            lib.g24_gemm(e[0], e[1], e[2], x, out, e[3][grid], c[1], c[2], c[3], c[4], c[5], grid, c[3], c[6], _NOZ(dev))
             torch.cuda.synchronize()
             ref = F.linear(x, w[key]).float()
             ok = ((out.bfloat16().float() - ref).norm() / ref.norm()).item() < 1e-2
@@ -2349,7 +2358,7 @@ def _g24_prepare(state, w, comp, g):
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
             {"rf_trig": False}, {"g13o": True}),
-        16: ({}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
+        16: ({}, {"g24z": False}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
              {"tk2h": 3}, {"tk2h": 4}, {"bal": True}, {"bal": False}, {"cslpw": False}, {"cslcarve": True},
@@ -2540,6 +2549,26 @@ def _tune(state):
     torch.cuda.empty_cache()
 
 
+def _g24_sel(state, key, m):
+    """The gemv24 entry _g19 runs for (key, m), or None (g22 or g19/cuBLAS take it)."""
+    if _opt(state, m, "g22:" + key, False) and state.get("g22", {}).get((key, m)) is not None:
+        return None
+    e = state.get("g24sk", {}).get((key, m)) if _opt(state, m, "g24sk:" + key, False) else None
+    if e is None:
+        e = state.get("g24", {}).get((key, m)) if _opt(state, m, "g24:" + key, False) else None
+    return e
+
+
+def _NOZ(dev):
+    z = _NOZ_T.get(dev)
+    if z is None:
+        z = _NOZ_T[dev] = torch.empty(0, dtype=torch.float32, device=dev)
+    return z
+
+
+_NOZ_T = {}
+
+
 def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3 = also the full smem carveout
     """x @ W.T (key's weight) in FP32 by gemv19 (a PDL dependent of the previous kernel), or None."""
     m = x.shape[0]
@@ -2549,17 +2578,24 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
         out = torch.empty((m, e[2]), dtype=torch.float32, device=x.device)
         _G22["lib"].g22_gemm(e[0], e[1], x.contiguous(), out, c[1], c[2], c[3], _G19_SMS, 0, c[2])
         return out
-    e = state.get("g24sk", {}).get((key, m)) if _opt(state, m, "g24sk:" + key, False) else None
-    if e is None:
-        e = state.get("g24", {}).get((key, m)) if _opt(state, m, "g24:" + key, False) else None
+    e = _g24_sel(state, key, m)
     if e is not None:  # proj s53: gemv24, where TUNE picks it
         c = e[4]
-        out = torch.empty((m, e[1].shape[0]), dtype=torch.float32, device=x.device)
+        out = _G24_ZN.pop((key, m), None)  # proj s56: zeroed by the previous g24 of this layer call (EZ)
+        ez = out is not None and G24_EZUSE
+        if out is None:
+            out = torch.empty((m, e[1].shape[0]), dtype=torch.float32, device=x.device)
+        nk = G24_ZCHAIN.get(key)
+        en = _g24_sel(state, nk, m) if nk is not None and _opt(state, m, "g24z", m in G24Z_TOKENS) else None
+        zo = _NOZ(x.device)
+        if en is not None:  # this g24 zeroes the next one's out after its own work (ZN)
+            zo = _G24_ZN[(nk, m)] = torch.empty((m, en[1].shape[0]), dtype=torch.float32, device=x.device)
         grid = G19_GRID.get((key, m), _G19_SMS)
         ctr = e[3].get(grid)
         if ctr is None:
             ctr = e[3][grid] = torch.zeros(2, dtype=torch.int32, device=x.device)
-        _G24["lib"].g24_gemm(e[0], e[1], e[2], x.contiguous(), out, ctr, c[1], c[2], c[3], c[4], c[5], grid, c[3] | ((int(trig) & 1) << 16), c[6])
+        _G24["lib"].g24_gemm(e[0], e[1], e[2], x.contiguous(), out, ctr, c[1], c[2], c[3], c[4], c[5], grid,
+                             c[3] | ((int(trig) & 1) << 16) | (int(ez) << 17) | (int(G24_EZPF) << 18), c[6], zo)
         return out
     on = key in G19_ON and _opt(state, m, "g19:" + key, (key, m) not in G19_DEFAULT_OFF)
     e = state.get("g19", {}).get((key, m)) if on else None
@@ -2768,6 +2804,7 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
 
 def kernel_fn(data, state):
     cfg = data["config"]
+    _G24_ZN.clear()
     _SLIDING[0] = cfg["window"] > 0
     batch, length, tokens = cfg["batch"], cfg["q_len"], cfg["tokens"]
     hq, d = cfg["num_q_heads"], cfg["head_dim"]

@@ -1364,3 +1364,26 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   tools/route_judge.py 0/480 (worst pick gap 0.034 at v32 sl seed 17 = the FP8 reference's own 0.034; limit 0.05).
 - H100 tuner (shared GPU, noisy: T=32 sl default 222.5 vs 235.7 us across two runs) picks tk2h 3/4 (+lt:o) at T=32 sl
   in both runs (-5..-8 us): watch the H200 'layer tune T=32' line in the 00:00Z check.
+- 00:01Z **check c973ab6f = main v102 (7f1c60b; submission.py of e8b5fee/233c0f1 identical): 2.0817x [2.050, 2.113], 10,866 us/step**
+  (board best 703d3a7e 1.9954x). Per shape H200 us (ours / SGLang, ratio; vs 703d3a7e):
+  d1 65.5/171.8 2.624 (-4.1) | 74.9/182.7 2.441 (-2.9); d16 132.3/258.2 1.952 (-11.0) | 215.1/436.3 2.029 (-12.6);
+  d32 163.6/260.2 1.590 (-10.4) | 319.4/615.7 1.928 (-7.2); v1 108.9/260.2 2.390 (-8.8) | 115.9/263.3 2.272 (-12.3);
+  v16 277.0/532.4 1.922 (+4.8) | 372.0/716.1 1.925 (+4.3); v32 361.1/738.4 2.045 (+4.7) | 535.8/1090.5 2.035 (-14.7).
+  v16 and v32 sliding are a few us SLOWER than 703d3a7e (suspects: T=128/256 tune picks, NORM_EARLY / moe_hot changes; or noise).
+  The local okc client hit my 600 s tool timeout; the job kept running (okc jobs / okc status <job> --json).
+- H200 tuner picks (profiles/submission.c973ab6f398c42b9.log 'layer tune'; default vs pick, us):
+  T=1 sl -> rf_trig False (71.5 vs 70.4) | full -> g13o (64.4 vs 64.2)
+  T=16 sl -> {g19:qkv False, lt:qkv, lt:o} (166.8 vs 166.3) | full -> g24:o False (231.3 vs 230.4)
+  T=32 sl -> {tk2h 4, lt:o} (168.7 vs 167.3) | full -> {tk2h 4, lt:o} (339.6 vs 337.0)
+  T=8 sl -> g14alt:qkv 3 (105.5 vs 103.6) | full -> g14alt:qkv 2 (143.7 vs 143.4)
+  T=128 sl -> twq 4 (275.1 vs 273.0) | full -> twf_split 1022 (388.5 vs 375.7)
+  T=256 sl -> {rg, twf_split 1022} (342.6 vs 340.6) | full -> {rg, twf_split 1022} (653.1 vs 644.7)
+  => T=32 tk2h 4 + lt:o (H100 tuner agreed) and T=128 full twf_split 1022 (-13 us) are candidates for TUNE_BASE defaults.
+- v103 = v102 + proj s56 g24z (EZ/ZN zero-ahead chain qkv->o->pooler->unpool at T=16; thanks proj): `git apply` of r-proj
+  dev/s56/g24z_layer.patch@a3c49ba, clean. Mixed tuner picks (e.g. the H200's lt:qkv/lt:o at T=16 sl) are safe: a g24
+  zeroes the next out only if _g24_sel says the next key also runs on g24; else the consumer zeroes itself as before.
+  H100 ab_flag 4 rounds x SEEDS 7,11,99 (tuner on), G24Z {16} vs off: d16 sl 157.3/150.8/188.8 vs 157.7/152.2/191.2
+  (-0.4/-1.4/-2.4), full 270.0/297.9/291.3 vs 270.2/298.6/291.7 (-0.2..-0.7). Cold compile+prepare+test 310 s, 13/13;
+  replay_test d16 seeds 11,23 0/80; route_judge d16 0/40. (A first warm-cache run printed "ninja: build stopped" yet
+  passed 13/13 with g24 built: most likely a race with another agent's build in the shared default TORCH_EXTENSIONS_DIR;
+  not reproducible cold.)

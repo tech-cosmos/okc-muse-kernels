@@ -62,7 +62,7 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
 // [R][AP][32 lanes x 16 B sign|mantissa] [R][AP][32 x 8 B codes] (pack19 with rg = R).
 template <int M, int KC, int AP, int NS, int WPB, int XB, int RR>
 __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H, float scale, const __nv_bfloat16* __restrict__ x,
-                                                    float* __restrict__ out, int* __restrict__ ctr, int n, int k, int npre) {
+                                                    float* __restrict__ out, int* __restrict__ ctr, int n, int k, int npre, float* __restrict__ zo, int zn4) {
     constexpr int R = RR & 0xff;
     constexpr bool SK = RR >> 8;
     constexpr int NT = M / 8, NA = KC / 32, SPK = NA / AP, SB = R * AP * WB, XS = KC * 2 + 16, STR = 16 * R + 4;
@@ -70,7 +70,10 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
     extern __shared__ __align__(128) unsigned char smem[];
     // npre bit 16: trigger the PDL dependent at start (the layer's g19 convention, s57: dependents that only touch out
     // after their own griddepcontrol.wait)
-    if (npre >> 16) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    if (npre & 0x10000) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    // npre bit 17 (proj s56 EZ): out arrives zeroed by an earlier g24 of the same layer call (its zo), complete before
+    // our griddepcontrol.wait returns (every kernel in between waits on its predecessor): no zero/fence/epoch barrier
+    const bool ez = (npre >> 17) & 1, ezpf = ez && ((npre >> 18) & 1);
     npre &= 0xffff;
     const int t = threadIdx.x, lane = t & 31, w = t >> 5, g = lane >> 2, c = lane & 3;
     const unsigned ring = (unsigned)__cvta_generic_to_shared(smem) + w * NS * SB, xs = (unsigned)__cvta_generic_to_shared(smem) + WPB * NS * SB;
@@ -105,6 +108,9 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
         for (; jn < total && jn < npre; ++jn) issue(jn);  // W only, before the predecessor is done
     }
+    if (ezpf)  // proj s56 (npre bit 18): out (zeroed long before, maybe evicted) back into L2 for the red.adds; prefetch only
+        for (int i = (blockIdx.x * WPB * 32 + t) * 32; i < M * n; i += gridDim.x * WPB * 32 * 32)  // (no data dependence)
+            asm volatile("prefetch.global.L2 [%0];" :: "l"(out + i));
     asm volatile("griddepcontrol.wait;" ::: "memory");
     if (t == 0) {  // the block's x chunks
         const int ksl = (tb - 1) / nrt;
@@ -115,7 +121,7 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
     }
     if (lane == 0) for (; jn < total && jn < NS; ++jn) issue(jn);
     jn = __shfl_sync(0xffffffffu, jn, 0);
-    {  // zero this block's slice of out, then arrive on the epoch counter ctr[1] (+gridDim.x per launch, never reset)
+    if (!ez) {  // zero this block's slice of out, then arrive on the epoch counter ctr[1] (+gridDim.x per launch, never reset)
         float4* o4 = (float4*)out;
         for (int i = blockIdx.x * WPB * 32 + t; i < M * n / 4; i += gridDim.x * WPB * 32) o4[i] = make_float4(0.f, 0.f, 0.f, 0.f);
         __threadfence();
@@ -126,8 +132,8 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
         }
         __syncthreads();
     }
-    const int target = *tgt;
-    bool passed = false;
+    const int target = ez ? 0 : *tgt;
+    bool passed = ez;
 #ifdef G24_TRACE
     unsigned long long tr0;
     asm volatile("mov.u64 %0, %globaltimer;" : "=l"(tr0));
@@ -262,6 +268,9 @@ __global__ void __launch_bounds__(WPB * 32, 1) gemm(const unsigned char* __restr
         }
         __syncwarp();
     }
+    // proj s56 ZN: zero the next g24's out (zo, zn4 float4s) as each warp finishes; plain stores, no fence: the next g24
+    // reads it only after its griddepcontrol.wait, i.e. after this grid has completed
+    for (int i = (blockIdx.x * WPB + w) * 32 + lane; i < zn4; i += gridDim.x * WPB * 32) ((float4*)zo)[i] = make_float4(0.f, 0.f, 0.f, 0.f);
 #ifdef G24_TRACE
     if (lane == 0) {
         unsigned long long tr1;
@@ -294,7 +303,7 @@ void g24_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
     g24::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_);
 }
 void g24_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out, torch::Tensor ctr,
-              int64_t kc, int64_t ap, int64_t ns, int64_t wpb, int64_t xb, int64_t grid, int64_t npre, int64_t rr) {
+              int64_t kc, int64_t ap, int64_t ns, int64_t wpb, int64_t xb, int64_t grid, int64_t npre, int64_t rr, torch::Tensor zo) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const int sk = rr >> 8;
     rr &= 0xff;
@@ -307,6 +316,7 @@ void g24_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
         TORCH_CHECK(tb == ta || (tb - 1) / nrg - ta / nrg < xb, "g24: block spans more than xb x chunks");
     }
     TORCH_CHECK(n % (16 * rr) == 0 && k % kc == 0 && sm <= 227 * 1024, "g24: shape/smem ", sm);
+    TORCH_CHECK(zo.numel() % 4 == 0 && (!zo.numel() || (zo.is_contiguous() && zo.scalar_type() == torch::kFloat32)), "g24: zo");
     auto stream = c10::cuda::getCurrentCUDAStream();
 #define G24_CASE(M_, KC_, AP_, NS_, WPB_, XB_, R_) \
     if (m == M_ && kc == KC_ && ap == AP_ && ns == NS_ && wpb == WPB_ && xb == XB_ && (rr | sk << 8) == R_) { \
@@ -318,7 +328,7 @@ void g24_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
         attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1; \
         cfg.attrs = attr; cfg.numAttrs = 1; \
         cudaLaunchKernelEx(&cfg, kern, (const unsigned char*)wp.data_ptr(), (const float2*)h.data_ptr(), (float)scale, (const __nv_bfloat16*)x.data_ptr(), \
-                           out.data_ptr<float>(), ctr.data_ptr<int>(), n, k, (int)npre); \
+                           out.data_ptr<float>(), ctr.data_ptr<int>(), n, k, (int)npre, zo.numel() ? zo.data_ptr<float>() : nullptr, (int)(zo.numel() / 4)); \
         C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
     G24_CONFIGS
     TORCH_CHECK(false, "g24: no config");
