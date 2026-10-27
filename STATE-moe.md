@@ -1,5 +1,9 @@
 # STATE-moe
 
+## n5s6 (22:20Z): re-derived scale compression (5-bit per-row window fits 100% of this generator's rows, -4.2% bytes) before
+finding it is n20's S6 (6-bit lossless scales, -2.8% bytes): H200 DEAD (d32 +2.7, d16 +1 us; decode consumer is latency-bound,
+any added decode op loses). Listed under Dead ends now. Still no lane answer; waiting for layer's 00:00Z pr32 tune lines.
+
 ## n5s5 (22:05Z): paper bounds only (pr32 pre-wait L2 prefetch zero-sum: ring fills the boundary window; MTOK16 S1 = 64 CTAs). Lane request to lead.
 H200 verdict: grep "layer tune T=\(16\|32\)" in r-layer profiles/<v143 check>.log, keep pr32/default fields (NOTES n5s5).
 
@@ -155,6 +159,8 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
 
 ## Dead ends (older ones: NOTES-moe.md)
+- (n20, H200 13b528a8) LOSSLESS SCALE COMPRESSION (S6 6-bit codes, base 80; 5-bit windows would need escapes): loses at d16/d32
+  (+1..2.7 us), wins only v1 -0.5..0.8: extra decode ops on a latency-bound consumer. Weight codes are uniform (4.0 bits): no gain there.
 - (s26) L2 prefetch of the unpool W from twm (spread over its main phase, evict_last): v32 +5..10 H100 us, unpool -1.
 - (s27) RSPLIT: weighted tk2f gemm13 split favouring CTAs that start early during pr1: +1.4..10 us (any imbalance costs).
 - (s12, H200 diag on layer routings; REOPENED n4s5: its weighted split was slow + count split imbalanced) GS16 in any form (old, merged one-body tk2h, split weights 2-6): +4..8 us at d16/d32;

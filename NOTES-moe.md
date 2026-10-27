@@ -2067,3 +2067,12 @@
   tr '|' '\n' | grep -E "layer tune|default|pr32|->"` (profiles are not in git: `okc status <16-hex job> --json` from that dir
   restores them; ask layer if absent). pr32 wins if its line beats default by > ~1 us at T=16 or T=32 (sl or full).
 - Lane request posted to lead (COORD Requests): moe's items are all at measured bounds pending that verdict.
+
+## Night5 session 6 (2026-10-27 22:04Z - 22:20Z) -- re-derived a dead end (scale compression); 0 checks, no GPU timing
+- No new lead decision since 20:00Z; moe checks 0/20 until 00:00Z; pr32's H200 verdict comes with layer's 00:00Z check (v143).
+- Looked for a byte-count lever: random_weights' e2m1 codes are uniform (4.0 bits, no gain); e4m3 block scales have entropy
+  3.71 bits, codes 92..126 over 16 experts; per-row (256-scale) window of 32 codes fits 100% of rows (5-bit + row base =
+  -4.2% expert bytes), 16-code windows fit only 99.6% of 4-scale groups (escapes needed). Then found n20's S6 (6-bit, -2.8%
+  bytes) already measured on the H200: DEAD (decode consumer latency-bound, n22). A 5-bit form needs more decode ops
+  (5-bit fields or nibble + bitplane), so it is dead for the same reason. Added to STATE's Dead ends so it is not rebuilt.
+- Next: after 00:00Z read layer's v143 'layer tune T=16/32' pr32 lines (STATE n5s5 grep recipe); lane request still open.
