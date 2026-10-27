@@ -69,11 +69,17 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 14 (00:32-01:15Z): TK2F_SQ = 1 ON MAIN (f0c16e9): tk2f single-copy 18 KB stages (prepare _sq_pack ->
+  st w13sq/w2sq, one cp.async.bulk per stage, PF 512, cfg + 10000000; bitwise 228/228). H200 DIAG df253e4c: d32 -1.5,
+  d16 -0.55, d1/v1 0 us (repeatable to 0.1). KPS 4 SQ (36 KB stages): d1/v1 +1, dead. Handoff: tools/n14/sq_layer.md.
+  Copy-pattern lever on tk2f is now mostly spent (probe promised 3x more). Checks today: 3/20 (4a591c7d, ab707ffc, df253e4c).
+  NEXT: lead's item (1) big-M v16/v32 (twm 172/218 us vs stream probe 128/141; drain) -- see Ranked ideas -8/-5.
+
 ## Night4 session 13 (22:48Z-00:45Z): H200 DIAG DONE (checks 4a591c7d: diag12 lost to log_tail; ab707ffc: 82 compact lines)
   RESULTS (NOTES n13): tk2f consumer ceiling gs8 - nm = 1.8/4.2/6.5/3.6 us (d1/d16/d32/v1): consumer work CLOSED.
   KPS 4 / ER / BAL dead on H200. tk2h W3 d32 -1.9 (d16 loses). RG 0 beats RG 1 (v16 -1.9, v32 -0.9). pb48 v16 -2.4.
   hot 32 @256 -5.4. Layer told (COORD Requests n13). The judge keeps only ~200 log lines: keep DIAG output compact.
-  NEXT BUILD (top): SINGLE-COPY tk2f stages: prepare() repacks w13/w2 (+ scales) so each tk2f stage (row r, k-chunk pair)
+  (done in n14, below) SINGLE-COPY tk2f stages: prepare() repacks w13/w2 (+ scales) so each tk2f stage (row r, k-chunk pair)
   is ONE contiguous 18 KB block {W 8K, W 8K, S 2K} -> one cp.async.bulk per stage instead of 3. H200 probe: sq18 vs uq =
   d32 -4.5, d16 -3.5, v1 -3.5, d1 -1.1 us (~1% layer score if tk2f follows its pattern as it does now: gs8 87.6 = tkp 86.8).
   Consumer unchanged except stage offsets; lossless repack. Check gemm13's gated pairs (2 W copies = gate + up rows 2048 apart?)

@@ -1144,7 +1144,7 @@
   Probe pieces at d32 / d16 / v1 / d1: multi-group re-reads (tkp - uq) 9.3 / 4.6 / 0 / 0; 3 copies per 18 KB stage vs ONE
   contiguous 18 KB copy (uq - sq18) 4.5 / 3.5 / 3.5 / 1.1 us -> NEXT BUILD (below).
 
-## Night4 session 14 (2026-10-27 00:32Z - ~01:40Z; moe checks 3/20 used today) -- TK2F_SQ single-copy tk2f stages
+## Night4 session 14 (2026-10-27 00:32Z - 01:15Z; moe checks 3/20 used today) -- TK2F_SQ single-copy tk2f stages
 - Built n13's NEXT: prepare `_sq_pack` repacks w13q/w2q + w13s2/w2s2 into the tk2f stage images
   [E][RPE][NQ][SB] = {tile lr kc q*16.., tile lr + RPE same kc, scales} (int32 [E, 256, 4, 4608] for w13, [E, 128, 4, 4608]
   for w2; lossless, +~0.86 GB); tk2f_produce<.., SQ> issues ONE cp.async.bulk of SB = 18 KB per stage (same L2 hint per row);
