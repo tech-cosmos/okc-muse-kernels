@@ -1914,3 +1914,14 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   kernel's prologue (layer's path) is the only form that can beat it. Pitfall: the first g30 timing in a process reads 1.5-3 us
   faster than steady state (pool 22.7/24.0 vs 25.6/27.1): always repeat a shape and take the later numbers.
 - s93 slip: ran 'git pull --rebase' inside ~/r-layer (layer's clone) at 16:08Z: fast-forward f7a1cdc -> ed832d1 (my own proj commit only, no layer files touched). Use /tmp worktrees of r-proj for layer branches.
+
+## s94 (2026-10-27 16:17Z-, night4 session 51): G30_PRE in-layer = small likely-win (branch proj/g30pre); 0 checks
+- G30_PRE (my s92 g30v.cu idea) ported onto r-layer proj/g30sort (ad581f9): g30 consumers read + sort the escape header
+  (prepared weights only, never written in a replay) BEFORE griddepcontrol.wait; the x producer warp waits itself; out is
+  written only after the consumers' wait. Default on (`#define G30_PRE 1`, -DG30_PRE=0 = old). Branch proj/g30pre 88ba088.
+- In-layer H100 (dev/s93/ab2.py "verify 16" 6 rounds, TUNE off, seeds 99/7/13; [0] g30sort, [1] +PRE), median (min) us:
+  sl 301.43 (298.54) | 301.43 (300.67); 297.63 (294.27) | 296.06 (295.60); 309.70 (306.59) | 308.78 (308.42)
+  full 438.49 (437.06) | 437.01 (436.48); 422.32 (420.61) | 420.14 (419.94); 383.30 (382.13) | 383.01 (382.83)
+  => medians 0..-2.2 us, mins mixed: near noise, never worse by median. Outputs bitwise equal on all 6 inputs.
+- Pitfall: ab2.py filter matches "verify 16", not "v16" (lost one 10-min run). Don't `pkill -f` a pattern that occurs in
+  your own command line (it kills the calling shell).

@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 (s94). G30_PRE (escape header read before the PDL wait) on r-layer branch proj/g30pre (88ba088, on g30sort):
+in-layer H100 v16 medians sl 0/-1.6/-0.9, full -1.5/-2.2/-0.3 us, bitwise equal: small likely-win, handed to layer. NOTES s94.
 Updated 2026-10-27 16:55 UTC (s93). g30_sort in-layer = TIE (r-layer branch proj/g30sort ad581f9, bitwise same). g30 split-K with
 DSMEM K-cluster reduce (dev/s93, G30_KC=1/2) DEAD: cluster+reduce ~2-2.5 us; qkv S3 18.9 vs cuBLAS 19.8, pool S2 loses. NOTES s93.
 Updated 2026-10-27 16:50 UTC (s92). g30 ESC_FIX cheaper: candidates sorted once, pop = register shift (dev/s92/g30_sort_layer.diff
@@ -137,7 +139,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s88: WPB 20-32 / R=2 ILP dead; NOW profile: loop ~47% of warp time, setup ~29%, task ends ~19% (dev/s88 ncu tools).
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
-000. (s92) layer: watch for g30_sort port; G30_PRE (header before the wait, dev/s92/g30v.cu) untested in-layer.
+000. (s94) layer: watch for g30_sort + G30_PRE (branch proj/g30pre) port; validate the bundle if asked.
    (s91) g30 escapes handed to layer: help layer integrate g30 at T=128 (qkv shape, T=256, PDL, TUNE option) if asked;
    validate its bundle (tools/validate.py on proj/validate) before its check.
 00. LANE (b) (lead 08:55Z): read COORD Requests for layer bundles; port + validate on proj/<name> branches (tools/validate.py on proj/validate).
