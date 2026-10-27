@@ -2085,6 +2085,7 @@ USE_GSLIDE = False  # batched sliding decode on _gd_full too (H100 win, H200 los
 BRED = True
 BNR = 1
 USE_GD1 = True  # decode full at batch * hkv == 2 on _gd_full too (511 splits, 8-warp one-pass merge); unchecked on H200
+ATT_PLAN = {}  # layer s84: plan overrides for the Gluon full-layer kernels (set per call by the layer's tuner option aplan)
 ATT_DIAG = 0  # layer s84: DIAG probe code for full-layer attention (set per call by the layer's tuner; 0 = real kernels)
 NT_AFTER = True  # gbal: _new_tokens launched after _gw_verify (it blocked 2nd gw CTAs on its SMs; s125)
 USE_GBAL = True  # verify full from 16 KV head pairs: balanced splits over the whole batch (_gw_bal); unchecked on H200
@@ -4031,6 +4032,8 @@ def kernel_fn(data: Inputs) -> torch.Tensor:
             and hkv == 2 and d == 64 and cfg["page_size"] == 1 and cfg["rope_theta"]:
         return _decode_nds(data, cfg)
     plan = _plan(cfg, max_pages, device)
+    if ATT_PLAN and (plan.get("gluon") or plan.get("gdec")):  # layer s84: H200 tuner plan overrides (full layers)
+        plan = {**plan, **ATT_PLAN}
     if data.get("qkv_ss", 0) and not (plan.get("gdec") and not plan.get("gluon")):  # proj s22: paths without QSS loads
         qkv = data["qkv_slabs"].sum(0).view(qkv.shape)
         data = {**data, "qkv": qkv, "qkv_ss": 0}
