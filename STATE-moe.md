@@ -69,6 +69,14 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 23 (05:45Z-): HOTQ = moe_hot<NH 64> (33..64-token experts, ONE N 64 pass) beside moe_twq at v16 (twq flags
+  bit 20 skips them; hot grid in twq flags bits 24..30 or HOTQ_M). Bitwise = twq (tools/s23/hq_t.py 0/26). H200 moe-only v16:
+  s33h (n21) 201.5 -> s33h32 194.8..196.5 -> **s66h32 191.8** (check 3187c4e7; twq 536953348 = 4|66<<8|1<<16|32<<24).
+  Seed 13 (one 36-token hot expert) gains nothing; seeds 17/99 -13. Off in moe; layer port tools/s23/patch_layer_hotq.py,
+  Handoffs/Requests 06:05Z. Checks today 16/20. Skipped s21's twm store-then-ticket idea (twm's combine already ~0 spin).
+  Check ecb491a2 confirms s66h32 191.1/191.4 (split 80/100, grid 24/40, quarters all worse). NEXT: a 16-warp hot pass (twq-style RT 1 N 64) if
+  the 8-warp hot items are the limit; HOTQ-style hot64 at v32 needs hx in moe_hot too (twm already single-passes 33..64).
+
 ## Night4 session 22 (05:35-05:50Z): DQW (dq rotations as IMAD.WIDE on the FMA pipe, bitwise) DEAD: consumer-bound proxy T16 +1.9,
   T32 +3.9, T64 +15 us; layer routings v32 +15.7 (H100; same SM as H200, no check spent). ncu: tk2f consumer is NOT pipe-bound
   (ALU 50%, FMA-heavy 34%, issue 50%; stalls wait 0.92 / long_sb 0.79 / throttle 0.40 per issue): it is LATENCY-bound
@@ -100,18 +108,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   NEXT: H200 phase-2 per-row rate (14% slower than phase 1 on the H200 only; the G88 proxy shows none: needs DIAG timelines, e.g.
   a no-spin probe); synthetic routings (10x8 vs 5x16 tokens) to measure extra-group vs expert cost for sq/h3. Checks today 8/20.
 
-## Night4 session 17 (02:22-03:20Z): TK2G_PAR4 = 1 on main (bdfc090): tk2h weighted-split bounds on 4 warps, 32-bit
-  (bitwise 138/138). H100: tk2h W3 consumer start 4.4 -> 2.6 us. H200 check 0d0e6c8d (timeline DIAG tools/n17/mktl_d.py):
-  d32 sq 87.2 | h3 83.8 (n16 w/o PAR4: -1.8, now -3.4); d16 sq 66.1 | h3 67.6; h0 loses (imbalanced). H200: h3 balanced.
-  d16 loss = tk2h's gated (phase-1) rows ~4% slower than tk2f_consume's (s99, identical work). Port note tools/n17/par4_layer.md.
-  NEXT: find the 4% (tk2g_row RTG run-time gated/RPE vs compile-time; PF bits; i-cache) -> h3 at d16 too. Checks today 7/20.
-
-## Night4 session 16 (01:50-02:50Z): TK2H_SQ = 1 on main (03b61af): tk2h (GS16+PF4, what the layer runs at d32) on the SQ
-  single-copy stages, bitwise 348/348. H200 DIAG 8b79cc25: d32 h16w3sq 84.5 vs h16w3 86.2 vs gs8 sq 86.3 (-1.7); d16 tk2h
-  still loses (68.8+ vs 65.3). Port note tools/n16/hsq_layer.md, posted to layer. Checks today 6/20.
-  NEXT (unchanged big levers, NOTES n15 end): v16/v32 first-wave HBM under-use; big-M is dq-bound (s22 floor ~185 us v32).
-
-## Older sessions (n3-n15, s6-s7): see NOTES-moe.md (L2H run-time modes, TWM_PB48, BAL, tk2h PF4 are all there).
+## Older sessions (n3-n17, s6-s7): see NOTES-moe.md (L2H run-time modes, TWM_PB48, BAL, tk2h PF4 are all there).
 
 ## Ranked ideas
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves

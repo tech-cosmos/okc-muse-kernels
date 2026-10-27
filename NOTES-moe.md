@@ -1383,3 +1383,14 @@
   h40 216.2 h48 217.3; s33h (n21 split) 214.5 | s33h32 210.0 s33h40 209.8. (H100 twm 195: the H100 misranks twq/twm, DRAM-bound.)
 - Layer port: tools/s23/patch_layer_hotq.py <moe_src.py> (applies to r-layer moe_src.py @ s75), then TUNE at T=128
   {"twq": 73988 | 32 << 24} (= 536944900).
+- H200 check 80af8c44 (8561d6c + DIAG, test run), MEAN 5 seeds, us: v16 s33h 201.4/201.7 | s33h24 194.9 | s33h32 194.8/195.0 |
+  s33h40 195.6 | q4h32 202.5 (seeds s33h -> s33h32: 7 -3.5, 11 -2.4, 13 -0.7, 17 -13.2, 99 -13.0). v32 (twq 4, no hot) 274.
+- H200 check 3187c4e7 (9d8e201 + DIAG): s33h32 196.5/196.6 | s24h32 197.3 | s50h32 195.2 | **s66h32 191.8** (seeds 7/11 203 -> 190) |
+  s33h16 196.1 | s33h20 195.6 | q4h24 204.1. With the heavy experts gone from twq, a longer split tail pays (n21 alone: s66 lost to s33).
+- H200 check ecb491a2 (caf38cb + DIAG): s66h32 191.1/191.4 | s80h32 193.2 | s100h32 195.7 | s66h24 194.9 | s66h40 193.5 | s66q32 194.5.
+  => layer TUNE[128] {"twq": 536953348} (= 4 | 66 << 8 | 1 << 16 | 32 << 24): -10.4 us vs the n21 candidate 73988 (201.5), -19 vs
+  plain twq. Split variants differ from s33 by <= 1 bf16 ulp (split sums differ; each is deterministic). Seed 13 (one 36-token hot
+  expert) stays ~204: unexplained (hot pass = 4 extra tokens' dq saved only).
+- H100 does NOT track this (per seed s66h32 vs s33h: 7 -9.5, 11 -1, 13 +12, 17 -7, 99 -6): use the H200 diag only.
+- NEXT ideas: a 16-warp hot pass (twq structure, RT 1 x N 64) if the 8-warp hot items limit seeds 7/11/13; hot64 at v32 would
+  need hx in moe_hot as well (twm single-passes 33..64 already, so little to gain there).
