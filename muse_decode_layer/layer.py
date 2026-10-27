@@ -651,7 +651,7 @@ def _join_builds():
         if d.get("lib", 0) is None:
             d.pop("lib")
     g = globals()
-    for n in ("_CSL", "_NVS", "_NDS"):
+    for n in ("_CSL", "_NVS", "_NDS", "_NVSCL"):
         if isinstance(g.get(n), _LazyBuild):
             g[n] = g[n].get()
 
@@ -2549,7 +2549,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
               {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": False},
               {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
               # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
-        256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
+        256: ({}, {"nvscl": False, "sl": True}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
               {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
@@ -2671,7 +2671,7 @@ def _tune(state):
             data = _synth_input(TUNE_SHAPE[tokens][0], dev, 3000 if sliding else 80000, TUNE_SHAPE[tokens][1], sliding,
                                 state["router"] if TUNE_SKEW else None)
             graphs, ok = [], []
-            cands = [o for o in cands if not (sliding and o.get("full"))]  # s84: full-layer-only options
+            cands = [o for o in cands if not (sliding and o.get("full") or not sliding and o.get("sl"))]  # s84/s85: full-/sliding-only options
             for opts in cands:
                 state["tune"][key] = opts
                 fn = lambda: kernel_fn(data, state)  # noqa: E731
@@ -2937,6 +2937,7 @@ QSS_DEFAULT = {32: True}  # tokens -> default of TUNE option qss (H100 layer, op
 # losers: d16 (csl, o on g19) 0.5 +0.6, 1.0 +1.6; v32 tie. TUNE option o_pf (0 = off).
 O_PF = {32: 0.5, 128: 0.5}
 VTK_QF32 = True  # s38: the T=8 sliding attention (vtk) takes the g19 m8 qkv in FP32 too (TUNE option g19:qkv_gate at T=8)
+NVS_CL = True  # s85: verify-32 sliding on moe s31's 2-CTA cluster nvs (attn_src _NVSCL; H200 standalone -1.1..-1.4 us). TUNE nvscl
 QF32_NDS = True  # s29: also at T=32 (nds sliding templated on the qkv type; full = the same Gluon path as T=16)
 RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 -> 109.9 (8 rounds), 112.3 -> 110.7 (4)
 TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
@@ -3100,7 +3101,7 @@ def _kernel_fn(data, state):
         w = e27[0] if e27 is not None else e[0] if e is not None else dense["o"]
         o_pf = (w.data_ptr(), int(w.numel() * w.element_size() * pf_frac) & ~15)
     o = attn_kernel_fn({
-        "o_pf": o_pf, "csl_pw": csl_pw,
+        "o_pf": o_pf, "csl_pw": csl_pw, "nvs_cl": _opt(state, tokens, "nvscl", NVS_CL),
         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
