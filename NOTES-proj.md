@@ -2088,3 +2088,12 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   per-call rate (H200 pooler m16 ~15.5 us after graph cost = ~2.4 TB/s of 12-bit bytes): a consumer oracle (decode off) on the
   H100 would show whether DEC3 decode or the ring/latency caps it, before any rewrite.
 
+- g30 consumer ORACLE (dev/n5s3/oracle.py + g30_oracle.cu = layer g30_src.cu with -DG30_ORACLE: raw bytes as A, no DEC3, no
+  escape fix), H100 cold L2 after a 3 us PDL spin pred, min of 3, layer cfgs (S, 16, 16), 12-bit pack bytes:
+  M32 pooler 19.87 vs oracle 19.06 us (2.53/2.64 TB/s), unpool 18.70/17.81 (2.69/2.83), qkv S3 13.18/11.97 (2.15/2.37);
+  M16 pooler 19.50/18.75, unpool 18.16/17.38, qkv 12.48/11.42.
+  => decode costs only 0.8-1.2 us/call; g30 is stream/latency-bound (~85% of H100 practical HBM). On the H200 (proj tuner
+  pooler m16 ~15.5 us after graph cost vs bare 50 MB stream ~13.9 from s17) the gap to a bare stream is ~1.6 us/call.
+  So the lead's ">= 3.5 TB/s" g30 target can't come from cheaper decode: what's left is fewer bytes (the ~11-bit format,
+  s17 estimate) or hiding the ramp/tail behind the neighbours (PDL overlap), not consumer work. qkv (36 tiles x S3 = 108 CTAs,
+  28 MB) is the most latency-bound (2.2 TB/s): a 132-CTA uneven split (g30k-style stream-K for qkv) is the one structural item.

@@ -3,7 +3,8 @@ Updated 2026-10-27 20:55 UTC (night5 n5s3 = session 3). r-layer branch **proj/g3
 actually built (v139 skipped it: K % 384 guard; kernel splits K unevenly) + moe pr32 TUNE option (embedded, prebuilt). validate ALL OK,
 cold 162.2 s; H100 tuner T=32 picks g30k104+g30n unp+qkv (sl 214.8 vs 220.1, full 433.3 vs 438.0). Proposed as the 00:00Z layer bundle.
 proj check 7cbaa0fd 1.3387x: H200 says g30 rings 16/16 beat 20/8 on every m16/m32 shape (probe reverted). Checks 10-27: 11/20, scored 3/10.
-NEXT: layer's H200 tune lines for this bundle; g30 consumer oracle (decode off) to see what caps g30 at ~2.4 TB/s on the H200.
+g30 ORACLE (n5s3): decode off saves only 0.8-1.2 us/call on H100 (g30 ~85% of HBM): decode is not the cap. NEXT: layer's H200 tune
+lines for this bundle; qkv g30k-style stream-K on 132 CTAs (qkv is the most latency-bound: 108 CTAs, 2.2 TB/s); ~11-bit format.
 Updated 2026-10-27 20:45 UTC (night5 s100 = session 2). **proj board best now submit a0168544 = ffb1ae8, 1.3543x** (check 7ad5148c
 1.3998; before a12513ed 1.3483): g30/g30n (12-bit W in wgmma A regs, dev/g30_src.cu = layer's copy) added as tuner candidates BF16_G30 at m16/32/128.
 H200 picks g30 at pooler m16, unpool m16/m32, qkv m16/m32 (-0.4..-2.2 us vs cuBLASLt); pooler m32 tie, o and m128 lose (per-shape
