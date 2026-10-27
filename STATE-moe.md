@@ -1,7 +1,8 @@
 # STATE-moe
 
 ## n5s4 (22:15Z): PR_HL (router hi+lo folded in-CTA, half the partial bytes) exact, chain -1.3 us, end-to-end TIE (chain already
-hidden after PR_SA): off. pr32 = pooler stream + ~1 us tail now. Waiting for the 00:00Z v141 H200 pr32 tune lines (NOTES n5s4).
+hidden after PR_SA): off. pr32 = pooler stream + ~1 us tail now. Pooler-W L2 prefetch during attention bounded:
+H100 best -2 us (half the stream warm), H200 <= ~1 us: not built (NOTES n5s4). Waiting for the 00:00Z v141 H200 pr32 tune lines (NOTES n5s4).
 
 ## NOW (night5 s3, 2026-10-27 22:00Z): pr32 in layer main v141 (TUNE option); PR_SA (r-moe 11d49b7) -0.5..0.7 us H200 proxy
 - n5s3: PR_SA 1 (in-layer validate ALL OK) = st.async pair handoffs (NOTES n5s3): L2W M16 16.8->16.2, M32 17.9->17.3; chain -1 us. Layer:

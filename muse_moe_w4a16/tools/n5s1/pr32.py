@@ -103,7 +103,41 @@ void pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
     pk<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * 2 / 16, ns_);
 }""", functions=["pred"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
     x = torch.randn(M, 8192, device=dev).bfloat16(); xs = x.clone()
-    pre = lambda: pm.pred(xs, x, PRED)  # noqa
+    WARM = float(os.environ.get("WARM", 0))  # n5s4: fraction of every CTA's pooler stream (+ all router W) L2-warm first
+    if WARM > 0:
+        wm = load_inline(name="n5_warm", cpp_sources="void warm(torch::Tensor, torch::Tensor, torch::Tensor);", cuda_sources=r"""
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+__global__ void wk(const long long* __restrict__ off, const int* __restrict__ len, const uint8_t* base, unsigned long long* sink) {
+    const uint4* p = (const uint4*)(base + off[blockIdx.x]);
+    unsigned s = 0;
+    for (int i = threadIdx.x; i < len[blockIdx.x] / 16; i += blockDim.x) { uint4 v = __ldcg(p + i); s ^= v.x ^ v.w; }
+    if (s == 0x12345678u) *sink = s;
+}
+void warm(torch::Tensor off, torch::Tensor len, torch::Tensor sink) {
+    wk<<<off.numel(), 512, 0, c10::cuda::getCurrentCUDAStream()>>>((const long long*)off.data_ptr(), (const int*)len.data_ptr(), (const uint8_t*)0, (unsigned long long*)sink.data_ptr());
+}""", functions=["warm"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
+        KS = 128; WST = wp.numel() * wp.element_size() // (64 * KS)
+        offs, lens = [], []
+        for c in range(rw.numel() // (64 << 10) if os.environ.get("WR", "1") == "1" else 0):
+            offs.append(rw.data_ptr() + c * (64 << 10)); lens.append(64 << 10)
+        for gq in range(64):
+            for y in range(2):
+                i0 = 2 * (y * (KS // 2) // 2)
+                WA, WB = (int(v) for v in os.environ.get("WPAT", "0/0").split("/"))
+                if WB:  # n5s4: stages i with i % WB < WA (interleaved), WARM ignored
+                    for i in range(KS // 2):
+                        if i % WB < WA:
+                            offs.append(wp.data_ptr() + (gq * KS + i0 + i) * WST); lens.append(WST)
+                    continue
+                n = int(WARM * (KS // 2)) * WST
+                offs.append(wp.data_ptr() + (gq * KS + i0) * WST); lens.append(n)
+        woff = torch.tensor(offs, dtype=torch.int64, device=dev); wlen = torch.tensor(lens, dtype=torch.int32, device=dev)
+        wsink = torch.zeros(1, dtype=torch.int64, device=dev)
+        print(f"WARM {WARM}: {sum(lens) / 1e6:.1f} MB in L2 (WST {WST})")
+        pre = lambda: (wm.warm(woff, wlen, wsink), pm.pred(xs, x, PRED))  # noqa
+    else:
+        pre = lambda: pm.pred(xs, x, PRED)  # noqa
     e0 = bench.time_graph(pre)
     for _ in range(3):
         print(f"M{M} pr32 {DEFS}: {bench.time_graph(lambda: (pre(), run(x, 1))) - e0:.2f} us (over a {PRED/1000:.0f} us PDL pred)", flush=True)

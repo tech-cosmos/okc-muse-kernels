@@ -2030,7 +2030,7 @@
 - Next session (after 00:00Z): read the layer's H200 'layer tune T=16/32' pr32 lines (v141 check). If pr32 wins: make sure SA is
   in, then try MTOK16 variants; if it loses, ask layer for a PR_TL timeline DIAG. moe checks reset at 00:00Z (20).
 
-## Night5 session 4 (2026-10-27 21:32Z - ~22:15Z) -- pr32 PR_HL (router hi+lo fold in-CTA): tie, kept off; 0 checks
+## Night5 session 4 (2026-10-27 21:32Z - 22:10Z) -- pr32 PR_HL (router hi+lo fold in-CTA): tie, kept off; 0 checks
 - Idea: the finisher chain ingests 64 x 2 KB per finisher and sums [512] hi|lo partials. PR_HL 1 packs each 64-row router
   group as [hi 32 rows | the same 32 lo rows] (host: cat([hi.view(8,32,K), lo.view(8,32,K)], 1)), so warp 10 folds
   r + (r+32) (and WG0 + WG1) before the DSMEM push / partial store: partials [rg][p][T][32], finisher ingest 64 x 1 KB,
@@ -2043,4 +2043,13 @@
   M16 HBM 21.60-21.89 vs 21.62-21.92; L2W 16.16-16.22 vs 16.35-16.38. = tie. PR_HL stays 0 (would also need the layer's
   _pr32_prepare packing change). Kept in body3.cu/pr32_src.cu as an option (pr32.py packs by DEFS).
 - Conclusion: pr32 end-to-end = the pooler stream (+ ~1 us pair tail); chain levers are exhausted until the H200 says otherwise.
+- BOUND (pr32.py WARM / WPAT / WR knobs: a warm kernel __ldcg-reads part of every CTA's stream after the cold flush, inside
+  the timed graph, before the 3 us pred; time = minus warm+pred alone). Question: with pr32 HBM-bound on the H100 (22.3 vs
+  L2-resident 17.1), does an L2 prefetch of the pooler W during sliding attention pay now (layer s61 killed it for consumer-bound g19)?
+  M32 H100 us: WARM (first f of each CTA's 64 pooler stages + all 8 MB router W) 0 22.4 | 0.25 21.2 | 0.5 (33.6 MB) 20.3 |
+  0.75 21.4 | 1.0 22.0 (L2 thrash > ~35 MB). Interleaved WPAT a/b (stages i % b < a): 1/2 (33.6 MB) 20.5 | 2/3 (42 MB) 20.5 |
+  1/3 21.0 | 1/4 21.2. => best -2 us on the H100 under ideal conditions (warm fully landed, L2 otherwise empty); the H200 is
+  near pr32's consumer floor (proxy 17.1 vs est. HBM ~18.5), so <= ~1 us/layer there (~0.14% at d16+d32 sliding) minus attention
+  contention (O_PF lessons: prefetch at nds start is zero-sum). Not built; revisit only if the H200 tuner picks pr32 AND a
+  layer DIAG shows pr32 HBM-bound there.
 - Next: after 00:00Z read layer's v141 check 'layer tune T=16/32' pr32 lines (and make sure layer took PR_SA, 11d49b7).
