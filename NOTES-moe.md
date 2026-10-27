@@ -2085,7 +2085,7 @@
   (s17-s30, n4s23). No unmeasured moe item found; did not rebuild a dead end.
 - Next: after 00:00Z read v143's 'layer tune T=16/32' pr32 lines (STATE n5s5 recipe) and act on them; else wait for a lane.
 
-## Night5 session 8 (2026-10-27 22:38Z - ) -- pr32 at T=8 with an FP32 router (PR_F32) to replace pr8; 0 checks
+## Night5 session 8 (2026-10-27 22:38Z - 23:25Z) -- pr32 at T=8 with an FP32 router (PR_F32) to replace pr8; 0 checks
 - Why: layer n5s6 measured T=8 g30k pooler + side router DEAD and wrote "a g30 pooler would need the router fused like pr32
   (FP32 router at T=8)". SGLang at T <= 8 = FP32 F.linear on the FP32 router input (baseline.py ROUTER_FP32_MAX_TOKENS 8):
   a hi/lo BF16 split is NOT allowed there (x itself is FP32).

@@ -1,6 +1,6 @@
 # STATE-moe
 
-## n5s8 (23:40Z): BUILT pr32 at T=8 with an FP32 router (PR_F32, tools/n5s8) to replace pr8: exact (FP32-class logits), standalone
+## n5s8 (23:25Z): BUILT pr32 at T=8 with an FP32 router (PR_F32, tools/n5s8) to replace pr8: exact (FP32-class logits), standalone
 H100 21.0 us, but IN-LAYER H100 DEAD (v1 sl +1.8..2.3, full +3.8..4.3 us vs pr8; no-PDL worse). Not handed off. NOTES n5s8.
 Next: still the 00:00Z v144 H200 'layer tune T=16/32' pr32 lines (n5s5 recipe); no other open moe item.
 
