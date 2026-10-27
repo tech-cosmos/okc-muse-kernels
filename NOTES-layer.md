@@ -1421,3 +1421,11 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   H100 ab_flag 4 rounds x SEEDS 7,11,99, SQ on vs off: d1 sl +0.7/+0.9/+0.7, full +0.9/+0.5/+0.6 (=> off at T=1);
   d16 +0.4/+0.1/+0.6 sl, +0.6/+0.2/-1.5 full; d32 +-0.5 (H100 DRAM-bound; moe's H200 diag: d32 -1.5, d16 -0.55).
   tk2f_stress 0/600, test 13/13, replay decode seeds 11,23 0/96, cold prepare 111.4 s.
+- 02:00Z **check 18504372 = v105 (f9b702a): 2.0871x [2.056, 2.118], 10,838 us** (best check so far; board 2.0606x). H200 us:
+  d1 67.6/76.6, d16 128.6/204.7, d32 163.1/312.0, v1 111.3/123.7, v16 272.5/355.1, v32 353.3/528.1 (vs check 0eb3484a v103:
+  d16 full -9.6, d32 sl -14 / full -21.5 (0eb3484a's d32 was a slow draw), v16 full -13; d1/v1 within noise). Judge run 284 s
+  start->finish (parallel builds fine on the judge; no build-failure lines in the log).
+- 02:05Z submit acce7f04 = v105 (check beat the board).
+- 02:25Z **submit acce7f04 = v105: 2.0525x [2.022, 2.083], 11,021 us** (below board best b9685e03 2.0606x; check->submit -1.7%,
+  the usual spread): d1 69.0/77.5, d16 135.7/212.8, d32 171.2/317.4, v1 114.8/129.8, v16 268.4/364.6, v32 348.5/531.8.
+  Board: layer #34 at 2.061x (#1 colinlikescode 2.380x). Budget 10-27 after s68: 17 checks / 7 submits left.

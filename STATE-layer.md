@@ -5,10 +5,11 @@ submit b9685e03 = v103, 2.0606x, 10,977 us/step, layer board #30** (#1 2.380x). 
 Per shape (H200 us, b9685e03): d1 70.3/77.0, d16 133.4/216.1, d32 164.7/320.7, v1 114.0/122.9, v16 271.3/360.5, v32 352.9/520.7.
 Checks: c973ab6f v102 2.0817x, 0eb3484a v103 2.065x. Check->submit spread ~1-2% (d1/v1 routing draw moves 5-13 us).
 H200 tuner picks per run are in NOTES s67 (T=32 {tk2h 4, lt:o} flips sign between runs: tuner-only; g24z wins on H200).
-Budget 2026-10-27: 18 checks / 8 submits left after s67 (resets 00:00Z).
+
 
 s68: **main = v105 = v103 + v104 (all JIT builds concurrent: cold import+prepare 314 s -> 111 s on the H100, lead 00:48Z
-done) + moe n14 TK2F_SQ at T>1** (bitwise; H100 tie at T>1, +0.7 at d1 so off there). Check 18504372 = v105 (see NOTES s68).
+done) + moe n14 TK2F_SQ at T>1** (bitwise; H100 tie at T>1, +0.7 at d1 so off there). Check 18504372 = v105 2.0871x (best check); submit acce7f04 = v105 2.0525x (noise, board stays b9685e03 2.0606x).
+Budget 10-27 after s68: 17 checks / 7 submits. Resubmitting v105 unchanged is NOT allowed: stack a new win first.
 Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
 
