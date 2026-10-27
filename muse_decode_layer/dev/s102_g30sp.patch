@@ -1,0 +1,410 @@
+diff --git a/muse_decode_layer/g30_src.cu b/muse_decode_layer/g30_src.cu
+index 0d760e2..32299c8 100644
+--- a/muse_decode_layer/g30_src.cu
++++ b/muse_decode_layer/g30_src.cu
+@@ -98,10 +98,13 @@ __device__ __forceinline__ void wg_mma_rs(float* d, unsigned a0, unsigned a1, un
+       : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db));
+ }
+ 
++template <bool SPL>
+ __global__ void __launch_bounds__(320, 1)
+-g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ wp, __nv_bfloat16* __restrict__ out,
+-           const float2* __restrict__ hdr, int N, int KS, float scale) {
+-  // KS = k-stages; wp = [G][KS][WST]
++g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ wp, void* __restrict__ outv,
++           const float2* __restrict__ hdr, int N, int KT, float scale) {
++  // KT = k-stages of K; wp = [G][KT][WST]. s102 SPL (split-K slabs, no reduce): gridDim.y = S CTAs per row group, CTA s
++  // takes stages [k0, k0 + KS) (uneven: S need not divide KT) and stores its FP32 tile to slab s of outv [S][128][N]
++  // (the consumer sums the slabs); !SPL: S = 1, BF16 out [128][N].
+   extern __shared__ __align__(1024) uint8_t smraw[];
+   uint8_t* sm = (uint8_t*)(((uintptr_t)smraw + 1023) & ~(uintptr_t)1023);
+   uint8_t* xs = sm;                                  // NS x 16 KB
+@@ -112,6 +115,8 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
+   uint64_t* wempty = wfull + G30_NW;
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int g = blockIdx.x;
++  const int k0 = SPL ? (int)(((long)blockIdx.y * KT) / gridDim.y) : 0;
++  const int KS = SPL ? (int)(((long)(blockIdx.y + 1) * KT) / gridDim.y) - k0 : KT;
+   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+   if (tid == 0) {
+     for (int i = 0; i < G30_NS; i++) { mbar_init(&full[i], 1); mbar_init(&empty[i], 1); }
+@@ -121,7 +126,7 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
+   __syncthreads();
+   if (warp == 8) {  // W: weights only, may run before the producer kernel is done
+     if (lane == 0) {
+-      const uint8_t* src = wp + (size_t)g * KS * G30_WST;
++      const uint8_t* src = wp + ((size_t)g * KT + k0) * G30_WST;
+       for (int i = 0; i < KS; i++) {
+         const int st = i % G30_NW, ph = (i / G30_NW) & 1;
+         mbar_wait(&wempty[st], ph ^ 1);
+@@ -138,7 +143,7 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
+         const int st = i % G30_NS, ph = (i / G30_NS) & 1;
+         mbar_wait(&empty[st], ph ^ 1);
+         mbar_expect_tx(&full[st], G30_XBOX);
+-        tma2d(xs + st * G30_XBOX, &tmX, i * 64, 0, &full[st]);
++        tma2d(xs + st * G30_XBOX, &tmX, (k0 + i) * 64, 0, &full[st]);
+       }
+     }
+     return;
+@@ -157,12 +162,13 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
+       for (int e = 0; e < G30_ESC; e++) {
+         const float2 hv = __ldg(hdr + (size_t)(g * 64 + (t >> 5) * 16 + 8 * rr + ((t & 31) >> 2)) * G30_ESC + e);
+         const int col = __float_as_int(hv.x);
+-        const bool mine = hv.y != 0x1p-15f && ((col >> 1) & 3) == q && ((col >> 6) & 1) == wg;
++        const bool mine = hv.y != 0x1p-15f && ((col >> 1) & 3) == q && (((col >> 6) - k0) & 1) == wg
++                          && (!SPL || ((col >> 6) >= k0 && (col >> 6) < k0 + KS));
+         cand[rr * G30_ESC + e] = mine ? ((unsigned)col << 18) | ((unsigned)rr << 16) | (__float_as_uint(hv.y) >> 16) : ~0u;
+       }
+     nxt = esc_pop(cand);
+   }
+-#define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); nxt = esc_pop(cand); } }
++#define G30_FIX(a) { const unsigned kend = (unsigned)(k0 + i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); nxt = esc_pop(cand); } }
+ #else
+ #define G30_FIX(a)
+ #endif
+@@ -219,6 +225,24 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
+   // acc layout (m64n128): d[4*jn + 2*h + e] = row r0 + 8h, token 8*jn + tok + e
+   const int r0 = (warp & 3) * 16 + (lane >> 2);
+   const int tok = 2 * (lane & 3);
++  if constexpr (SPL) {  // FP32 tile -> slab blockIdx.y (staged token-major, coalesced 16 B stores)
++    float* stf = (float*)(xs + 32768);  // [128 tok][64 rows] (+4 pad)
++#pragma unroll
++    for (int jn = 0; jn < 16; jn++)
++#pragma unroll
++      for (int h = 0; h < 2; h++)
++#pragma unroll
++        for (int q = 0; q < 2; q++) stf[(8 * jn + tok + q) * 68 + r0 + 8 * h] = d[4 * jn + 2 * h + q] * scale;
++    asm volatile("bar.sync 2, 128;" ::: "memory");
++    float* o = (float*)outv + (size_t)blockIdx.y * G30_MTOK * N;
++#pragma unroll
++    for (int q = 0; q < 16; q++) {
++      const int idx = q * 128 + t, tk = idx >> 4, c = idx & 15;
++      *(float4*)(o + (size_t)tk * N + g * 64 + c * 4) = *(const float4*)(stf + tk * 68 + c * 4);
++    }
++    return;
++  }
++  __nv_bfloat16* out = (__nv_bfloat16*)outv;
+   // stage the tile token-major in smem, then coalesced 16 B stores (128 B per token row)
+   __nv_bfloat16* stg = (__nv_bfloat16*)(xs + 32768);  // [128 tok][64 rows] (+8 pad)
+ #pragma unroll
+@@ -250,17 +274,19 @@ static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, ui
+ }
+ }  // namespace g30
+ 
+-// out [128][N] BF16 = x [128][K] @ W^T; wp = pack30 stages, hdr = [N][G30_ESC] float2; pdl: launch as a PDL secondary
+-void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale, int64_t pdl) {
+-  const int K = x.size(1), N = out.size(1);
+-  TORCH_CHECK(x.size(0) == G30_MTOK && x.is_contiguous() && K % 64 == 0 && N % 64 == 0 && out.size(0) == G30_MTOK);
++// out [128][N] BF16 = x [128][K] @ W^T; wp = pack30 stages, hdr = [N][G30_ESC] float2; pdl: launch as a PDL secondary.
++// s102 g30_slab: out = FP32 [split][128][N] split-K slabs (sum = x @ W^T), no reduce.
++static void g30_launch(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, void* out, int N, double scale, int64_t pdl, int split) {
++  const int K = x.size(1);
++  TORCH_CHECK(x.size(0) == G30_MTOK && x.is_contiguous() && K % 64 == 0 && N % 64 == 0 && split >= 1 && split <= K / 64);
+   CUtensorMap tx;
+   g30::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
+   const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512;
+-  static bool once = false;
+-  if (!once) { cudaFuncSetAttribute(g30::g30_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
++  static bool once[2] = {false, false};
++  auto kern = split > 1 ? g30::g30_kernel<true> : g30::g30_kernel<false>;
++  if (!once[split > 1]) { cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once[split > 1] = true; }
+   cudaLaunchConfig_t cfg = {};
+-  cfg.gridDim = dim3(N / 64);
++  cfg.gridDim = dim3(N / 64, split);
+   cfg.blockDim = dim3(320);
+   cfg.dynamicSmemBytes = smem;
+   cfg.stream = at::cuda::getCurrentCUDAStream();
+@@ -268,7 +294,16 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
+   at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+   at[0].val.programmaticStreamSerializationAllowed = pdl ? 1 : 0;
+   cfg.attrs = at; cfg.numAttrs = 1;
+-  TORCH_CHECK(cudaLaunchKernelEx(&cfg, g30::g30_kernel, tx, (const uint8_t*)wp.data_ptr(), (__nv_bfloat16*)out.data_ptr(),
+-                                 (const float2*)hdr.data_ptr(), N, K / 64,
++  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, tx, (const uint8_t*)wp.data_ptr(), out, (const float2*)hdr.data_ptr(), N, K / 64,
+                                  (float)scale) == cudaSuccess, "g30 launch failed");
+ }
++
++void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale, int64_t pdl) {
++  TORCH_CHECK(out.size(0) == G30_MTOK && out.scalar_type() == at::kBFloat16);
++  g30_launch(x, wp, hdr, out.data_ptr(), out.size(1), scale, pdl, 1);
++}
++
++void g30_slab(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale, int64_t pdl) {
++  TORCH_CHECK(out.dim() == 3 && out.size(1) == G30_MTOK && out.scalar_type() == at::kFloat && out.is_contiguous());
++  g30_launch(x, wp, hdr, out.data_ptr(), out.size(2), scale, pdl, out.size(0));
++}
+diff --git a/muse_decode_layer/layer.py b/muse_decode_layer/layer.py
+index 258fdd2..6ff4c40 100644
+--- a/muse_decode_layer/layer.py
++++ b/muse_decode_layer/layer.py
+@@ -760,10 +760,14 @@ _G30_SRC = None  # @@G30@@
+ # s100 g30 (g30_src.cu = layer s99 dev/s99_g30.cu + PDL + proj s91's in-fragment escape patch): T=128 wgmma GEMM over the 12-bit
+ # weights decoded into register A-fragments (H100 cold-L2 unp 8192x4096 22.4 vs cuBLAS 25.6 us; in-layer ab_flag 4 rounds x 3 seeds
+ # v16 sl -4.1..-5.2, full -4.5..-5.5 us; G30_TRIG another -0.6..-1.5). In TUNE_BASE[128]; TUNE option {g30:unpool: False}.
+-G30_KEYS = ("unpool", "o")  # o: H100 standalone 10.2 vs cuBLAS 10.5 us (tie): TUNE option g30:o only
++G30_KEYS = ("unpool", "o", "pooler")  # o: H100 standalone 10.2 vs cuBLAS 10.5 us (tie): TUNE option g30:o only
+ # s101 DEAD: qkv on a split-K g30 (dev/s101_g30split.cu: uneven K ranges, FP32 slabs, ticket, last CTA sums; bit-exact):
+ # S3 standalone 21.4 vs cuBLAS 20.0 us (MMA part 16.4, reduce chain +5), in-layer v16 sl +2.5..4.1, full +0.1..2.5 us.
+ G30_TOKENS = 128
++# s102 g30sp (TUNE option at T=128, value = order): the pooler on g30_slab (split-K S=G30SP_S, FP32 slabs summed by the
++# rmsnorm, no reduce kernel) + the router hi/lo as its own cuBLAS GEMM (instead of the fused "fr" torch.mm).
++# 2 = router + routing first, 3 = pooler first.
++G30SP_S = 2
+ G30_PDL = 1  # launch g30 as a PDL secondary (W streams before griddepcontrol.wait)
+ G30_TRIG = True  # the second boundary is g30's PDL secondary (g30 triggers at start)
+ _G30 = {}
+@@ -2493,8 +2497,9 @@ def _g30_build():
+             from torch.utils.cpp_extension import load_inline
+             _G30["lib"] = load_inline(
+                 name="layer_g30_" + hashlib.sha256(_G30_SRC.encode()).hexdigest()[:10],
+-                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
+-                cuda_sources=_G30_SRC, functions=["g30_gemm"],
++                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);\n"
++                            "void g30_slab(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
++                cuda_sources=_G30_SRC, functions=["g30_gemm", "g30_slab"],
+                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"], extra_ldflags=["-lcuda"])
+         except Exception as ex:  # noqa: BLE001
+             print("layer g30 build failed:", ex)
+@@ -2541,6 +2546,11 @@ def _g30_prepare(state, w, comp, g):
+             torch.cuda.synchronize()
+             ref = F.linear(x, w[key]).float()
+             ok = ((out.float() - ref).norm() / ref.norm()).item() < 1e-2
++            if ok and key == "pooler":
++                sl = torch.full((G30SP_S, G30_TOKENS, w[key].shape[0]), float("nan"), device=dev)
++                lib.g30_slab(x, e[0], e[1], sl, e[2], 0)
++                torch.cuda.synchronize()
++                ok = ((sl.sum(0) - ref).norm() / ref.norm()).item() < 1e-2
+         except Exception as ex:  # noqa: BLE001
+             print("layer g30 failed:", key, ex)
+             ok = False
+@@ -3269,6 +3279,27 @@ def _kernel_fn(data, state):
+                 t.record_stream(side_stream)
+         moe = _experts_moe(p, topk_weights, local_ids, state)
+         return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
++    g30sp = (tokens == G30_TOKENS and not fp32_router and state.get("pool_router") is not None
++             and "pooler" in state.get("g30", {}) and _use_moe(tokens) and _opt(state, tokens, "g30sp", 0))
++    if g30sp:  # s102: pooler on g30 split-K slabs (summed in the rmsnorm) + router hi/lo on cuBLAS, one stream
++        e = state["g30"]["pooler"]
++        sl = torch.empty((G30SP_S, tokens, D_EXPERT), dtype=torch.float32, device=dev)
++        if g30sp == 3:
++            _G30["lib"].g30_slab(h, e[0], e[1], sl, e[2], G30_PDL)
++        rl = torch.mm(h, state["pool_router"][D_EXPERT:].t(), out_dtype=torch.float32)
++        ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
++        lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
++        wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
++        _routing[(tokens,)](rl, state["router_bias"], data["local_start"], ids, lids, wts, tokens,
++                            E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
++                            SKS=N_EXPERTS, ST=2 * N_EXPERTS, TRIG=False, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2)
++        if g30sp != 3:
++            _G30["lib"].g30_slab(h, e[0], e[1], sl, e[2], G30_PDL)
++        p = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
++        _rmsnorm_gain[(tokens,)](sl, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=False, TRIG=False,
++                                 ROUND=True, NS=G30SP_S, SS=tokens * D_EXPERT, num_warps=8)
++        moe = _experts_moe(p, wts, lids, state)
++        return _tail(moe, stream1, h, tokens, state, pdl) + (ids,)
+     if (not fp32_router and state.get("pool_router") is not None
+             and _opt(state, tokens, "fr", tokens in FUSED_ROUTER_TOKENS)):
+         # SGLang's router above 8 tokens = BF16 h against the BF16 hi/lo split of the FP32 weight (FP32 accumulation):
+diff --git a/muse_decode_layer/submission.py b/muse_decode_layer/submission.py
+index f056546..69fdabe 100644
+--- a/muse_decode_layer/submission.py
++++ b/muse_decode_layer/submission.py
+@@ -13092,10 +13092,13 @@ __device__ __forceinline__ void wg_mma_rs(float* d, unsigned a0, unsigned a1, un
+       : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db));
+ }
+ 
++template <bool SPL>
+ __global__ void __launch_bounds__(320, 1)
+-g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ wp, __nv_bfloat16* __restrict__ out,
+-           const float2* __restrict__ hdr, int N, int KS, float scale) {
+-  // KS = k-stages; wp = [G][KS][WST]
++g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ wp, void* __restrict__ outv,
++           const float2* __restrict__ hdr, int N, int KT, float scale) {
++  // KT = k-stages of K; wp = [G][KT][WST]. s102 SPL (split-K slabs, no reduce): gridDim.y = S CTAs per row group, CTA s
++  // takes stages [k0, k0 + KS) (uneven: S need not divide KT) and stores its FP32 tile to slab s of outv [S][128][N]
++  // (the consumer sums the slabs); !SPL: S = 1, BF16 out [128][N].
+   extern __shared__ __align__(1024) uint8_t smraw[];
+   uint8_t* sm = (uint8_t*)(((uintptr_t)smraw + 1023) & ~(uintptr_t)1023);
+   uint8_t* xs = sm;                                  // NS x 16 KB
+@@ -13106,6 +13109,8 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
+   uint64_t* wempty = wfull + G30_NW;
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int g = blockIdx.x;
++  const int k0 = SPL ? (int)(((long)blockIdx.y * KT) / gridDim.y) : 0;
++  const int KS = SPL ? (int)(((long)(blockIdx.y + 1) * KT) / gridDim.y) - k0 : KT;
+   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+   if (tid == 0) {
+     for (int i = 0; i < G30_NS; i++) { mbar_init(&full[i], 1); mbar_init(&empty[i], 1); }
+@@ -13115,7 +13120,7 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
+   __syncthreads();
+   if (warp == 8) {  // W: weights only, may run before the producer kernel is done
+     if (lane == 0) {
+-      const uint8_t* src = wp + (size_t)g * KS * G30_WST;
++      const uint8_t* src = wp + ((size_t)g * KT + k0) * G30_WST;
+       for (int i = 0; i < KS; i++) {
+         const int st = i % G30_NW, ph = (i / G30_NW) & 1;
+         mbar_wait(&wempty[st], ph ^ 1);
+@@ -13132,7 +13137,7 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
+         const int st = i % G30_NS, ph = (i / G30_NS) & 1;
+         mbar_wait(&empty[st], ph ^ 1);
+         mbar_expect_tx(&full[st], G30_XBOX);
+-        tma2d(xs + st * G30_XBOX, &tmX, i * 64, 0, &full[st]);
++        tma2d(xs + st * G30_XBOX, &tmX, (k0 + i) * 64, 0, &full[st]);
+       }
+     }
+     return;
+@@ -13151,12 +13156,13 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
+       for (int e = 0; e < G30_ESC; e++) {
+         const float2 hv = __ldg(hdr + (size_t)(g * 64 + (t >> 5) * 16 + 8 * rr + ((t & 31) >> 2)) * G30_ESC + e);
+         const int col = __float_as_int(hv.x);
+-        const bool mine = hv.y != 0x1p-15f && ((col >> 1) & 3) == q && ((col >> 6) & 1) == wg;
++        const bool mine = hv.y != 0x1p-15f && ((col >> 1) & 3) == q && (((col >> 6) - k0) & 1) == wg
++                          && (!SPL || ((col >> 6) >= k0 && (col >> 6) < k0 + KS));
+         cand[rr * G30_ESC + e] = mine ? ((unsigned)col << 18) | ((unsigned)rr << 16) | (__float_as_uint(hv.y) >> 16) : ~0u;
+       }
+     nxt = esc_pop(cand);
+   }
+-#define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); nxt = esc_pop(cand); } }
++#define G30_FIX(a) { const unsigned kend = (unsigned)(k0 + i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); nxt = esc_pop(cand); } }
+ #else
+ #define G30_FIX(a)
+ #endif
+@@ -13213,6 +13219,24 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
+   // acc layout (m64n128): d[4*jn + 2*h + e] = row r0 + 8h, token 8*jn + tok + e
+   const int r0 = (warp & 3) * 16 + (lane >> 2);
+   const int tok = 2 * (lane & 3);
++  if constexpr (SPL) {  // FP32 tile -> slab blockIdx.y (staged token-major, coalesced 16 B stores)
++    float* stf = (float*)(xs + 32768);  // [128 tok][64 rows] (+4 pad)
++#pragma unroll
++    for (int jn = 0; jn < 16; jn++)
++#pragma unroll
++      for (int h = 0; h < 2; h++)
++#pragma unroll
++        for (int q = 0; q < 2; q++) stf[(8 * jn + tok + q) * 68 + r0 + 8 * h] = d[4 * jn + 2 * h + q] * scale;
++    asm volatile("bar.sync 2, 128;" ::: "memory");
++    float* o = (float*)outv + (size_t)blockIdx.y * G30_MTOK * N;
++#pragma unroll
++    for (int q = 0; q < 16; q++) {
++      const int idx = q * 128 + t, tk = idx >> 4, c = idx & 15;
++      *(float4*)(o + (size_t)tk * N + g * 64 + c * 4) = *(const float4*)(stf + tk * 68 + c * 4);
++    }
++    return;
++  }
++  __nv_bfloat16* out = (__nv_bfloat16*)outv;
+   // stage the tile token-major in smem, then coalesced 16 B stores (128 B per token row)
+   __nv_bfloat16* stg = (__nv_bfloat16*)(xs + 32768);  // [128 tok][64 rows] (+8 pad)
+ #pragma unroll
+@@ -13244,17 +13268,19 @@ static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, ui
+ }
+ }  // namespace g30
+ 
+-// out [128][N] BF16 = x [128][K] @ W^T; wp = pack30 stages, hdr = [N][G30_ESC] float2; pdl: launch as a PDL secondary
+-void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale, int64_t pdl) {
+-  const int K = x.size(1), N = out.size(1);
+-  TORCH_CHECK(x.size(0) == G30_MTOK && x.is_contiguous() && K % 64 == 0 && N % 64 == 0 && out.size(0) == G30_MTOK);
++// out [128][N] BF16 = x [128][K] @ W^T; wp = pack30 stages, hdr = [N][G30_ESC] float2; pdl: launch as a PDL secondary.
++// s102 g30_slab: out = FP32 [split][128][N] split-K slabs (sum = x @ W^T), no reduce.
++static void g30_launch(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, void* out, int N, double scale, int64_t pdl, int split) {
++  const int K = x.size(1);
++  TORCH_CHECK(x.size(0) == G30_MTOK && x.is_contiguous() && K % 64 == 0 && N % 64 == 0 && split >= 1 && split <= K / 64);
+   CUtensorMap tx;
+   g30::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
+   const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512;
+-  static bool once = false;
+-  if (!once) { cudaFuncSetAttribute(g30::g30_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
++  static bool once[2] = {false, false};
++  auto kern = split > 1 ? g30::g30_kernel<true> : g30::g30_kernel<false>;
++  if (!once[split > 1]) { cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once[split > 1] = true; }
+   cudaLaunchConfig_t cfg = {};
+-  cfg.gridDim = dim3(N / 64);
++  cfg.gridDim = dim3(N / 64, split);
+   cfg.blockDim = dim3(320);
+   cfg.dynamicSmemBytes = smem;
+   cfg.stream = at::cuda::getCurrentCUDAStream();
+@@ -13262,18 +13288,31 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
+   at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+   at[0].val.programmaticStreamSerializationAllowed = pdl ? 1 : 0;
+   cfg.attrs = at; cfg.numAttrs = 1;
+-  TORCH_CHECK(cudaLaunchKernelEx(&cfg, g30::g30_kernel, tx, (const uint8_t*)wp.data_ptr(), (__nv_bfloat16*)out.data_ptr(),
+-                                 (const float2*)hdr.data_ptr(), N, K / 64,
++  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, tx, (const uint8_t*)wp.data_ptr(), out, (const float2*)hdr.data_ptr(), N, K / 64,
+                                  (float)scale) == cudaSuccess, "g30 launch failed");
+ }
++
++void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale, int64_t pdl) {
++  TORCH_CHECK(out.size(0) == G30_MTOK && out.scalar_type() == at::kBFloat16);
++  g30_launch(x, wp, hdr, out.data_ptr(), out.size(1), scale, pdl, 1);
++}
++
++void g30_slab(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale, int64_t pdl) {
++  TORCH_CHECK(out.dim() == 3 && out.size(1) == G30_MTOK && out.scalar_type() == at::kFloat && out.is_contiguous());
++  g30_launch(x, wp, hdr, out.data_ptr(), out.size(2), scale, pdl, out.size(0));
++}
+ '''
+ # s100 g30 (g30_src.cu = layer s99 dev/s99_g30.cu + PDL + proj s91's in-fragment escape patch): T=128 wgmma GEMM over the 12-bit
+ # weights decoded into register A-fragments (H100 cold-L2 unp 8192x4096 22.4 vs cuBLAS 25.6 us; in-layer ab_flag 4 rounds x 3 seeds
+ # v16 sl -4.1..-5.2, full -4.5..-5.5 us; G30_TRIG another -0.6..-1.5). In TUNE_BASE[128]; TUNE option {g30:unpool: False}.
+-G30_KEYS = ("unpool", "o")  # o: H100 standalone 10.2 vs cuBLAS 10.5 us (tie): TUNE option g30:o only
++G30_KEYS = ("unpool", "o", "pooler")  # o: H100 standalone 10.2 vs cuBLAS 10.5 us (tie): TUNE option g30:o only
+ # s101 DEAD: qkv on a split-K g30 (dev/s101_g30split.cu: uneven K ranges, FP32 slabs, ticket, last CTA sums; bit-exact):
+ # S3 standalone 21.4 vs cuBLAS 20.0 us (MMA part 16.4, reduce chain +5), in-layer v16 sl +2.5..4.1, full +0.1..2.5 us.
+ G30_TOKENS = 128
++# s102 g30sp (TUNE option at T=128, value = order): the pooler on g30_slab (split-K S=G30SP_S, FP32 slabs summed by the
++# rmsnorm, no reduce kernel) + the router hi/lo as its own cuBLAS GEMM (instead of the fused "fr" torch.mm).
++# 2 = router + routing first, 3 = pooler first.
++G30SP_S = 2
+ G30_PDL = 1  # launch g30 as a PDL secondary (W streams before griddepcontrol.wait)
+ G30_TRIG = True  # the second boundary is g30's PDL secondary (g30 triggers at start)
+ _G30 = {}
+@@ -16563,8 +16602,9 @@ def _g30_build():
+             from torch.utils.cpp_extension import load_inline
+             _G30["lib"] = load_inline(
+                 name="layer_g30_" + hashlib.sha256(_G30_SRC.encode()).hexdigest()[:10],
+-                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
+-                cuda_sources=_G30_SRC, functions=["g30_gemm"],
++                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);\n"
++                            "void g30_slab(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
++                cuda_sources=_G30_SRC, functions=["g30_gemm", "g30_slab"],
+                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"], extra_ldflags=["-lcuda"])
+         except Exception as ex:  # noqa: BLE001
+             print("layer g30 build failed:", ex)
+@@ -16611,6 +16651,11 @@ def _g30_prepare(state, w, comp, g):
+             torch.cuda.synchronize()
+             ref = F.linear(x, w[key]).float()
+             ok = ((out.float() - ref).norm() / ref.norm()).item() < 1e-2
++            if ok and key == "pooler":
++                sl = torch.full((G30SP_S, G30_TOKENS, w[key].shape[0]), float("nan"), device=dev)
++                lib.g30_slab(x, e[0], e[1], sl, e[2], 0)
++                torch.cuda.synchronize()
++                ok = ((sl.sum(0) - ref).norm() / ref.norm()).item() < 1e-2
+         except Exception as ex:  # noqa: BLE001
+             print("layer g30 failed:", key, ex)
+             ok = False
+@@ -17339,6 +17384,27 @@ def _kernel_fn(data, state):
+                 t.record_stream(side_stream)
+         moe = _experts_moe(p, topk_weights, local_ids, state)
+         return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
++    g30sp = (tokens == G30_TOKENS and not fp32_router and state.get("pool_router") is not None
++             and "pooler" in state.get("g30", {}) and _use_moe(tokens) and _opt(state, tokens, "g30sp", 0))
++    if g30sp:  # s102: pooler on g30 split-K slabs (summed in the rmsnorm) + router hi/lo on cuBLAS, one stream
++        e = state["g30"]["pooler"]
++        sl = torch.empty((G30SP_S, tokens, D_EXPERT), dtype=torch.float32, device=dev)
++        if g30sp == 3:
++            _G30["lib"].g30_slab(h, e[0], e[1], sl, e[2], G30_PDL)
++        rl = torch.mm(h, state["pool_router"][D_EXPERT:].t(), out_dtype=torch.float32)
++        ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
++        lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
++        wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
++        _routing[(tokens,)](rl, state["router_bias"], data["local_start"], ids, lids, wts, tokens,
++                            E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
++                            SKS=N_EXPERTS, ST=2 * N_EXPERTS, TRIG=False, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2)
++        if g30sp != 3:
++            _G30["lib"].g30_slab(h, e[0], e[1], sl, e[2], G30_PDL)
++        p = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
++        _rmsnorm_gain[(tokens,)](sl, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=False, TRIG=False,
++                                 ROUND=True, NS=G30SP_S, SS=tokens * D_EXPERT, num_warps=8)
++        moe = _experts_moe(p, wts, lids, state)
++        return _tail(moe, stream1, h, tokens, state, pdl) + (ids,)
+     if (not fp32_router and state.get("pool_router") is not None
+             and _opt(state, tokens, "fr", tokens in FUSED_ROUTER_TOKENS)):
+         # SGLang's router above 8 tokens = BF16 h against the BF16 hi/lo split of the FP32 weight (FP32 accumulation):

@@ -2051,3 +2051,17 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Only open route for qkv at T=128: no BF16 reduce at all, i.e. attention sums 3 FP32 slabs at its loads (QSS-style; nvs had +1.6 us for
   2 slabs) for sliding only, and full layers would still need the BF16 path. Estimated <= -2 us at v16 sl (~0.08%): not built.
 - tools/timeline.py: STMT env (exec'd in the module before capture) to time a flag/TUNE_BASE override.
+
+## s102 (2026-10-27 16:22Z-, night4 session 51): T=128 pooler on split-K g30 slabs built + measured DEAD; main unchanged (v135); 0 judge runs
+- Budget 10-27: layer checks 20/20 (reset 00:00Z), 4 submits left. Last piece of lead 13:30Z item (2): the FR pooler at T=128.
+- Built (dev/s102_g30sp.patch, on 1c49030): g30_kernel<SPL> template (SPL: uneven K range per blockIdx.y, escapes filtered to the
+  range, FP32 tile -> slab y of [S][128][N], no ticket/reduce; S1 path unchanged: unpool 24.4 us as before) + host g30_slab;
+  layer TUNE option g30sp at T=128 (pooler on g30_slab S2, slabs summed by _rmsnorm_gain NS=2 ROUND, router hi/lo as its own
+  cuBLAS torch.mm [T,512] FP32, _routing ST=512; 2 = router first, 3 = pooler first). bench test 13/13 with it forced.
+- H100 ab_flag verify 16, 4 rounds x seeds 99/7, TUNE {}: base sl 300.6/295.7, full 434.8/421.8; g30sp 2 sl 308.9/303.0, full
+  442.4/436.3; g30sp 3 sl 308.9/302.9, full 444.6/438.5 (+7..17 us).
+- Timeline v16 sl: FR torch.mm 32.8 us (75 MB) vs g30 slab pooler 25.2 (50 MB 12-bit; standalone was 23.5) + router cuBLAS splitK
+  7.6 + reduce 1.9 + routing 3.1 + rmsnorm 2.4; experts start 3.8 us later, twm +2.8. Even a free-standing perfect router (8 MB
+  ~3 us) bounds it at ~-3 us H100 (~0.1%), and on the H200 g30 is per-SM x-ingest-bound (moe s43): DEAD. A g30 that also carries
+  the router's hi/lo rows raw (BF16 stages) would need 136+ CTAs (2 waves) or a rebalanced split: est. <= -4 us H100, not built.
+- Lead 13:30Z item (2) is closed: unpool T=128 g30 (v135, first check after 00:00Z), qkv (s101), pooler (s102), T=256 (s100) dead.
