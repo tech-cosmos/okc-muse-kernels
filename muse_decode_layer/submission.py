@@ -4650,8 +4650,10 @@ def _plan(cfg, max_pages, device):
             # fix 1 (s106): fixed-reference softmax (reference = tile 0's row max + 14 binades; no row max / alpha /
             # rescale in the loop; overflowing rows -> _combine REDO, exact). H100 paired cold -0.19 us (9/9), warm-L2
             # -0.4 (7/7; -1.1 with pre 0).
+            # spec (moe s33): seq from the table width (batch 1; redo if the real length differs): H200 DIAG -0.63/-0.70 us
+            # standalone (4/4 pairs, checks 4fe17fa9/28658e59), bitwise = before.
             return dict(splits=127, block_n=64, warps=4, stages=8, hpp=1, fuse=False, qk8=True, pdt="f32", tsep=True,
-                        pf=True, pre=2, fix=1)
+                        pf=True, pre=2, fix=1, spec=True)
         return dict(splits=128, block_n=128, warps=4, stages=6, hpp=1, fuse=False, qk8=True, pdt="f32")
     if length == 1:
         if HAVE_GLUON and USE_GDEC and hkv % 2 == 0 and cfg["num_q_heads"] // hkv == 8 and cfg["head_dim"] == 64:
