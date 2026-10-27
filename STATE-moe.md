@@ -1,5 +1,17 @@
 # STATE-moe
 
+## NOW (night5 s1, 2026-10-27 20:05Z): pr32 built, handed to layer/proj as a TUNE option; H200 tuner is the gate
+- pr32 = T=16/32 pooler (g30n S2 12-bit) + router (hi/lo BF16 rows, first 8 stages of every streaming CTA) + routing, ONE launch:
+  grid (66,2) pairs; x 0/1 = 4 finisher CTAs (spare SMs) poll a counter, bulk-pull pair partials, route 1 token/warp (redux top-8).
+  Files: muse_moe_w4a16/tools/n5s1/pr32_src.cu (= head.cu + body3.cu; edit those, then `cat head.cu body3.cu > pr32_src.cu` and
+  set the MTOK/S defaults to 32/2), pr32.py (standalone exactness + timing + `DEFS="PR_TL 1"` timeline), patch_layer_pr32.py.
+- H100: standalone 23.1 us (pooler alone 20.0); in-layer tie..-1.4 (d32 -1.3/-1.3, d16 +1.1/-1.4 sl/full). Tests clean (NOTES n5s1).
+- NEXT: (1) watch COORD for proj/layer integrating it + the H200 'layer tune T=16/32' pr32 lines; if the H200 picks it, tune
+  NW/NS there (NW 8/NS 16 now; H200 may want deeper W ring) and try MTOK 16 S1 variants. (2) If the H200 rejects it: look at
+  the timeline on the H200 via a layer DIAG (finisher chain ~10-12 us must end before the pooler). (3) Ideas: put the router
+  rows' partial store on a non-streaming path earlier (stage order), cut warp 10's fence wait (4.6 us at NW 8).
+- moe checks 20/20 used on 10-27 (reset 00:00Z); moe board best febfcb1f 2.2469x; attention board best 957cabd7 2.5962x.
+
 ## LANE since 2026-10-27 16:45Z (lead LANE DECISION 5): g30 structure at m16/m32 for the d16/d32 pooler + unpool
 - s47 built **g34** (muse_moe_w4a16/tools/s47/g34.cu, harness g34.py, exactness g34exact.py; NOTES s47). Bit-exact, same pack as
   layer g30. H100 vs g24 layer cfgs (full / consumer-only NOW, us): m32 pool 18.9/12.2 vs 21.0/16.2, unp 18.9/12.3 vs 20.5/15.7;
