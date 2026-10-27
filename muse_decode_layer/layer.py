@@ -2591,6 +2591,10 @@ CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem 
 if _moe_TK2F_DIAG:  # s81: DIAG check copies only: the tk2f probes (+ the defaults) at T = 1/16/32, no other tuning
     _TK2X = [{"tk2x": k, "diag": True} for k in (6, 1, 2, 3, 4, 5)]
     TUNE = {1: ({}, *_TK2X), 16: ({}, *[dict(o, bal=False) for o in _TK2X]), 32: ({}, {"tk2h": 0, "diag": True}, *[dict(o, tk2h=0) for o in _TK2X[1:]])}
+ATT_DIAG_BUILD = False  # s84: DIAG check copies only (sed to True): full-attention probes (attn_src ATT_DIAG) + defaults
+if ATT_DIAG_BUILD:  # gd: 11 = gathers only (no math after tile 0), 12 = all-L2; gw: 1 = no V widen, 2 = all-L2, 3 = no consumer math, 4 = 1+2
+    TUNE = {16: ({}, *[{"attx": k, "diag": True} for k in (11, 12)]), 32: ({}, *[{"attx": k, "diag": True} for k in (11, 12)]),
+            128: ({}, *[{"attx": k, "diag": True} for k in (2, 3)]), 256: ({}, *[{"attx": k, "diag": True} for k in (1, 2, 3, 4)])}
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
@@ -3054,7 +3058,8 @@ def _kernel_fn(data, state):
         # the window's page-table entries (csl's speculative range: the table's last W + 1 columns)
         n_pf = min(pt.shape[1], cfg["window"] + 1)
         kv_pf = (pt[0, pt.shape[1] - n_pf:], kc, vc, n_pf, kc.stride(0) * kc.element_size())
-    global RF_TRIG
+    global RF_TRIG, ATT_DIAG
+    ATT_DIAG = 0 if cfg["window"] > 0 else _opt(state, tokens, "attx", 0)  # s84 DIAG probes (tuner timing only)
     RF_TRIG = _opt(state, tokens, "rf_trig", RF_TRIG_DEFAULT)  # s27: attention's _red_fin (decode 1 full) triggers o after its wait
     # s62 CSL_PW: decode sliding csl as a PDL secondary of the g19 qkv (g19 triggers at start; csl's K/V gathers
     # go out before its griddepcontrol.wait, overlapping the GEMM's weight stream)

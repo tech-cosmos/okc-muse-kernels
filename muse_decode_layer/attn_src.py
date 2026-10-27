@@ -2085,6 +2085,7 @@ USE_GSLIDE = False  # batched sliding decode on _gd_full too (H100 win, H200 los
 BRED = True
 BNR = 1
 USE_GD1 = True  # decode full at batch * hkv == 2 on _gd_full too (511 splits, 8-warp one-pass merge); unchecked on H200
+ATT_DIAG = 0  # layer s84: DIAG probe code for full-layer attention (set per call by the layer's tuner; 0 = real kernels)
 NT_AFTER = True  # gbal: _new_tokens launched after _gw_verify (it blocked 2nd gw CTAs on its SMs; s125)
 USE_GBAL = True  # verify full from 16 KV head pairs: balanced splits over the whole batch (_gw_bal); unchecked on H200
 # Split partials' accumulator dtype (plan key pdt). FP32 only: SGLang's FA3 keeps its split partials in
@@ -2445,8 +2446,10 @@ if HAVE_GLUON:
     def _gw_producer_bal(seq_ptr, pt_ptr, kbase, vbase, k_ring, v_ring, vh0, vh1, ready, empty, p,
                          B: gl.constexpr, B_PAD: gl.constexpr, P: gl.constexpr, MAX_PAGES: gl.constexpr,
                          PAGE: gl.constexpr, ROW_W: gl.constexpr, BN: gl.constexpr, C: gl.constexpr,
-                         D: gl.constexpr, NS: gl.constexpr, PW: gl.constexpr, LAG: gl.constexpr):
-        """_gw_producer_cv over the program's segments (the ring position carries across them)."""
+                         D: gl.constexpr, NS: gl.constexpr, PW: gl.constexpr, LAG: gl.constexpr, GX: gl.constexpr = 0):
+        """_gw_producer_cv over the program's segments (the ring position carries across them).
+        GX (layer s84 DIAG probes, wrong results, tuner timing only): 1 = no V widen once every ring slot holds one,
+        2 = every tile re-gathers the segment's first rows (all-L2), 4 = both."""
         GLY: gl.constexpr = gl.BlockedLayout([1, 16], [4, 8], [PW, 1], [1, 0])
         VL: gl.constexpr = gl.BlockedLayout([1, 8], [4, 8], [PW, 1], [1, 0])
         n_g = gl.arange(0, BN, layout=gl.SliceLayout(1, GLY))
@@ -2463,7 +2466,10 @@ if HAVE_GLUON:
                 if i < ntiles:
                     s = (it + i) % NS
                     off = ((pg.to(gl.int64) * PAGE + t % PAGE) * ROW_W)[:, None] + c_g[None, :]
-                    t = gl.maximum(gl.minimum(lo + (i + 1) * BN + n_g, hi - 1), 0)
+                    if GX == 2 or GX == 4:
+                        t = gl.maximum(gl.minimum(lo + n_g, hi - 1), 0)
+                    else:
+                        t = gl.maximum(gl.minimum(lo + (i + 1) * BN + n_g, hi - 1), 0)
                     pg = gl.load(pt_row + t // PAGE)
                     mbarrier.wait(empty.index(s), (((it + i) // NS) & 1) ^ 1)
                     cp.async_copy_global_to_shared(k_ring.index(s), kbase + off)
@@ -2475,8 +2481,13 @@ if HAVE_GLUON:
                         cp.wait_group(LAG)
                         gl.barrier()
                         vt = v_ring.index(sj)
-                        vh0.index(sj).store(vt.slice(0, D, 1).load(VL).to(gl.float16))
-                        vh1.index(sj).store(vt.slice(D, D, 1).load(VL).to(gl.float16))
+                        if GX == 1 or GX == 4:
+                            if it + i - LAG < NS:
+                                vh0.index(sj).store(vt.slice(0, D, 1).load(VL).to(gl.float16))
+                                vh1.index(sj).store(vt.slice(D, D, 1).load(VL).to(gl.float16))
+                        else:
+                            vh0.index(sj).store(vt.slice(0, D, 1).load(VL).to(gl.float16))
+                            vh1.index(sj).store(vt.slice(D, D, 1).load(VL).to(gl.float16))
                         fence_async_shared()
                         mbarrier.arrive(ready.index(sj))
             it += ntiles
@@ -2485,8 +2496,9 @@ if HAVE_GLUON:
     def _gw_consumer_bal(qkv_ptr, q_s, k_ring, vh, ready, empty, seq_ptr, pid, h, scale, pacc_ptr, pml_ptr,
                          HEAD: gl.constexpr, HQ: gl.constexpr, HKV: gl.constexpr, G: gl.constexpr, L: gl.constexpr,
                          B: gl.constexpr, B_PAD: gl.constexpr, P: gl.constexpr, NID: gl.constexpr, M: gl.constexpr,
-                         D: gl.constexpr, BN: gl.constexpr, NS: gl.constexpr, LZ: gl.constexpr = 0):
-        """_gw_consumer_cv (PEEL, LSUM) over the program's segments: each loads its request's queries and stores
+                         D: gl.constexpr, BN: gl.constexpr, NS: gl.constexpr, LZ: gl.constexpr = 0,
+                         GX: gl.constexpr = 0):
+        """(GX 3, layer s84 DIAG: no math after the exact tiles, wrong results.) _gw_consumer_cv (PEEL, LSUM) over the program's segments: each loads its request's queries and stores
         its partial at id p + b."""
         S_L: gl.constexpr = gl.NVMMADistributedLayout(version=[3, 0], warps_per_cta=[4, 1],
                                                       instr_shape=[16, BN, 32])
@@ -2538,7 +2550,7 @@ if HAVE_GLUON:
                     a_tok = warpgroup_mma(p16, vh.index(s), acc, is_async=True)
                     acc, p16 = warpgroup_mma_wait(0, deps=[a_tok, p16])
                     mbarrier.arrive(empty.index(s))
-                for i in range(LZ_PK, ntiles):
+                for i in range(LZ_PK, ntiles if GX != 3 else LZ_PK):
                     s = (it + i) % NS
                     mbarrier.wait(ready.index(s), ((it + i) // NS) & 1)
                     s_tok = warpgroup_mma(q_s, k_ring.index(s).slice(HEAD * D, D, 1).permute((1, 0)),
@@ -2552,6 +2564,11 @@ if HAVE_GLUON:
                     a_tok = warpgroup_mma(p16, vh.index(s), acc, is_async=True)
                     acc, p16 = warpgroup_mma_wait(0, deps=[a_tok, p16])
                     mbarrier.arrive(empty.index(s))
+                if GX == 3:
+                    for i in range(LZ_PK, ntiles):
+                        s = (it + i) % NS
+                        mbarrier.wait(ready.index(s), ((it + i) // NS) & 1)
+                        mbarrier.arrive(empty.index(s))
                 # (x - x != 0 exactly for inf and NaN.)
                 asum = gl.convert_layout(gl.sum(acc, 1), gl.SliceLayout(1, S_L))
                 m_i = gl.where(asum - asum == 0.0, m_i, float("inf"))
@@ -2623,7 +2640,9 @@ if HAVE_GLUON:
                  SEP: gl.constexpr = False, Q16: gl.constexpr = True, KST: gl.constexpr = True,
                  BAL: gl.constexpr = False, B: gl.constexpr = 1, B_PAD: gl.constexpr = 32, NP: gl.constexpr = 1,
                  NID: gl.constexpr = 1, RED: gl.constexpr = False, red_ptr=None, rcnt_ptr=None, out_ptr=None,
-                 NR: gl.constexpr = 4, epi=True, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0):
+                 NR: gl.constexpr = 4, epi=True, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0, DX: gl.constexpr = 0):
+        # DX (layer s84 DIAG probes, wrong results, tuner timing only): 1 = no math after tile 0 (gathers only),
+        # 2 = every tile re-gathers the same rows (all-L2).
         h = gl.program_id(2) * 2
         if BAL:
             # Length-proportional splits (plan dbal, full layers): the NP programs of a KV head pair go to the
@@ -2755,48 +2774,50 @@ if HAVE_GLUON:
             cp.async_copy_global_to_shared(k_ring.index(sj), kbase + off, mask=ok[:, None] & all_c)
             cp.async_copy_global_to_shared(v_ring.index(sj), vbase + off, mask=ok[:, None] & all_c)
             cp.commit_group()
-            t = t + BN
+            if DX != 2:
+                t = t + BN
             pg = gl.load(pt_row + t // PAGE, mask=t < hi, other=0)
             if SEQ_IN:
                 pg = gl.maximum(pg, 0)  # speculative length: entries past the real one are -1
             cp.wait_group(NS - 1)
             gl.barrier()
-            s = i % NS
-            kb = k_ring.index(s).permute((1, 0)).load(KB)
-            if Q16:
-                kb = kb.to(gl.float16)
-            sc = mma_v2(q, kb, gl.zeros([M, BN], gl.float32, MMA))
-            if lo + (i + 1) * BN > hi:
-                sc = gl.where((lo + i * BN + n_s < hi)[None, :], sc, float("-inf"))
-            m_new = gl.maximum(m_i, gl.max(sc, 1) * scale)
-            alpha = gl.exp2(m_i - m_new)
-            p = gl.exp2(gl.fma(sc, scale, -m_new[:, None]))
-            l_i = l_i * alpha + gl.sum(p, 1)
-            m_i = m_new
-            if TPV:
-                a0, a1 = gl.split(gl.permute(gl.reshape(alpha, [2, G]), (1, 0)))
-                acc0 = acc0 * gl.convert_layout(a0, gl.SliceLayout(0, MMA))[None, :]
-                acc1 = acc1 * gl.convert_layout(a1, gl.SliceLayout(0, MMA))[None, :]
-                p0, p1 = gl.split(gl.permute(gl.reshape(p.to(gl.float16), [2, G, BN]), (2, 1, 0)))
-                vh.store(v_ring.index(s).load(BL).to(gl.float16))
-                gl.barrier()
-                acc0 = mma_v2(vh.slice(0, D, 1).permute((1, 0)).load(VA), gl.convert_layout(p0, PB), acc0)
-                acc1 = mma_v2(vh.slice(D, D, 1).permute((1, 0)).load(VA), gl.convert_layout(p1, PB), acc1)
-            elif KST:
-                acc = acc * alpha[:, None]
-                ph = gl.convert_layout(p.to(gl.float16), PA)
-                # The FP16 V tile as one B operand, then split per head in registers (loading the two [BN, D] halves
-                # from smem separately costs register shuffles: all-L2 +3%).
-                v = gl.convert_layout(v_ring.index(s).load(BL).to(gl.float16), VB)
-                v0, v1 = gl.split(gl.permute(gl.reshape(v, [BN, 2, D]), (0, 2, 1)))
-                v0 = gl.convert_layout(v0, VB)
-                v1 = gl.convert_layout(v1, VB)
-                acc = mma_v2(gl.where(row0, ph, 0.0), v0, acc)
-                acc = mma_v2(gl.where(row0, 0.0, ph), v1, acc)
-            else:
-                acc = acc * alpha[:, None]
-                v = gl.convert_layout(v_ring.index(s).load(BL).to(gl.float16), VB)
-                acc = mma_v2(gl.convert_layout(p.to(gl.float16), PA), v, acc)
+            if (i == 0) | (DX != 1):
+                s = i % NS
+                kb = k_ring.index(s).permute((1, 0)).load(KB)
+                if Q16:
+                    kb = kb.to(gl.float16)
+                sc = mma_v2(q, kb, gl.zeros([M, BN], gl.float32, MMA))
+                if lo + (i + 1) * BN > hi:
+                    sc = gl.where((lo + i * BN + n_s < hi)[None, :], sc, float("-inf"))
+                m_new = gl.maximum(m_i, gl.max(sc, 1) * scale)
+                alpha = gl.exp2(m_i - m_new)
+                p = gl.exp2(gl.fma(sc, scale, -m_new[:, None]))
+                l_i = l_i * alpha + gl.sum(p, 1)
+                m_i = m_new
+                if TPV:
+                    a0, a1 = gl.split(gl.permute(gl.reshape(alpha, [2, G]), (1, 0)))
+                    acc0 = acc0 * gl.convert_layout(a0, gl.SliceLayout(0, MMA))[None, :]
+                    acc1 = acc1 * gl.convert_layout(a1, gl.SliceLayout(0, MMA))[None, :]
+                    p0, p1 = gl.split(gl.permute(gl.reshape(p.to(gl.float16), [2, G, BN]), (2, 1, 0)))
+                    vh.store(v_ring.index(s).load(BL).to(gl.float16))
+                    gl.barrier()
+                    acc0 = mma_v2(vh.slice(0, D, 1).permute((1, 0)).load(VA), gl.convert_layout(p0, PB), acc0)
+                    acc1 = mma_v2(vh.slice(D, D, 1).permute((1, 0)).load(VA), gl.convert_layout(p1, PB), acc1)
+                elif KST:
+                    acc = acc * alpha[:, None]
+                    ph = gl.convert_layout(p.to(gl.float16), PA)
+                    # The FP16 V tile as one B operand, then split per head in registers (loading the two [BN, D] halves
+                    # from smem separately costs register shuffles: all-L2 +3%).
+                    v = gl.convert_layout(v_ring.index(s).load(BL).to(gl.float16), VB)
+                    v0, v1 = gl.split(gl.permute(gl.reshape(v, [BN, 2, D]), (0, 2, 1)))
+                    v0 = gl.convert_layout(v0, VB)
+                    v1 = gl.convert_layout(v1, VB)
+                    acc = mma_v2(gl.where(row0, ph, 0.0), v0, acc)
+                    acc = mma_v2(gl.where(row0, 0.0, ph), v1, acc)
+                else:
+                    acc = acc * alpha[:, None]
+                    v = gl.convert_layout(v_ring.index(s).load(BL).to(gl.float16), VB)
+                    acc = mma_v2(gl.convert_layout(p.to(gl.float16), PA), v, acc)
         cp.wait_group(0)
 
         # Partials [B, HKV, S + 1, G, D]: each row's own head's D columns of acc.
@@ -2917,16 +2938,17 @@ if HAVE_GLUON:
                  SEP: gl.constexpr = False, Q16: gl.constexpr = True, KST: gl.constexpr = True,
                  BAL: gl.constexpr = False, B: gl.constexpr = 1, B_PAD: gl.constexpr = 32, NP: gl.constexpr = 1,
                  NID: gl.constexpr = 1, SPEC: gl.constexpr = 0, RED: gl.constexpr = False, red_ptr=None,
-                 rcnt_ptr=None, out_ptr=None, NR: gl.constexpr = 4, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0):
+                 rcnt_ptr=None, out_ptr=None, NR: gl.constexpr = 4, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0,
+                 DX: gl.constexpr = 0):
         # SPEC > 0 (batch 1, page 1): seq = table width - 1 known from the shape (SGLang slices the page table to the
         # batch's longest length); start on it, redo with the real length if it differs (as in _attn_split).
         if SPEC > 0:
             real = gl.load(seq_ptr + gl.program_id(1))
-            _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW, QSS)
+            _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW, QSS, DX)
             if real != SPEC:
-                _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS)
+                _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX)
         else:
-            _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS)
+            _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX)
 
     @gluon.jit
     def _gw_verify(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale,
@@ -2936,7 +2958,8 @@ if HAVE_GLUON:
                    LAG: gl.constexpr = 0, PEEL: gl.constexpr = False, LSUM: gl.constexpr = False,
                    FUSE: gl.constexpr = False, cnt_ptr=None, out_ptr=None, RS: gl.constexpr = 1,
                    R_PAD: gl.constexpr = 1, BAL: gl.constexpr = False, B: gl.constexpr = 1,
-                   B_PAD: gl.constexpr = 1, NID: gl.constexpr = 1, NP: gl.constexpr = 1, LZ: gl.constexpr = 0):
+                   B_PAD: gl.constexpr = 1, NID: gl.constexpr = 1, NP: gl.constexpr = 1, LZ: gl.constexpr = 0,
+                   GX: gl.constexpr = 0):
         M: gl.constexpr = L * G
         C: gl.constexpr = 2 * D
         split = gl.program_id(0)
@@ -2993,12 +3016,12 @@ if HAVE_GLUON:
         if BAL:
             gl.warp_specialize([
                 (_gw_consumer_bal, (qkv_ptr, q0, k_ring, vh0, ready, empty, seq_ptr, split, h, scale, pacc_ptr,
-                                    pml_ptr, 0, HQ, HKV, G, L, B, B_PAD, NP, NID, M, D, BN, NS, LZ)),
+                                    pml_ptr, 0, HQ, HKV, G, L, B, B_PAD, NP, NID, M, D, BN, NS, LZ, GX)),
                 (_gw_consumer_bal, (qkv_ptr, q1, k_ring, vh1, ready, empty, seq_ptr, split, h, scale, pacc_ptr,
-                                    pml_ptr, 1, HQ, HKV, G, L, B, B_PAD, NP, NID, M, D, BN, NS, LZ)),
+                                    pml_ptr, 1, HQ, HKV, G, L, B, B_PAD, NP, NID, M, D, BN, NS, LZ, GX)),
                 (_gw_producer_bal, (seq_ptr, pt_ptr, kc_ptr + h * D, vc_ptr + h * D, k_ring, v_ring, vh0, vh1, ready,
                                     empty, split, B, B_PAD, NP, MAX_PAGES, PAGE, ROW_W, BN, C, D, NS, PW,
-                                    LAG)),
+                                    LAG, GX)),
             ], [4, PW], [CREGS, PREGS])
         elif LAG:
             gl.warp_specialize([
@@ -4150,7 +4173,8 @@ def _verify_bal(data, cfg, plan, out, qk_scale):
         data["cache_loc"], pacc, pml, qk_scale,
         HQ=hq, HKV=hkv, G=group, L=length, D=d, PAGE=cfg["page_size"], MAX_PAGES=page_table.shape[1], S=progs,
         BN=plan["block_n"], NS=plan["stages"], PW=plan["pw"], PREGS=plan["pregs"], CREGS=plan["cregs"],
-        LAG=plan.get("lag", 1), BAL=True, B=batch, B_PAD=b_pad, NID=nid, NP=progs, LZ=plan.get("lz", LZ), num_warps=4, maxnreg=plan["maxnreg"],
+        LAG=plan.get("lag", 1), BAL=True, B=batch, B_PAD=b_pad, NID=nid, NP=progs, LZ=plan.get("lz", LZ),
+        GX=ATT_DIAG if ATT_DIAG in (1, 2, 3, 4) else 0, num_warps=4, maxnreg=plan["maxnreg"],
         launch_pdl=True)
     if nta:
         _new_tokens[(batch, hkv)](
@@ -4223,7 +4247,7 @@ def _decode_gluon(data, cfg, plan):
             HQ=hq, HKV=hkv, G=group, D=d, PAGE=cfg["page_size"], MAX_PAGES=page_table.shape[1], S=splits,
             BN=plan["block_n"], NS=plan["stages"], WINDOW=cfg["window"], ROPE=bool(cfg["rope_theta"]),
             Q16=plan.get("q16", True), KST=plan.get("kst", True), BAL=True, B=batch, B_PAD=b_pad, NP=progs, NID=nid,
-            **(_red_args(batch, group, d, nid, device, out) if red else {}), QSS=qss, num_warps=1)
+            **(_red_args(batch, group, d, nid, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, num_warps=1)
         if red:
             _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, nid, True)
             return out
@@ -4247,7 +4271,7 @@ def _decode_gluon(data, cfg, plan):
         ROPE=bool(cfg["rope_theta"]), SEP=sep, Q16=plan.get("q16", True),
         KST=plan.get("kst", True),
         SPEC=page_table.shape[1] - 1 if plan.get("spec") and batch == 1 and cfg["page_size"] == 1 else 0,
-        **(_red_args(batch, group, d, s, device, out) if red else {}), QSS=qss, num_warps=1)
+        **(_red_args(batch, group, d, s, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, num_warps=1)
     if red:
         _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, s, False)
         return out
