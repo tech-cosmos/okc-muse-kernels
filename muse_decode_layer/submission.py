@@ -15241,7 +15241,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
              {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True},
              {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True},
-             {"g27:o": True}, {"g24p": True}, {"g24p": True, "tk2h": 4}, {"g24p": True, "tk2h": 4, "lt:o": True}),
+             {"g27:o": True}),  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},

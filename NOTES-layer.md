@@ -1523,3 +1523,11 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   (issue-bound: the extra unpack instructions cost more than 2.8% fewer bytes). main v113 = TK2F_S6 = 0 (= v111 behavior).
 - Looked for other layer-side work: H200 profile 0f12113f d1 sl = tk2f 27.4 | pr1 18.5 | g13 qkv 10.8 | bnd 2x3.2 | o 6.2 |
   n2u 5.4 | csl 4.0; everything left is on the dead-end list except the T=1 o+bnd+pr1 megakernel (~-3 us bound).
+- v114 = v113 + proj s63 G24P (pooler g24 EZ at T=32, persistent zero buffer re-zeroed by the unpool; zeroing is after
+  g24's griddepcontrol.wait, so the rmsnorm reading pooled has completed) as TUNE[32] options; also moved `_SLIDING[0] = ...`
+  before the G24X/G24P `_opt` reads (proj's find: they read the previous call's flag). Tests 13/13, replay d32 forced
+  seeds 11,23 0/120, zero invariant eager+replay ok, cold prepare 120.2 s. H100 tuner rejects g24p (+1..2 us).
+- CHECK c755dcc3 v114 (aa08453) 2.0578x (not submitted, < 2.0860): d1 67.9/76.1, d16 124.1/210.7, d32 161.2/318.5,
+  v1 111.4/122.1, v16 268.2/359.6, v32 352.6/517.8. H200 tuner T=32: sl g24p 168.6 | +tk2h4 166.4 | +lt:o 166.8 vs tk2h4
+  165.2 / +lt:o 165.1 (picked {tk2h 4, lt:o}); full g24p 336.0 x3 vs default 334.1, bal 333.1 (picked bal). G24P DEAD on
+  H200 too -> v115 drops the g24p TUNE options (code kept, off).

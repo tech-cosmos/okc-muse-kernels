@@ -1,9 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
 BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
-s73: **main = v113 = v111 behavior** + moe n20 S6 ported (6-bit scale codes in tk2f/tk2h SQ stages, prepare round-trip assert,
+s73: **main = v115 = v111 behavior** (+ proj G24P code, TUNE options removed: H200 check c755dcc3 v114 2.0578x, not submitted,
+tuner g24p +0.6..2 us at d32). Earlier in s73: v113 + moe n20 S6 ported (6-bit scale codes in tk2f/tk2h SQ stages, prepare round-trip assert,
 fallback) but OFF (`_moe_TK2F_S6 = 0`): H100 in-layer d16 -1..-2, d32 -2..-3 us, but moe's H200 diag 13b528a8 says tk2f d16 +0.7..1.0,
-d32 +2.9, tk2h d32 +1.6 us (H200 issue-bound, H100 DRAM-bound). No judge runs. Budget 10-27 left: 12 checks / 5 submits.
+d32 +2.9, tk2h d32 +1.6 us (H200 issue-bound, H100 DRAM-bound). Budget 10-27 left: 11 checks / 5 submits.
 s72: v111 = v109 behavior (QSS T=128 dead). Check 0f12113f v110 2.0766x (not submitted). moe_norm2 removal oracle dead.
 s71: **main = v109 = v108 + proj s59 G24X + moe n18 L2H mode 4** (H100 d16 -2.2/-5.7 us, rest tie; tests 13/13, replay 0/240). Check c3bab7fd 2.0822x (< board, not submitted; H200 tuner: G24X -1 us at T=16). Budget 10-27 left: 13 checks / 5 submits. Submit only after stacking another win onto v109 and a check > 2.0860.
 
