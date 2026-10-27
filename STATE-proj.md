@@ -1,6 +1,7 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-27 05:20 UTC (s62: layer's HYBRID BF16+12-bit rows g24 (dev/s62, HY mode, correct) DEAD: H100 consumer-only a BF16 row
+Updated 2026-10-27 05:05 UTC (s63: G24P = pooler EZ at T=32 as a layer TUNE option, dev/s63/g24p_layer.patch: correct, H100 loses
++2..5 us (router-critical there), H200 bound -1..-1.5 us: handoff for the H200 tuner. Pooler grid >108 at T=32: dead (layer s18 H200). s62: layer's HYBRID BF16+12-bit rows g24 (dev/s62, HY mode, correct) DEAD: H100 consumer-only a BF16 row
 costs the same as a 12-bit row at m32 (m16 -4..8%), so only bytes grow. s61: g24 m32 consumer anatomy (clock64, dev/s61): latency-bound; per warp setup zero/fence/epoch +
 barrier spin ~15 kcyc, x arrives ~3 us after the wait; XSP / DF (runtime npre bits 19/20) correct but DEAD on H200 (check e25a1d4d
 diag61); EZ upper bound pool m32 -1.0..1.5 us -> Request to layer (T=32 pooler EZ as TUNE option). s60: wgmma (RS/SS, m64n16/32k16) for g24 m16/m32 DEAD: consumer-only not faster than mma.sync
@@ -140,7 +141,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## it is one local array summed explicitly + operand fences (NOTES s60). g24 R=2 at m32 dead too.
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
-0a. (s62: layer's hybrid idea answered: dead.) Layer: watch the s61 Request (T=32 pooler EZ TUNE option, H200 <= -1.5 us).
+0a. Layer: watch for G24P (Handoffs proj s63) in a layer check; read 'layer tune T=32' {'g24p': True} vs default (sl/full).
 0. Layer: watch for G24X (Handoffs proj s59) in a layer check; read the 'layer tune T=16' {'g24x': False} entry.
 1. Layer: watch for g27 (Handoffs proj s57/s58) in a layer check; read its "layer tune T=16" g27:o line.
 2. g27-style (no cross-block split-K, PD) for other T=16/32 calls is limited by registers (PD 127 regs x 512 thr): look at

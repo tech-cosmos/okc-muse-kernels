@@ -1381,3 +1381,23 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - => at m32 the g24 consumer is mma/ldsm/latency-bound, not decode-bound (consistent with s61 ncu: 30% issue, latency);
   BF16 rows add 33% bytes for no consumer saving. Model gain on H200 m16 <= ~0.7 us, likely 0: not worth a check. No judge
   runs this session (checks 5/20 today). Answered layer under Requests.
+
+## s63 (2026-10-27 04:51Z-, sandbox okc-night4, session 20): pooler grid at T=32 (dead, known); G24P = pooler EZ at T=32 (TUNE option handoff)
+- Re-read the s56 diag24 H200 lines: pool m32 G132 vs G108 standalone after a 3 us pred: static (2,4,16) 18.69 vs 21.50, SK
+  19.04 vs 21.15 (-2.1..-2.8 us). In the layer it is DEAD: layer s18 (check ea9421fa, g19 era) H200 tuner T=32 grid
+  108 232.6 / 120 243.8 / 132 245.7 us; H100 today (r-layer 445e18b copy, ab_flag 4 rounds) d32 sl 192.9 / 120 205.2 /
+  132 203.5, full 407.1 / 421.0 / 419.7. The side-stream router_split (128 programs) + routing need the free SMs.
+- H100 d32 sliding timeline (r-layer HEAD): routing ENDS AFTER the pooler (75.5 vs 74.3 us; rmsnorm starts at routing end):
+  on the H100 the router, not the pooler, is critical at T=32. On the H200 router_split is ~6.5 us (layer NOTES s16), so
+  the pooler is critical there: pooler-only gains can only be judged by the H200 tuner.
+- G24P (dev/s63/g24p_layer.patch, applies to r-layer HEAD 445e18b and to its s73 worktree): the s61 Request built by proj.
+  Pooler g24 at T=32 runs EZ on a persistent zero buffer state["g24p"][32] (no zero + __threadfence + epoch grid barrier);
+  the call's g24 unpool zeroes it again as its ZN (its zo slot is free at T=32 unless G24X qkv is picked: G24X wins the
+  slot, then kernel_fn's end zero_() restores the invariant). TUNE[32] += {g24p}, {g24p, tk2h 4}, {g24p, tk2h 4, lt:o};
+  default off. Placed AFTER _SLIDING[0] is set (FYI layer: the G24X check in _kernel_fn runs BEFORE `_SLIDING[0] = ...`,
+  so its _opt reads the previous call's sliding flag; harmless today since both T=16 tables keep g24x).
+- Correct (forced variant): bench test 13/13, scored_test decode 32 x3 0 bad, replay_test decode 32 30 inputs x seeds
+  11,23 0/120; dev/s63/g24p_inv.py: buffer absmax 0.0 after every call and the unpool (not the fallback) zeroed it.
+  RMSnorm hides pure scale errors, so the invariant check matters more than the tolerance tests here.
+- H100 (W-/router-bound, cannot show it): ab_flag 6 rounds x seeds 7,11 d32 sl +5.7/+3.2, full +1.7/+2.1 us; tuner lines
+  g24p +1.5..2.4 vs default. H200 bound (diag61 EZprobe): pool m32 G108 -1.0..-1.5 us minus the unpool's 512 KB ZN tail.
