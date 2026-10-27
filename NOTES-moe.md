@@ -2002,3 +2002,24 @@
 - Next: the H200 'layer tune T=16/32' pr32 lines from layer's 00:00Z bundle (layer promised to paste them). If pr32 wins there,
   try MTOK 16 S1 (more CTAs per K) and the router stage order; if it loses vs the 4.6 TB/s-equivalent floor measured here, the
   loss is HBM-side contention (H200 DIAG timeline via layer).
+
+## Night5 session 3 (2026-10-27 21:00Z - ) -- pr32 PR_SA (st.async pair handoffs); 0 checks
+- Budget at start: moe checks 0/20 left (10-27), attention 7/20 left (not used: no attention item; GUEST-style use forbidden).
+- pr32 is already in layer main v141 (ed9b994, embedded by proj as a TUNE option) for the 00:00Z check: H200 verdict pending.
+- Timeline stamps added (PR_TL): entry (8), xwait (9, consumers past griddepcontrol.wait), end (10, rank 0 after the out store),
+  fxchg (3, finisher after the 64-partial sum); pr32.py prints the pair tail = end(rank 0) - max(pdone r0, r1).
+  H100 L2W (H200 proxy), us from the first CTA entry, M32: xwait 2.5 (cluster barrier + escape-header sort, hidden under PDL),
+  router stages done (pstart) 4.1, warp 10 rank 1 sum + DSMEM push -> rstore 6.4, pair partial store + fence -> rpart 8.7,
+  fpoll 9.7, ingest 128 KB -> fingest 12.0 (one SM at ~55 GB/s under the stream), 64-partial sum 1.0, route_token 2.3,
+  froute 15-16; pooler pdone max 16.9, pair tail med 1.5 (max 2.0) -> end max 18.9. M16 similar (froute 12.3, pdone max 15.1).
+  => on an H200 the routing chain is about as long as the pooler stream: it was close to critical.
+- PR_SA 1 (default now): every pair handoff by `st.async.shared::cluster.mbarrier::complete_tx::bytes.v4.f32` into rank 0's
+  smem; rank 0's tid 0 does arrive.expect_tx(bytes) on rbar/pbar at init (complete_tx may land first: fine). Pooler: rank 1's
+  WG0/WG1 and rank 0's WG1 push their accumulators into 3 rbuf slots and exit (no bar.sync 1,256, no smem hop, no
+  fence.acq_rel.cluster); rank 0's WG0 waits rbar and sums. Router pair: rank 1's warp 10 st.async into rpair (no fence).
+  Sum order changes only by FP32 association (pooled maxerr identical to PR_SA 0 on all seeds); deterministic.
+- Timeline SA1 vs SA0 (L2W): pair tail med 1.0-1.3 -> 0.5-1.0; rstore -0.8, rpart -0.8, froute -1.0..1.3 us (M16/M32).
+- Timing (us over a 3 us PDL pred, 2 rounds x 3): L2W M16 16.7/16.85 -> 16.0/16.4, M32 17.8/18.0 -> 17.2/17.35;
+  HBM-bound M16 21.9/22.1 -> 21.8/21.6, M32 22.65/22.9 -> 22.6/22.4. Exactness: pr32.py RS=25 x 3 reps M16/M32: BAD 0.
+- r-moe 11d49b7. Layer diff: tools/n5s3/pr32_sa.diff (applies to r-layer muse_decode_layer/pr32_src.cu), or simply copy
+  tools/n5s1/pr32_src.cu over it (superset: + PR_L2W/PR_TL debug paths, off by default).
