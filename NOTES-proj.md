@@ -1509,3 +1509,22 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   g24sk2:<key> checked first in _g24_sel; TUNE[32] += {g24sk2:pooler}, {g24sk2:unpool}, both, both + {tk2h 4, g24:qkv_gate}.
   Forced (TUNE {} + TUNE_BASE[32] g24sk2 both) scored decode 32 3 seeds x 2 types PASS; H100 ab_flag 3 rounds x seeds 99,7:
   sl +1.2/+0.3, full +0.9/+0.6 us (W-bound H100, expected; s56 said +1.2..1.7). H200 tuner decides. No judge runs.
+
+## s70 (2026-10-27 07:17-07:40Z, sandbox okc-night4, session 27): cuBLAS nvjet + PDL via capture-graph edge surgery = DEAD
+- Target: layer s12 idle budget item "T>=16 cuBLAS no-PDL gaps ~1.6%" (v16/v32 sliding: 4 nvjet GEMMs ~70/88 us in-layer,
+  judge 2f7349ee). cuBLASLt has no PDL option (cublasLt.h: no pdl/programmatic), so tried forcing it from outside.
+- Mechanism (works, dev/s70/*.py): cuBLAS itself calls cudaStreamGetCaptureInfo without edge data, so setting programmatic
+  edge data on the STREAM (cudaStreamUpdateCaptureDependencies) makes the next mm fail (cudaErrorLossyQuery). Instead, AFTER
+  the node is captured: cudaStreamGetCaptureInfo -> graph + last node; cudaGraphNodeGetDependencies; cudaGraphRemoveDependencies
+  + cudaGraphAddDependencies with {type Programmatic, from_port 1 (trigger) or 2 (LaunchCompletion)} (edge removal is allowed
+  on a capturing graph). cudaFuncGetName on a cuBLAS (driver) func leaves a sticky-looking error: use cuFuncGetName or clear.
+- (a) nvjet as a PDL SECONDARY (dev/s70/pdl_nvjet.py: a kernel triggers at entry, spins 20 us, then writes X; programmatic
+  edge -> torch.mm(X, W^T)): 18/30 replays WRONG. nvjet has no griddepcontrol.wait (ACQBULK): never launch it early. DEAD.
+- (b) nvjet as PRIMARY, successor (pre-wait 8 MB stream, griddepcontrol.wait, then reads the GEMM out) on a port-2
+  (LaunchCompletion) edge (dev/s70/succ.py, H100, M128/256 K8192 N4096, 40 cold replays, 3 runs): -0.2..-0.7 us vs a
+  plain edge (port 1 = plain, +0..0.7); always correct (the wait still covers nvjet's completion). Pre-wait work in the
+  successor adds nothing (nvjet's single wave holds the SMs until its tail). <= ~0.1% layer, and it edits the harness's
+  capturing graph (gray area): DEAD, not handed off.
+- Other T>=16 PDL route (not built): an own CUTLASS sm90 GEMM compiled with GDC (wait_on_dependent_grids) for the T=128/256
+  calls; gain = launch latency only (~<=1 us/GEMM, wait sits before any load), needs CUTLASS to tie nvjet. Low.
+- No judge runs this session.
