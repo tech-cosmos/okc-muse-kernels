@@ -1391,3 +1391,6 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   across runs): NOT NORM_EARLY: H100 ab_flag 4 rounds x SEEDS 7,11, NE on vs off: v16 sl 307.0/306.3 vs 308.2/307.3,
   v32 sl 346.3/337.8 vs 349.6/342.0 (NE wins 1..4 us); other sliding shapes tie. Most likely judge noise (1.8% per shape).
 - 00:37Z check 0eb3484a = v103 (174a655) queued; submit 129ad449 (v102) queued.
+- 00:27Z **submit 129ad449 = v102 (code of check c973ab6f): 2.0398x [2.009, 2.070], 11,089 us/step: NEW BOARD BEST** (was 703d3a7e
+  1.9954x); layer board #39 at 00:52Z (#1 2.380x). d1 70.2/75.5, d16 132.6/216.6, d32 161.8/319.1, v1 116.4/129.3,
+  v16 273.3/367.3, v32 359.6/527.8. vs its check: d1 sl +4.7, v1 +7.5/+13.4 (T=1/8 routing draw: local expert count), rest +-2.
