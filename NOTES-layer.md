@@ -2187,3 +2187,8 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   g30k120 231.4 | g30k104+unp 216.0 | g30k104+unp+qkv 215.0 (picked). T=32 full default 439.8 | g30k104+unp 435.1 | +qkv 435.3 | pr32+unp 436.4.
   T=16 sl default 219.5, g30k104 220.4 (ties); T=16 full default 315.8, g30k104 313.1.
 - **main = v141.** 00:00Z check 1 = v141; read the H200 'layer tune T=16/T=32' lines (g30k/g30n/pr32) and copy them to NOTES + moe/proj.
+- H100 timeline d32 sl v141 (tuner picks): qkv g30 0-16.0 | nds/combine 16.7-35.0 | o nvjet 35.5-42.0 | bnd 42.4-45.7 | g30k pooler 43.4-71.2
+  beside router_split 46.2-67.8 + routing -72.0 (balanced: g30k ends 0.8 us before routing) | rmsnorm 72.3-75.0 | tk2f 73.5-171.3 | norm2 -175.2 |
+  g30 unpool 164.8-193.2 (18 us after norm2 = ~2 TB/s on 36 MB, still the biggest non-expert post-dependency slice) | bnd -195.7.
+- Git gotcha: `git merge --no-ff` + `git pull --rebase` LINEARIZES the merge and DROPS the merge commit's own extra changes (my notes vanished;
+  code tree was identical). Restored by `git checkout <merge> -- NOTES STATE`. Next time: commit notes separately, or `git pull --rebase=merges`.
