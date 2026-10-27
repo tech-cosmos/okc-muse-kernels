@@ -1664,3 +1664,10 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   cold prepare 120.3 s (join 96.7, tune 22.9).
 - tools/files_eq.py is NOT usable to show bitwise equality with the tuner on: v124 vs v124 itself differs on 11 rows
   (tuner picks differ between prepares; decode 32 sl seed 0 even flips a routing tie). Use a forced-tune variant for that.
+- H100 ab_files verify 3 rounds v124 -> v125: v1 142.8/155.7 -> 142.6/155.0, v16 297.0/444.1 -> 295.6/442.0, v32 376.5/614.1 -> 375.7/613.2.
+- 08:54Z CHECK 19163546 v125 (2663c2c) 2.0731x [2.042, 2.104], 10,911 us (not submitted, < 2.0860; tie = noise): d1 68.6/77.5,
+  d16 126.4/211.3, d32 161.4/**296.3** (best d32 full yet), v1 112.1/123.0, v16 268.0/355.2 (SGLang 506 sl, fast run), v32 354.2/520.8.
+  H200 tuner defaults vs v124's check 08d10234: T=1 sl 78.2 -> 70.6 (SCB ~0 there: machine is faster), T=16 186.2/242.9 -> 167.0/230.0,
+  T=32 175.4/340.4 -> 163.4/332.8, T=128 285.5/396.3 -> 282.1/362.1, T=256 351.3/564.1 -> 341.6/530.3: a different/faster H200, so
+  cross-run tuner numbers cannot isolate SCB's ~1-5 us. SCB stays on main (bitwise per moe, H100 -0.2..-2 us, moe H200 diag -1..-5).
+- okc check client was killed by my 25 min background timeout while the job was still queued; the job ran on. Poll `okc jobs` instead.

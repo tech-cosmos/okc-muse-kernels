@@ -1,7 +1,9 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
 BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
-s77: **main = v124** (701bf12) = v123 + TUNE_BASE stacking of the options the H200 tuner won on >= 9/10 logs (T=1 {g13o, pr1_rb 32},
+s80: **main = v125** (2663c2c) = v124 + moe s27 SCB (bitwise); check 19163546 2.0731x (noise tie, not submitted;
+d32 full 296.3 best yet). Budget 10-27 left: 4 checks (reserved for moe DIAGs) / 5 submits.
+s77: v124 (701bf12) = v123 + TUNE_BASE stacking of the options the H200 tuner won on >= 9/10 logs (T=1 {g13o, pr1_rb 32},
 T=8 sl g14alt:qkv_gate 3, T=16 sl tk2fj False, T=128 fr) + stack combos (T=8 cslpw, T=128 twf_split66+lt, T=256 rg+split+lt).
 Check 08d10234 v124 2.0832x (tie; not submitted). tools/opt_test.py = every TUNE option forced on the base (0/300 bad).
 Budget 10-27 left: 5 checks (4 reserved for moe in-layer DIAG bundles, lead 06:41Z) / 5 submits. Tuner-level stacking is
