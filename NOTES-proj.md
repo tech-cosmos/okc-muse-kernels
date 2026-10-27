@@ -1814,3 +1814,23 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - H200 tuner (layer 35dd53d0, v125): T=32 sliding {g24:pooler/unpool False} 167.8 vs default 168.2 us: in-layer at d32 g24 = cuBLAS.
 - Verdict: the g24 m16/m32 consumer is closed again; all three lead-suggested structures measured or bounded dead. Next proj
   item needs a new lane (below 3.5 TB/s on H100 is physical: H100 full pool m32 is W-bound at ~2.4 TB/s eff. after the pred).
+
+## s89 (2026-10-27 14:56-15:45Z, sandbox okc-night4, session 46): xrm = moe xr with a token-split cluster: DEAD on H100
+- No open lane-(b) requests (layer main v134 already validated s87). Lead 13:30Z item (2) (T=128 GEMMs) is moe's claim
+  (s41 xr: resident-x K slice, killed by 33.5 MB of FP32 red.add); built a DIFFERENT structure in my own dir to test
+  the "red volume /4" condition from layer s98: dev/s89/xrm_src.cu + xrm.py (copy of moe's xr.py harness).
+- xrm: cluster of C CTAs along tokens; rank r owns tokens [r*128/C, ...), so its resident x slice covers C x more k
+  (KC = 512*C) and split-K S / red volume drop C x. Each W 64x64 box is TMA-MULTICAST to all C CTAs (rank r issues rows
+  r*64/C..); empty barriers count one remote arrive per CTA; 1 MMA WG (m64n{64,32}k16) + 1 producer warp. Correct
+  (rel err 1e-6..3e-6). Variants: XR_RED 0 (diag) / 2 red.v2 / 3 cp.reduce.async.bulk / 4 smem tile -> 4 red warps; XR_NOMC.
+- PITFALL (cost 3x): remote arrive as `mbarrier.arrive.release.cluster.shared::cluster` = ~0.7 us per box (whole stream
+  92 us); plain `mbarrier.arrive.shared::cluster` (CUTLASS ClusterBarrier form) -> 29 us. (moe s42 DSMEM: same trap.)
+- H100 cold-L2 graph us (incl. ~4.9 us harness), pool 4096x8192 / unp 8192x4096 m128; cuBLAS 29.6 / 28.9:
+  | C=2 KB16 NS8 stream only (no MMA, no red) | 29.2 |  | + MMA (RED 0) | 29.4 / 29.6 (MMA hidden) |
+  | C=2 red.v2 (S=8, 16.8 MB reds) | 48.9 |  | RED 3 TMA bulk reduce | 62.9 / 63.3 (TMA unit shared with W stream) |
+  | RED 4 decoupled red warps | 46.1 / 46.3 |  | C=4 KB32 NS8 stream only | 71.2 |  | C=4 KB16 NS16 stream only | 48.3 |
+- Reading: halving the red volume vs moe's xr did NOT halve its cost (+17..19.5 us for 16.8 MB vs moe +16.5 for 33.5 MB);
+  reds cost the same whether the MMA WG or separate warps issue them: L2 atomics and the TMA W stream do not overlap.
+  C=4 multicast is cluster-round-trip-bound (per-box rate ~0.2-0.28 us/box regardless of C; needs NS >= 16, which the
+  resident x leaves no smem for). Even an ideal C=4 (stream 29 + ~8 us of reds) loses to cuBLAS on H100. DEAD; the
+  T=128 split-K reduction remains the blocker for every resident-x form (agrees with layer s98). 0 checks.

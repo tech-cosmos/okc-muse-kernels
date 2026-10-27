@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 15:45 UTC (s89). xrm (dev/s89: moe's T=128 xr with tokens split over a 2/4-CTA cluster, W multicast, S/C reds) DEAD:
+C=2 MMA hidden at stream rate (29.4 us) but 16.8 MB of reds still +17 us (red warps/TMA bulk reduce no help); C=4 round-trip-bound. NOTES s89.
 Updated 2026-10-27 15:00 UTC (s88). Lead 13:30Z item (1) g24 m16/m32 REOPENED + DEAD again: more warps/SM (WPB 20-32) and R=2 ILP
 (8-14 warps) lose vs layer cfgs on NOW/G108/G88 proxy; slab split-K bounded dead by bytes; ncu per-instr split (dev/s88). NOTES s88.
 Updated 2026-10-27 14:40 UTC (s87). FULL validate of layer main v134 (f70b84e): ALL OK (13/13, 0/24, 0/308, 0/1200, 0/480, 0/240,
@@ -127,6 +129,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s59: G24X (dev/s59/g24x_layer.patch): first-op qkv g24 = setup round trips behind the W stream; EZ across calls -1.3/-1.9 us standalone.
 ## s60: wgmma WG mode (dev/s60/gemv24.cu, RR bit 9) correct but DEAD; nvcc drops a 2nd wgmma accumulator's sum unless
 ## it is one local array summed explicitly + operand fences (NOTES s60). g24 R=2 at m32 dead too.
+## s89: xrm dead (above). Pitfall: remote mbarrier arrive with .release.cluster ~0.7 us each; use plain .shared::cluster form.
 ## s88: WPB 20-32 / R=2 ILP dead; NOW profile: loop ~47% of warp time, setup ~29%, task ends ~19% (dev/s88 ncu tools).
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
