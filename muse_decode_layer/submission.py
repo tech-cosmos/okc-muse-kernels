@@ -13673,7 +13673,7 @@ _G30 = {}
 # proj s96 g30n (proj s95, r-proj dev/s95: G30_MTOK 32/16 + G30_S cluster split-K, DSMEM reduce in rank 0, BF16 out): T=16/32
 # unpool/pooler/qkv on g30. One build per (MTOK, S, NW, NS); NW >= 16 keeps 1 CTA/SM (2 CTAs/SM under PDL +5 us). H100 standalone
 # after a 3 us PDL pred vs g24: d32 unp 17.3 vs 20.3, pool 18.9 vs 21.5, qkv 12.3 vs 13.4; d16 unp 17.2 vs 18.7, pool 18.4 vs 18.75.
-G30N_CFG = {("unpool", 32): (1, 20, 8), ("pooler", 32): (1, 20, 8), ("qkv_gate", 32): (3, 16, 16),
+G30N_CFG = {("unpool", 32): (1, 16, 16), ("pooler", 32): (1, 20, 8), ("qkv_gate", 32): (3, 16, 16),
             ("unpool", 16): (1, 16, 16), ("pooler", 16): (1, 16, 16), ("qkv_gate", 16): (3, 16, 16)}  # (S, NW, NS)
 G30N_DEFAULT_ON = set()  # (key, T) on without TUNE; otherwise TUNE option "g30n:<key>"
 # s96 H100 in-layer (TUNE off, 3 rounds x seeds 99/7): unpool T=32 -1.2..-2.1 us (2 runs); pooler S2 +9..11 (128 cluster CTAs vs the
@@ -13688,8 +13688,10 @@ _G30N = {}
 # H100 in-layer (TUNE off, seeds 99/7, 4 rounds, d32 vs g24 pooler): G 80 +1, 88 -0.2..0.8, 96 -0.6..1.7, 104 -1.1..2.0 (sl) /
 # -1.5..1.7 (full), 112 -0.5..+0.8, 120/132 +14 us (the side-stream router starves). d16 G108: sl +2.4, full -0.3..1.2.
 # TUNE option "g30k:<key>": <G> (one prepared entry per G in the tuple; the H200's router is ~3x faster than the H100's).
-G30K_CFG = {("pooler", 32): ((104, 120), 20, 8), ("pooler", 16): ((104,), 16, 16)}  # (key, T) -> (grids, NW, NS)
+G30K_CFG = {("pooler", 32): ((104, 120), 16, 16), ("pooler", 16): ((104,), 16, 16)}  # (key, T) -> (grids, NW, NS)
 G30K_DEFAULT = {}  # (key, T) -> G used without TUNE (0 = off)
+# proj s100: T=32 rings NW16/NS16 (was 20/8) for g30n unpool and g30k pooler: H200 standalone (proj check 7ad5148c) unp m32
+# 19.42 vs 21.12, g30n S2 pool m32 19.97 vs 21.86 us; H100 in-layer tie (r-proj dev/s100/ringab.py); GEMM bitwise identical.
 _G30K = {}
 # proj s57 gemv27 (g27_src.cu = r-proj muse_bf16_proj/dev/s57/gemv27.cu): o at T=16/32 without cross-block split-K: a
 # block owns RGB whole 16-row groups, its warps split k (KQ), partials summed in smem, plain FP32 stores (no out zeroing,
