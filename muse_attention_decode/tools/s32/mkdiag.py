@@ -23,12 +23,17 @@ src += r'''
 
 # ---- s32 DIAG (never submit) ----
 _PLAN_OV = {}
+_GW = dict(gluon=True, splits=127, block_n=64, stages=3, lag=1, gpeel=True, pw=4, pregs=40, cregs=96, maxnreg=80,
+           lsum=True, gfuse=False, gbal=False)  # s94's non-bal Gluon plan at verify 1 full
+_GB = {**_GW, "gbal": True, "hb": 2, "cw": 4}
 _DIAG = {
-    ("decode", 1, "full"): [("d1a", {}), ("d1L2", {"_pt": "l2"}), ("d1seq", {"_pt": "seq"}), ("d1fl2", "floor"),
-                            ("d1dense", "dense")],
-    ("verify", 1, "full"): [("v1a", {}), ("v1L2", {"_pt": "l2"}), ("v1seq", {"_pt": "seq"}),
-                            ("v1L2s4", {"_pt": "l2", "stages": 4}), ("v1L2p255", {"_pt": "l2", "splits": 255}),
-                            ("v1fl2", "floor"), ("v1dense", "dense")],
+    ("decode", 1, "full"): [("d1a", {}), ("d1fl2", "floor")],
+    ("verify", 1, "full"): [("v1a", {}), ("v1gw127", _GW), ("v1gw191", {**_GW, "splits": 191}),
+                            ("v1gw255", {**_GW, "splits": 255}), ("v1gw255l2", {**_GW, "splits": 255, "lag": 2}),
+                            ("v1gw255s2", {**_GW, "splits": 255, "stages": 2}),
+                            ("v1gbal", _GB), ("v1gbalc8", {**_GB, "cw": 8}), ("v1gbalh1", {**_GB, "hb": 1}),
+                            ("v1gbalL2", {**_GB, "_pt": "l2"}), ("v1gw255L2", {**_GW, "splits": 255, "_pt": "l2"}),
+                            ("v1L2", {"_pt": "l2"}), ("v1fl2", "floor")],
 }
 
 

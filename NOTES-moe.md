@@ -1609,3 +1609,22 @@
   Its timed shapes are main's code: **2.6193x** (fast node; d16/d32/v32 full 84.6/160.8/192.4, v32 sl 14.03).
 - Submit **90b7ce85** = main (s31 code, never submitted; its timed code had just checked 2.619x): **2.5653x** (1468.1 us)
   = tie with board 2.566x (node noise). Scored 1/10 today.
+- **Check b0d361bc (DIAG v4, data-level ablation: page table remapped so all gathers hit L2 (`L2`) or read consecutive
+  rows (`seq`); timing only)**, H200 us: d1 full main 12.22 | all-L2 11.04 | seq 11.84 | floor 7.97 | dense 7.46;
+  v1 full main 17.14 | all-L2 16.66 | seq 16.93 | all-L2 + stages 4 20.35 | all-L2 + splits 255 20.50 | floor 7.95.
+  **=> batch-1 full is NOT memory-bound on the H200**: free DRAM saves only 1.2 (d1) / 0.5 (v1) us. The ~9 us v1 gap
+  over the gather floor is per-program fixed latency + consumer chain + merge. Timed shapes = main: 2.6391x (fast node).
+- **Check 0c60ebfc (DIAG v5)**, v1 full H200 us: main 17.02 | Gluon gw 127 17.42, 191 20.83, 255 22.88, 255 lag 2 23.94,
+  255 stages 2 23.47, 255 all-L2 21.81 | gbal (264 programs, _combine_bal) hb2 cw4 21.63, cw8 18.59, hb1 19.81, all-L2
+  20.82 | main all-L2 16.93. More programs per SM (2 CTAs/SM) LOSE even with free DRAM: the extra programs' fixed cost +
+  wider merge outweigh the consumer parallelism. Timed shapes = main: 2.5891x.
+- Readings: v1 full is bound by a serial per-program chain (~10 tiles x ~1 us in _attn_split, profile 12.6 us) + the
+  _combine hop (2.7 us). d1 full likewise (_gd_full 8.2 + _red_fin 1.4; all-L2 only -1.2). Neither more programs nor
+  deeper stages help. Plan knobs for batch-1 full are closed on the H200 (all measured here).
+- NEXT (s33): per-program globaltimer timeline of _attn_split at v1 full ON THE H200 through the diag hook (stamps: program
+  start, q ready, first tile landed, each tile's end, partial store, _combine start/end; print percentiles in the log):
+  find whether the ~1 us/tile is the page-table->row dependent chain per tile (Triton does not pipeline the dependent
+  pt load: then prefetch the whole split's page-table slice into smem/registers up front), the softmax/dot chain, or
+  the launch/ramp. Same for _gd_full at d1. Only build once the H200 timeline names the cost.
+- Budget 10-27 (attention): checks 7/20 used (5 this session: 7df7c251, 4fd8b5d5, 6b5011ed, b0d361bc, 0c60ebfc; all
+  DIAG, never submit), scored 1/10 (90b7ce85).

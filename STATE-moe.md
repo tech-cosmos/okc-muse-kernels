@@ -84,12 +84,16 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
-## Attention: what's on main (r-moe muse_attention_decode/submission.py @ s31) vs checked
+## Attention: what's on main (r-moe muse_attention_decode/submission.py @ s31 code) vs checked
 - = 410dcb6 + agent2 halfpfkr (v32 sl cl, csl/nds pt prefetch, nds K-early) + verify 16 on the pre-cl nvs build (_NVS0) +
-  csl/vtk owner fast divides. Check 18cf3bfb 2.5510x (slow node ojkcfmco; previous 362ff219 2.5447x same node). v32 sl
-  14.1-14.4 vs 15.5 (H200-verified win); others tie within noise (per-shape noise up to ~0.7 us between same-node runs).
-  NOT submitted: rule needs a check > board 2.566x. Next check of a NEW change may land on a fast node and qualify.
-- Checks used 2026-10-27: 2/20 (362ff219, 18cf3bfb). Scored 0/10.
+  csl/vtk owner fast divides. SUBMITTED s32: 90b7ce85 2.5653x (tie with board 2.566x). The same code timed 2.619 / 2.639 /
+  2.589x inside s32's DIAG checks (node noise +-3% whole-run): board best stays 2.566x (06456b7e).
+- Checks used 2026-10-27: 7/20 (s32: 5 DIAGs). Scored 1/10.
+## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)
+- Floors (pt trip + 20.5 MB random 128-B rows, all in flight, incl. launch): ~8.0 us d1 and v1; dense 7.4.
+- Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.
+- Every plan knob loses (stages, splits 63-1023, BN, warps 8, pre/pf/fix, qk16, Gluon gw 127-263 +-gfuse, gbal).
+- Next: H200 per-program timeline of _attn_split (v1) / _gd_full (d1) via the diag hook; build only once it names the cost.
 ## Attention: ranked ideas / bounds (s31)
 - csl (d1 sl) post-gather tail is ~1.5 us cold H100: compute 0.45, premerge+cluster 0.2, push/slowest-CTA 0.37, owner 0.33.
   The slowest CTA's 12 random gathers per thread set the push time; owner merge is now ~0.33. No >0.2 us lever seen in the
