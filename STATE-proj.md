@@ -1,4 +1,7 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 23:35 UTC (night5 n5s5 = session 5). g30 escape path: fixup warp reading x from the smem ring (G30_FXS, exact) is
+DEAD on H100 (qkv m32 after pred 13.8 vs in-loop patch 13.0 vs no-esc 11.7; just gating the x ring on the extra warp costs 0.8 us).
+All off-loop escape forms (ESCM, FXW, FXS) lose: the in-loop patch stays; escape line parked (NOTES n5s5). Checks 10-27: 13/20, scored 3/10.
 Updated 2026-10-28 00:00 UTC (night5 n5s4 = session 4). **FOUND: g30's escape path costs 1.5-2.0 us per call on the H200** (check 198e7084,
 _diag30e g30 vs -DG30_ESC=0, m32 after a 3 us pred: qkv 12.9 vs 11.35, pooler 16.6 vs 14.7, unpool 15.2 vs 13.1; standalone -0.6..1.2) =
 ~4-5 us per d16/d32 load (~0.8% layer) if escapes were free. Cause (H100 bisection): in-loop patch events stall the warpgroup's wgmma.

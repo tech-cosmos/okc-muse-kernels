@@ -2,7 +2,7 @@
 Exactness: one-hot x over every escape column (+ random columns) must reproduce W bit-exactly; random x: rel err vs FP32.
 Timing: 1-kernel graphs, cold L2, standalone (minus an empty graph) and after a 3 us PDL predecessor (minus the pred alone).
 Run from muse_bf16_proj/: python dev/n5s4/escm.py [M=32] [keys=qkv_gate:3,pooler:2,unpooler:1] [rounds=2]"""
-import sys, hashlib, torch
+import os, sys, hashlib, torch
 sys.path.insert(0, ".")
 import bench, reference
 from torch.utils.cpp_extension import load_inline
@@ -19,7 +19,7 @@ def build(src, S, extra=()):
                        extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
 Wall = reference.generate_weights(reference.WEIGHTS_SEED)
 for key, S in KEYS:
-    libs = {"old": build(OLD, S), "escm": build(NEW, S), "noesc": build(OLD, S, ["-DG30_ESC=0"])}
+    libs = {"old": build(OLD, S), "escm": build(NEW, S, os.environ.get("NEWDEFS", "").split()), "noesc": build(OLD, S, ["-DG30_ESC=0"])}
     w = Wall[key]; N, K = w.shape
     code, sm, hdr, scale = L._compress(w)
     P = L._pack30(code, sm)

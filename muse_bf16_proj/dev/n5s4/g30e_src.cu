@@ -33,6 +33,9 @@
 #ifndef G30_FXW
 #define G30_FXW 1  // proj n5s4: escapes by a fixup warp (warp 10): smem sums cneg = sum x 2^-15, cpos = sum x v per (row, token)
 #endif             // off the consumers' path; WG0 ends with d = (d - cneg) + cpos (FP32; one-hot exact). Needs G30_HSM.
+#ifndef G30_FXS
+#define G30_FXS 0  // proj n5s5: the fixup warp reads x from the smem x ring (joins each stage's empty barrier), no global loads
+#endif
 #ifndef G30_FXB
 #define G30_FXB 16
 #endif
@@ -177,6 +180,9 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
   float* cneg = (float*)(hsm + 64 * G30_ESC);  // [64 rows][MTOK]
   float* cpos = cneg + 64 * G30_MTOK;
   float2* elist = (float2*)(cpos + 64 * G30_MTOK);  // [<= 64 * ESC] (row | col << 8, v)
+#if G30_FXS
+  float2* elist2 = elist + 64 * G30_ESC;  // elist sorted by (col, row)
+#endif
   uint64_t* fbar = hbar + 1;
 #endif
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
@@ -188,7 +194,11 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
 #endif
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (tid == 0) {
-    for (int i = 0; i < G30_NS; i++) { mbar_init(&full[i], 1); mbar_init(&empty[i], 1); }
+    for (int i = 0; i < G30_NS; i++) { mbar_init(&full[i], 1); mbar_init(&empty[i], 1 + G30_FXS
+#ifdef G30_DBG_FXSNG
+      - 1
+#endif
+    ); }
     for (int i = 0; i < G30_NW; i++) { mbar_init(&wfull[i], 1); mbar_init(&wempty[i], 1); }
 #if G30_S > 1
     mbar_init(rbar, G30_S - 1);
@@ -260,6 +270,52 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
       n += __popc(msk);
     }
     __syncwarp();
+#if G30_FXS
+    // rank sort by key (col << 8 | row; unique) so each stage's escapes are a contiguous run
+    for (int e = lane; e < n; e += 32) {
+      const float2 ev = elist[e];
+      const int ke = __float_as_int(ev.x);
+      int rk = 0;
+      for (int f = 0; f < n; f++) rk += __float_as_int(elist[f].x) < ke;
+      elist2[rk] = ev;
+    }
+    __syncwarp();
+    {
+      int p = 0;
+      int kn = n > 0 ? (__float_as_int(elist2[0].x) >> 8) : 0x7fffffff;
+#ifdef G30_DBG_FXSNW
+      kn = 0x7fffffff;  // timing only: no escape work
+#endif
+#pragma unroll 1
+      for (int ir = 0; ir < i1 - i0; ir++) {
+        // every stage is waited for: an arrive for stage ir + NS must not land in stage ir's empty phase
+        const int st = ir % G30_NS, ph = (ir / G30_NS) & 1, kend = (i0 + ir + 1) * 64;
+        mbar_wait(&full[st], ph);
+        if (kn < kend) {
+          const uint8_t* xb = xs + st * G30_XBOX;
+          do {
+            const float2 ev = elist2[p];
+            const int c = kn & 63, r = __float_as_int(ev.x) & 255;
+#pragma unroll
+            for (int tk = lane; tk < G30_MTOK; tk += 32) {
+              const float xv = __bfloat162float(*(const __nv_bfloat16*)(xb + tk * 128 + (((c >> 3) ^ (tk & 7)) << 4) + (c & 7) * 2));
+              const int ix = r * G30_MTOK + tk;
+              cneg[ix] = fmaf(xv, 0x1p-15f, cneg[ix]);
+              cpos[ix] = fmaf(xv, ev.y, cpos[ix]);
+            }
+            p++;
+            kn = p < n ? (__float_as_int(elist2[p].x) >> 8) : 0x7fffffff;
+          } while (kn < kend);
+        }
+        __syncwarp();
+#ifndef G30_DBG_FXSNG
+        if (lane == 0) mbar_arrive(&empty[st]);
+#endif
+      }
+    }
+    mbar_arrive(fbar);
+    return;
+#endif
 #if G30_PRE
     asm volatile("griddepcontrol.wait;" ::: "memory");  // x
 #endif
@@ -488,6 +544,9 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
 #endif
   // reduce WG1 into WG0 through smem (the x ring is free once both WGs are done: barrier over the 256 consumer threads)
   float* red = (float*)xs;
+#if G30_FXS
+  mbar_wait(fbar, 0);  // the fixup warp reads the x ring until its last stage
+#endif
   asm volatile("bar.sync 1, 256;" ::: "memory");
   if (wg == 1) {
 #pragma unroll
@@ -576,7 +635,7 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
   CUtensorMap tx;
   g30::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
   const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 + 1024 : 0)
-                   + (G30_HSM ? 64 * G30_ESC * 8 + 1024 : 0) + (G30_FXW ? 2 * 64 * G30_MTOK * 4 + 64 * G30_ESC * 8 : 0);
+                   + (G30_HSM ? 64 * G30_ESC * 8 + 1024 : 0) + (G30_FXW ? 2 * 64 * G30_MTOK * 4 + (1 + G30_FXS) * 64 * G30_ESC * 8 : 0);
   static bool once = false;
   if (!once) { cudaFuncSetAttribute(g30::g30_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
   cudaLaunchConfig_t cfg = {};

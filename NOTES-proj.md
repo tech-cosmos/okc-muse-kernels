@@ -2124,3 +2124,21 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   the SW128 x box while the stage is resident: no global loads at all). Alternative: cheaper in-loop patch (a per-WG escape mask per
   stage precomputed in prepare so only stages with escapes branch; or patch in smem W stage pre-decode). Then port to g30k/g30n in the
   layer (proj branch) and A/B in-layer. Gate on an H200 diag like _diag30e (it is still in sub_template, DIAG30E = {} to re-enable).
+
+## n5s5 (2026-10-27 22:43Z-23:35Z, night5 session 5): g30 escapes via a fixup warp reading x from the smem ring (G30_FXS): DEAD; 0 checks
+- Built G30_FXS in dev/n5s4/g30e_src.cu (on top of FXW + HSM): the fixup warp rank-sorts the tile's escapes by (col, row) before
+  the wait, then walks the x ring stage by stage (waits full[st], reads x[tok][col] from the SW128 box, lane = token, FP32 cneg/cpos
+  sums in smem), and is a 2nd arrival on each x stage's empty barrier; consumers wait the fixup's fbar before the WG reduce (the
+  reduce reuses the x ring). No global loads. Exact: one-hot bit-exact on qkv/pooler/unpool m32 (dev/n5s4/escm.py, NEWDEFS="-DG30_FXS=1").
+- H100 after a 3 us PDL pred, us (escm.py 3 rounds; GPU shared): qkv S3 old 13.0 / FXS 13.8-14.0 / no-esc 11.7; pooler S2 19.8 /
+  20.2 / 19.2; unpool S1 17.7 / 18.4 / 16.9. FXS LOSES to the in-loop patch everywhere.
+- Bisection (escdbg.py qkv m32 S3, one process per variant): OLD 12.96, FXNOP (warp present, exits) 11.58, FXS but no escape work
+  (only per-stage full wait + empty arrive) 12.35, FXS full 13.76. So gating the x ring on a 3rd warp costs ~0.8 us by itself and
+  ~20 escapes/CTA of trivial smem work another ~1.4 us. Ungated debug variant (no arrive, DBG_FXSNG) DEADLOCKS (killed): the fixup
+  warp falls > NS = 16 stages behind (full-barrier parity aliasing), i.e. the extra warp is badly starved/late, which is why gating
+  on it costs. (Not traced further: candidate causes = issue-slot starvation on its SMSP beside 2 consumer warps, or the header bulk
+  copy landing late behind the pre-wait W stream.)
+- Conclusion for the escape line: every off-loop form tried (ESCM end fixup from L2, FXW fixup warp from L2, FXS fixup warp from
+  smem) costs more than the in-loop patch. The in-loop patch stays. Remaining untried ideas, each worth <= ~0.5 us/call on H100:
+  per-thread key list in smem (pop = 1 LDS instead of a 16-MOV shift), key with precomputed fragment index. Not pursuing now.
+- dev/n5s4/escm.py takes NEWDEFS="<-D...>" for the new-source variant. Do NOT run G30_DBG_FXSNG (hangs the GPU).
