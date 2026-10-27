@@ -1585,7 +1585,7 @@
   (vtk is 2 CTAs/SM); csl new-token reciprocal instead of / kscale, / vscale: +0.03 (1/9).
 - Handoff: v32 sliding cl (+ the separate pre-cl nvs build for S 4) to layer (r-layer attn_src.py has neither).
 
-## Night4 session 32 (2026-10-27 10:24Z - ) -- attention lane: H200 DIAG of batch-1 full (d1/v1 full)
+## Night4 session 32 (2026-10-27 10:24Z - 12:40Z) -- attention lane: H200 DIAG of batch-1 full (d1/v1 full)
 - Reasoning: d1 full 12.07 / v1 full 16.75 us (floor 4.3) are not in layer's claim (layer = d16/d32/v16/v32 full) and are
   worth 0.67 / 0.51 %/us. ~/attn exp/hdiag5 (H200 batch-1 random/dense gather floors + plan variants) was queued for 2 days
   and never run. Ported it onto main as tools/s32/mkdiag.py (writes a DIAG copy; NEVER submit): d1 full variants d1a/s3/s4/
