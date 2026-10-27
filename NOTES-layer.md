@@ -2097,7 +2097,7 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   lo rows (new producer/consumer path + FP32 epilogue) or 24+ escape slots (register cost in the consumers). Bound <= -4 us H100
   v16 (~0.15%), H200 maybe x-ingest-bound: not started; next session's candidate if nothing better arrives.
 
-## s105 (2026-10-27 17:01Z-17:30Z, night4 session 54): one-launch pooler+router g30 at T=128 measured DEAD (H100 standalone); 0 judge runs
+## s105 (2026-10-27 17:01Z-17:05Z, night4 session 54): one-launch pooler+router g30 at T=128 measured DEAD (H100 standalone); 0 judge runs
 - Layer checks 20/20 used on 10-27; sandbox moves ~18:00Z. Measured the last queued g30 form (s104) before building it.
 - dev/s105_frbound.py (main g30_gemm, S=1) and dev/s105_slabbound.py (s102 g30_slab: old g30_src @1d405c8 + the g30_src.cu hunks
   of dev/s102_g30sp.patch, path as argv[1]); extra rows = pooler copies (12-bit, cheapest case: raw-BF16 lo rows would cost more).
