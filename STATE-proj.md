@@ -78,7 +78,6 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## 05:15Z), wiring dev/pr1_layer.patch. H100 layer: d1 -2.5/-2.7 us, v1 -1.1/-1.4 us. Await the layer's H200 check.
 - Lesson: under saturated HBM each dependent memory round trip costs ~3-4 us: keep ticket/last-block chains OFF the
   streaming blocks (extra finisher block spinning on an acquire counter).
-## Session 13: T<=8 ramps QG (csl beside qkv) + gemv21 (TMA-ring m=1) DEAD; g13 needs its whole register file. NOTES s13.
 
 ## Session 14: gemv19 run end = the escape fixup loop (~1.06 us per run end, serialized shfl/branch chain) -> ballot
 ## version (bit-identical; H100 -0.5..0.8 us per g19 call). Handoff posted, patch dev/g19_ballot_layer.patch (NOTES s14).
@@ -99,39 +98,28 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 - **H200 proxy for g19** (NOTES s16): H100 `GRID=88 MODE=2 PRED=3000 python dev/g19.py ...`, times x 0.73 = judge g19
   after-pred numbers for pooler/unpool (qkv off by ~3 us); GRID 72 ~ the layer's 108 blocks. Use it before H200 diags.
 
-## s19-s26 (NOTES): QSS (d32 qkv as 2 FP32 bmm slabs) in layer v70; G19_RAW dead; DeepGEMM bf16 dead (image: flashinfer
 ## 0.7.0, deep_gemm 0.2.1+muse, sgl_kernel 0.4.9); tinygemm2 port = proj tuner candidate at unpooler m8 (not judge-checked).
-## s31/s32: evict_last on pr1 router-W prefetch + all 9 layer L2 prefetch sites + KV_PF = WIN (H100 layer d1 -1.3..-2.0 us,
 ## bitwise same; in layer v80+, dev/s32/evl_all_layer.patch). Dead: evict_first on W streams, O_PF/boundary/pr8 hints. NOTES s31/s32.
-## Session 33: g13 (12-bit) for the layer's T=1 o as a PDL secondary: H100 d1 full ~-1 us, sliding bimodal 0..-1.9:
-## handoff as TUNE option g13o (dev/s33/g13o_layer.patch on v82). After the wait a GEMV is ISSUE-bound (~2.3 us decode+FMA);
+## s33: g13o (12-bit T=1 o, PDL secondary) handoff as TUNE option g13o (dev/s33/g13o_layer.patch on v82). After the wait a GEMV is ISSUE-bound (~2.3 us decode+FMA);
 ## pre-decoding before the wait works (g13p) but loading all W beside csl slows csl as much: dead. NOTES s33.
-## Session 34: DEC4 (dev/s34/dec4.py source transform, on main in gemv19/14/13, pr1, pr8): 12-bit decode 4 instr per BF16
-## pair instead of 5 ((s & M2) | C had two immediates = 2 LOP3s; constants now opaque registers, one 3-reg LOP3). Bit-identical.
-## H200 proxy g19 -0.5..-1.6 us per call (m32 pool -1.36 unp -1.22); in the H100 layer a tie (g19 there is HBM-shared with
-## _router_split). Handoff dev/s34/dec4_layer.patch (applies on r-layer f5fe1ec). ab_files has a ~1.5 us file-position bias
-## at d16/d32 sliding: use A B B A. g19 m32 = consumer-bound (NOW 27.1 vs full 29.6 at G72); load-group size G: null. NOTES s34.
+## Session 34: DEC4 (4 instr/pair, superseded by DEC3; NOTES s34). ab_files has a ~1.5 us file-position bias at d16/d32 sliding: use A B B A.
 ## Session 35: DEC3 (dev/s35/dec3.py layout + dec3_src.py transform; on main in ALL 12-bit kernels + packers via _dec3):
 ## same 12 bits re-arranged (code bit 0 in the byte, sign + c1..c3 in the word at shift-friendly bits; prmt injects 0x38):
 ## 3 instr per BF16 pair (dec8 11 vs 16). H200 proxy g19 B-A: m16 -0.4..-1.65, pool m32 -0.48 us; layer H100 tie, tests
 ## 13/13 + scored 24/24, T=1/8 bitwise same. Layer agent integrating it (g22 kept on old layout). Old decode: -DPJ_DEC4.
-## s36-s40 (detail in NOTES): pr8 bulk L2 prefetch npf 212 after the wait = WIN (H100 layer v1 -1.6 us, in layer v88). pr8
+## s19-s52 dead ends + details: NOTES. s36-s40: pr8 bulk L2 prefetch npf 212 after the wait = WIN (H100 layer v1 -1.6 us, in layer v88). pr8
 ## tail = random ~3 us block-finish spread; fixing it needs K split + combines, <= ~0.1% layer: deprioritized. s39 dev/s39/fill.py:
 ## a side HBM stream beside a latency chain is zero-sum if it queues its whole range at once; ONE 32 KB TMA in flight per SM
 ## streams at ~95% rate and dilates the chain 40-60% less (rule for any layer weight-overlap/side-stream idea). s40: throttling
 ## g19's own few-stage pre-wait prologue (npre 1-2) beside a memory-touching pred: dead (keep deep npre).
-## s44/s45: g19 m32 LONGRUN DEAD; layer pooler T=16 npre 2 vs 3 tie (keep 3).
 ## s46: T=1 pooler W pre-fill into L2/SMEM beside csl/o/bnd (side-stream throttled TMA filler, dev/s46): DEAD, +2..6 us d1:
 ## csl's window already carries o's pre-wait W stream; a side kernel alone costs ~2-3 us; bnd window = pr1's prologue.
-## s47: SASS audit (dev/s47_pdl_audit.py) of all proj kernels in layer v91: no producer output read before griddepcontrol.wait;
 ## only pr1 non-bnd x/x32 __ldg fragile (Request to layer). unpool T=32 G19_GRID 96-132 tie.
-## s48: g19 m32 escape fixups ~0.5-1.2 us/call proxy; G19_FIX2 / G19_HPF DEAD; diag G19_NOHDR/NOFIXB (off).
 ## s50: _diag19d (print only) in submission: g19 pool m32/m16, unp m32 x {main, NOW, NOW+NOMMA, NOW+NOX, NOFIX} x G132/108
 ## after a 3 us PDL pred (+~1-2 min compile). gemv23 at m16/m32 (BF16, no decode) = W-stream-bound, ties/loses cuBLAS: DEAD.
 ## H100 G19_TR2 trace: per consumer stage ~0.35 us outside the atom loop (loop top tag/int math 0.23, arrive->got 0.13).
 ## s51: G19_TAG2/G19_NOTM/G19_CLK switches (off by default). NOW-mode H100: TAG2 -1.0 (m16) / -0.1..-0.4 (m32) us vs layer-like
 ## NOTM; full kernel tie on H100 (W-bound). Loop top 0.30 -> 0.14 kcyc/stage (clock64). NOTES s51.
-## s52: dead (NOTES s52): flag-based PDL handoff (1.02 vs gdc.wait 0.77 us), G19_SWP, G19_ACC4 (switches off in gemv19.cu).
 ## s54: g24 SK (r | 256): per-warp equal stage ranges, flush at task boundaries (fixes coarse task quantization; G24_TRACE
 ## shows m32 static warps doing 2 vs 3 tasks). H200 proxy: SK wins m32 + qkv m16, loses o and m16 pool/unp (G132); at G108
 ## SK fixes static (16,1024,2,4,16). DYN smem chunk claims DEAD (+4 us). NOTES s54.
