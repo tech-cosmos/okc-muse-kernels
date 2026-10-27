@@ -1429,3 +1429,16 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - 02:25Z **submit acce7f04 = v105: 2.0525x [2.022, 2.083], 11,021 us** (below board best b9685e03 2.0606x; check->submit -1.7%,
   the usual spread): d1 69.0/77.5, d16 135.7/212.8, d32 171.2/317.4, v1 114.8/129.8, v16 268.4/364.6, v32 348.5/531.8.
   Board: layer #34 at 2.061x (#1 colinlikescode 2.380x). Budget 10-27 after s68: 17 checks / 7 submits left.
+
+## s69 (2026-10-27 02:20Z-, session 18): v106 = v105 + proj s56 g24cfg + proj s57 g27 + moe n16 tk2h on SQ
+- proj s56 dev/s56/g24cfg_h200_layer.patch (pooler T=16 g24 (4,3,12); H200 standalone 15.4 vs 18.3 us) and proj s57
+  dev/s57/g27_layer.patch (g27 for the T=16 o; H200 5.25 vs g24 6.43 us): both `git apply` clean on v105. g27's load_inline
+  moved out of _g27_prepare into `_g27_build` on _BUILD_POOL (_PREBUILD), _G27 added to _join_builds' retry list.
+- moe n16 tools/n16/hsq_layer.md hand-ported: moe_tk2f_launch SQ branch dispatches tk2h (14W004) to the PF 4|512 instantiation
+  (BAL flag stripped before, ignored by tk2h as on the 3-copy path); _tk2f_w maps 14W004 to +10000000 / w13sq,w2sq.
+  Bitwise vs 3-copy (/tmp/s69/hsq_eq.py = sq_eq2 with TK2H_M {16,32}: W3 and W2): 0/96 + 0/96.
+- TUNE_BASE (32, *) += tk2h 4 (moe n13 -1.9, n16 -1.7 us on H200, moe-only); TUNE[32] candidates {tk2h 0}, {tk2h 3},
+  {tk2h 0, lt:o} so the tuner can revert; tk2h dropped from TUNE[16] (moe n13: loses +3..5 us on H200).
+- H100 ab_files 4 rounds v105 vs v106 (tuner on): d16 sl 192.1 -> 191.3, full 292.8 -> 291.0; d32 sl 192.2 -> 195.8 (+3.6,
+  H100 DRAM-bound tk2h; H200 decides via the tuner line), full 411.4 -> 409.1.
+- Tests: bench test 13/13 (twice), replay decode seeds 11,23 0/160 + d32 0/20, cold prepare (fresh caches) 115.0 s (join 89.9, tune 24.4).

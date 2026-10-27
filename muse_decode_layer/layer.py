@@ -2501,7 +2501,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
              {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
-             {"o_pf": 0}, {"g19trig": False}, {"tk2h": 0}, {"tk2h": 3}, {"tk2h": 0, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
+             {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
              {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True},
              {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
@@ -2525,13 +2525,14 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
 _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
 TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True, "bal": True, **_G24_ALL},
-             (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4},
-             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4},
+             (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True},
+             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True},
              (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
 # proj s54: T=32 pooler+unpool on stream-K g24 (g24sk): H100 ab_flag 5 rounds x 2 seeds d32 sl -1.3/-1.9, full -1.5/-1.1 us;
 # g24sk at T=16 +0.4..0.9 and qkv at T=32 +1..1.5 on the H100 (W-bound): TUNE candidates only.
 # H100 ab_flag 4 rounds x 3 seeds, TUNE {}: d16 sl/full -2.9/-3.0 us, d32 sl/full -1.5/-1.8 (o on g24 at T=32 sl +2.3; qkv tie/-1)
-# s69: T=32 tk2h 4 (W3) on SQ stages by default (moe n13/n16 H200 moe-only on layer routings: -1.9 / -1.7 us vs gs8 SQ);
+# s69: T=32 tk2h 4 (W3, now on SQ stages) stays a tuner option: as TUNE_BASE (check 71f451bb) the H200 tuner measured
+# {tk2h 0} sl 169.4 vs 172.4, full 348.2 vs 348.3 us in the layer (moe-only said -1.7); {tk2h 3} +8..10.
 # tk2h dropped from TUNE[16] (moe n13 H200: every tk2h loses +3..5 us at T=16).
 # s61: T=16 sliding moe n8 BAL (H100 real routings 4 seeds -2.6 us mean); s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
 # s62: tokens where decode sliding csl is a PDL secondary of the qkv GEMM (TUNE option cslpw). H100 ab_flag 5-6 rounds x
