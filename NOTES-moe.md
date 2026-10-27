@@ -1412,3 +1412,13 @@
   seed -0.4..-1.8); s33h 200.6 -> 198.5; v32 (twq, not the layer's v32 path) 276.7/275.9 -> 269.7/269.6 (-6.5).
   => layer TUNE[128] {"twq": 539050500} (= 536953348 | 1 << 21): ~-1.3 us at v16 vs the s23 candidate. Port tools/s24/patch_layer_ne.py
   (applies to r-layer moe_src.py @ a90cadb, with or without tools/s23/patch_layer_hotq.py; layer's halves-only n21 copy handled).
+- H200 check fccff52d (tools/s24/mktl_twq.py copy: TWM_TL 1 + DIAG_TL, test run, never submit): twq per-CTA timelines on the
+  layer's v16 routings (us; items = 1 MB weights + scales each, same bytes for gemm13 and gemm2 items):
+    kinds (g2 class reuse N: n, mean item us), s66ne seed 7: g13 N8 160 x 42.6 | N16 96 x 48.7 | N32 32 x 62.3 | g2 whole-K N8 41.5 (q4)
+    | g2 K-half N8 144 x 26.3 | N16 49 | N32 60. Same on every seed (N8 43, N16 49-50, N24 58, N32 62).
+  => N8 items run at ~3.45 TB/s aggregate (near the H200 stream rate); N16 +15%, N24 +35%, N32 +45% for the SAME bytes = the
+  consumer (dq + wgmma not overlapping; at N32 per stage ~1770 clk vs ~1230 at N8). K halves are ~20% slower per byte than whole items.
+  s66h32ne: hot SMs' twq CTAs start at 70-100 us (start max), exit min/med/max 141-161 / 154-176 / 171-188, busy/G 135-156.
+  s66ne (no hot): loss 17-23 us. q4 (no split): loss 30-33, last CTA +20 us after the median.
+  diag12 same check: v16 s66h32ne 189.8 | s66ne 200.9; v32 twq 268.5.
+  Next lever for v16 (and v32 twm): the N16-N32 consumer (per-step wgmma wait / dq latency chain), not bytes or passes.
