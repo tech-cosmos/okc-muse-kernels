@@ -144,6 +144,19 @@ __global__ void __launch_bounds__(128) decode(const unsigned short* __restrict__
         asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(mb), "r"(16 * (16 * 16 + 8)) : "memory");
     }
     asm volatile("barrier.cluster.arrive.relaxed.aligned;" ::: "memory");
+    if (threadIdx.x == 32 && spec < 0) {  // agent2 s17 (batched): L2-prefetch this CTA's share of the request's
+        // plausible page-table span (agentic lengths: window start >= 0.86 width - 2112) while seq_lens is in flight,
+        // so the dependent page-table read hits L2. A hint only (no effect on results). H100 decode 16 -0.13 us.
+        const int rq = 32, pb = blockIdx.x / rq, part = blockIdx.x % rq, maxp = MP;
+        const int plo = max(0, (int)(maxp * 0.86f) - 2112);
+        const int per = ((maxp - plo + rq - 1) / rq + 3) & ~3;
+        const int a = plo + part * per, e = min(a + per, maxp);
+        if (e > a) {
+            const uintptr_t u = reinterpret_cast<uintptr_t>(pt + (long long)pb * maxp + a) & ~uintptr_t(15);
+            const uintptr_t v = (reinterpret_cast<uintptr_t>(pt + (long long)pb * maxp + e) + 15) & ~uintptr_t(15);
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(u), "r"((unsigned)(v - u)) : "memory");
+        }
+    }
 
     // Every load that doesn't need the page table goes out first (warps issue in order, and the gathers' addresses
     // wait for the page-table trip): queries, the new token, the gate, scales; then cos/sin (needs seq).
@@ -774,6 +787,17 @@ __device__ __forceinline__ uint32_t smem_u32(const void* p) { return (uint32_t)_
 __device__ __forceinline__ uint64_t mdesc(uint32_t addr, uint32_t sbo, uint32_t mode) {
     return (uint64_t)((addr & 0x3FFFF) >> 4) | ((uint64_t)(sbo >> 4) << 32) | ((uint64_t)mode << 62);
 }
+#ifndef NV_STAMP
+#define NV_STAMP 0
+#endif
+__device__ __forceinline__ void stamp(float* pml, int k) {
+#if NV_STAMP
+    if ((threadIdx.x & 127) == 0) {
+        uint64_t t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+        reinterpret_cast<unsigned long long*>(pml)[blockIdx.x * 8 + k] = t;
+    }
+#endif
+}
 __device__ __forceinline__ uint32_t swz64(uint32_t o) { return o ^ (((o >> 7) & 3) << 4); }
 __device__ __forceinline__ void wg_fence() { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
 __device__ __forceinline__ void wg_commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
@@ -840,6 +864,8 @@ template <int NS> struct Smem {
 #if NV_HALF
     int lim2[8][2];
     float xo[128 * 36];                        // NV_HALF: consumer 1's o / m / l for the in-CTA merge
+    alignas(128) float xo2[128 * 36];                       // cl: the cluster's rank-1 CTA's merged o / m / l (DSMEM push)
+    uint64_t clbar;                            // cl: rank 1's 128 remote arrivals after that push
 #endif
     alignas(1024) uint8_t knew[BN * 128];      // last split: the 8 new keys as a K tile (rows 0-7; rows 8-63 zero)
     alignas(1024) uint8_t vtnew[2][HD * BN];   // and their V^T (key slots 0-7 of group 0; the rest zero)
@@ -1063,7 +1089,7 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const __nv_bfloat1
                                          float scale, int win, float* __restrict__ pacc, float* __restrict__ pml,
                                          uint8_t* __restrict__ kc,
                                          uint8_t* __restrict__ vc, const long long* __restrict__ loc, float ksv,
-                                         float vsv, int H, int total) {
+                                         float vsv, int H, int total, int cl, __nv_bfloat16* __restrict__ out) {
     // NV_HALF: h is the consumer's half (smem slot) of KV head H's split; else h is the KV head (H unused).
     const int tid = threadIdx.x & 127, lane = tid & 31, w = tid >> 5;
     const int HH = NV_HALF ? H : h;
@@ -1225,6 +1251,7 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const __nv_bfloat1
     }
     l[0] += __shfl_xor_sync(0xffffffff, l[0], 1); l[0] += __shfl_xor_sync(0xffffffff, l[0], 2);
     l[1] += __shfl_xor_sync(0xffffffff, l[1], 1); l[1] += __shfl_xor_sync(0xffffffff, l[1], 2);
+    if (cl) stamp(pml, 1 + h);
 #if NV_HALF
     // Release the producer's tiles this half has no keys for, then merge half 1 into half 0 through smem.
     for (int i = n; i < total; ++i) {
@@ -1239,7 +1266,24 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const __nv_bfloat1
         asm volatile("bar.sync 4, 256;" ::: "memory");
         return;
     }
+    uint32_t rank = 0;
+    __nv_bfloat162 gr[2][8];
+    float2 gt[2][8];
+    if (cl) {
+        asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(rank));
+        if ((w >> 1) == (int)rank) {  // rows this rank finishes: prefetch their gates (2 rows x 16 columns)
+            const int ra = w * 16 + (lane >> 2);
+#pragma unroll
+            for (int t = 0; t < 2; ++t) {
+                const __nv_bfloat16* g = qkv + (long long)(b * 8 + (ra >> 3) + t) * qkv_w + 20 * HD +
+                                         (H * 8 + (ra & 7)) * HD + (lane & 3) * 2;
+#pragma unroll
+                for (int j = 0; j < 8; ++j) gr[t][j] = *reinterpret_cast<const __nv_bfloat162*>(g + j * 8);
+            }
+        }
+    }
     asm volatile("bar.sync 4, 256;" ::: "memory");
+    if (cl) stamp(pml, 3);
     {
         const float4* xo = reinterpret_cast<const float4*>(&sm.xo[tid * 36]);
         const float4 x = xo[8];
@@ -1253,6 +1297,77 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const __nv_bfloat1
             o[4 * j + 0] = o[4 * j + 0] * a0 + y.x * b0; o[4 * j + 1] = o[4 * j + 1] * a0 + y.y * b0;
             o[4 * j + 2] = o[4 * j + 2] * a1 + y.z * b1; o[4 * j + 3] = o[4 * j + 3] * a1 + y.w * b1;
         }
+    }
+    if (cl) {
+        // 2-CTA cluster = the 2 splits of (request, H). Rank r finishes rows 32 r .. 32 r + 31 (warps 2 r, 2 r + 1):
+        // the other 2 warps stage their merged o / m / l locally and one bulk DSMEM copy (9 KB) puts them into the
+        // peer's xo2, completing on the peer's clbar; the owners merge and write the gated, normalized output.
+        if ((w >> 1) != (int)rank) {
+            float4* xl = reinterpret_cast<float4*>(&sm.xo2[tid * 36]);
+#pragma unroll
+            for (int j = 0; j < 8; ++j) xl[j] = make_float4(o[4 * j], o[4 * j + 1], o[4 * j + 2], o[4 * j + 3]);
+            xl[8] = make_float4(m[0], m[1], l[0], l[1]);
+            asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+            asm volatile("barrier.cluster.wait.acquire.aligned;" ::: "memory");  // the peer's clbar init is visible
+            asm volatile("bar.sync 5, 64;" ::: "memory");
+            if ((tid & 63) == 0) {
+                const uint32_t src = smem_u32(&sm.xo2[tid * 36]);
+                uint32_t dst = src, bar = smem_u32(&sm.clbar);
+                asm volatile("mapa.shared::cluster.u32 %0, %0, %1;" : "+r"(dst) : "r"(rank ^ 1));
+                asm volatile("mapa.shared::cluster.u32 %0, %0, %1;" : "+r"(bar) : "r"(rank ^ 1));
+                asm volatile("cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
+                             ::"r"(dst), "r"(src), "n"(64 * 36 * 4), "r"(bar) : "memory");
+                asm volatile("cp.async.bulk.commit_group;\ncp.async.bulk.wait_group.read 0;" ::: "memory");
+            }
+            stamp(pml, 4);
+            return;
+        }
+        // sigmoid(gate) while rank 1 finishes (as _norm_gate_store: o * sigmoid(gate))
+#pragma unroll
+        for (int t = 0; t < 2; ++t)
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                const float2 g = __bfloat1622float2(gr[t][j]);
+                gt[t][j] = make_float2(__fdividef(1.f, 1.f + __expf(-g.x)), __fdividef(1.f, 1.f + __expf(-g.y)));
+            }
+        fence_regs(*reinterpret_cast<float(*)[32]>(&gt[0][0]));  // keep the sigmoids before the wait
+        asm volatile("{\n.reg .pred p;\nW: mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], 0;\n@!p bra W;\n}\n"
+                     ::"r"(smem_u32(&sm.clbar)) : "memory");
+        stamp(pml, 4);
+        const float4* xo = reinterpret_cast<const float4*>(&sm.xo2[tid * 36]);
+        const float4 x = xo[8];
+        const float mn0 = fmaxf(m[0], x.x), mn1 = fmaxf(m[1], x.y);
+        const float a0 = ex2(m[0] - mn0), b0 = ex2(x.x - mn0), a1 = ex2(m[1] - mn1), b1 = ex2(x.y - mn1);
+        const float l0 = l[0] * a0 + x.z * b0, l1 = l[1] * a1 + x.w * b1;
+        const float f0 = __fdividef(vsv, l0), f1 = __fdividef(vsv, l1);
+        float s0 = 0.f, s1 = 0.f;
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            const float4 y = xo[j];
+            o[4 * j + 0] = (o[4 * j + 0] * a0 + y.x * b0) * f0; o[4 * j + 1] = (o[4 * j + 1] * a0 + y.y * b0) * f0;
+            o[4 * j + 2] = (o[4 * j + 2] * a1 + y.z * b1) * f1; o[4 * j + 3] = (o[4 * j + 3] * a1 + y.w * b1) * f1;
+            s0 += o[4 * j] * o[4 * j] + o[4 * j + 1] * o[4 * j + 1];
+            s1 += o[4 * j + 2] * o[4 * j + 2] + o[4 * j + 3] * o[4 * j + 3];
+        }
+        if (NV_STAMP) { fence_regs(o); stamp(pml, 6); }
+        s0 += __shfl_xor_sync(0xffffffff, s0, 1); s0 += __shfl_xor_sync(0xffffffff, s0, 2);
+        s1 += __shfl_xor_sync(0xffffffff, s1, 1); s1 += __shfl_xor_sync(0xffffffff, s1, 2);
+        const float r0 = rsqrtf(s0 / HD + 1e-5f), r1 = rsqrtf(s1 / HD + 1e-5f);
+        const int ra = w * 16 + (lane >> 2);
+#pragma unroll
+        for (int t = 0; t < 2; ++t) {
+            __nv_bfloat16* dsto = out + (long long)(b * 8 + (ra >> 3) + t) * (16 * HD) + (H * 8 + (ra & 7)) * HD +
+                                  (lane & 3) * 2;
+            const float rr = t ? r1 : r0;
+#pragma unroll
+            for (int j = 0; j < 8; ++j) {
+                const float2 g = gt[t][j];
+                const __nv_bfloat162 v = __floats2bfloat162_rn(o[4 * j + 2 * t] * rr * g.x, o[4 * j + 2 * t + 1] * rr * g.y);
+                *reinterpret_cast<__nv_bfloat162*>(dsto + j * 8) = v;
+            }
+        }
+        stamp(pml, 5);
+        return;
     }
     const long long part = (((long long)b * 2 + H) * S + split) * MR;
 #else
@@ -1281,16 +1396,31 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
                                               const long long* __restrict__ loc, const int* __restrict__ pt,
                                               const int* __restrict__ seq, float* __restrict__ pacc,
                                               float* __restrict__ pml, float qk_scale, int S, int ch, int maxp,
-                                              int qkv_w, int win) {
+                                              int qkv_w, int win, int cl, __nv_bfloat16* __restrict__ out) {
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     const int tid = threadIdx.x, wg = tid >> 7;
     if (tid == 0) {
         for (int i = 0; i < NS; ++i) { mb_init(&sm.ready[i], 4); mb_init(&sm.empty[i], 8); }
+#if NV_HALF
+        if (cl) {  // 1 arrival (its own, with the expected bytes) + the peer's bulk copy of 9 KB
+            mb_init(&sm.clbar, 1);
+            asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(smem_u32(&sm.clbar)), "n"(64 * 36 * 4) : "memory");
+        }
+#endif
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
-    __syncthreads();
+    if (cl) {  // the peer's bulk copy completes on this CTA's clbar on rank 0's clbar later: its init must be visible cluster-wide
+        // arrive now, wait only in the warps that copy into the peer (just before the copy)
+        asm volatile("barrier.cluster.arrive.release.aligned;" ::: "memory");
+    } else {
+        __syncthreads();
+    }
+    if (cl && wg == 1) {
+        stamp(pml, 0);
+        if (NV_STAMP && threadIdx.x == 128) { uint32_t sid; asm("mov.u32 %0, %%smid;" : "=r"(sid)); reinterpret_cast<unsigned long long*>(pml)[blockIdx.x * 8 + 7] = sid; }
+    }
     const int split = blockIdx.x % S;
 #if NV_HALF
     // CTA (request, KV head H, split); consumer c takes half c of the split's ch keys.
@@ -1302,7 +1432,7 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
     } else {
         asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(NV_CREGS));
         consumer<NS>(sm, wg - 1, qkv, cs, wg == 1 ? r0 : r1, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc,
-                     loc, ks[0], vsc[0], H, r0.n);
+                     loc, ks[0], vsc[0], H, r0.n, cl, out);
     }
 #else
     const Range rg = rng(seq, blockIdx.x / S, split, ch, win);
@@ -1311,7 +1441,7 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
         producer<NS, LAG>(sm, kc, vc, pt, rg, maxp);
     } else {
         asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(NV_CREGS));
-        consumer<NS>(sm, wg - 1, qkv, cs, rg, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc, loc, ks[0], vsc[0], 0, 0);
+        consumer<NS>(sm, wg - 1, qkv, cs, rg, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc, loc, ks[0], vsc[0], 0, 0, 0, nullptr);
     }
 #endif
 }
@@ -1319,7 +1449,8 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
 
 void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor ks, torch::Tensor vsc,
          torch::Tensor loc, torch::Tensor pt,
-         torch::Tensor seq, torch::Tensor pacc, torch::Tensor pml, double qk_scale, int64_t S, int64_t ch, int64_t win) {
+         torch::Tensor seq, torch::Tensor pacc, torch::Tensor pml, double qk_scale, int64_t S, int64_t ch, int64_t win,
+         torch::Tensor out, int64_t cl) {
     // Producer lag NV_LAG (1) at every S: LAG 2 at 4 splits was H100 -0.18 us but H200 +0.2 (check 9249146d, verify 32).
     auto f = nv::nvs<NV_NS, NV_LAG>;
     const int smem = (int)sizeof(nv::Smem<NV_NS>) + 1024;
@@ -1329,26 +1460,38 @@ void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
         once = true;
     }
     const int B = (int)seq.size(0);
-    f<<<dim3((unsigned)(S * B * (1 + NV_HALF))), 384, smem, c10::cuda::getCurrentCUDAStream()>>>(
+    // cl (NV_HALF, S 2): the 2 splits of each (request, KV head) run as one 2-CTA cluster and merge over DSMEM.
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3((unsigned)(S * B * (1 + NV_HALF)));
+    cfg.blockDim = dim3(384);
+    cfg.dynamicSmemBytes = smem;
+    cfg.stream = c10::cuda::getCurrentCUDAStream();
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = cl ? 2 : 1; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+    cfg.attrs = at; cfg.numAttrs = 1;
+    cudaLaunchKernelEx(&cfg, f,
         (const __nv_bfloat16*)qkv.data_ptr(), (const float*)cs.data_ptr(), (uint8_t*)kc.data_ptr(),
         (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(),
         (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(),
         (const int*)seq.data_ptr(), (float*)pacc.data_ptr(), (float*)pml.data_ptr(), (float)qk_scale, (int)S, (int)ch,
-        (int)pt.size(1), (int)qkv.size(-1), (int)win);
+        (int)pt.size(1), (int)qkv.size(-1), (int)win, (int)cl, (__nv_bfloat16*)out.data_ptr());
 }
 '''
 try:
     _NVS = _load_inline(
-        name="muse_nvs_a2s13h",
+        name="muse_nvs_a2s15w",
         cpp_sources="void nvs(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, int64_t, "
-                    "int64_t);",
+                    "int64_t, torch::Tensor, int64_t);",
         cuda_sources=_NVS_SRC, functions=["nvs"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("nvs build failed, using Triton:", _e)
     _NVS = None
 NVS_HALF = '#define NV_HALF 1' in _NVS_SRC
+NVS_STAMP = '#define NV_STAMP 1' in _NVS_SRC  # tools/a2/clstamp.py
+NVS_CL_BATCH = 32  # NV_HALF at S 2 from this batch on: 2-CTA clusters merge over DSMEM, no _combine_hb
 NVS_MIN_BATCH = 16  # verify sliding from this batch on nvs (verify 32: H100 paired -1.66 us, H200 16.64 -> 15.28/15.07;
 # verify 16 with 8 splits: H100 paired -0.38 us in s9 (6/7), but the H200 tied 12.63 vs 12.63 in check baea7057)
 
@@ -1459,7 +1602,7 @@ template <int NS> struct Smem {
     alignas(1024) uint8_t q[2][MR * HD];       // per head FP8 queries [row][d], SW64
     int ptr[8][BN];                            // page 1: page-table entries of tiles i .. i + NV_PFD (ring of 8)
     int lim[8];                                // and each tile's last valid key
-    uint64_t ready[NS], empty[NS];
+    uint64_t ready[NS], empty[NS], readyv[NS];
     alignas(1024) uint8_t knew[BN * 128];      // last split: the 8 new keys as a K tile (rows 0-7; rows 8-63 zero)
     alignas(1024) uint8_t vtnew[2][HD * BN];   // and their V^T (key slots 0-7 of group 0; the rest zero)
 };
@@ -1527,6 +1670,10 @@ __device__ __forceinline__ void producer(Smem<NS>& sm, const uint8_t* __restrict
         if (i >= NV_LAG) {
             const int s = (i - NV_LAG) % NS;
             cp_wait<NV_LAG>();
+            asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+            __syncwarp();
+            if ((tid & 31) == 0) mb_arrive(&sm.ready[s]);   // agent2 s19 K-early: QK(i) starts while V(i) is transposed;
+            // P@V waits on readyv (H100 decode 32 -0.06/-0.10 us; on nvs it lost +0.10/+0.19 at verify 16/32)
             asm volatile("bar.sync 1, 128;" ::: "memory");
             {
                 const uint32_t vsb = smem_u32(&sm.vs[s][0]), vtb = smem_u32(&sm.vt[s][0][0]);
@@ -1548,7 +1695,7 @@ __device__ __forceinline__ void producer(Smem<NS>& sm, const uint8_t* __restrict
             }
             asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
             __syncwarp();
-            if ((tid & 31) == 0) mb_arrive(&sm.ready[s]);
+            if ((tid & 31) == 0) mb_arrive(&sm.readyv[s]);
         }
     }
 }
@@ -1806,6 +1953,7 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const __nv_bfloat16* __r
             const int sp = (i - 1) % NS, sc = i % NS;
             mb_wait(&sm.ready[sc], (i / NS) & 1);
             issue_qk2(s, qa, smem_u32(&sm.k[sc][0]));
+            mb_wait(&sm.readyv[sp], ((i - 1) / NS) & 1);
             fence_regs(pin);
             issue_pv2(o, pin, smem_u32(&sm.vt[sp][0][0]));
             wg_wait<1>();
@@ -1823,6 +1971,7 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const __nv_bfloat16* __r
         };
         auto lastt = [&](uint32_t (&pin)[8]) {
             const int sp = (n - 1) % NS;
+            mb_wait(&sm.readyv[sp], ((n - 1) / NS) & 1);
             fence_regs(pin);
             issue_pv2(o, pin, smem_u32(&sm.vt[sp][0][0]));
             wg_wait<0>();
@@ -1869,9 +2018,26 @@ const __nv_bfloat16* __restrict__ qkv, const float* __restrict__ cs,
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    if (threadIdx.x == 32) {  // agent2 s17: L2 prefetch of this CTA's share of the request's plausible page-table span
+        // (as in csl; H100 decode 32 -0.11..-0.24 us; on nvs it lost +0.18 at verify 16/32)
+#if NV_HALF
+        const int rq = 2 * S;
+#else
+        const int rq = S;
+#endif
+        const int pb = blockIdx.x / rq, part = blockIdx.x % rq;
+        const int plo = max(0, (int)(maxp * 0.86f) - 2112);
+        const int per = ((maxp - plo + rq - 1) / rq + 3) & ~3;
+        const int a = plo + part * per, e = min(a + per, maxp);
+        if (e > a) {
+            const uintptr_t u = reinterpret_cast<uintptr_t>(pt + (long long)pb * maxp + a) & ~uintptr_t(15);
+            const uintptr_t v = (reinterpret_cast<uintptr_t>(pt + (long long)pb * maxp + e) + 15) & ~uintptr_t(15);
+            asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" ::"l"(u), "r"((unsigned)(v - u)) : "memory");
+        }
+    }
     const int tid = threadIdx.x, wg = tid >> 7;
     if (tid == 0) {
-        for (int i = 0; i < NS; ++i) { mb_init(&sm.ready[i], 4); mb_init(&sm.empty[i], 4); }
+        for (int i = 0; i < NS; ++i) { mb_init(&sm.ready[i], 4); mb_init(&sm.empty[i], 4); mb_init(&sm.readyv[i], 4); }
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
     __syncthreads();
@@ -3761,8 +3927,9 @@ def _verify_nvs(data, cfg):
     """Verify sliding (L 8, G 8, D 64, HKV 2, page 1) on the native nvs kernel + _combine_hb."""
     batch, length, hq, hkv, d = cfg["batch"], cfg["q_len"], cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     qkv, device = data["qkv"], data["qkv"].device
+    cl = NVS_HALF and batch >= NVS_CL_BATCH
     if NVS_HALF:  # CTA (request, KV head, split), 2 halves per split merged in the CTA
-        S = 2 if batch >= 32 else 4
+        S = 2 if batch >= 32 or cl else 4
         chunk = triton.cdiv(triton.cdiv(cfg["window"], S), 128) * 128
     else:
         S = 4 if batch >= 32 else 8  # ~128 CTAs, one per SM
@@ -3773,7 +3940,12 @@ def _verify_nvs(data, cfg):
     out = torch.empty((batch, length, hq * d), dtype=torch.bfloat16, device=device)
     _NVS.nvs(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], data["k_scale"],
              data["v_scale"], data["cache_loc"], data["page_table"], data["seq_lens"], pacc, pml,
-             cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"])
+             cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], out, int(cl))
+    if NVS_STAMP:
+        global _LAST_PML
+        _LAST_PML = pml
+    if cl:  # 2-CTA clusters merged the 2 splits and wrote out
+        return out
     _combine_hb[(batch * length, hq // 2)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=hq // hkv, L=length, M=rows, D=d, S=S, S_PAD=triton.next_power_of_2(S), SB=S, HB=2,
