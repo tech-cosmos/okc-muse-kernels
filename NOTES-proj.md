@@ -1338,3 +1338,22 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - Also dead (same harness): g24 R=2 at m32 (2 row groups per warp share x fragments): NOW 15.3 (8 warps) vs r1 15.2,
   full 22.7 vs 21.5.
 - No judge runs this session (proj checks 4/20 used today). Nothing for layer.
+
+## s61 (2026-10-27 04:05-05:20Z, sandbox okc-night4, session 18): where the g24 m32 consumer's time goes (clock64 split)
+- ncu (G24_NOW pool m32 r1 (512,4,3,12,2) G132): issue slots 30% busy, 2.75 active / 0.53 eligible warps per scheduler,
+  tensor pipe 22%: LATENCY-bound (top stalls wait 1.6, short_scoreboard 1.2, membar 0.7 per issue). Loop body is well
+  scheduled already (G24_G=1/2/4 = atoms whose smem loads go together: all tie). WPB 16 at m32: NOW -0.6 but full +0.6 us.
+- dev/s61/gemv24.cu (= s60 file + below) + dev/s61/g24.py (env EZ / XSP / DF bits; DEFS=G24_CLK prints per-warp clock64:
+  stage loops, task ends (fix = escape fixups, bar = epoch spin), first-x wait, setup (wait -> after epoch arrive), pass@).
+  H100 pool m32 full G132, kcyc median: setup 10.4 (zero + __threadfence + atomic, all warps in __syncthreads), loop 16,
+  ends 8.3 (fix 1.7, bar spin 5.0), barrier seen passed at 22 kcyc after griddepcontrol.wait although every block arrived by
+  11.4: dependent round trips (fence, atomic, ld.acquire spin) behind the saturated W stream cost ~3 us each.
+  NOW: setup 4.1, bar 0.7, fix 1.8 (fixups ~0.7 kcyc per task end = ~7% of a warp).
+- EZ probe (bit 17, no zeroing; timing only): setup -> 0.1 but the first x wait becomes 9.3 kcyc (G132) / 6.3 (G88):
+  x arrives ~3.2 us after the wait REGARDLESS of W (NPRE 0: 5.5 kcyc; PRED 10 us: 6.1): thread 0's 64 serial bulk issues.
+  XSP (x copies spread over threads, s58 idea): x wait 6.3 -> 2.0 kcyc, but the stage loop grows by the same (W-bound).
+- Kernel times: G132 EZ upper bound m16 -0.6..-1.0, m32 0; G88 proxy pool m32 -1.65, unp m16 -0.9, pool m16 -0.3, unp m32 0.
+  XSP / DF (bit 20: keep a task's scaled partials in registers while the barrier is pending, flush with the next) all tie
+  on the H100 (G132 and G88 W-bound). Correct with ESCW adversarial escapes (all 4 combos, qkv/o/pool/unp m16/m32).
+- => only the H200 (consumer-bound) can judge them: print-only _diag61 in submission (layer cfgs + grids, variants base |
+  xsp | df | xsp+df | EZprobe).
