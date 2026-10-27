@@ -1788,3 +1788,29 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   ALL OK: bench test 13/13, scored 0/24, opt_test 0/308, tk2f_stress 0/1200, replay 0/480, route_judge 0/240 (worst gap
   0.0256 drop-lead 0.0179), stream_fuzz 0/1490, cold prepare 117.4 s. => v134 is clear for the 00:00Z layer check.
 - Gotcha: validate.py ignores unknown flags (`--help` starts a full run). Board: layer #29 at 2.134x (#1 2.399x).
+
+## s88 (2026-10-27 14:41-15:00Z, night4 session 45): lead 13:30Z item (1) g24 m16/m32 reopened: occupancy + R=2 ILP = DEAD; ncu per-instruction split
+- No judge runs (proj 10-27: 8/20 checks, 1/10 scored). H100, dev/s61/g24.py, us over a 3 us PDL pred, pool/unp.
+- (a) More warps per SM (lead's "2 CTAs/SM, smaller stages" in its 1-block form): NOW (consumer-only) G132:
+  m16 (1024,AP2,NS4,WPB16) 11.36/10.82 | WPB24 NS3 11.62/11.36 | WPB32 NS2 12.05/11.78 | 512 SK WPB32 13.38/12.67;
+  m32 (512,2,4,16,SK) 15.97/15.55 | WPB24 NS2 16.86/16.86 | WPB20 NS3 16.90/16.19 | KC256 WPB24 19.06/18.82 | KC256 WPB32
+  24.9/24.3 (64-85 reg caps). More warps never help (m32 smem caps WPB>=24 at KC512 NS>=3: x 66 KB + stage tile 2.5 KB/warp).
+  With s12's g19/g20 2-blocks/SM H200 diag (lost) this closes the occupancy axis.
+- (b) R=2 (two row groups per task: shared x ldmatrix frags, half the task ends) at fewer warps (255-reg budget):
+  vs the layer's real cfgs (static (4,3,12) r1; SK2 (4,3,12) r257), pool/unp m32:
+  NOW G132: L 15.14/15.33 | SK2 15.36/15.22 | R2 (4,2,8) static 14.75/15.07;  NOW G108: L 17.98/18.21 | SK2 17.12/16.70 | R2 18.11/18.02;
+  full G88 (H200 proxy): L 24.91/23.02 | SK2 23.94/21.79 | R2 25.09/23.20. R2 SK (r258) worse everywhere (NOW G132 16.6-17.2);
+  R2 WPB 10-14 worse (NS cut to fit smem). m16 R2 loses (11.2-11.5 vs 10.9). => DEAD (at best -0.4 NOW G132 pool, loses G108/proxy).
+- (c) Lead's "split-K over more CTAs, reduce in the next kernel's prologue": arithmetic kills it: plain slabs need S = k/KC = 16
+  partials x 512 KB (pool m32 out) = 8 MB extra reads (~2 us) to save the zero/fence/epoch (H200 EZ bound <= 1.0-1.5 us, s61),
+  which G24P/g24z already remove without slabs. (d) byte-perm LUT unpack = DEC3 already (3 instr/pair), and s62 showed
+  no-decode BF16 rows cost the same consumer time at m32. Not built.
+- NEW per-instruction profile (dev/s88/prof.py = g24.py under ncu without graph timing; dev/s88/sass_regions.py splits the
+  SASS stall samples by exec-count region). NOW pool m32 (512,2,4,16,SK) G132, 122 regs, issue 39%, 8.2 cyc/issue:
+  stage loop only ~47% of warp samples (body 36% + refill/arrive/fence.view.async 11%; top stall 'wait'); pre-loop ~29%
+  (zero + MEMBAR.SC.GPU 8.3%, runtime int divisions in setup ~5.5%, bar.sync 2%); per-task code ~19% (task-start index
+  math + header loads 5.7%, flush 7.1%, escape fixups ~6%). Fixed costs are known (s55 LZ/ZPROBE, s56 EZ, s61 XSP/DF all tried);
+  this is the same wall measured from a new side.
+- H200 tuner (layer 35dd53d0, v125): T=32 sliding {g24:pooler/unpool False} 167.8 vs default 168.2 us: in-layer at d32 g24 = cuBLAS.
+- Verdict: the g24 m16/m32 consumer is closed again; all three lead-suggested structures measured or bounded dead. Next proj
+  item needs a new lane (below 3.5 TB/s on H100 is physical: H100 full pool m32 is W-bound at ~2.4 TB/s eff. after the pred).

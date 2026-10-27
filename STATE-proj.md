@@ -1,5 +1,7 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 15:00 UTC (s87). FULL validate of layer main v134 (f70b84e): ALL OK (13/13, 0/24, 0/308, 0/1200, 0/480, 0/240,
+Updated 2026-10-27 15:00 UTC (s88). Lead 13:30Z item (1) g24 m16/m32 REOPENED + DEAD again: more warps/SM (WPB 20-32) and R=2 ILP
+(8-14 warps) lose vs layer cfgs on NOW/G108/G88 proxy; slab split-K bounded dead by bytes; ncu per-instr split (dev/s88). NOTES s88.
+Updated 2026-10-27 14:40 UTC (s87). FULL validate of layer main v134 (f70b84e): ALL OK (13/13, 0/24, 0/308, 0/1200, 0/480, 0/240,
 fuzz 0/1490, cold 117.4 s): clear for the 00:00Z layer check. NOTES s87.
 Updated 2026-10-27 14:15 UTC (s86). g28 PING-PONG (dev/s86, s64 item 3b) built + DEAD: H100 NOW pool m32 16.2-17.4 vs g24 15.84,
 m16 17.3 vs 11.8; skeleton alone ~0.13-0.19 us/stage (mbarrier round trips), gate < 0.1 failed; BN 256 no gain. NOTES s86.
@@ -7,14 +9,7 @@ Updated 2026-10-27 14:00 UTC (s85). Layer bundle branch proj/qf35 ac340f7 (v133 
 T=128 TUNE): validate ALL OK (full for qf, --quick combined), cold 116.5 s; Request to layer to merge for 00:00Z. NOTES s85.
 Updated 2026-10-27 13:40 UTC (s84). Full validate of layer main v133 (02120df): ALL OK (13/13, 0/24, 0/302, 0/1200, 0/480, 0/240,
 fuzz 0/1476, cold 116.8 s): clear for the 00:00Z layer check. muse_prefill_layer exists but doesn't count overall. NOTES s84.
-Updated 2026-10-27 12:30 UTC (s83). Layer v129 (6621403) took its own nu8d fix. NEW tools/stream_fuzz.py (r-layer branch proj/fuzz
-19b5ba1 + validate.py step 'fuzz'): torch.cuda._sleep injected at every side/hi-stream fork (side late / main late, eager + graph),
-every TUNE set: unfixed v128 caught (12/204 eager, 10/156 graph); v129 all T 0/1492 eager, 0/1216 graph. Static audit: no other
-cross-stream shared scratch. Next: run validate (incl. fuzz) on every new layer bundle. NOTES s83.
-Updated 2026-10-27 12:10 UTC (s82). FOUND+FIXED a T=8 race in layer (v128 and earlier): TUNE {'pr1': False} + nu8d -> rmsnorm reads
-side-stream local_ids before the join (14-20/60 wrong under GPU contention; H200 tuner never picks pr1 False: +1.7..2.6 us).
-Fix + tools/nu8_race.py on r-layer branch proj/nu8fix 357859d; bundle proj/b82 d4b2aba = attn31 + fix: validate ALL OK,
-opt 0/906 + replay 0/480 under a GPU hog. Lesson: run opt/replay under contention. NOTES s82.
+s82/s83 (nu8d race found+fixed in layer; tools/stream_fuzz.py): see NOTES.
 Older session headers (s46-s80): see NOTES-proj.md (sessions are logged there in order).
 ## Board
 - **Best: submit 1ff4721e87c844c2 = ca7e557, 1.3233x** (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -132,6 +127,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s59: G24X (dev/s59/g24x_layer.patch): first-op qkv g24 = setup round trips behind the W stream; EZ across calls -1.3/-1.9 us standalone.
 ## s60: wgmma WG mode (dev/s60/gemv24.cu, RR bit 9) correct but DEAD; nvcc drops a 2nd wgmma accumulator's sum unless
 ## it is one local array summed explicitly + operand fences (NOTES s60). g24 R=2 at m32 dead too.
+## s88: WPB 20-32 / R=2 ILP dead; NOW profile: loop ~47% of warp time, setup ~29%, task ends ~19% (dev/s88 ncu tools).
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
 00. LANE (b) (lead 08:55Z): read COORD Requests for layer bundles; port + validate on proj/<name> branches (tools/validate.py on proj/validate).
