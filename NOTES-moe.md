@@ -1112,3 +1112,34 @@
   => N48 vs N64 for a <= 48-token pass is worth nothing (twm's big passes are not consumer-bound by N there); pb48's
   small G88 v16 gain must come from its extra items (49..64-token experts -> 2 items = finer load balance), and it
   flips sign at G132. Reverted; pb48 stays only as the queued DIAG probe.
+- 00:00Z DIAG check 4a591c7d (de63ab1 + DIAG = 1; 2.197x as a test run, NOT for submit): every diag12 line LOST: the judge
+  keeps only result.log_tail (~207 lines) and the n9 stream probe printed ~330 diag9s lines after them. Fixed in 36bcb76
+  (one compact `diag12 MEAN <load> <v>: X us | seeds .. | maxdiff ..` line per variant = 82 lines; DIAG_STREAM False).
+- H200 stream probe (diag9s MEAN, us / TB/s over unique bytes; moe_stream = bulk-copy ring, consumers only wait/arrive, no hints):
+            tkp    uq     uq8    uqk4   tkp4   sq16   sq18   sq18x8 sq32   sq36   sq64
+    d1      24.8   24.8   24.1   22.0   22.0   24.0   23.7   23.6   21.9   21.9   21.5
+    d16     65.6   61.0   59.2   53.5   57.4   59.1   57.5   57.2   53.1   52.8   52.1
+    d32     86.8   77.5   75.3   68.0   74.5   74.6   73.0   72.4   67.4   67.1   66.1
+    v1      63.9   64.0   62.0   56.4   56.4   61.8   60.5   60.0   55.8   55.6   54.7
+    v16    213.1  134.4  130.7  122.8  190.4  129.3  127.8  127.0  121.3  121.1  119.2
+    v32    343.6  147.4  142.7  135.7  302.8  142.0  140.8  139.9  134.6  133.8  132.1
+  (tkp = tk2f's copy pattern 18 KB stages x NSTG 4; uq/uq8 = each expert once NSTG 4/8; uqk4/tkp4 = 36 KB stages NSTG 4;
+  sqNN = contiguous single-copy NN-KB stages.) Readings: on the H200 copy SIZE matters: at the same 144 KB in flight
+  36 KB stages (16 KB copies) beat 18 KB (8 KB copies) by 5.7 / 7.3 / 5.6 us (d16/d32/v1: uq8 vs uqk4); single
+  contiguous 32-64 KB copies reach 3.9-4.0 TB/s at d16/d32, 4.2 TB/s at v16/v32. tk2f's own pattern (tkp) is 3.06 TB/s
+  at d16/d32 incl. its multi-group re-reads (tkp - uq = 4.6 / 9.3 us there; no L2 hints in the probe). But the real
+  kernel at KPS 4 did NOT gain on the H200 in s12 (619ad6ad, no hints then: 403 89.7 / 402 91.9 vs 204 88.9 at d32), so
+  the probe's copy-size gain is not available to tk2f as is; the rerun's nm / er402 / er403 lines decide what is.
+- Rerun ab707ffc (36bcb76 + DIAG = 1, 2.219x test run): all 82 compact lines arrived. H200 MEANs (us, delta vs base):
+    d1  gs8 30.5 | l2h0 +1.2 l2h1 +0.8 | h16w0 0 h8p4 -0.2 h16w2/3/4p4 -0.3 | bal -0.3 bal1 +0.5 | er +0.8 | nm -1.8 | er402 +0.9 er403 +1.3
+    d16 gs8 66.0 | l2h0 +1.9 l2h1 +1.6 | h16w0 +4.6 h8p4 +0.5 h16w2p4 +3.2 w3 +4.0 w4 +4.2 | bal 0 bal1 +0.2 | er +1.9 | nm -4.2 | er402 +2.2 er403 +2.3
+    d32 gs8 87.6 | l2h0 +1.8 l2h1 +0.6 | h16w0 +5.6 h8p4 +0.8 h16w2p4 -1.0 w3 -1.9 w4 -0.2 | bal +1.7 bal1 +1.7 | er +2.7 | nm -6.5 | er402 +3.2 er403 +3.1
+    v1  gs8 65.0 | l2h0 +2.1 l2h1 +0.9 | tk2h -0.5..+0 | bal 0 | er +0.7 | nm -3.6 | er402 +1.4 er403 +0.7
+    v16 off 172.4 | hot any -0.3..-0.6 (no hot experts) | o76 -0.7 | h32rg0 -2.5 (vs h32 -0.6: RG 0 better by 1.9) | ne0 +1.1/+2.0 | pb48 -2.4
+    v32 off 218.0 | h24 +5.4 h32 -5.4 h40 -2.8 | h32o76 -5.5 | o76 +1.7 | h32rg0 -6.3 (RG 0 better by 0.9) | h32ne0 -2.1 (NE worth 3.3) offne0 +5.6 | h32pb48 -5.0
+  Decisions: tk2f consumer work closed (gs8 - nm <= 6.5 us anywhere; every consumer variant <= -1.9); KPS 4 / ER / BAL
+  dead on the H200; L2H 4, NE 1, hot 32 @256, no o76: confirmed; RG 1 loses (layer already runs RG off); pb48 @128 -2.4
+  offered to layer as TUNE. Posted under COORD Requests (moe -> layer n13).
+- The remaining tk2f lever = its copy stream: gs8 87.6 = tkp 86.8 at d32 (tk2f runs exactly at its copy pattern's rate).
+  Probe pieces at d32 / d16 / v1 / d1: multi-group re-reads (tkp - uq) 9.3 / 4.6 / 0 / 0; 3 copies per 18 KB stage vs ONE
+  contiguous 18 KB copy (uq - sq18) 4.5 / 3.5 / 3.5 / 1.1 us -> NEXT BUILD (below).

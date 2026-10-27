@@ -69,26 +69,20 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 13 (22:48Z-00:45Z): H200 DIAG DONE (checks 4a591c7d: diag12 lost to log_tail; ab707ffc: 82 compact lines)
+  RESULTS (NOTES n13): tk2f consumer ceiling gs8 - nm = 1.8/4.2/6.5/3.6 us (d1/d16/d32/v1): consumer work CLOSED.
+  KPS 4 / ER / BAL dead on H200. tk2h W3 d32 -1.9 (d16 loses). RG 0 beats RG 1 (v16 -1.9, v32 -0.9). pb48 v16 -2.4.
+  hot 32 @256 -5.4. Layer told (COORD Requests n13). The judge keeps only ~200 log lines: keep DIAG output compact.
+  NEXT BUILD (top): SINGLE-COPY tk2f stages: prepare() repacks w13/w2 (+ scales) so each tk2f stage (row r, k-chunk pair)
+  is ONE contiguous 18 KB block {W 8K, W 8K, S 2K} -> one cp.async.bulk per stage instead of 3. H200 probe: sq18 vs uq =
+  d32 -4.5, d16 -3.5, v1 -3.5, d1 -1.1 us (~1% layer score if tk2f follows its pattern as it does now: gs8 87.6 = tkp 86.8).
+  Consumer unchanged except stage offsets; lossless repack. Check gemm13's gated pairs (2 W copies = gate + up rows 2048 apart?)
+  and the L2 hint split (evict_last for re-read rows) still work with one copy. Then a DIAG A/B (sq18x8: NSTG 8 no gain).
+
 ## Night4 session 12 (22:25-23:15Z, no judge runs): TWM_PB_M 48 (twm's > 32-token experts in 48-token N48 passes,
   bitwise; #define TWM_PB48, compiled in DIAG builds only: +7 s compile). G88 proxy v16 -1.2, v32 +5 proxy-us; H100 full
   grid v16 +3.4 (a 49-token expert -> 48 + 1 passes). Queued in the 00:00Z DIAG as pb48 / h32pb48 (dry run 109 s, PASS).
   Rule: pb48 >= 1.5 us under off at v16 on the H200 -> offer layer TUNE pb48 at T=128; else close it (NOTES n12).
-
-## Night4 session 11 (22:06-22:30Z, no judge runs): DIAG dry run 107 s total (safe), tests PASS. READ the 00:00Z DIAG with
-  `python muse_moe_w4a16/tools/n11/diag_read.py ~/r-moe/muse_moe_w4a16/profiles/submission.<job>.log` (or the cwd's profiles/).
-  Decision rules: bal wins d16/v1 -> tell layer (TUNE bal); h16w*p4 wins d32 -> layer's tk2h TUNE value; l2h0/l2h1 beat gs8
-  -> layer #define TK2F_L2H; h32 vs h24/h40, h32ne0, h32rg1 -> layer TUNE at T=256; gs8 - nm < ~4 us at d16/d32 -> stop
-  tk2f consumer work for good. Post the per-load table under COORD Results/Requests for layer.
-
-## Night4 session 10 (21:44-22:15Z, no judge runs) -- KPS 4 re-closed; DIAG er + nm (NOTES n10, r-moe 77fa9b6)
-- H100: tk2f with NO consumer math (nm, PF & 256 probe) is only 1.0/3.1/3.7/2.8 us faster (d1/d16/d32/v1), and copy size
-  does not matter without math (nm402 = nm204); stream "tkp4" gains came from its missing L2 hints. ER (early ring release,
-  fence.proxy.async; cfg 94204/91204, bitwise) = tie. 00:00Z DIAG: read gs8 - nm (upper bound of ANY consumer-side gain).
-
-## Night4 session 9 (21:27-22:15Z, no judge runs) -- H200 HBM-ceiling probe in the DIAG (NOTES n9)
-- r-moe 804b9f5: moe_stream + _diag_stream: the 00:00Z DIAG check also prints `diag9s MEAN <load> <v>` (tkp = tk2f's
-  copy pattern, uq = unique bytes, sq16..64 = contiguous single copies). H100: tk2f = its copy pattern's rate; 16 KB+
-  copies ~6% faster than 8 KB. tk2f KPS 4 (84404/84403/404) DEAD (H100 +2..6 us, bitwise). Read diag9s vs diag12 gs8.
 
 ## Night4 s7: BAL (TK2F_DYN 98204, bitwise; per-segment counters, rounding rows split over CTAs) in the DIAG as bal/bal1; ILV dead.
 ## Night4 s6: tk2h PF4 (TK2H_PF4 / TK2H_M, #define TK2H_P4; bitwise) + tools/n6/patch_layer_h16.py; layer TUNE tk2h at T=16/32;
