@@ -1628,3 +1628,29 @@
   the launch/ramp. Same for _gd_full at d1. Only build once the H200 timeline names the cost.
 - Budget 10-27 (attention): checks 7/20 used (5 this session: 7df7c251, 4fd8b5d5, 6b5011ed, b0d361bc, 0c60ebfc; all
   DIAG, never submit), scored 1/10 (90b7ce85).
+
+## Night4 session 33 (2026-10-27 11:52Z - ~12:10Z) -- attention lane: v1 full per-program timeline (H100, no checks spent)
+- Tool: muse_attention_decode/tools/s33/mktl.py (+ tl_tail.py): DIAG copy (NEVER submit) with clock64/globaltimer stamps
+  in _attn_body (start, q ready, after _new, after the FIX pre-loop, per tile (TS 2), loop end, after _finish) and in
+  _combine (start, after gdc_wait, loads done, end); on the first eager v1-full call it graph-replays TS 0/1/2 (+ all-L2
+  page table) cold and prints 'tl33' lines. Local driver: /tmp/s33d/run2.py style (OV='{"splits":255}' env = plan override).
+  Stamp cost: TS1 +0.9 us, TS2 +2.4 us (the per-tile l_i reduction); phase numbers below are from TS1.
+- **H100 v1 full (main plan: 127 splits x 2 heads = 254 programs + 2 tsep, 10 tiles of 64 keys each), us:**
+  q phase (start -> fp8 q in smem: seq/qkv/cos-sin/pt trips + PRE prefetch) 1.9-2.0 | _new 0.6 | FIX pre-tile 1.1 |
+  loop 9.0-9.2 | _finish 0.5 | program total 13.1-13.6 | _combine: launched at ~1 us (PDL), released 0.48 after the last
+  _attn_split end, partial loads 1.47 (4 MB FP32 from L2), done 2.0 us after the last program. Whole 16.0-16.4.
+- Per tile (TS2): first 1.5, then a flat **0.94 us/tile**, the SAME with every gather in L2 (0.93-0.96). Not memory.
+- **Per-SM throughput saturates**: splits 63 (1 program/SM, 20 tiles) 0.66 us/tile; 127 (2/SM) 0.92; 255 (4/SM, 5 tiles)
+  ~1.67 incl. fill. SM tile rate 1.5 -> 2.2 -> 2.4 tiles/us. Splits 255 also doubles the merge (c_load 4.2-5.9 us, ends
+  4.9 us after the last program): 21.5 us total. These H100 totals (63: 20.6, 255: 21.5) match the s32 H200 diag (20.96,
+  20.50): for this shape the H100 IS a valid proxy (not DRAM-bound on either).
+- ncu (H100): 123 regs, 41.7 KB smem, issue active 34%, warps active 12%; stalls spread (long_sb 21%, wait 14%, barrier
+  14%, short_sb 12%). Loop SASS = 308 instr/warp/tile: MUFU 32, FFMA 32, FSEL 32 + ISETP 16 (tail masks on every tile),
+  F2FP 32 (P and V cvt), LDS 16 + STS 4 (V fp8 -> fp16 via smem), 2 QGMMA + 4 HGMMA each followed by DEPBAR 0,
+  3 BAR.SYNC + 2 MEMBAR.ALL.CTA + 2 FENCE.VIEW.ASYNC, 5 LDGSTS.
+- DEAD (local, 2 rounds each): peel (unmasked full tiles) +0.3 us, mif (masks only when needed) -0.3 (noise). Removing
+  20% of the loop's instructions does nothing: neither issue- nor memory-bound; it is the serial wgmma->exp->STS V->
+  fence->bar->wgmma chain with 2 warpgroups per SM contending. ~/attn already lost with native CUDA (s71/s74/s92/s111),
+  hand-pipelined FPIPE (s113), FA3 ping-pong (s101), FP8 PV (s90), more programs (s32 here). Verify 1 full is closed for me.
+- Not tried / left: an intra-tile stamp breakdown (QK wait / exp / V convert+bar / PV wait) to say WHICH link of the 0.66 us
+  single-program chain dominates; the merge's 1.47 us L2 load of 4 MB FP32 partials (BF16 partials are banned).

@@ -94,6 +94,9 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.
 - Every plan knob loses (stages, splits 63-1023, BN, warps 8, pre/pf/fix, qk16, Gluon gw 127-263 +-gfuse, gbal).
 - Next: H200 per-program timeline of _attn_split (v1) / _gd_full (d1) via the diag hook; build only once it names the cost.
+## Attention: v1 full (s33, H100 timeline tools/s33/mktl.py; NOTES s33)
+- Loop = flat 0.94 us per 64-key tile, same all-L2; per-SM saturation (1/2/4 programs per SM: 0.66/0.92/~1.67 us/tile);
+  q phase 2.0, FIX tile 1.1, merge tail 2.0 us. H100 = valid proxy here (matches s32 H200 diag). peel/mif dead. CLOSED.
 ## Attention: ranked ideas / bounds (s31)
 - csl (d1 sl) post-gather tail is ~1.5 us cold H100: compute 0.45, premerge+cluster 0.2, push/slowest-CTA 0.37, owner 0.33.
   The slowest CTA's 12 random gathers per thread set the push time; owner merge is now ~0.33. No >0.2 us lever seen in the
