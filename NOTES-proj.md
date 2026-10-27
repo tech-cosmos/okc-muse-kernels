@@ -1948,3 +1948,13 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Not done (handed to moe/layer): in-layer wiring. g30 writes BF16 [m][N] (cuBLAS-like), g24 writes FP32 and carries the
   zero-ahead chain (unpool's ZN/G24X/G24P zeroes the next call's qkv/pooler out): replacing unpool g24 needs the kernel_fn zero_()
   fallback (s59) or EZ off for those. No H200 numbers yet (moe s43: H200 per-CTA x ingest may bind at T=128; at T<=32 x is 4x smaller).
+- (17:10Z) G30_S generalized to S <= 4 (rank y > 0 pushes into rank 0's slot y-1, rbar count S-1; split bounds kept even for WG
+  parity). Exact (one-hot, seeds 0/7) qkv M16/M32 S3/S4, pooler M32 S2 NW20. Same harness, after a 3 us PDL pred, us:
+  qkv_gate 2304x8192 (36 row tiles): m32 S2 14.4 | **S3 12.3** | S4 18.2 (2 waves) vs g24 layer cfg 13.4 (r1) / 13.6 (SK) vs cuBLAS 16.8;
+  m16 S2 13.4 | **S3 11.4** | S4 17.1 vs g24 12.1 / 11.9 vs cuBLAS 16.6.
+  o 8192x1024 S1: m16 5.7-5.8, m32 6.0 vs g24 6.8 / 7.3 vs cuBLAS 7.8 (layer's T=16 o is g27: not compared here).
+  Ring sweep (NW,NS): unp m32 S1 (20,8) 17.3 ~ (16,16) 17.4, (24,12) 18.3; pool m32 S2 (20,16) 18.9-18.8 best; unp m16 S1 (16,16) 17.2;
+  pool m16 S2 (16,8) 18.4 (vs g24 18.75), (20,16) 18.5.
+  Caveat: g24.py's cuBLAS reads ~1 us higher than s95_g30n.py's for qkv (17.8 vs 16.8) and ~0 for pool/unp: the qkv margin may be ~1 us smaller.
+  Since G30_MTOK/G30_S are compile-time, the layer needs one build per (MTOK, S, NW, NS) combo (or a template). Per-call savings (H100):
+  d32 qkv -1.1, pool -2.6, unp -2.9, o -1.3; d16 qkv -0.5, pool -0.4, unp -1.5.

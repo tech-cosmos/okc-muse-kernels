@@ -130,17 +130,17 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
   uint64_t* wempty = wfull + G30_NW;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int g = blockIdx.x;
-  const int i0 = (int)blockIdx.y * KS / G30_S, i1 = ((int)blockIdx.y + 1) * KS / G30_S;
+  const int i0 = 2 * ((int)blockIdx.y * (KS / 2) / G30_S), i1 = 2 * (((int)blockIdx.y + 1) * (KS / 2) / G30_S);  // even: WG parity
 #if G30_S > 1
   uint64_t* rbar = wempty + G30_NW;
-  float* rbuf = (float*)(ws + G30_NW * G30_WST + 1024);  // [ND][128] partials from rank 1
+  float* rbuf = (float*)(ws + G30_NW * G30_WST + 1024);  // [S - 1][ND][128] partials from ranks 1..S-1
 #endif
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (tid == 0) {
     for (int i = 0; i < G30_NS; i++) { mbar_init(&full[i], 1); mbar_init(&empty[i], 1); }
     for (int i = 0; i < G30_NW; i++) { mbar_init(&wfull[i], 1); mbar_init(&wempty[i], 1); }
 #if G30_S > 1
-    mbar_init(rbar, 1);
+    mbar_init(rbar, G30_S - 1);
 #endif
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
@@ -266,9 +266,9 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
 #pragma unroll
   for (int j = 0; j < G30_ND; j++) d[j] += red[j * 128 + t];
 #if G30_S > 1
-  if (blockIdx.y == 1) {  // push the partial into rank 0's rbuf, one remote arrive
+  if (blockIdx.y > 0) {  // push the partial into rank 0's rbuf slot y - 1, one remote arrive
     uint32_t rb, rm;
-    asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rb) : "r"(smem_u32(rbuf)));
+    asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rb) : "r"(smem_u32(rbuf + (blockIdx.y - 1) * G30_ND * 128)));
     asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rm) : "r"(smem_u32(rbar)));
 #pragma unroll
     for (int j = 0; j < G30_ND; j++) asm volatile("st.shared::cluster.f32 [%0], %1;" :: "r"(rb + (j * 128 + t) * 4), "f"(d[j]) : "memory");
@@ -282,7 +282,9 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
         " mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], 0;\n"
         " @!p bra G30_RW;\n}\n" :: "r"(smem_u32(rbar)) : "memory");
 #pragma unroll
-    for (int j = 0; j < G30_ND; j++) d[j] += rbuf[j * 128 + t];
+    for (int y = 0; y < G30_S - 1; y++)
+#pragma unroll
+      for (int j = 0; j < G30_ND; j++) d[j] += rbuf[(y * G30_ND + j) * 128 + t];
   }
 #endif
   // acc layout (m64n128): d[4*jn + 2*h + e] = row r0 + 8h, token 8*jn + tok + e
@@ -323,10 +325,10 @@ static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, ui
 void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale, int64_t pdl) {
   const int K = x.size(1), N = out.size(1);
   TORCH_CHECK(x.size(0) == G30_MTOK && x.is_contiguous() && K % 64 == 0 && N % 64 == 0 && out.size(0) == G30_MTOK);
-  TORCH_CHECK((K / 64) % (2 * G30_S) == 0, "g30: K stages per split must be even");
+  TORCH_CHECK((K / 64) % 2 == 0 && K / 64 >= 4 * G30_S, "g30: K stages");
   CUtensorMap tx;
   g30::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
-  const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512 + (G30_S > 1 ? G30_ND * 128 * 4 + 1024 : 0);
+  const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 + 1024 : 0);
   static bool once = false;
   if (!once) { cudaFuncSetAttribute(g30::g30_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
   cudaLaunchConfig_t cfg = {};
