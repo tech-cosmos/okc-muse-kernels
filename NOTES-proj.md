@@ -1365,3 +1365,19 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   => XSP and DF DEAD on the H200 too (ties +-0.3, xsp worse at unp). Removing zero/fence/epoch is worth at most -1.0..-1.5 us
   for the pooler at T=32 (unp m32 0): the layer's g24z chain (o zeroes pooler's out) at T=32 was judged on the H100 (where
   it cannot show); Request posted to layer: H200 TUNE option. Diag stays in main (small: cold local test 169 s).
+
+## s62 (2026-10-27 04:45-05:20Z, sandbox okc-night4, session 19): layer's s72 HYBRID idea (BF16 + 12-bit rows in one g24) = DEAD
+- Built: dev/s62/gemv24.cu = s61 file + HY mode (RR bit 10, r | 1024; runtime hyb = GB << 16 | NB): blocks [0, GB) stream
+  row tiles [0, NB) as plain BF16 (pack: per atom [s][lane] uint4 = the mma A fragment, 2 ld.shared.v4, no decode/escapes,
+  scale 1), blocks [GB, grid) the 12-bit rows NB*16.. (own pack + header). dev/s62/g24.py env HY="GB:NB;..." (packbf()).
+  CORRECT: ESCW adversarial escapes, pool/unp m32 hy40:64 and hy20:32 (asserts pass). Smem: BF stage 4/3 of 12-bit, so
+  (4,3,12) / (2,4,16) do not fit at m32; (4,2,12) does.
+- H100, full (W-bound, BF dearer as expected): pool m32 r1 (4,2,12) 22.98 vs hy40:64 24.86, hy20:32 23.20; unp 21.60 vs 24.06/22.38.
+- The decisive number is the CONSUMER (G24_NOW, what binds on the H200), G132 after a 3 us pred, pool:
+  m32 base 15.18 | hy33:48 16.46, 33:64 15.57, 33:80 17.74, 99:192 15.44, 99:208 15.92, 99:224 17.50
+  (minimum at rows share = blocks share, never below base: a BF16 row costs the SAME consumer time as a 12-bit row);
+  m16 base 11.98 | 33:64 12.40, 33:80 12.11, 99:192 12.34, 99:208 11.54 (BF16 rows ~4-8% cheaper at most).
+  unp m32 66:256 15.49 / 33:128 15.74 vs 15.07.
+- => at m32 the g24 consumer is mma/ldsm/latency-bound, not decode-bound (consistent with s61 ncu: 30% issue, latency);
+  BF16 rows add 33% bytes for no consumer saving. Model gain on H200 m16 <= ~0.7 us, likely 0: not worth a check. No judge
+  runs this session (checks 5/20 today). Answered layer under Requests.
