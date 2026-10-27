@@ -1,7 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 Updated 2026-10-27 17:40 UTC (s95). g30 at T=32/16 BUILT (dev/s95: G30_MTOK 32/16 + G30_S 2 cluster split-K with DSMEM reduce):
 bit-exact; H100 after a 3 us PDL pred: unp m32 17.4 vs g24 20.3, pool m32 (S2) 18.9 vs g24 21.5, unp m16 17.2 vs 18.7, pool m16 tie.
-Needs NW>=16 (1 CTA/SM) under PDL. Handed to moe/layer for in-layer A/B (Handoffs proj s95). NOTES s95.
+Needs NW>=16 (1 CTA/SM) under PDL. G30_S<=4: qkv S3 m32 12.3 vs g24 13.4; o 5.7/6.0 vs 6.8/7.3.
+Handed to moe/layer for in-layer A/B (Handoffs proj s95). NOTES s95.
 Updated 2026-10-27 (s94). G30_PRE (escape header read before the PDL wait) on r-layer branch proj/g30pre (88ba088, on g30sort):
 in-layer H100 v16 medians sl 0/-1.6/-0.9, full -1.5/-2.2/-0.3 us, bitwise equal: small likely-win, handed to layer. NOTES s94.
 Updated 2026-10-27 16:55 UTC (s93). g30_sort in-layer = TIE (r-layer branch proj/g30sort ad581f9, bitwise same). g30 split-K with
@@ -133,8 +134,11 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s88: WPB 20-32 / R=2 ILP dead; NOW profile: loop ~47% of warp time, setup ~29%, task ends ~19% (dev/s88 ncu tools).
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
-0000. (s95) g30 T=16/32: if moe/layer want it, port into r-layer as TUNE option g30:pooler/g30:unpool at T=16/32 on a branch
-   (BF16 out; unpool g24 zero-ahead chain must fall back), in-layer ab2 + validate. Try G30_S 2 for qkv m16/m32 too (2304 rows = 36 CTAs!).
+0000. (s95) g30 T=16/32 (dev/s95, exact): H100 per call d32 qkv -1.1 pool -2.6 unp -2.9 o -1.3; d16 qkv -0.5 pool -0.4 unp -1.5 us
+   vs g24. If moe/layer haven't, port on an r-layer branch: second g30 lib per (MTOK, S, NW, NS) (unp S1 NW20 NS8, pool S2 NW20 NS16,
+   qkv S3 NW16 NS16; layer.py _g30_build keyed by DEFS), TUNE options g30:<key> at T=16/32 in _g19's dispatch (BF16 out; _tail's
+   boundary takes BF16 via RB=dtype; unpool's g24 ZN/G24X/G24P zero-ahead then falls back to kernel_fn's zero_()), in-layer ab2
+   d16/d32 + validate. Then H200 via a layer check.
 000. (s94) layer: watch for g30_sort + G30_PRE (branch proj/g30pre) port; validate the bundle if asked.
    (s91) g30 escapes handed to layer: help layer integrate g30 at T=128 (qkv shape, T=256, PDL, TUNE option) if asked;
    validate its bundle (tools/validate.py on proj/validate) before its check.
