@@ -1491,3 +1491,21 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   H200 config: the T=128/256 gap to the bytes floor is not a config problem.
 - lt_cfg.txt pooler m128: (66,15,..,0,3) (28.80 on H200) -> (66,124,35,1,0,0,0,4). DIAG_LTE = [] and DIAG61 = [] (s61 diag
   done). Tests 39/39. Handoff to layer: LT_ALT ("pooler",128) + TUNE[128] {"ltalt:pooler": 1/2} (COORD Handoffs proj s68).
+
+## s69 (2026-10-27 07:05Z-, sandbox okc-night4, session 26): g24 refill batching (DEAD) + T=32 SK (4,3,12) as layer TUNE option
+- Target (lead 05:07Z): the layer's biggest proj gap at T>=16 = g24 pooler+unpool at d32 (H200 profile 2f7349ee: 48.4 us for
+  2 calls incl. PDL waits; bytes floor ~2 x 12.5). s61 ncu listed membar 0.7 per issue: the per-stage fence.proxy.async.
+- dev/s69/gemv24.cu = s61 file + G24_FB=N (refill freed ring slots in batches of N, one proxy fence per batch) and
+  G24_NOFENCE (timing probe). dev/s69/g24.py = s61 harness on it. Correct (ESCW adversarial escapes, FB 2/4).
+- H100 consumer-only (G24_NOW, G108, 2 reps, us): NOFENCE = base everywhere (the fence costs nothing: the membar stall is
+  not it). FB=4 -0.5..-0.8 at m32, -1.7 at m16 (2,4,16), FB=2 ~0. Full kernel: FB=4 +1..2 us everywhere (with NS=4 the
+  ring drains before each refill), FB=2 G108 +0.3..0.6, G88 proxy m32 -0.35 (~-0.25 H200 us). DEAD (<= 0.05% layer).
+- Re-swept m32 SK configs (pool/unp, 2 reps): NOW G108 (4,3,12) 17.5/17.2 vs layer's (2,4,16) 18.4-18.7/17.9-18.2; (4,2,16) 17.2/
+  17.5; (4,4,8) 20.4/19.4; (4,4,10) 19.9/19.1. G88 proxy (4,3,12) 23.9-24.1/22.0 vs 24.7-24.9/22.8-22.9 (~-0.6 H200 us each);
+  matches s56's H200 diag (pool m32 SK (4,3,12) 20.00 vs (2,4,16) 21.15). The layer dropped it in s56 on an H100 in-layer loss,
+  so it was never H200-tuned in-layer.
+- Handoff dev/s69/g24sk2_layer.patch (layer.py only, applies on r-layer 34a1bdc): G24_SK2CFG {pooler, unpool @32: (32,512,4,3,
+  12,2,257)}, state "g24sk2" (shares the (512,4) pack with G24_CFG: no extra weight memory, +1 template instance), option
+  g24sk2:<key> checked first in _g24_sel; TUNE[32] += {g24sk2:pooler}, {g24sk2:unpool}, both, both + {tk2h 4, g24:qkv_gate}.
+  Forced (TUNE {} + TUNE_BASE[32] g24sk2 both) scored decode 32 3 seeds x 2 types PASS; H100 ab_flag 3 rounds x seeds 99,7:
+  sl +1.2/+0.3, full +0.9/+0.6 us (W-bound H100, expected; s56 said +1.2..1.7). H200 tuner decides. No judge runs.
