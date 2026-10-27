@@ -1943,3 +1943,29 @@
 - Lane item (g30 at m16/m32) closed in s48 (proj g30n is the faster version and is on layer main v137 as TUNE[32] g30n:unpool).
   Too little time before the move to start a build; wrote the s50 pick list into STATE (g30n pooler with fewer CTAs, or the
   attention diag timeline). No GPU time used.
+
+## Night5 session 1 (2026-10-27 18:57Z - ) -- pr32: T=16/32 pooler (g30n S2) + router (hi/lo) + routing in ONE launch; 0 checks
+- New sandbox okc-night5 (runs to 11-05). Re-posted the 10-27 moe/attention judge runs in COORD (from these NOTES).
+- Why: proj s96 found the g30n pooler (S2, 128 CTAs) loses +9..14 us in-layer at T=16/32 only because the side-stream
+  router (_router_split + _routing) then has no SMs. pr8 (proj) already fuses pooler+router+routing at T=8; nothing does at T=16/32.
+- Built tools/n5s1/pr32_src.cu (= g30_src.cu helpers + new kernel), harness tools/n5s1/pr32.py (exactness + cold-L2 time over a
+  3 us PDL pred, proj s95 method; `SRC=... NW= NS= DEFS="PR_TL 1"` prints a per-CTA globaltimer timeline).
+  Structure: grid (66, 2) in (1,2,1) clusters = 132 CTAs. x = 0, 1: 4 "finisher" CTAs (the 4 SMs 128 streaming CTAs leave).
+  x >= 2: pooler group g = x - 2, K half y (g30n S2, DSMEM sum), and FIRST 8 router stages: rows 64 (g / 8).. of [hi; lo]
+  (raw BF16, prepare packs them in A-fragment order [rg][kstage][4 j][128 thr][16 B], 8 KB stages through the same W ring and
+  x ring). Router acc -> smem (both WGs, tok-major), bar.arrive; a NEW warp 10 sums them, rank 1 pushes to rank 0 by DSMEM,
+  rank 0 writes the pair partial part[rg][g & 7][T][64] + fence + red.release count. Finisher f waits count == 64, pulls its
+  8 tokens' chunks of all 64 partials in ONE bulk shot (64 x 2 KB, one mbarrier), sums in fixed order (deterministic),
+  routes 1 token per warp: top-8 via redux.sync max (order-preserving u32 keys, +0.0f folds -0) + redux min (lowest index
+  on ties) = same picks as the layer's _routing. Writes ids/lids/wts (+ FP32 logits [T][512] hi|lo for checking).
+- Correct: routing ids/lids == layer Triton _routing on our logits for 4 seeds x 3 reps (wts within 3e-8: sum order),
+  == FP64-logit routing, counters self-reset, pooled = g30 math (BF16 rounding-level vs FP32 ref).
+- H100 standalone (us over a 3 us PDL pred, cold L2, M=32): g30n pooler alone (my kernel, router off) 20.0; + router stages
+  (no reduce/routing) 21.1; first fused version (reduce by last-ticket CTA + routing in that CTA) 70 (!); final 22.9-23.2.
+  LESSON (globaltimer timelines): while 128 CTAs saturate HBM every global round trip costs 4-7 us (Little: ~12 MB of TMA in
+  flight / 3.3 TB/s), a non-streaming SM ingests only its fair share (~26 GB/s), and DSMEM scalar stores / the shuffle-based
+  top-8 were slow (5 us per token!). Fixes that mattered: no reduce/route work in streaming CTAs (finishers on the spare SMs),
+  pair DSMEM pre-reduce (halves partial bytes), one bulk shot per finisher (128 KB), token split (no logits exchange),
+  redux.sync top-8, shallower W ring (NW 8: the fence after the partial store 4.6 vs 11-16 us at NW 12-16; pooler also faster).
+- Clusters: cudaOccupancyMaxActiveClusters on the H100 with ~200 KB smem: size 2 -> 66 (132 CTAs), 4 -> 30, 8 -> 15, 16 -> 7:
+  only pairs fit all 128 streaming CTAs, so in-cluster reduces beyond pairs are out.
