@@ -1913,3 +1913,4 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   standalone, before escapes ~+0.4..0.9): DEAD as a lever (v16 sl %/us 0.041 -> <= 0.04%). Slabs + reduce fused into the next
   kernel's prologue (layer's path) is the only form that can beat it. Pitfall: the first g30 timing in a process reads 1.5-3 us
   faster than steady state (pool 22.7/24.0 vs 25.6/27.1): always repeat a shape and take the later numbers.
+- s93 slip: ran 'git pull --rebase' inside ~/r-layer (layer's clone) at 16:08Z: fast-forward f7a1cdc -> ed832d1 (my own proj commit only, no layer files touched). Use /tmp worktrees of r-proj for layer branches.
