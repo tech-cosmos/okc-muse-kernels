@@ -1662,3 +1662,14 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   (~22 min H100, mostly the FP32 reference at full T=16/32). Posted Handoffs + Requests (layer: run
   `validate.py --only=attn` or `attn_probe.py <file>` on each attn_src.py change; exhaustive before a submit).
 - No judge runs. Checks 10-27 proj still 8/20, scored 1/10.
+
+## s79 (2026-10-27 10:33-10:58Z): lane (b), validated layer v128 (moe s31 nvscl in attn_src)
+- Snapshot of r-layer's working tree (later committed unchanged as 536adfd; submission.py md5 a62423ac) in /tmp/pj85.
+- tools/attn_probe.py 8 passes: 29/29 PASS (worst 2.2e-3). The cl path runs at verify 32 sliding (batch 32 -> S 2;
+  the probe passes no o_pf/qkv_ss). In-layer, the cl path is active at T=256 sliding by default: O_PF has no 256 key,
+  QSS default off at 256 (the qss TUNE option falls back to the non-cl nvs + _combine_hb, still correct).
+- tools/validate.py FULL: test 13/13, scored 0/24, opt 0/302, tk2f 0/1200, replay 0/480, route 0/240 (gap 0.0256,
+  drop-lead 0.0179: same as v125), cold prepare 121.3 s.
+- H100 ab_flag "verify 32", 6 rounds, SEEDS 99,7, NVS_CL True/False/True: sl s99 373.46/374.98/373.39, s7
+  347.38/348.68/347.13 (-1.4..-1.5 us); full 612.4/612.7/613.0, 572.5/573.0/572.7 (tie, cl unused there).
+- Posted under COORD Requests (s79). No proj judge runs.

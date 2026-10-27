@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 10:58 UTC (s79). Validated layer v128 (536adfd, nvscl): full validate ALL OK (cold 121.3 s), attn_probe
+29/29, H100 v32 sl -1.4..-1.5 us (NOTES s79, COORD Requests). Next: same for every new layer/moe attention bundle.
 Updated 2026-10-27 10:25 UTC (s78). Lead 09:45Z: attention reopened (layer: _gd_full/_gw_verify; moe: attention board);
 proj stays (b). S78: branch proj/attnprobe (6e8d0bb): tools/attn_probe.py = attention KEY-COVERAGE oracle (K=0, k/v=0
 -> uniform softmax, V one-hot probes; dropped/extra key -> 0.14-0.49 vs noise 2e-3) + validate.py step 'attn'. v125:
