@@ -1622,3 +1622,26 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   T=16 sl default, full bal; T=32 sl tk2fj False, full bal+lt:o; T=128 sl twm_order 76 (-2.7), full {twf_split 66, lt:o, lt:unpool}
   (-8.3 confirm); T=256 sl rg, full rg+split1022+all lt (-12 confirm). Stacking makes the picks move but the total is flat:
   the tuner-level gains (1-3 us per layer type) stay below judge noise (+-1%).
+
+## s78 (2026-10-27 08:23Z-09:05Z, night4 session 27): re-bound of the layer-own structural items; no build, no judge runs
+- Score weight check: sum over the 12 scored shapes of %/us (STATE table) = 0.68 % per us saved on EVERY shape; d1 sl alone 0.177.
+- Judge 08d10234 per-run spread (runs_ns, 60 inputs/shape): d1 sl 59.1..84.5 us (median 71.0; routing = 0..3 local experts),
+  d32 sl 154..187, v1 sl 92..134. Per-run tk2f cost follows the routed expert count; nothing layer-side in the spread.
+- H100 timelines now (main v124, seed 99): d1 sl qkv g13 0-12.8 | csl -19.8 | o g13 -23.7 | bnd -27.0 | pr1 -46.2 | tk2f 46.7-80.2 |
+  n2u -84.8 | bnd -86.6. v1 sl g14 0-13.7 | vtk -20.6 | g12 o -27.9 | bnd -32.6 | pr8 -53.9 | tk2f 54.3-138.4 | nu8 -142.4 | bnd -145.2.
+  d32 sl qkv g24 0-16.0 | nds+combine -33.4 | o g27 -42.7 | bnd -47.8 | pooler g24 -70.8 (|| router_split+routing s585 -72.4) |
+  rmsnorm -74.7 | tk2f 73.7-171.5 | norm2 -175.3 | unpool g24 -196.0 | bnd -198.7.
+- Re-bounded the lead's layer items with these + earlier measurements:
+  * pooler+router+routing+expert prologue at T<=8: tk2f already starts 0.4-0.5 us after pr1/pr8 end (TK2FX): bound ~0.
+  * persistent experts->norm->unpool->boundary at T<=8: tail after tk2f = 6.4 us d1 / 6.8 us v1 (H100); every partial fusion
+    of it (N2U_BOUNDARY, n2u8, bndc, BND_SPIN, UPF/UPF2) measured +0..3 us; bound <= 1-2 us d1, ~2-3 v1 (<= ~0.5% total).
+  * T=1 o+bnd+pr1 megakernel: its pooler-W preload during o needs spare HBM in the o/csl window, but pr1 npf 4/8 (H200 tuner)
+    and G10_PFL2 (H100) both measured that window as NOT spare (o / csl slow by the same amount). What is left is one launch
+    (bnd ~2 us) minus a grid barrier (~0.7-1 us): <= ~1 us d1 (~0.25%). Not worth a multi-session rewrite.
+  * NEW idea checked on paper, dead: unpool(norm2(z)) = W (g*z) / rms(z) (rms is a per-token scalar) would let the unpool skip
+    norm2 / start on partial z, but (a) s72's oracle shows norm2 is free (it hosts the unpool's PDL window) and (b) starting the
+    unpool on rows finished by early tk2f CTAs = UPF3's window, where the extra stream slowed tk2f stragglers by +7.8 us (s15).
+- Conclusion: the layer's own glue/fusion levers are exhausted at <= ~0.5% each; the gap to #1 (14%) is the expert kernels
+  (tk2f at ~4.06 TB/s marginal vs ~4.4 achievable; twm at v16/v32 consumer-bound) and full attention (_gd_full/_gw_verify,
+  frozen). Asked the lead (COORD Requests) to redirect the layer lane (proposal: layer takes tk2f at T<=32 off moe's plate
+  while moe does twm; or attention full shapes inside the layer).

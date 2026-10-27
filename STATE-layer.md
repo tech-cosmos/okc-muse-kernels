@@ -26,6 +26,8 @@ floor per ~/attn STATE); g24 pooler+unpool d16 35, d32 48; pr1 17.3 (d1). Layer 
 Judge noise: one shape moves up to 10% between runs of the same code (v108: d32 full 291 vs 327 us).
 
 ## NEXT
+00. (s78) Layer-own structural items re-bounded (NOTES s78): T<=8 prologue fusion ~0, persistent T<=8 tail <= ~0.5%,
+    T=1 o+bnd+pr1 megakernel <= ~0.25% (o/csl window has no spare HBM). Waiting for the lead's lane decision (COORD Requests s78).
 0. (s77) Lead 06:41Z: up to 4 of the 10-27 checks go to moe as in-layer DIAG bundles (watch Handoffs for "moe DIAG for layer"; run on main v124, copy the tuner lines to moe). Don't spend checks on tuner-option ties.
    Only unbuilt layer item: T=1 o+bnd+pr1 megakernel (bound ~-3 us d1 = ~+0.5%, multi-session, NOTES s45/s61/s74).
 1. Integrate new moe/proj Handoffs on top of main (v111) (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
@@ -33,12 +35,7 @@ Judge noise: one shape moves up to 10% between runs of the same code (v108: d32 
 2. Weakest ratios on the board run: d32 sl 1.589, v16 sl 1.923, d16 sl 1.976: experts (tk2f/twm) are moe's lane; ask moe.
 3. okc check can exceed a 600 s tool timeout: run it in the background, poll `okc jobs`, read with `okc status <job> --json`.
 
-Mains v71-v88 (older), all H100-validated (bench test 13/13, replay_test + route_judge 0 fails), details in
-NOTES s32-s44: v71 BND_SPLIT | v72 O_PF (d32/v16 sl) | v73 moe TK2F_L2H | v74 pr1_npf 0 at T=1 | v75 TUNE_BASE (H200-agreed
-per-(T, sliding) defaults) | v76 moe TWM_L2H | v77 fused pooler+router GEMM at T=256 | v78-v80 g19 M=8 + T=8 candidates +
-proj evict_last on all L2 prefetches | v81-v83 PDL edges in the routing glue | v84 proj g13o (T=1 o 12-bit, TUNE) | v85 proj
-DEC4 | v86 proj DEC3 (12-bit decode 3 instr/pair) | v87 moe_hot at T=256 (TUNE_BASE hot 32; H100 v32 -14 sl / -11 full) |
-v88 proj s36 pr8 bulk L2 prefetch after the wait (PR8_CFG npf 212; H100 ABBA 6 rounds v1 -1.9 sl / -1.6 full).
+Mains v71-v88 (older, H100-validated): NOTES s32-s44.
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
 option sets on synthetic inputs (shapes only) and keeps the fastest in state["tune"]; `_opt()` reads it at trace time.
