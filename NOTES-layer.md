@@ -1508,3 +1508,18 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   the TUNE entry; code path kept, off). Budget 10-27 after s72: 12 checks / 5 submits.
 - Layer-side idea list is exhausted on the measured terms (see STATE dead ends); the remaining levers are moe's experts and
   proj's T=16/32 g24 (consumer-bound at m32) and T=128/256 cuBLAS GEMMs.
+
+## s73 (2026-10-27 04:51Z-05:10Z, night4 session 22): moe n20 S6 ported, H200-dead -> off; no judge runs
+- Ported r-moe 4a87466 S6 (6-bit block-scale codes c = e4m3 byte - 80 in the SQ stage images, 17920 vs 18432 B/stage,
+  s6dec = PRMT + LOP3) into moe_src.py: tk2f_produce/consume, tk2g_row, tk2h_consume, launch cfg + 20000000 (84204 (+BAL),
+  tk2h GS16 PF4), `_s6_pack`, `_s6_unpack` + prepare()-time round-trip assert (lossless), falls back to 8-bit SQ if any
+  scale byte is outside [80, 0x7E]. layer.py's NU8 anchor string updated (SB line now `(PF & 1024) ? 1120 : 1152`).
+- Tests: bench test 13/13, tk2f_stress 0/600, tk2h_stress W3 0/400, tools/s6_eq.py (S6 vs SQ bitwise, variants/s6keep.py =
+  submission with _moe_TK2F_S6_KEEPSQ = True) 0/480. Cold prepare (fresh caches) 123.9 s.
+- H100 ab_flag 4 rounds x seeds 11,23 (S6 on/off): d16 sl -1.0/-2.1, full -1.3/-1.0; d32 sl -2.8/-1.9, full 0/-2.3 us;
+  d1/v1/verify tie (T=8 runs the NU8 85204 path, not SQ; T=1 not SQ).
+- moe's H200 diag 13b528a8 (moe-only, layer routings, 5 seeds, maxdiff 0): tk2f d16 65.7/65.4 (sq) vs 66.4/66.4 (s6),
+  d32 86.1/86.0 vs 89.0/89.0, tk2h W3 d32 82.4 vs 84.0, d1 tie, v1 -0.8 (not used by the layer). => S6 LOSES on the H200
+  (issue-bound: the extra unpack instructions cost more than 2.8% fewer bytes). main v113 = TK2F_S6 = 0 (= v111 behavior).
+- Looked for other layer-side work: H200 profile 0f12113f d1 sl = tk2f 27.4 | pr1 18.5 | g13 qkv 10.8 | bnd 2x3.2 | o 6.2 |
+  n2u 5.4 | csl 4.0; everything left is on the dead-end list except the T=1 o+bnd+pr1 megakernel (~-3 us bound).

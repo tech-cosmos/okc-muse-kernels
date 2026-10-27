@@ -1,8 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
 BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
-s72: **main = v111 = v109 behavior** (v110 added QSS at verify sliding nvs as a T=128 TUNE option: H100 tie/loss, H200 tuner tie -> removed;
-code path kept off). Check 0f12113f v110 2.0766x (not submitted). Oracle: moe_norm2 removal at d16/d32 = +1.5..3 us (dead). Budget 10-27 left: 12 checks / 5 submits.
+s73: **main = v113 = v111 behavior** + moe n20 S6 ported (6-bit scale codes in tk2f/tk2h SQ stages, prepare round-trip assert,
+fallback) but OFF (`_moe_TK2F_S6 = 0`): H100 in-layer d16 -1..-2, d32 -2..-3 us, but moe's H200 diag 13b528a8 says tk2f d16 +0.7..1.0,
+d32 +2.9, tk2h d32 +1.6 us (H200 issue-bound, H100 DRAM-bound). No judge runs. Budget 10-27 left: 12 checks / 5 submits.
+s72: v111 = v109 behavior (QSS T=128 dead). Check 0f12113f v110 2.0766x (not submitted). moe_norm2 removal oracle dead.
 s71: **main = v109 = v108 + proj s59 G24X + moe n18 L2H mode 4** (H100 d16 -2.2/-5.7 us, rest tie; tests 13/13, replay 0/240). Check c3bab7fd 2.0822x (< board, not submitted; H200 tuner: G24X -1 us at T=16). Budget 10-27 left: 13 checks / 5 submits. Submit only after stacking another win onto v109 and a check > 2.0860.
 
 Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
@@ -10,9 +12,8 @@ TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline b
 Judge noise dominates: identical-ish code 2.04-2.12x across checks; per-shape T=32 moves 5-10%.
 
 ## NEXT
-0. FIRST: moe n20 S6 (6-bit block-scale codes in tk2f/tk2h SQ stages, lossless w/ fallback; r-moe 4a87466; H100 moe-only
-   d16 -1.7, d32 -2.4, v1 -2.0 us) awaits moe's H200 diag (13b528a8, queued 04:46Z). Port it once it's under Handoffs, stack
-   with anything else new, test (incl. tools/tk2f_stress.py), cold prepare, check; submit only if > 2.0860x.
+0. (s73) Nothing queued for a check: v113 = v111 (checked 2.0766/2.0822 < board 2.0860). Next check needs a NEW win stacked.
+   Only unbuilt layer item: T=1 o+bnd+pr1 megakernel (bound ~-3 us d1 = ~+0.5%, multi-session, NOTES s45/s61).
 1. Integrate new moe/proj Handoffs on top of main (v111) (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
    cold compile < ~5.5 min), then check; submit only if the check beats 2.0860x.
 2. Weakest ratios on the board run: d32 sl 1.589, v16 sl 1.923, d16 sl 1.976: experts (tk2f/twm) are moe's lane; ask moe.
