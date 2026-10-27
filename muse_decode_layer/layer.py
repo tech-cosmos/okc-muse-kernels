@@ -769,6 +769,57 @@ G30_KEYS = ("unpool", "o")  # o: H100 standalone 10.2 vs cuBLAS 10.5 us (tie): T
 # S3 standalone 21.4 vs cuBLAS 20.0 us (MMA part 16.4, reduce chain +5), in-layer v16 sl +2.5..4.1, full +0.1..2.5 us.
 G30_TOKENS = 128
 G30_PDL = 1  # launch g30 as a PDL secondary (W streams before griddepcontrol.wait)
+
+PR32_TOKENS = (16, 32)
+PR32_DEFAULT = False  # moe n5s1: one launch for the T=16/32 pooler (g30n S2) + router (hi/lo) + routing
+PR32_CFG = {16: (8, 16), 32: (8, 16)}  # T: (NW, NS)
+_GPR32_SRC = None  # @@GPR32@@
+_PR32 = {}
+
+
+def _pr32_build(c):
+    """c = (MTOK, NW, NS) -> the pr32 lib (moe n5s1, pr32_src.cu) or None."""
+    if c not in _PR32:
+        try:
+            import hashlib
+            from torch.utils.cpp_extension import load_inline
+            dfs = [f"-DG30_MTOK={c[0]}", "-DG30_S=2", f"-DG30_NW={c[1]}", f"-DG30_NS={c[2]}"]
+            _PR32[c] = load_inline(
+                name="layer_pr32_" + hashlib.sha256((_GPR32_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
+                cpp_sources="void pr32_launch(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale, torch::Tensor rw, torch::Tensor part, torch::Tensor logits, torch::Tensor cnt, torch::Tensor bias, torch::Tensor ls, torch::Tensor ids, torch::Tensor lids, torch::Tensor wts, double mult, double reps, int64_t local, int64_t pdl, torch::Tensor tl);",
+                cuda_sources=_GPR32_SRC, functions=["pr32_launch"],
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
+        except Exception as ex:  # noqa: BLE001
+            print("layer pr32 build failed:", c, ex)
+            _PR32[c] = None
+    return _PR32[c]
+
+
+def _pr32_builds():
+    if _GPR32_SRC is None:
+        return []
+    return [(lambda c=(m, *PR32_CFG[m]): _pr32_build(c)) for m in PR32_TOKENS]
+
+
+def _pr32_prepare(state):
+    state["pr32"] = {}
+    if _GPR32_SRC is None:
+        return
+    r = torch.cat([state["router_hi"], state["router_lo"]]).contiguous().view(torch.int16)
+    G, KS = r.shape[0] // 64, r.shape[1] // 64
+    rw = r.view(G, 4, 2, 8, KS, 4, 2, 4, 2).permute(0, 4, 1, 3, 7, 5, 6, 2, 8).reshape(G, KS, 128, 4, 8)
+    rw = rw.permute(0, 1, 3, 2, 4).contiguous().view(torch.uint8)
+    state["pr32_cnt"] = torch.zeros(16, dtype=torch.int32, device=r.device)
+    for m in PR32_TOKENS:
+        e = state.get("g30n", {}).get(("pooler", m))
+        if e is None:
+            continue
+        nw, ns = PR32_CFG[m]
+        lib = _pr32_build((m, nw, ns))
+        if lib is None:
+            continue
+        state["pr32"][m] = (lib, e[1], rw)
+
 G30_TRIG = True  # the second boundary is g30's PDL secondary (g30 triggers at start)
 _G30 = {}
 # proj s96 g30n (proj s95, r-proj dev/s95: G30_MTOK 32/16 + G30_S cluster split-K, DSMEM reduce in rank 0, BF16 out): T=16/32
@@ -2436,6 +2487,7 @@ def _g19_prepare(state):
     _g24_prepare(state, w, comp, g)
     _g30_prepare(state, w, comp, g)
     _g30n_prepare(state, w, comp, g)
+    _pr32_prepare(state)
     _g30k_prepare(state, w, comp, g)
     del comp
 
@@ -2639,7 +2691,7 @@ def _g30n_prepare(state, w, comp, g):
         if key not in packs:
             if key not in comp:
                 comp[key] = _compress(w[key])
-            if comp[key] is None or w[key].shape[0] % 64 or w[key].shape[1] % (128 * S):
+            if comp[key] is None or w[key].shape[0] % 64 or w[key].shape[1] % 128 or w[key].shape[1] // 64 < 4 * S:  # n5s3: uneven S split ok (i0/i1)
                 continue
             code, sm, hdr, scale = comp[key]
             v = hdr[:, :, 1]
@@ -2796,9 +2848,9 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24:o": False}, {"g24:qkv_gate": False},
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
              {"g27:o": False},  # s84: attention plan (full layers only)
-             {"g30n:unpool": True},  # night5 s1: g30n at T=16 (H100 tie: H200 decides); n5s2: qkv_gate g30n options dropped (S=3: 8192 % 384, never built)
+             {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"pr32": True},  # n5s3: moe pr32; night5 s1: g30n at T=16 (H100 tie: H200 decides); n5s3: qkv S3 built again (uneven K split)
              ),
-        32: ({}, {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"g30k:pooler": 104}, {"g30k:pooler": 120}, {"g30k:pooler": 104, "g30n:unpool": True}, {"g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
+        32: ({}, {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"pr32": True}, {"pr32": True, "g30n:unpool": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"g30k:pooler": 104}, {"g30k:pooler": 120}, {"g30k:pooler": 104, "g30n:unpool": True}, {"g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
@@ -3337,7 +3389,9 @@ def _kernel_fn(data, state):
     cfg = data["config"]
     _G24_ZN.clear()
     _SLIDING[0] = cfg["window"] > 0  # s73: before the G24X/G24P _opt reads (they read the previous call's flag before)
-    if cfg["tokens"] in G24X_TOKENS and _opt(state, cfg["tokens"], "g24x", True) and _g24_sel(state, "qkv_gate", cfg["tokens"]) is not None:
+    g30q = (state.get("g30n", {}).get(("qkv_gate", cfg["tokens"])) is not None  # n5s3: qkv on g30n (BF16 out): no G24X
+            and _opt(state, cfg["tokens"], "g30n:qkv_gate", ("qkv_gate", cfg["tokens"]) in G30N_DEFAULT_ON))
+    if cfg["tokens"] in G24X_TOKENS and not g30q and _opt(state, cfg["tokens"], "g24x", True) and _g24_sel(state, "qkv_gate", cfg["tokens"]) is not None:
         xb = state.get("g24x", {}).get(cfg["tokens"])
         if xb is not None and _g24_sel(state, "qkv_gate", cfg["tokens"])[4][0] == cfg["tokens"]:
             _G24_ZN[("qkv_gate", cfg["tokens"])] = xb  # zero (invariant): the qkv g24 runs EZ on it
@@ -3485,6 +3539,7 @@ def _kernel_fn(data, state):
         moe = _experts_moe(p, wts, lids, state, bucket, gnorm) if _use_moe(tokens) else (
             _experts_marlin if HAVE_SGL else _experts_local)(p, wts, lids, state)
         return _tail(moe, stream1, h, tokens, state, pdl) + (ids,)
+    pr32 = False
     if pr1:  # pooler + router + routing in one launch (proj pr1), PDL secondary of the boundary: no side stream
         pooled = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
         logits = torch.empty((tokens, N_EXPERTS), dtype=torch.float32, device=dev)
@@ -3507,6 +3562,20 @@ def _kernel_fn(data, state):
             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
                                    ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)
+    elif (pr32 := (tokens in PR32_TOKENS and state.get("pr32", {}).get(tokens) is not None
+                   and _opt(state, tokens, "pr32", PR32_DEFAULT))):
+        side_stream.wait_stream(main_stream)  # nothing runs there, but the later joins need it forked in the capture
+        lib, (wp, hdr, scale), rw = state["pr32"][tokens]
+        pooled = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
+        topk_ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
+        local_ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
+        topk_weights = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
+        part = torch.empty(64 * tokens * 64, dtype=torch.float32, device=dev)
+        logits = torch.empty((tokens, 2 * N_EXPERTS), dtype=torch.float32, device=dev)
+        lib.pr32_launch(h, wp, hdr, pooled, scale, rw, part, logits, state["pr32_cnt"], state["router_bias"],
+                        data["local_start"], topk_ids, local_ids, topk_weights, ROUTER_MULTIPLIER, ROUTE_EPS,
+                        LOCAL_EXPERTS, G30_PDL, part)
+        bucket = None
     else:
         side_stream.wait_stream(main_stream)
         with torch.cuda.stream(side_stream):
@@ -3517,7 +3586,7 @@ def _kernel_fn(data, state):
             topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens, trig=rpdl)
             # The experts' bucketing too, off the main stream's path.
             bucket = _moe_bucket(state, local_ids, rpdl) if bkt else None
-    if pr1:
+    if pr1 or pr32:
         pass
     elif tokens in POOLER_HI_PRIORITY:
         # the pooler on a high-priority stream: its CTAs go ahead of the router's remaining waves
@@ -3607,4 +3676,4 @@ def _kernel_fn(data, state):
     return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
 
 
-_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30k_builds())]
+_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30k_builds(), *_pr32_builds())]
