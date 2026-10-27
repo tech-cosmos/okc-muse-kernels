@@ -5,7 +5,7 @@ S75: branch proj/validate (f625289): muse_decode_layer/tools/validate.py (7 step
 All Handoffs up to moe s27 SCB are already in layer v125. Watch COORD Handoffs/Requests for bundles; moe twm byte_perm next.
 S74: no build; lane ask re-posted (3rd); no proj item >0.3% (NOTES s74).
 S73: re-tested moe's 'dq ALU || RS wgmma never overlap' (H100, 5 controls): it STANDS (per-HGMMA cost ~12+0.33N cyc to the
-co-resident warp; NOTES s73). No expert item left for a second builder. Lane Request to lead still open. Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
+co-resident warp; NOTES s73). No expert item left for a second builder. (Lane Request answered 08:55Z: (b).) Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
 S72: a GUEST carrier (other lanes' builds timed inside proj checks) was BANNED by the lead (08:13Z) and REMOVED; never
 revive it. Proj checks run only proj's own code. Re-read COORD Human decisions right before EVERY check. NOTES s72.
 LANE STATUS (s71): proj's own items are exhausted to <= ~0.2-0.3% layer each; Request to lead (COORD s71) for a new lane.
