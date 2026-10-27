@@ -1717,3 +1717,7 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   (3.03x, 1242 us vs our 1482 us = 16% less attention time). Attention = 7-27% of our layer loads; 16% faster attention on
   every shape = +2.5% layer score (10% = +1.5%). In-layer H200 attention (profile 19163546) = standalone (gd_full d32 166.6,
   gw_verify v32 190.7, v16 99.2 us). _red_fin/_new_tokens "GPU time" in the layer profile (124/25 us) is PDL wait overlap.
+- H100 timelines (main, seed 99) for the attention question: d1 sl g13 qkv 0-12.6 | csl 13.1-19.8 | o g13 14.0-23.7 (PDL) | bnd
+  22.8-28.0 | pr1 -46.7 | tk2f 47.1-81.6 | n2u -86.0 | bnd -87.9; v1 sl g14 0-14.0 | vtk 14.4-21.0 | o g12 15.3-28.2 | bnd -32.0 |
+  pr8 -53.5 | tk2f 53.9-137.8 | nu8 -142.3 | bnd -145.1. Batch-1 sliding attention exposes <= ~2-3 us per layer (~0.4-0.5%).
+- Next session: read the lead's answer to Requests s82 (reopen full attention in the layer's attn_src.py copy, or another lane).
