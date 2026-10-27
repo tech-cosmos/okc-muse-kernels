@@ -69,6 +69,13 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 21 (05:13Z-): moe_twq K-split tail (TWQ_SPLIT / twq flags | items << 8 | log2 parts << 16): H200 v16 -10.6 us
+  (check 1ebfc1e3: q4 209.9 -> s33h 199.3, every seed; v32 -2). Store-then-ticket, last part sums in part order (deterministic).
+  Off by default in moe (board bs128 uses twm). Layer port tools/n21/patch_layer_twq.py + TUNE {"twq": 73988} at T=128 (posted).
+  H100 in-layer: sliding -5, full +5 (unexplained): the layer's H200 tuner decides. Quarters lose to halves. Checks today 12/20.
+  NEXT: same store-then-ticket split for twm (its 2-way split spins on the other half); twq split of gemm13 tail items? (no: gemm13
+  items come first). Check the layer's H200 tuner line for twq 73988 when they run it.
+
 ## Night4 session 20 (04:33-05:35Z): S6 = 6-bit block-scale codes in the tk2f/tk2h SQ stages (lossless, -2.8% bytes, bitwise) DEAD
   on the H200 (checks 13b528a8, c6b296a3): d16 +0.8, d32 +2.7 (tk2h +1.2), v1 -0.5 us; S6P (aligned starts) = S6. H100 said -2 us.
   Wins only on byte-bound single-group rows: the H200 consumer is ALU-pipe-bound at d16/d32 (S6 moved IMAD -> LOP3 + SHF).

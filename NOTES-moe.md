@@ -1340,3 +1340,9 @@
   sliding twq4 309.0 | s24h 304.8 | s33h 303.9 | s66h 309.0 (per seed s33h +1.2/-7.3/-9.1); full 427.1 | 427.2 | 432.8 | 428.8
   (per seed +2.6/+9.9/+4.7). Correct (scored verify 16 x 3 seeds both layer types, 0 bad). Full loses on the H100: unexplained
   (same routings; the full layer's context differs). => TUNE candidate per (T, sliding), never a default without the H200.
+- H200 check 1ebfc1e3 (18dfa4c + DIAG, 2.225x test run, never submit), moe-only layer routings, MEAN 5 seeds, us (b = repeat):
+    v16 q4 210.1/209.6 | s24h 200.6 | s33h 199.3/199.3 | s66h 203.2 | s33q 202.3   (s33h every seed better: -3.5..-14)
+    v32 q4 273.0/272.6 | s24h 270.1 | s33h 271.4/270.2 | s66h 269.9 | s33q 270.5   (layer runs twm + hot at v32: n/a)
+  => **twq + 33-item half split = -10.6 H200 us at v16** (~5% of the experts; ~+0.3..0.4% layer if sliding takes it). Quarters
+  lose to halves on the H200 too. Handed to layer as TUNE candidates at T=128 (twq 73988 = 4|33<<8|1<<16, 73996 = 12|...).
+  Decode shapes unchanged (dec = sq only this run: d1 29.8, d16 65.2, d32 86.4, v1 64.4).
