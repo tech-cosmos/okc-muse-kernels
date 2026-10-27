@@ -8,6 +8,8 @@ NOTES-ready line:
   tk2f     tools/tk2f_stress.py 300 (75 --quick): tk2f vs fallback, bitwise
   replay   tools/replay_test.py 20 inputs, router seeds 11,23 (11 --quick)
   route    tools/route_judge.py 20 inputs, router seed 11
+  fuzz     tools/stream_fuzz.py (proj s83): every TUNE set with a spin kernel injected at each side/hi-stream fork (side late /
+           main late, eager + CUDA graph), reps 2 per forking set (1 and side modes only with --quick)
   prep     tools/prep_time.py with fresh TORCH_EXTENSIONS_DIR/TRITON_CACHE_DIR (cold; judge limit 300 s, keep <= 200 s)
 Correctness steps take no GPU lock (they are not timed); prep_time is wall-clock and is NOT locked either: its number
 is pessimistic when other agents load the GPU. Exit code 1 if any step fails."""
@@ -68,6 +70,8 @@ STEPS = [
     ("tk2f", [PY, "tools/tk2f_stress.py", "75" if quick else "300"], {"SUB": sub}, p_bad),
     ("replay", [PY, "tools/replay_test.py", sub, "20", "11" if quick else "11,23"], {}, p_rs),
     ("route", [PY, "tools/route_judge.py", sub, "20", "11"], {}, p_rs),
+    ("fuzz", [PY, "tools/stream_fuzz.py", sub, "side,gside" if quick else "side,main,gside,gmain", "400000", "1", "",
+              "1" if quick else "2"], {}, p_bad),
     ("prep", [PY, "tools/prep_time.py", sub], "COLD", p_prep),
 ]
 only = set(flags["--only"].split(",")) if "--only" in flags else None
@@ -101,7 +105,7 @@ for name, cmd, env, parse in STEPS:
     if not ok:
         print("   tail:", *txt.strip().splitlines()[-4:], sep="\n     ", flush=True)
 short = {"test": "bench test", "scored": "scored", "opt": "opt_test", "tk2f": "tk2f_stress", "replay": "replay",
-         "route": "route_judge", "prep": "cold prepare"}
+         "route": "route_judge", "fuzz": "stream_fuzz", "prep": "cold prepare"}
 parts = []
 for name, ok, b, n, extra in res:
     if name == "test":
