@@ -1664,3 +1664,18 @@
   (4fe17fa9's d1 pair was noise; d1 keeps spec). v1 full spec 16.34/16.45 vs 17.10/17.14: -0.7 us again (4/4 H200 pairs).
   Timed shapes 2.5809x (node). Handoff to layer: one line in attn_src.py's verify-1-full plan (spec=True).
 - **Submit 957cabd7** (main ac5b67e + mkab tool only = spec at v1 full): **2.5962x** (1450.7 us), NEW attention board best (was 2.566x 06456b7e). v1 full 15.98 us (board run 16.60). Budget 10-27 attention: checks 9/20, scored 2/10.
+
+## Night4 session 34 (2026-10-27 12:28Z - ~13:20Z) -- attention lane: v16 sliding in-kernel merge (closed by measurement/arithmetic); 0 checks
+- Target: v16 sl (judge 11.54 cold; warm profile nvs<5,2> 7.6 + _combine_hb 2.0), STATE idea "drop _combine_hb via DSMEM
+  cluster merge". nvs CTA = (request, KV head, split): v16 = 16 x 2 x S4 = 128 CTAs, 384 thr, 160-reg consumers.
+- H100 (tools/s34_cl_v16.py, 3 rounds, NVS_CL_BATCH 32 vs 16 = cl build at S 2 with 2-CTA DSMEM merge, no combine):
+  v16 sl 12.45/12.78/12.70 (S4 + combine) vs 14.13/14.59/14.37 (cl S2): **+1.7 us**; v1/v32 unchanged (control).
+- 4-CTA clusters at S4: 2 CTAs/SM impossible (2 x 46K regs > 64K), at 1 CTA/SM only 30 4-clusters co-reside (need 32)
+  -> second wave. S3 with 3-CTA clusters (96 CTAs, chunk 768/768/512 by the 128-key half rounding): +50% keys on the
+  critical CTA, S2's +1.7 us says that loses more than the ~1-1.5 us combine exposure. => v16 sl merge CLOSED.
+- Same arithmetic for d32 sl (nds S8, 256 CTAs at 2/SM, combine 1.6 warm): an 8-CTA cluster per request needs 32
+  clusters x 4 SMs; at 0.24 %/us the whole combine is worth <= 0.3%: not built.
+- Re-read: d1 full judge profile 8.2 + 1.4 warm vs 12.19 cold; s32 all-L2 only -1.2 -> the rest of the cold penalty is
+  the per-program page-table trip (pt 320 KB cold), no overlap available at kernel start (nothing earlier in the graph).
+- Conclusion for the lead: every attention item in my STATE list is now measured dead or <= 0.3%. Batch-1 sliding
+  (csl/vtk) structure was mined in ~/attn s72-s126; I have no new >= 1% lever. Asking for a lane (COORD Requests).

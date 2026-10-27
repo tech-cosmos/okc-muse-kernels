@@ -103,8 +103,8 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   The slowest CTA's 12 random gathers per thread set the push time; owner merge is now ~0.33. No >0.2 us lever seen in the
   csl structure (many tried in ~/attn s72-s126). Untested: fewer distinct row loads per thread (wider per-lane rows) to cut
   the max-of-12-latencies tail; 2 query heads per mma (rows 8..15 of the m16 tile are zero today).
-- v16 sl: merge launch (_combine_hb ~2 us) is the gap; 4-CTA clusters don't fit at 1 CTA/SM (30 < 32), 2-CTA S 2 loses.
-  An nvs at 2 CTAs/SM (smaller ring) would let 4-CTA clusters fit (max 62): unexplored.
+- v16 sl merge: CLOSED s34 (cl S2 +1.7 us H100 3/3; 2 CTAs/SM impossible by registers; 4-clusters 30 < 32; S3 loses on
+  arithmetic). d32 sl combine <= 0.3%: not worth a build. No open attention item >= 1% left in this list.
 
 ## moe sessions n3-n30: see NOTES-moe.md (moe lane closed by lead 2026-10-27 09:45Z, LANE DECISION 2).
 
