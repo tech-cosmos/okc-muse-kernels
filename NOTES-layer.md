@@ -1974,3 +1974,23 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   a ~21 us W stream; red-free xr is already only 2.4 TB/s. Dead unless the red volume drops ~4x. T=256 split-K worse (55 us).
   Also posted the layer interface xr would need (token-major out[T][N], zero_next chain, N=2304, T=256).
 - No layer plumbing built (nothing to plug in). First check after 00:00Z = main v134 (unchanged plan).
+
+## s99 (2026-10-27 14:47Z-, night4 session 48): lead 13:30Z item (2) BUILT: g30 = 12-bit-weight wgmma GEMM for T=128 (H100 standalone); 0 judge runs
+- Triton first (dev/s99_g12t.py, simple sm-byte + nibble layout, tl.dot): decode inside Triton is far too slow (best pool
+  57.9 / unp 41.9 us vs cuBLAS 29.3 / 28.8; even with x read once 48 / 38 us). Same Triton GEMM on plain BF16 W: unp 27.2 (beats
+  cuBLAS 29.0), pool 32.4. Triton is dead for 12-bit at T=128.
+- dev/s99_g30.cu + dev/s99_g30.py (CUDA): swap-AB wgmma m64n128k16 with A = W decoded straight into REGISTER A-fragments by
+  proj's DEC3 dec8 (1 prmt + 1 lop3 per BF16 pair; dec8 output = the m16n8k16 / wgmma A fragment), B = x [128 tok x 64 k] SW128
+  TMA box. CTA = 64 W rows x K/S: producer warp (6 KB 1-D bulk W stage packed per thread fragment + 16 KB x box per stage,
+  NS ring) + 2 consumer WGs on alternate stages, summed through smem; epilogue staged token-major in smem, 16 B stores.
+  pack30() in s99_g30.py (uses layer _compress/_dec3: lossless; ESCAPES NOT HANDLED yet). Lesson: A[par][..] with runtime par
+  put the fragments in local memory (60 us); 2x manual unroll with A0/A1 fixed it (22 us).
+- H100 cold-L2 graph us (cuBLAS same run): unp 8192x4096 S1 21.9 (best NS10 21.0) vs 25.8 = -4.8 us; pool 4096x8192 S2 (FP32
+  slabs) 25.7 / NS10 24.6 vs 26.4; S4 28.4; pool S1 (64 CTAs, MMA-bound on 64 SMs) 34.1; unp S2 28.0 (FP32 slab out +6 us).
+  Ablations (unp S1): no MMA 20.6, no x loads 21.1, no W loads 18.1. => not decode/MMA-bound: L2-bound: every CTA re-reads all
+  of x (128 CTAs x 1 MB = 128 MB of L2 reads + 50 MB W = ~8 TB/s of L2). MMA alone ~9 us at 128 CTAs.
+- NEXT (biggest lever): TMA multicast of the x box across a cluster of 2-4 CTAs along N (x L2 reads /2../4; CUTLASS pattern:
+  each CTA loads 1/C of the box with .multicast::cluster, empty barriers cluster-wide). Expect unp ~16-17 us (W stream bound at
+  ~3 TB/s), pool with S2 + cluster. Then: escape fixups (per-row headers in the epilogue, x from global, s == 0 slab only), T=256
+  (MMA ~17 us H100: n256 or two passes), qkv shape (QKV_SIZE x 8192), integration as TUNE[128/256] g30:<key> options. On the H200
+  (HBM 4.8 TB/s, L2 not faster) the x L2 traffic matters even more: multicast before any H200 test.
