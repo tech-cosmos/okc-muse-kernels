@@ -1550,3 +1550,19 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - v117: TUNE entries removed again (the `_opt` hooks stay: pr1bnd / bspl1 / bspl2), = v111 behavior. Tests 13/13.
 - Remaining layer-own idea with a nonzero bound: T=1 o+bnd+pr1 megakernel (~-3 us d1). The boundary itself is at its
   latency floor (PDL release + 2 reductions; 4 programs already), so a cluster/DSMEM boundary would save little.
+
+## s75 (2026-10-27 05:44Z-, night4 session 24): moe n21 twq K-split ported as TUNE[128] options (lead 05:38Z top priority)
+- moe_src.py patched with r-moe e7e0123 muse_moe_w4a16/tools/n21/patch_layer_twq.py (clean apply on v117's moe_src; twq flags
+  q | items << 8 | log2 parts << 16; partials allocated per call, tickets = st["tk"] shared with twf, self-resetting).
+- layer.py TUNE[128] += {twq 73988} (4|33<<8|1<<16), {twq 73996} (12|...), {twq 73988, fr}, {twq 73988, lt:o, lt:unpool}.
+  H100 tuner never picks them (twq loses on H100 in-layer, as for plain twq 4 since s32); the H200 decides.
+- Correctness (forced via variants/v118_f73988.py / _f73996.py, prepare() override of state["tune"][(128, *)]): scored verify 16
+  3 seeds both types 0 bad (73996: 2 seeds 0 bad), replay_test verify 16 seeds 11,23 x 20 = 0/80; bench test 13/13.
+  NOTE: tools filters are substrings of "verify 16 sliding", NOT "v16" (a "v16" filter silently tests nothing: "bad 0").
+- Cold prepare (fresh caches) 152.1 s (join 93.6, tune ~55; shared GPU), <= 200 OK.
+- 05:54Z CHECK a0bcbbf4 v118 (a90cadb) 2.0866x [2.055, 2.118], 10,841 us (board 2.0860: +0.0006 = noise; behavior = v111 since
+  the tuner picked no twq option -> NOT submitted, would be a lucky-run resubmit): d1 67.6/77.5, d16 129.0/212.1, d32 159.5/316.3,
+  v1 103.8/114.1, v16 269.3/359.5, v32 351.8/522.5. H200 tuner T=128 sl: default 287.2 | twq4 292.2 | twq73988 298.2 | 73996 297.6 |
+  +fr 296.2 | fr 281.6 (picked fr); full: twq73988 383.3 vs default 386.6, picked fr+twf_split 66 (379.0). The split LOSES in the
+  synthetic-routing tuner (moe-only real routings said -10.6). Previous check 4bf626fa: twq4 278.1 vs default 284.9 (picked).
+- v119: TUNE_BASE (128, True) = {twq 73988} (forced under every non-twq pick) as a real-input diag check.
