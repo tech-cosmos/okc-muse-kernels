@@ -1847,3 +1847,32 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   multicast forms don't cut per-SM ingest (s16). This is moe's claimed xr+DSMEM line (moe s42); posted the bound to moe.
 - Unpool-W L2 prefetch during twm (HBM slack while twm is consumer-bound): same as layer's dead UPF/UPF3 (H200 DIAG -4% at
   d32 with tk2f), not retried.
+
+## s91 (2026-10-27 15:32-16:30Z, sandbox okc-night4, session 48): g30 ESCAPES for layer's T=128 12-bit wgmma GEMM; 0 judge runs
+- Lane: layer s99 built g30 (swap-AB wgmma, W decoded by DEC3 straight into register A fragments, x by TMA; H100 unp 21.6 vs
+  cuBLAS 25.7, pool S2 25.4 vs 26.5) with escapes NOT handled. I took the escape piece (Claim in COORD); layer kept the rest.
+  (My s90 paper bound "own m128 GEMM dead by per-SM smem ingest" was wrong for this form: W never goes through smem as a
+  wgmma operand here, only x does, and x is 128 tok x 64 k per stage = the same box for every CTA.)
+- Dead first try (dev/s91/g30e.cu history): x[t][col] * (v - 2^-15) FMAs into the accumulators. (a) Seeding WG1's acc before
+  its first stage: ptxas C7515 serializes the whole wgmma pipeline (non-wgmma defs of acc regs) -> +6.5..8 us. (b) Header
+  prefetched at start, FMAs after the pipeline drains: divergent per-row branches (8 rows/warp) serialize the x L2 round
+  trips -> +5.5..8.4 us. Also inexact for tiny v when the decoded 2^-15 lands in the other WG's partial.
+- WIN: patch the A FRAGMENT. Escapes decode to 2^-15; the owning thread overwrites that BF16 half with v = true/scale (exact
+  in BF16: true is BF16, scale a power of 2; prepare() must check bf16(v) == v per weight, else no g30 for it; subnormal v
+  are fine, tested). Per thread candidates (2 rows x 8 slots filtered by q = (col>>1)&3, WG stage parity, CTA k range) as
+  packed keys stage<<24|(col%64)<<18|rr<<16|vbits in 16 registers (built from __ldg of the header at kernel start, free);
+  per stage `while ((nxt>>24) <= i) { byte_perm patch via unrolled select; pop min }`. 145 regs (no spill), no C7515.
+  Exact like a plain BF16 GEMM (spike tokens: x = 8 at one escape-heavy col -> out bitwise = cuBLAS-level, 0 bad).
+- H100 cold-L2 graph us (t30.py, 4 rounds, s99 5269ca7 base NS10): unp 21.26-21.78 no-esc -> 22.26-22.61 with escapes (+0.6..0.9),
+  pool S2 22.03-22.16 -> 22.46-22.54 (+0.4); cuBLAS 25.9-26.3 / 27.0-27.2. __builtin_expect form (V1) no better.
+  Candidates-built-but-never-applied (ESC_NOFIX) = no-esc time: the cost is the per-stage check/patch code in the decode.
+- Correctness g30e.py: natural escapes (randn/sqrt(k): 0.40/0.57 per row) and ESCW adversarial (2.6-2.8/row incl. zeros,
+  -0, subnormal v) x {unp S1 BF16 out, pool S2 FP32 slabs}: spike-token bad 0 (no-fix build: 12..18070 bad), elements
+  beyond 2x cuBLAS's own error: 3-4 of 1M at S1 (near-zero outputs) = same as no-esc on clean rows.
+- Port onto layer 857a9cb (split W/x rings NS10/NW10, ROT/R2/CL options): dev/s91/g30f.cu, patch dev/s91/g30_esc_layer.patch
+  (`patch -p0` from repo root, checked --dry-run). Keys use the WG's local stage index, so G30_ROT works. Matrix (dev/s91/corr_s91.log,
+  GPU shared with layer validate): default + ROT x natural/ESCW x unp S1/pool S2: spike-token bad 0 everywhere (nofix 12..18070).
+  Default H100: unp 23.25 fix vs 22.59 nofix vs cuBLAS 26.35; pool S2 23.47 / 22.80 / 26.82; ESCW unp 25.18 (2.6 esc/row).
+  G30_R2=1: "g30 launch failed" (also before my code runs its hdr? not debugged; layer measured R2 no better) -> untested.
+- Python side for layer: g30_run(..., scale, hdr) with hdr = _compress's [N][8][2] fp32 as is; prepare check per weight
+  `v = hdr[..., 1]; torch.equal(v.bfloat16().float(), v)` else no g30 for that weight (never fails on randn weights: 0 inexact).

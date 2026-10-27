@@ -1,6 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 15:45 UTC (s90). No build: no layer bundle pending; T=128 own-GEMM re-bounded on paper (S>=4 split-K
-needed by per-SM ingest; red +3..4 us; g23 s28 measured this family dead). Asked lead for a lane. NOTES s90.
+Updated 2026-10-27 16:10 UTC (s91). g30 ESCAPES (layer s99 T=128 12-bit wgmma GEMM): escape value patched into the owning
+thread's register A fragment (exact; H100 +0.4..0.9 us; still -3.5..4.5 us vs cuBLAS). Patch muse_bf16_proj/dev/s91/g30_esc_layer.patch
+on layer 857a9cb s99_g30.cu, test dev/s91/g30e.py (ESCW=1 adversarial). Handoffs proj s91. NOTES s91.
+Updated 2026-10-27 15:45 UTC (s90). Paper bound for own T=128 GEMM (wrong for g30: W never goes through smem). NOTES s90.
 Updated 2026-10-27 15:45 UTC (s89). xrm (dev/s89: moe's T=128 xr with tokens split over a 2/4-CTA cluster, W multicast, S/C reds) DEAD:
 C=2 MMA hidden at stream rate (29.4 us) but 16.8 MB of reds still +17 us (red warps/TMA bulk reduce no help); C=4 round-trip-bound. NOTES s89.
 Updated 2026-10-27 15:00 UTC (s88). Lead 13:30Z item (1) g24 m16/m32 REOPENED + DEAD again: more warps/SM (WPB 20-32) and R=2 ILP
@@ -9,10 +11,6 @@ Updated 2026-10-27 14:40 UTC (s87). FULL validate of layer main v134 (f70b84e): 
 fuzz 0/1490, cold 117.4 s): clear for the 00:00Z layer check. NOTES s87.
 Updated 2026-10-27 14:15 UTC (s86). g28 PING-PONG (dev/s86, s64 item 3b) built + DEAD: H100 NOW pool m32 16.2-17.4 vs g24 15.84,
 m16 17.3 vs 11.8; skeleton alone ~0.13-0.19 us/stage (mbarrier round trips), gate < 0.1 failed; BN 256 no gain. NOTES s86.
-Updated 2026-10-27 14:00 UTC (s85). Layer bundle branch proj/qf35 ac340f7 (v133 + moe s35 qf on d1-full plan + proj s68 ltalt:pooler
-T=128 TUNE): validate ALL OK (full for qf, --quick combined), cold 116.5 s; Request to layer to merge for 00:00Z. NOTES s85.
-Updated 2026-10-27 13:40 UTC (s84). Full validate of layer main v133 (02120df): ALL OK (13/13, 0/24, 0/302, 0/1200, 0/480, 0/240,
-fuzz 0/1476, cold 116.8 s): clear for the 00:00Z layer check. muse_prefill_layer exists but doesn't count overall. NOTES s84.
 s82/s83 (nu8d race found+fixed in layer; tools/stream_fuzz.py): see NOTES.
 Older session headers (s46-s80): see NOTES-proj.md (sessions are logged there in order).
 ## Board
@@ -135,6 +133,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s88: WPB 20-32 / R=2 ILP dead; NOW profile: loop ~47% of warp time, setup ~29%, task ends ~19% (dev/s88 ncu tools).
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
+000. (s91) g30 escapes handed to layer: help layer integrate g30 at T=128 (qkv shape, T=256, PDL, TUNE option) if asked;
+   validate its bundle (tools/validate.py on proj/validate) before its check.
 00. LANE (b) (lead 08:55Z): read COORD Requests for layer bundles; port + validate on proj/<name> branches (tools/validate.py on proj/validate).
 0c. Layer: watch for s68 ltalt:pooler at T=128 (Handoffs proj s68) in a layer check's 'layer tune T=128' lines.
 0a. Layer: watch for G24P (Handoffs proj s63) in a layer check; read 'layer tune T=32' {'g24p': True} vs default (sl/full).

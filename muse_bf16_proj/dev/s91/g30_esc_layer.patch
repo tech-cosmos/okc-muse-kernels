@@ -1,0 +1,117 @@
+--- muse_decode_layer/dev/s99_g30.cu	2026-10-27 15:45:38.181526735 +0000
++++ muse_decode_layer/dev/s99_g30.cu	2026-10-27 15:48:32.089451034 +0000
+@@ -2,7 +2,12 @@
+ // W decoded straight into wgmma register A-fragments (swap-AB: A = W rows, B = x via TMA SW128, n = 128 tokens).
+ // CTA = (64-row group g, k-split s): 2 consumer WGs take alternate 64-k stages of the same 64 rows (smem-summed at the
+ // end) + 1 producer warp (1-D bulk copy of the 6 KB packed W stage + 2-D TMA of the 16 KB x box per stage).
+-// Escapes NOT handled (bound prototype). S == 1: BF16 out [T][N] = scale * acc; S > 1: FP32 slabs [S][T][N].
++// proj s91: escapes handled IN THE A FRAGMENT: an escape decodes to 2^-15; the thread that owns it (row, k) overwrites that
++// BF16 half with v = true / scale from the header hdr [N][G30_ESC] float2 (col bits, v; empty slot (0, 2^-15)). v is exact
++// in BF16 (true is BF16, scale a power of two; prepare() must check bf16(v) == v, else no g30 for that weight). Each thread
++// keeps its candidates (its 2 rows, its q = k pair, its WG's stages, the CTA's k range) as packed keys
++// stage<<24 | (k % 64)<<18 | rr<<16 | v bits (stage = the WG's local loop index, so K-rotation is fine) in registers;
++// per stage one compare and a rare patch (H100 +0.35..0.6 us). Exact like a plain BF16 GEMM (no x reads, no fixup FMAs). S == 1: BF16 out [T][N] = scale * acc; S > 1: FP32 slabs [S][T][N].
+ #include <cuda.h>
+ #include <cuda_runtime.h>
+ #include <cudaTypedefs.h>
+@@ -22,6 +27,9 @@
+ #ifndef G30_NOX
+ #define G30_NOX 0
+ #endif
++#ifndef G30_ESC  // escape slots per row in the 12-bit header (layer G13_ESC); 0 = escapes ignored (bound prototype)
++#define G30_ESC 8
++#endif
+ #ifndef G30_EPI
+ #define G30_EPI 1
+ #endif
+@@ -105,6 +113,24 @@
+   return lop_aob(sh, 0x87008700u, p);
+ }
+ 
++// patch the half (kh, rr, h) of j's A fragment with BF16 bits vb: a[4 j + 2 kh + rr] (m16n8k16 A layout), h = high half
++__device__ __forceinline__ void esc_patch(unsigned (&a)[16], unsigned key) {
++  const int kk = (key >> 18) & 63, idx = 4 * (kk >> 4) + 2 * ((kk >> 3) & 1) + ((key >> 16) & 1);
++  const unsigned vb = key & 0xFFFFu, sel = (kk & 1) ? 0x5410u : 0x3254u;
++#pragma unroll
++  for (int u = 0; u < 16; u++)
++    if (u == idx) a[u] = __byte_perm(a[u], vb, sel);
++}
++template <int NC>
++__device__ __forceinline__ unsigned esc_pop(unsigned (&c)[NC]) {  // smallest key (= next stage), removed; ~0u: none
++  unsigned m = c[0];
++#pragma unroll
++  for (int u = 1; u < NC; u++) m = min(m, c[u]);
++#pragma unroll
++  for (int u = 0; u < NC; u++) c[u] = c[u] == m ? ~0u : c[u];
++  return m;
++}
++
+ #define D8(i) "+f"(d[i]), "+f"(d[i + 1]), "+f"(d[i + 2]), "+f"(d[i + 3]), "+f"(d[i + 4]), "+f"(d[i + 5]), "+f"(d[i + 6]), "+f"(d[i + 7])
+ __device__ __forceinline__ void wg_mma_rs(float* d, unsigned a0, unsigned a1, unsigned a2, unsigned a3, uint64_t db) {
+   asm volatile(
+@@ -118,7 +144,7 @@
+ 
+ __global__ void __launch_bounds__(320, 1)
+ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ wp, void* __restrict__ out, int N,
+-           int KS, int S, float scale) {
++           int KS, int S, float scale, const float2* __restrict__ hdr) {
+   // KS = k-stages per CTA; wp = [G][S*KS][WST]
+   extern __shared__ __align__(1024) uint8_t smraw[];
+   uint8_t* sm = (uint8_t*)(((uintptr_t)smraw + 1023) & ~(uintptr_t)1023);
+@@ -177,6 +203,27 @@
+   float d[64];
+ #pragma unroll
+   for (int j = 0; j < 64; j++) d[j] = 0.f;
++#if G30_ESC
++  unsigned cand[2 * G30_ESC], nxt;
++  {
++    const int k0 = s * KS * 64, q = t & 3, rbase = (G30_R2 ? 2 * g + wg : g) * 64 + (t >> 5) * 16 + ((t & 31) >> 2);
++#pragma unroll
++    for (int rr = 0; rr < 2; rr++)
++#pragma unroll
++      for (int e = 0; e < G30_ESC; e++) {
++        const float2 hv = __ldg(hdr + (size_t)(rbase + 8 * rr) * G30_ESC + e);
++        const int col = __float_as_int(hv.x), ls = ((col - k0) >> 6) - rot, li = ls < 0 ? ls + KS : ls;  // local stage
++        const bool mine = hv.y != 0x1p-15f && col >= k0 && col < k0 + KS * 64 && ((col >> 1) & 3) == q &&
++                          (G30_R2 || (li & 1) == wg);
++        cand[rr * G30_ESC + e] = mine ? ((unsigned)li << 24) | ((unsigned)(col & 63) << 18) | ((unsigned)rr << 16) |
++                                        (__float_as_uint(hv.y) >> 16) : ~0u;
++      }
++    nxt = esc_pop(cand);
++  }
++#define ESC_FIX(a) { while ((nxt >> 24) <= (unsigned)i) { esc_patch(a, nxt); nxt = esc_pop(cand); } }
++#else
++#define ESC_FIX(a)
++#endif
+ #if G30_CL > 1 && !G30_LOCALREL
+ #define RELEASE(st_) mbar_arrive_cl(&empty[st_], t)
+ #else
+@@ -197,7 +244,7 @@
+     const uint8_t* wst = ws + sw * WSLOT + (G30_R2 ? wg * WST : 0);                                                                  \
+     const uint4 s01 = *(const uint4*)(wst + t * 16), s23 = *(const uint4*)(wst + 2048 + t * 16);            \
+     const uint4 nw = *(const uint4*)(wst + 4096 + t * 16);                                                  \
+-    DEC(a, 0, s01.x, s01.y, nw.x) DEC(a, 1, s01.z, s01.w, nw.y) DEC(a, 2, s23.x, s23.y, nw.z) DEC(a, 3, s23.z, s23.w, nw.w) \
++    DEC(a, 0, s01.x, s01.y, nw.x) DEC(a, 1, s01.z, s01.w, nw.y) DEC(a, 2, s23.x, s23.y, nw.z) DEC(a, 3, s23.z, s23.w, nw.w) ESC_FIX(a) \
+     asm volatile("wgmma.fence.sync.aligned;" ::: "memory");                                                 \
+     const uint32_t b = smem_u32(xs + st * XBOX);                                                            \
+     if (!G30_NOMMA) {                                                                                       \
+@@ -327,9 +374,10 @@
+   TORCH_CHECK(r == CUDA_SUCCESS, "encode failed ", (int)r);
+ }
+ 
+-void g30_run(torch::Tensor x, torch::Tensor wp, torch::Tensor out, int64_t N, int64_t S, double scale) {
++void g30_run(torch::Tensor x, torch::Tensor wp, torch::Tensor out, int64_t N, int64_t S, double scale, torch::Tensor hdr) {
+   const int K = x.size(1);
+-  TORCH_CHECK(x.size(0) == M_TOK && K % (64 * S) == 0 && N % 64 == 0);
++  TORCH_CHECK(x.size(0) == M_TOK && K % (64 * S) == 0 && N % 64 == 0 && K / 64 / S < 255);
++  TORCH_CHECK(hdr.dtype() == torch::kFloat32 && (G30_ESC == 0 || hdr.numel() == N * G30_ESC * 2), "hdr must be [N][G30_ESC][2] fp32");
+   const int KS = K / 64 / S;
+   CUtensorMap tx;
+   mk(&tx, x.data_ptr(), K, M_TOK, 64, G30_MCOFF ? 128 : 128 / G30_CL);
+@@ -348,5 +396,5 @@
+   static bool pr = false;
+   if (!pr) { int nc = -1; cudaOccupancyMaxActiveClusters(&nc, g30_kernel, &cfg); printf("g30 CL=%d max active clusters %d (grid %d)\n", G30_CL, nc, N / 64 * (int)S); pr = true; }
+   TORCH_CHECK(cudaLaunchKernelEx(&cfg, g30_kernel, tx, (const uint8_t*)wp.data_ptr(), out.data_ptr(), (int)N, KS, (int)S,
+-                                 (float)scale) == cudaSuccess, "g30 launch failed");
++                                 (float)scale, (const float2*)hdr.data_ptr()) == cudaSuccess, "g30 launch failed");
+ }

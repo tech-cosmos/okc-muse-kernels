@@ -1,0 +1,33 @@
+== DEFS= ESCW=0
+  unp fix: rel err 1.66e-03  elements out of tol 4  spike-token bad 0
+  unp nofix: rel err 1.66e-03  elements out of tol 105  spike-token bad 22
+unp N8192 K4096 S1  ESCW=0 escapes 3261 (0.40/row, 0 subnormal v): g30+fix 23.25 | g30 nofix 22.59 | cuBLAS 26.35 us
+  pool fix: rel err 2.10e-06  elements out of tol 304874  spike-token bad 0
+  pool nofix: rel err 2.26e-06  elements out of tol 306769  spike-token bad 12
+pool N4096 K8192 S2  ESCW=0 escapes 2328 (0.57/row, 0 subnormal v): g30+fix 23.47 | g30 nofix 22.80 | cuBLAS 26.82 us
+== DEFS= ESCW=1
+  unp fix: rel err 1.65e-03  elements out of tol 3  spike-token bad 0
+  unp nofix: rel err 1.65e-03  elements out of tol 18369  spike-token bad 18070
+unp N8192 K4096 S1  ESCW=1 escapes 21309 (2.60/row, 2027 subnormal v): g30+fix 25.18 | g30 nofix 22.72 | cuBLAS 26.11 us
+  pool fix: rel err 2.10e-06  elements out of tol 304683  spike-token bad 0
+  pool nofix: rel err 2.92e-06  elements out of tol 320881  spike-token bad 9033
+pool N4096 K8192 S2  ESCW=1 escapes 11349 (2.77/row, 1054 subnormal v): g30+fix 24.13 | g30 nofix 23.06 | cuBLAS 26.66 us
+== DEFS=-DG30_ROT=1 ESCW=0
+  unp fix: rel err 1.66e-03  elements out of tol 41  spike-token bad 0
+  unp nofix: rel err 1.66e-03  elements out of tol 122  spike-token bad 22
+unp N8192 K4096 S1 -DG30_ROT=1 ESCW=0 escapes 3261 (0.40/row, 0 subnormal v): g30+fix 27.14 | g30 nofix 26.85 | cuBLAS 26.32 us
+  pool fix: rel err 2.10e-06  elements out of tol 304579  spike-token bad 0
+  pool nofix: rel err 2.27e-06  elements out of tol 306215  spike-token bad 12
+pool N4096 K8192 S2 -DG30_ROT=1 ESCW=0 escapes 2328 (0.57/row, 0 subnormal v): g30+fix 28.61 | g30 nofix 28.85 | cuBLAS 26.64 us
+== DEFS=-DG30_ROT=1 ESCW=1
+  unp fix: rel err 1.65e-03  elements out of tol 36  spike-token bad 0
+  unp nofix: rel err 1.65e-03  elements out of tol 18367  spike-token bad 18070
+unp N8192 K4096 S1 -DG30_ROT=1 ESCW=1 escapes 21309 (2.60/row, 2027 subnormal v): g30+fix 27.90 | g30 nofix 27.25 | cuBLAS 26.46 us
+  pool fix: rel err 2.10e-06  elements out of tol 304421  spike-token bad 0
+  pool nofix: rel err 2.93e-06  elements out of tol 320671  spike-token bad 9033
+pool N4096 K8192 S2 -DG30_ROT=1 ESCW=1 escapes 11349 (2.77/row, 1054 subnormal v): g30+fix 29.09 | g30 nofix 28.32 | cuBLAS 26.91 us
+== DEFS=-DG30_R2=1 ESCW=0
+RuntimeError: g30 launch failed
+== DEFS=-DG30_R2=1 ESCW=1
+RuntimeError: g30 launch failed
+finished
