@@ -2,7 +2,7 @@
 # (WEIGHTS_SEED)); its prepare() runs the H200 tuner ('layer tune T=...' lines) and any DIAG switched on in the file.
 import time
 ref = mods["reference"]
-w = ref.generate_weights(ref.WEIGHTS_SEED)
+w = ref["generate_weights"](ref["WEIGHTS_SEED"])
 torch.cuda.synchronize()
 t0 = time.time()
 st = sub["prepare"](w)

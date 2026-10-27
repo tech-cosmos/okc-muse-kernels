@@ -12,6 +12,10 @@ elif kind == "layer":  # the layer's own DIAG switches must already be set in it
     guest = open(os.path.join(path, "submission.py")).read()
     order = ["nvfp4", "checks", "reference"]
     mods = {m: open(os.path.join(path, m + ".py")).read() for m in order}
+    for m in order:  # `from <helper> import a, b` -> names from the helper's namespace (no sys.modules: the judge rejects edits)
+        mods[m] = re.sub(r"^from (" + "|".join(order) + r") import (.+)$",
+                         lambda mm: "; ".join(f"{n.strip()} = _guest_mods['{mm.group(1)}']['{n.strip()}']"
+                                              for n in mm.group(2).split(",")), mods[m], flags=re.M)
 else:
     sys.exit("kind = moe | layer")
 driver = open(os.path.join(d, f"{kind}_driver.py")).read()
