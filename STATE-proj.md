@@ -1,5 +1,5 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 07:10 UTC (s65: g27 PD at M=8 (12-bit o at T=8, dev/s65) correct, standalone H100 4.77 vs cuBLAS 7.84 us, but LOSES in the layer v1: sl +0.9..1.0, full +3..3.8 us (pre-wait W stream + whole-RF blocks slow vtk/attn_split): DEAD. s64: gemv28 = x as wgmma A + W decoded into smem as wide-N B (dev/s64): correct but DEAD in this form: H100 pool m32 20.9 vs g24 20.7, m16 19.8-21.1 vs 18.5; NOW m32 19.5 vs g24 15.8; the decoder->MMA mbarrier handoff chain costs ~0.33 us/stage (~= one stage of HBM time). s63: G24P = pooler EZ at T=32 as a layer TUNE option, dev/s63/g24p_layer.patch: correct, H100 loses
+Updated 2026-10-27 07:05 UTC (s66: mined 8 layer H200 tuner logs (dev/s66/tune_stats.py): the tuner keeps one option set, so consistent singles (T=32 g24:qkv_gate -0.84 full 8/8, -0.57 sl) never stack with tk2h 4: handoff dev/s66/tune32_stack_layer.patch (TUNE[32] combos; tests 0 bad). s65: g27 PD at M=8 (12-bit o at T=8, dev/s65) correct, standalone H100 4.77 vs cuBLAS 7.84 us, but LOSES in the layer v1: sl +0.9..1.0, full +3..3.8 us (pre-wait W stream + whole-RF blocks slow vtk/attn_split): DEAD. s64: gemv28 = x as wgmma A + W decoded into smem as wide-N B (dev/s64): correct but DEAD in this form: H100 pool m32 20.9 vs g24 20.7, m16 19.8-21.1 vs 18.5; NOW m32 19.5 vs g24 15.8; the decoder->MMA mbarrier handoff chain costs ~0.33 us/stage (~= one stage of HBM time). s63: G24P = pooler EZ at T=32 as a layer TUNE option, dev/s63/g24p_layer.patch: correct, H100 loses
 +2..5 us (router-critical there), H200 bound -1..-1.5 us: handoff for the H200 tuner. Pooler grid >108 at T=32: dead (layer s18 H200). s62: layer's HYBRID BF16+12-bit rows g24 (dev/s62, HY mode, correct) DEAD: H100 consumer-only a BF16 row
 costs the same as a 12-bit row at m32 (m16 -4..8%), so only bytes grow. s61: g24 m32 consumer anatomy (clock64, dev/s61): latency-bound; per warp setup zero/fence/epoch +
 barrier spin ~15 kcyc, x arrives ~3 us after the wait; XSP / DF (runtime npre bits 19/20) correct but DEAD on H200 (check e25a1d4d
@@ -128,6 +128,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## it is one local array summed explicitly + operand fences (NOTES s60). g24 R=2 at m32 dead too.
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
+0b. Layer: watch for the s66 TUNE[32] combos {tk2h 4(, lt:o), g24:qkv_gate} in a layer check (tune T=32 lines).
 0a. Layer: watch for G24P (Handoffs proj s63) in a layer check; read 'layer tune T=32' {'g24p': True} vs default (sl/full).
 0. Layer: watch for G24X (Handoffs proj s59) in a layer check; read the 'layer tune T=16' {'g24x': False} entry.
 1. Layer: watch for g27 (Handoffs proj s57/s58) in a layer check; read its "layer tune T=16" g27:o line.

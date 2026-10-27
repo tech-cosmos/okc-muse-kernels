@@ -1436,3 +1436,22 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   seeds 99,7, G27_ON without/with ("o", 8): verify 1 sliding 141.56/115.87 -> 142.44/116.88 (+0.9/+1.0), full
   155.05/129.70 -> 158.85/132.70 (+3.8/+3.0); verify 16 untouched (tie). DEAD: the pre-wait W stream + whole-RF blocks
   hurt vtk / _attn_split+_combine more than o gains (same lesson as pr1 npf / PR1_BND). No handoff. No judge runs.
+
+## s66 (2026-10-27 06:24-07:05Z, sandbox okc-night4, session 23): H200 tuner-log mining -> T=32 stacked TUNE candidates (handoff)
+- Layer H200 profile 2f7349ee (v119, 2.0855x) per-kernel: d32 sl g24 pool+unp 48.4 (2 calls), qkv cuBLAS 12.8, o cuBLAS 6.2;
+  d16 sl g24 qkv+unp 33.4, pooler (4,3,12) 17.6, o g27 7.6. H200 tuner T=32: g24:pooler/unpool off = tie (167.2 vs 167.6):
+  at m32 every pooler/unpool kernel we have costs the same in the layer (consumer-bound wall, s50/s56 diag: NOW NOMMA
+  skeleton alone 10.6 us on H200). Did not reopen the m32 consumer (s18/s51/s60/s61/s64 ablations: dead in every form).
+- New dev/s66/tune_stats.py: per-option deltas vs default over the newest 8 layer judge logs. The tuner keeps ONE option set
+  per (T, type), so consistent small singles never stack with the winner (tk2h 4). Consistent H200 singles:
+  T=32 full g24:qkv_gate -0.84 us mean (8/8 negative), sliding -0.57 (6/8); g24sk:qkv_gate -0.55/-0.45; lt:o full -0.46 (7/8);
+  tk2fj False -0.6 at T=16 sl (8/8, already picked) and T=32 (6-7/8). tk2h 4 (+lt:o) is the usual T=32 pick (-2.5/-4.5).
+- H100 ab_flag (r-layer 6145e6d copy /tmp/pj66/L, TUNE_BASE forced, 5 rounds x seeds 99,7, us): base {tk2h 4, lt:o}
+  sl 192.38/197.62 full 408.32/417.63 | + g24:qkv_gate 191.71/197.95, 407.84/416.19 | + tk2fj False 192.16/198.77,
+  408.18/416.66. (Without lt:o: + g24:qkv_gate sl tie, full -1.2/-1.35.) Correct: v_c.py (tk2h 4 + lt:o + g24:qkv_gate +
+  tk2fj off forced at T=32) scored_test decode 32 x3 0 bad, replay_test 20 x seeds 11,23 0/80.
+- Handoff dev/s66/tune32_stack_layer.patch (applies to r-layer 6145e6d): TUNE[32] += {tk2h 4, g24:qkv_gate},
+  {tk2h 4, lt:o, g24:qkv_gate}. Expected H200 ~-0.5..-1 us at d32 sl/full (~0.05% score); zero risk (tuner decides).
+  Suggested to layer: a generic stacking pass (merge the winner with singles that beat default in the same run, one ABBA
+  confirm) would harvest these everywhere, but combos then need correctness tests (tuner does not check outputs).
+- No judge runs this session.
