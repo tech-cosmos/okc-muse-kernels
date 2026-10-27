@@ -1208,3 +1208,19 @@
 - Big-M levers left after this (all need new work): first-wave HBM under-use (v16 ~10 us at 2.7 TB/s; v32 without hot ~25 us
   at ~1 TB/s), v32 aggregate consumer bound (N16-N32 items 44-50 us vs N8 37.6 for the same bytes; dq + MMA do not overlap,
   s18), and the remaining ~17 us drain at v16 (halves only shorten the last items to ~half).
+
+## Night4 session 16 (2026-10-27 01:50Z - ~02:50Z; moe checks 6/20 used today) -- tk2h on SQ stages: d32 -1.7 H200 us
+- The layer's H200 profile (b9685e03) shows it runs tk2h (moe_tk2f<.., 16, 1, 4> = GS16 + PF4) at d32, which had no SQ
+  (n14's single-copy stages were gs8-only). The SQ stage image is byte-identical to the 3-copy stage and tk2h shares
+  tk2f_produce, so tk2h + SQ = PF 516 on w13sq/w2sq: new dispatch in the `if (sq)` block (TK2H_P4 || TK2_EXP builds),
+  python TK2H_SQ = 1 (cfg 14x004 -> + 10000000). Bitwise vs 3-copy 348/348 (tools/n16/hsq_t.py, SUB = TK2H_P4 1 copy).
+- DIAG builds now compile TK2H_P4 (not TK2F_SQ4; KPS 4 SQ images behind TK2F_SQ4_DIAG = False: dead, saves ~0.9 GB).
+- H200 check 8b79cc25 (03b61af + DIAG, 2.221x test run, never submit), MEAN us over 5 layer seeds:
+            sq (gs8)  h16w2  h16w2sq  h16w3  h16w3sq  sqb
+    d1      30.0      30.2   30.2     30.1   30.1     30.1   (tk2h not used at M = 1: same kernel)
+    d16     65.3      69.6   68.8     71.0   69.4     65.5
+    d32     86.3      86.9   86.7     86.2   84.5     86.3
+    v1      64.7      64.6   64.8     64.5   64.8     64.4   (same kernel)
+    v16 s66 171.3, v32 s66 207.0
+  => at d32 tk2h W3 + SQ -1.7 us vs tk2h W3 (the layer's pick) and vs gs8 SQ; d16 keeps gs8 SQ. Handoff + Request posted
+  (port note tools/n16/hsq_layer.md). Layer weight ~1.7 x .056 = ~0.1%.

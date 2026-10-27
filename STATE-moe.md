@@ -69,6 +69,11 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 16 (01:50-02:50Z): TK2H_SQ = 1 on main (03b61af): tk2h (GS16+PF4, what the layer runs at d32) on the SQ
+  single-copy stages, bitwise 348/348. H200 DIAG 8b79cc25: d32 h16w3sq 84.5 vs h16w3 86.2 vs gs8 sq 86.3 (-1.7); d16 tk2h
+  still loses (68.8+ vs 65.3). Port note tools/n16/hsq_layer.md, posted to layer. Checks today 6/20.
+  NEXT (unchanged big levers, NOTES n15 end): v16/v32 first-wave HBM under-use; big-M is dq-bound (s22 floor ~185 us v32).
+
 ## Night4 session 15 (01:06Z-): FIRST H200 big-M TIMELINE (check 5bbb03ca, NOTES n15): v16 twm co-bound (busy/G 136 vs ~127 bytes),
   losses = drain ~22 us (items 36-50 us) + first wave at 2.7 TB/s; v32 consumer-bound in aggregate (hot passes, N16-32 items),
   first 35 us at ~1 TB/s without hot; hot32 -7. twq4 LOSES on the H200 moe-only at v16 (+2.2). BUG fixed: twm launch clamped
