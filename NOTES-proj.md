@@ -1643,3 +1643,22 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 Lane (b). Read COORD: no new Handoffs/Requests for proj since v125 (moe s28/s29 ablations only, no build; layer s81 tk2f
 closed by H200 diag 93a0990d; layer s82 claims the v125 submit under the lead's 09:28Z rule, v125 already passed
 tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 work.
+
+## s78 (2026-10-27 09:52Z-, night4 session 35): lane (b): attention key-coverage oracle; no judge runs
+- Lead 09:45Z: attention REOPENED (layer edits _gd_full/_gw_verify in attn_src.py; moe builds attention kernels on the
+  attention board); proj stays (b). No new Handoff to port. Gap found: the layer check's 3-15% bound cannot see a dropped
+  or duplicated KV tile / window off-by-one (one 128-key tile of 80K moves the output ~0.2%).
+- Built muse_decode_layer/tools/attn_probe.py (branch proj/attnprobe 6e8d0bb, + validate.py step 'attn'):
+  K cache = 0 and qkv k/v parts = 0 -> every score 0 (uniform softmax, independent of FP8-vs-BF16 queries); V cache = 0
+  except 64 one-hot probes per (request, KV head) per pass (dim i = 1.0 at position p_i), positions swept over
+  [first visible - 2, seq) (the 2 just outside the window must be masked). Ref = reference._attention with qkv_gate = I
+  (TF32 off) on the same BF16 qkv; calls sub.attn_kernel_fn eagerly (csl_pw off) at 29 shapes (12 scored, 13 tests, 4
+  odd: ctx 2049/2050/4097/9001, page 64). Stale bytes (0x44) pre-filled in the new rows: kernel must write +-0 there.
+  --passes=N spread passes (default 8), 0 = exhaustive; --control hides one probe from the kernel.
+- First design was wrong: with random new-token k, the new key's score (exp up to ~e^10) made the result sensitive to the
+  allowed FP8 query rounding (2-49% "errors"). Zeroing k fixed it. Sliding kernels write -0.0 (0x80) for the zero K: OK.
+- v125 (2663c2c) H100: 29/29 PASS at 8 passes (16 s warm), worst 2.46e-3. Control: 29/29 FAIL (0.14-0.49).
+- Exhaustive (--passes=0, every key position of every request, 12 scored shapes): v125 12/12 PASS, worst 2.07e-3
+  (~22 min H100, mostly the FP32 reference at full T=16/32). Posted Handoffs + Requests (layer: run
+  `validate.py --only=attn` or `attn_probe.py <file>` on each attn_src.py change; exhaustive before a submit).
+- No judge runs. Checks 10-27 proj still 8/20, scored 1/10.

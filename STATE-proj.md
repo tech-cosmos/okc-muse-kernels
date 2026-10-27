@@ -1,4 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 10:25 UTC (s78). Lead 09:45Z: attention reopened (layer: _gd_full/_gw_verify; moe: attention board);
+proj stays (b). S78: branch proj/attnprobe (6e8d0bb): tools/attn_probe.py = attention KEY-COVERAGE oracle (K=0, k/v=0
+-> uniform softmax, V one-hot probes; dropped/extra key -> 0.14-0.49 vs noise 2e-3) + validate.py step 'attn'. v125:
+29/29 at 8 passes, exhaustive 12/12 scored. Next: run it (and validate.py) on every layer attention change / moe handoff.
 Updated 2026-10-27 09:40 UTC (s77). S77: still nothing to port (moe s29 no build; layer s81 closed tk2f; layer submitting v125 = validated s75). No runs.
 Prev update 09:30 UTC (s76): same, no bundles.
 Prev update 09:50 UTC (s75). LANE (lead 08:55Z): (b) = integration/testing for layer: port Handoffs into the layer on a
