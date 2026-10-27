@@ -2029,3 +2029,18 @@
   test 0/13, scored 0/12, opt 0/354, replay 0/240, route 0/240 (worst gap 0.0256), fuzz 0/362: ALL OK. Handoff posted in COORD.
 - Next session (after 00:00Z): read the layer's H200 'layer tune T=16/32' pr32 lines (v141 check). If pr32 wins: make sure SA is
   in, then try MTOK16 variants; if it loses, ask layer for a PR_TL timeline DIAG. moe checks reset at 00:00Z (20).
+
+## Night5 session 4 (2026-10-27 21:32Z - ~22:15Z) -- pr32 PR_HL (router hi+lo fold in-CTA): tie, kept off; 0 checks
+- Idea: the finisher chain ingests 64 x 2 KB per finisher and sums [512] hi|lo partials. PR_HL 1 packs each 64-row router
+  group as [hi 32 rows | the same 32 lo rows] (host: cat([hi.view(8,32,K), lo.view(8,32,K)], 1)), so warp 10 folds
+  r + (r+32) (and WG0 + WG1) before the DSMEM push / partial store: partials [rg][p][T][32], finisher ingest 64 x 1 KB,
+  sum over 256 full logits, route_token uses lg[e] directly; logits scratch gets only the first 256 columns.
+  FP32 association change only. Exact: pr32.py RS=4 x 3 reps M16/M32 BAD 0, routing == triton on our logits, == FP64 route.
+- H100 L2W timeline M32 (us from first entry): HL0 -> HL1: rstore 5.1 -> 4.6, rpart 7.2 -> 6.4, fpoll 7.9 -> 6.9,
+  fingest 10.2 -> 9.2, fxchg 11.3 -> 10.0, froute 13.6 -> 12.3; pdone max 15.9 / 16.1, end max 16.9 both.
+  => routing chain -1.3 us, but after PR_SA it already ended ~2 us before the pooler: not on the critical path.
+- Timing (us over 3 us PDL pred, 3 reps): M32 HBM 22.30-22.37 vs 22.16-22.48; L2W 17.12-17.20 vs 16.93-17.09;
+  M16 HBM 21.60-21.89 vs 21.62-21.92; L2W 16.16-16.22 vs 16.35-16.38. = tie. PR_HL stays 0 (would also need the layer's
+  _pr32_prepare packing change). Kept in body3.cu/pr32_src.cu as an option (pr32.py packs by DEFS).
+- Conclusion: pr32 end-to-end = the pooler stream (+ ~1 us pair tail); chain levers are exhausted until the H200 says otherwise.
+- Next: after 00:00Z read layer's v141 check 'layer tune T=16/32' pr32 lines (and make sure layer took PR_SA, 11d49b7).

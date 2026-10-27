@@ -122,6 +122,10 @@ __device__ __forceinline__ void wg_mma_rs(float* d, unsigned a0, unsigned a1, un
 #ifndef PR_SA
 #define PR_SA 1  // n5s3: pair handoffs by st.async + mbarrier complete_tx (rank 1 fires and exits; no fence/bar.sync)
 #endif
+#ifndef PR_HL
+#define PR_HL 0  // n5s4: router rows packed as [hi 32 | lo 32] per 64-row group: hi + lo folded in-CTA, half the partial bytes
+#endif
+#define PR_RW (PR_HL ? 32 : 64)  // pair partial width (logits per 64-row group)
 #define PR_RBS (PR_SA ? 3 : G30_S - 1)  // pooler partial slots in rbuf (SA: rank 1 wg0, rank 1 wg1, rank 0 wg1)
 #define PR_NR (PR_ROUTER ? 128 / PR_RKS : 0)  // router stages per CTA
 constexpr int E = 256, TOPK = 8;
@@ -152,7 +156,11 @@ __device__ __forceinline__ void route_token(const RArgs& a, const float* lg, con
 #pragma unroll
   for (int i = 0; i < E / 32; ++i) {
     const int e = lane + 32 * i;
+#if PR_HL
+    const float l = lg[e];  // hi + lo already folded
+#else
     const float l = lg[e] + lg[E + e];  // hi + lo
+#endif
     sc[i] = 1.f / (1.f + expf(-l * a.mult));
     const unsigned u = __float_as_uint(sc[i] + bs_[e] + 0.0f);
     key[i] = u ^ ((unsigned)((int)u >> 31) | 0x80000000u);
@@ -185,12 +193,25 @@ __device__ __forceinline__ void route_token(const RArgs& a, const float* lg, con
   }
 }
 
+// router partial element idx of [T][PR_RW]: WG0 + WG1 accumulators ([2][T][64]); PR_HL: + the lo row (r + 32) too
+__device__ __forceinline__ float4 rsum4(const float* rred, int idx) {
+#if PR_HL
+  const int b = (idx >> 5) * 64 + (idx & 31);
+  const float4 a = *(const float4*)(rred + b), c = *(const float4*)(rred + G30_MTOK * 64 + b);
+  const float4 e = *(const float4*)(rred + b + 32), h = *(const float4*)(rred + G30_MTOK * 64 + b + 32);
+  return make_float4((a.x + c.x) + (e.x + h.x), (a.y + c.y) + (e.y + h.y), (a.z + c.z) + (e.z + h.z), (a.w + c.w) + (e.w + h.w));
+#else
+  const float4 u = *(const float4*)(rred + idx), v = *(const float4*)(rred + G30_MTOK * 64 + idx);
+  return make_float4(u.x + v.x, u.y + v.y, u.z + v.z, u.w + v.w);
+#endif
+}
+
 // finishers (clusters x = 0, 1: 4 CTAs on the 4 SMs the 128 streaming CTAs leave free): f = 2 x + y routes tokens
 // 8 f .. 8 f + 7. Waits for the 64 pair partials, pulls its 8-token chunks of all of them (64 x 2 KB) in one bulk shot,
 // sums them in pair-slice order (deterministic), routes one token per warp.
 __device__ __forceinline__ void finisher(const RArgs& a, uint8_t* sm, uint64_t* fb, float* bs_, float* lgb) {
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, f = 2 * blockIdx.x + blockIdx.y;
-  constexpr int TPF = G30_MTOK / 4, CH = TPF * 64 * 4, NP = 8;  // tokens per finisher, chunk bytes, pair slices per rg
+  constexpr int TPF = G30_MTOK / 4, CH = TPF * PR_RW * 4, NP = 8;  // tokens per finisher, chunk bytes, pair slices per rg
   asm volatile("griddepcontrol.wait;" ::: "memory");
   if (tid < E) bs_[tid] = __ldg(a.bias + tid);
   const int ls = __ldg(a.ls);
@@ -207,27 +228,28 @@ __device__ __forceinline__ void finisher(const RArgs& a, uint8_t* sm, uint64_t* 
     asm volatile("fence.proxy.async.global;" ::: "memory");
     mbar_expect_tx(fb, 64 * CH);
     for (int i = 0; i < 64; i++)
-      bulk1d(sm + i * CH, (const uint8_t*)a.part + ((size_t)i * G30_MTOK + TPF * f) * 64 * 4, CH, fb);
+      bulk1d(sm + i * CH, (const uint8_t*)a.part + ((size_t)i * G30_MTOK + TPF * f) * PR_RW * 4, CH, fb);
   }
   __syncthreads();
   mbar_wait(fb, 0);
   if (tid == 0) TLX(a, 2)
   if (warp < TPF) {
     const float* c = (const float*)sm;
-    float* lg = lgb + warp * 2 * E;  // this warp's token: [512] logits
+    float* lg = lgb + warp * 2 * E;  // this warp's token: [512] logits (PR_HL: [256] full logits)
+    constexpr int NL = PR_HL ? E : 2 * E;
 #pragma unroll
-    for (int i = 0; i < 2 * E / 32; i++) {
-      const int row = lane + 32 * i, rg = row >> 6, r = row & 63;
+    for (int i = 0; i < NL / 32; i++) {
+      const int row = lane + 32 * i, rg = row / PR_RW, r = row % PR_RW;
       float s = 0.f;
 #pragma unroll
-      for (int p = 0; p < NP; p++) s += c[((rg * NP + p) * TPF + warp) * 64 + r];
+      for (int p = 0; p < NP; p++) s += c[((rg * NP + p) * TPF + warp) * PR_RW + r];
       lg[row] = s;
     }
     __syncwarp();
     if (tid == 0) TLX(a, 3)
     route_token(a, lg, bs_, TPF * f + warp, lane, ls);
 #pragma unroll
-    for (int i = 0; i < 2 * E / 32; i++) __stcg(a.logits + (TPF * f + warp) * 2 * E + lane + 32 * i, lg[lane + 32 * i]);
+    for (int i = 0; i < NL / 32; i++) __stcg(a.logits + (TPF * f + warp) * 2 * E + lane + 32 * i, lg[lane + 32 * i]);
     if (tid == 0) TLX(a, 7)
   }
 }
@@ -271,7 +293,7 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
 #if PR_SA
     if (blockIdx.y == 0 && blockIdx.x >= 2) {  // bytes the pushes will complete (may land before or after this)
       mbar_expect_tx(rbar, 3 * G30_ND * 128 * 4);
-      mbar_expect_tx(pbar, G30_MTOK * 64 * 4);
+      mbar_expect_tx(pbar, G30_MTOK * PR_RW * 4);
     }
 #endif
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
@@ -288,13 +310,13 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
       uint32_t rb, rm;
       asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rb) : "r"(smem_u32(rpair)));
       asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rm) : "r"(smem_u32(pbar)));
-      for (int idx = lane * 4; idx < G30_MTOK * 64; idx += 128) {
-        const float4 u = *(const float4*)(rred + idx), v = *(const float4*)(rred + G30_MTOK * 64 + idx);
+      for (int idx = lane * 4; idx < G30_MTOK * PR_RW; idx += 128) {
+        const float4 v = rsum4(rred, idx);
 #if PR_SA
-        st_async4(rb + idx * 4, u.x + v.x, u.y + v.y, u.z + v.z, u.w + v.w, rm);
+        st_async4(rb + idx * 4, v.x, v.y, v.z, v.w, rm);
 #else
-        asm volatile("st.shared::cluster.v4.f32 [%0], {%1, %2, %3, %4};" :: "r"(rb + idx * 4), "f"(u.x + v.x), "f"(u.y + v.y),
-                     "f"(u.z + v.z), "f"(u.w + v.w) : "memory");
+        asm volatile("st.shared::cluster.v4.f32 [%0], {%1, %2, %3, %4};" :: "r"(rb + idx * 4), "f"(v.x), "f"(v.y),
+                     "f"(v.z), "f"(v.w) : "memory");
 #endif
       }
 #if !PR_SA
@@ -307,12 +329,12 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
         "{\n .reg .pred p;\n PR32_PW:\n"
         " mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], 0;\n"
         " @!p bra PR32_PW;\n}\n" :: "r"(smem_u32(pbar)) : "memory");
-    float* pp = ra.part + (size_t)(rg * 8 + (g & 7)) * G30_MTOK * 64;
+    float* pp = ra.part + (size_t)(rg * 8 + (g & 7)) * G30_MTOK * PR_RW;
     if (lane == 0) TLX(ra, 0)
-    for (int idx = lane * 4; idx < G30_MTOK * 64; idx += 128) {
-      const float4 u = *(const float4*)(rred + idx), v = *(const float4*)(rred + G30_MTOK * 64 + idx);
+    for (int idx = lane * 4; idx < G30_MTOK * PR_RW; idx += 128) {
+      const float4 v = rsum4(rred, idx);
       const float4 w = *(const float4*)(rpair + idx);
-      __stcg((float4*)(pp + idx), make_float4(u.x + v.x + w.x, u.y + v.y + w.y, u.z + v.z + w.z, u.w + v.w + w.w));
+      __stcg((float4*)(pp + idx), make_float4(v.x + w.x, v.y + w.y, v.z + w.z, v.w + w.w));
     }
     __threadfence();
     __syncwarp();
@@ -579,7 +601,7 @@ void pr32_launch(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Te
   static_assert(G30_S == 2, "pr32: pair router reduce needs S = 2");
   const int smem = G30_NS * G30_XBOX + G30_NW * PR_SLOT + 1024 + 3 * G30_MTOK * 64 * 4 + G30_ND * 128 * 4 * PR_RBS + 1024 + 1024;
   // finisher: 64 chunks + 8 x [512] logits below the barriers
-  TORCH_CHECK(64 * (G30_MTOK / 4) * 256 <= G30_NS * G30_XBOX + G30_NW * PR_SLOT, "pr32: finisher smem");
+  TORCH_CHECK(64 * (G30_MTOK / 4) * PR_RW * 4 <= G30_NS * G30_XBOX + G30_NW * PR_SLOT, "pr32: finisher smem");
   static bool once = false;
   if (!once) { cudaFuncSetAttribute(pr32::pr32_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
   pr32::RArgs ra{(const uint8_t*)rw.data_ptr(), part.data_ptr<float>(), logits.data_ptr<float>(), cnt.data_ptr<int>(),
