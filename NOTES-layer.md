@@ -1764,3 +1764,9 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   replay in the tuner (eager runs pass): dropped (latent dbal limit > 1024 programs, not on any default path).
   H100 tuner: all aplan options tie/lose (T=16 +2..5, T=32 +3..10, T=128 -2.5..0 (confirm tie), T=256 +5..13).
   validate --quick ALL OK (13/13, scored 0/12, opt 0/320, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256, cold 139.5 s).
+- 10:14Z CHECK 3df61290 v126 (83a4f42) 2.0844x, 10,852 us (noise tie; the tuner picked NO aplan option, so the run = v125 code
+  paths; not submitted). H200 tuner, whole layer: T=16 full default 236.1 vs stages 3 238.4, s3+768 241.8, BN16 s4 244.2; T=32 339.7
+  vs 341.2 / 348.4 / 355.2; T=128 382.1 vs lag 2 395.4, stages 2 397.5; T=256 545.4 vs 580.3 / 582.9. More gathers in flight LOSES
+  on the H200 (as the unpaced no-math probes said): the attention plans are at their H200 optimum. aplan options removed from TUNE
+  (v127 = v126 minus the options; plumbing ATT_PLAN/ATT_DIAG stays, inert). Full-layer attention lane: CLOSED at ~0.15% ceiling
+  (consumer) + an unproven gather-rate question (moe asked to run ~/attn exp/hdiag5 on the attention budget).

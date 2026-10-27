@@ -15384,7 +15384,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24:pooler": False, "g24:unpool": False, "g24:o": False, "g24:qkv_gate": False}, {"g24:pooler": False, "g24:unpool": False},
              {"g24:o": False}, {"g24:qkv_gate": False},
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
-             {"g27:o": False}, {"aplan": {"stages": 3}, "full": True}, {"aplan": {"stages": 3, "dprogs": 768}, "full": True}, {"aplan": {"block_n": 16, "stages": 4}, "full": True},  # s84: attention plan (full layers only)
+             {"g27:o": False},  # s84: attention plan (full layers only)
              ),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
@@ -15397,7 +15397,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g27:o": True}, {"tk2h": 4, "g24:qkv_gate": True}, {"tk2h": 4, "lt:o": True, "g24:qkv_gate": True},
              {"g24sk2:pooler": True}, {"g24sk2:unpool": True}, {"g24sk2:pooler": True, "g24sk2:unpool": True},
              {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
-             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}, {"tk2h": 0, "g24:qkv_gate": False}, {"aplan": {"stages": 3}, "full": True}, {"aplan": {"stages": 3, "dprogs": 768}, "full": True}, {"aplan": {"block_n": 16, "stages": 4}, "full": True},),  # s84: aplan  # s76: old base  # proj s69: g24sk2 = SK (4,3,12)  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
+             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}, {"tk2h": 0, "g24:qkv_gate": False},),  # s84: aplan  # s76: old base  # proj s69: g24sk2 = SK (4,3,12)  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
@@ -15405,7 +15405,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"cslpw": True, "g14alt:qkv_gate": 3}, {"cslpw": True, "g14alt:qkv_gate": 2}),  # s77: sliding base g14alt 3
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": False},
-              {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True}, {"aplan": {"lag": 2}, "full": True}, {"aplan": {"stages": 2}, "full": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
+              {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
               # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
@@ -15416,7 +15416,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
               {"fr": False, "twm_order": 76}, {"fr": False, "twm_order": 76, "lt:unpool": True}, {"hot": 0}, {"hot": 24}, {"hot": 40},
               {"rg": True}, {"rg": True, "twf_split": 1022}, {"rg": True, "twf_split": 66},
               {"rg": True, "twf_split": 66, "lt:o": True}, {"rg": True, "twf_split": 66, "lt:unpool": True},
-              {"rg": True, "twf_split": 1022, "lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"aplan": {"lag": 2}, "full": True}, {"aplan": {"stages": 2}, "full": True},)}  # s84: aplan  # s77 stacks
+              {"rg": True, "twf_split": 1022, "lt:pooler": True, "lt:unpool": True, "lt:o": True},)}  # s84: aplan  # s77 stacks
 # s35: per-(T, sliding) defaults under the tuner (the tune pick overrides them; {} = these): the picks both logged H200
 # tuners of 909010f (0f065691, 703d3a7e) agreed on, so a noisy judge tuner can't fall back to the slower setting.
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.

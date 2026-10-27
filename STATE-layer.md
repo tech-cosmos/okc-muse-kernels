@@ -2,6 +2,10 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+s84: lane 2 (full attention in-layer, lead 09:45Z) MEASURED + CLOSED: H200 DIAG cf5e1621: d16/d32 full purely gather-bound (no math
+-1 us), v32 full free consumer -8 / free memory -20, v16 free consumer +21; H200 tuner (check 3df61290 v126, 2.0844x) rejects every
+attention plan variant (+2..37 us). Ceiling of full-attention work ~0.15% (+ unproven gather rate <= 0.4%). main = v127 (v125 code paths).
+Budget 10-27 left: 1 check / 4 submits. NOTES s84. Waiting for the lead's next lane (COORD Requests s84).
 s83: no lead answer to s81/s82 lane question; merged proj tools/validate.py (main ALL OK --quick, cold 115.5 s); 0 judge runs.
 s82: budget 10-27 left: 3 checks / 4 submits. Asked lead (COORD Requests s82) whether layer reopens full attention (+2.5% if at #1's attention speed).
 s80: **main = v125** (2663c2c) = v124 + moe s27 SCB (bitwise); check 19163546 2.0731x (noise tie, not submitted;
