@@ -85,23 +85,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   s24 twq timeline (check fccff52d): N8 items ~3.45 TB/s, N16 +15%, N32 +45% for the same bytes (consumer-bound); twq loop
   166 instr/warp/k-chunk at ~50% issue. s22: DQW (dq on the FMA pipe) dead; the decode consumer is latency-bound (ncu), not pipe-bound.
 
-## Night4 session 20 (04:33-05:35Z): S6 = 6-bit block-scale codes in the tk2f/tk2h SQ stages (lossless, -2.8% bytes, bitwise) DEAD
-  on the H200 (checks 13b528a8, c6b296a3): d16 +0.8, d32 +2.7 (tk2h +1.2), v1 -0.5 us; S6P (aligned starts) = S6. H100 said -2 us.
-  Wins only on byte-bound single-group rows: the H200 consumer is ALU-pipe-bound at d16/d32 (S6 moved IMAD -> LOP3 + SHF).
-  NEXT idea from it: shift dq work from the ALU pipe to the FMA pipe (IMAD-based shifts, like o3's *16648) -- untested.
-  Checks today 11/20. TK2F_S6 = 0 on main (code kept).
-
-## Night4 session 19 (03:27-04:45Z): moe_twq WBW (weights before griddepcontrol.wait, flags & 16, valid only with RG 0) DEAD:
-  bitwise, but H100 v16 +2.0 / H200 check 9da19e71 v16 +2.5, v32 +2 us (2 stages: +1). Early weight traffic slows the
-  gather -> x path (3rd time: RFLAG, PF2, WBW): no more pre-expert prefetch ideas. Checks today 9/20.
-  NEXT candidates (all small): layer still on TK2F_L2H 1 (port note n18, ~0.25%); phase-2 per-row rate on the H200.
-
-## Night4 session 18 (02:50-03:50Z): the layer is on TK2F_L2H mode 1 (moe uses 4) -> port note tools/n18/l2h4_layer.md
-  (H200 moe-only, mode 1 vs 4: d1 +0.5, d16 +1.6, d32 +1.1, v1 +0.5; H100 in-layer d16 sl -2..4.5). DEAD this session: PF2 (gemm2
-  L2 prefetch at the phase switch), per-phase L2 modes (H200 check 1b1d0fbd: 4/4 best), TK2H_REG (neutral; kept, bitwise).
-  The tk2h 2-group row is only 1.10-1.15x on the consumer side (warm L2): the H200's W3 = 1.375 comes from the memory side.
-  NEXT: H200 phase-2 per-row rate (14% slower than phase 1 on the H200 only; the G88 proxy shows none: needs DIAG timelines, e.g.
-  a no-spin probe); synthetic routings (10x8 vs 5x16 tokens) to measure extra-group vs expert cost for sq/h3. Checks today 8/20.
+## Night4 sessions 19-20: WBW (weights before wait) and S6 (6-bit scale codes) both DEAD on the H200 (NOTES n19/n20).
 
 ## Older sessions (n3-n17, s6-s7): see NOTES-moe.md (L2H run-time modes, TWM_PB48, BAL, tk2h PF4 are all there).
 
