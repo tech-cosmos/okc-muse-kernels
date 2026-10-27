@@ -1457,3 +1457,18 @@
   my HOTQ / NE requests withdrawn. DIAG_VARIANTS now always carry a twm control (+ repeat).
 - LESSON: every DIAG must contain the layer's default path as a control; any kernel change must be re-timed against an
   older build of the same variant (proxy SUB=<old module>), not only against sibling variants in the same build.
+
+## Night4 session 26 (2026-10-27 07:34Z - ~08:05Z; moe checks 18/20, no judge runs) -- audit + idea triage, no build
+- PDL load-order audit of every moe kernel (lead 06:50Z/10-26 ask; SASS of the main build, /tmp/moe26.sass): loads before
+  the first ACQBULK (griddepcontrol.wait) are only prepared constants: the e4m3 LUT copy in twm/twq/twf/tw/moe_hot
+  (LDG.CONSTANT at +0x600/+0xc00 = 384-thread LUT fill) and moe_norm's w1 (norm weight). moe_gather, moe_norm2,
+  moe_routegather: no pre-wait loads (routegather reads ids/X with __ldcg, layer s52 request done). moe_norm's
+  NORM_EARLY path never runs griddepcontrol.wait: ids/tw by __ldcg, Y by __ldcg after an ld.acquire of the expert flag,
+  and twm triggers its dependents only after its own wait (route/gather/router complete): OK. moe_tk2 (not a default
+  path) has 33 pre-wait LDG.CONSTANT: re-audit before ever using it.
+- Ranked idea -9 (warp-specialized twm consumer, written in s25) was already dead: s19 mb_ws.py measured full ~= T + M
+  with dequant warps and SS-MMA warps separated, and SS slower than RS. STATE corrected. mma.sync for N8 items: no H200
+  gain (N8 items already at the per-SM HBM share, s23).
+- Judge layer profile baae0e41 (v121) for reference: d32 sl tk2f 68.8 us (9-11 experts x 6.97 = HBM fit), v16 sl twm 180 +
+  moe_norm 38 (PDL wait), v32 sl twm 230 || moe_hot 211 (grid 32). The expert kernels sit at their fits; what remains in
+  moe's lane is the big-M drain (~20 us/call) and tk2f's fixed ~14 us (mostly hidden by layer TK2FX/TK2FJ).

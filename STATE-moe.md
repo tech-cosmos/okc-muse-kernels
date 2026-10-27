@@ -102,11 +102,11 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 ## Older sessions (n3-n17, s6-s7): see NOTES-moe.md (L2H run-time modes, TWM_PB48, BAL, tk2h PF4 are all there).
 
 ## Ranked ideas
--9. (s25) twm consumer at N16-N64 (items +15..60% per byte vs N8: dq and wgmma serialize inside each warp; TQ_DEEP showed the
-   wgmma wait itself is not it). Warp-specialized twm: dequant warpgroups write BF16 A tiles to smem (SW128), an MMA warpgroup issues
-   wgmma with A from smem, mbarrier ring between them, so dq of stage k+1 overlaps MMA of stage k across warps. Watch proj s64's
-   lesson (gemv28: per-stage mbarrier handoff ~0.33 us killed it): hand off >= 2 k-chunks per barrier. Big build; v16/v32 first wave
-   + hot passes are where it pays (n15: first wave 2.5-2.9 TB/s, v32 hot RT2 passes ~16 GB/s/SM). Measure vs the twm control.
+-9. DEAD (s26 re-read of s19): warp-specialized twm consumer (dq WGs -> BF16 A in smem -> SS wgmma WG) was already
+   microbenchmarked in s19 (tools/s19/mb_ws.py): full ~= T + M (no overlap even across warps), SS slower than RS (smem
+   bandwidth: 64 KB A written + read per RT4 stage). s22 pingpong: also nothing. Do not rebuild it.
+   Also: mma.sync for N8 items (s18 microbench -7%) buys nothing on the H200: light N8 items already run at the per-SM HBM
+   share (s23); N16 only -3%. Big-M levers left = the drain (~20 us/call, TWF_SPLIT_M halves already a layer TUNE option).
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
    all their tokens needs N 96-128 accumulators = a SEPARATE kernel (ptxas sizes registers for the whole function).
    E.g. hot experts on their own launch on a subset of SMs concurrently with twm/twq for the rest (2 streams or one
