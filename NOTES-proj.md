@@ -1692,3 +1692,15 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   the o-end -> pr8-end segment compares): A 29.5->55.8 = 26.3, 29.0->55.4 = 26.4 us; B 31.3->53.9 = 22.6, 28.0->49.7 = 21.7 us.
   => removing the bnd launch entirely saves ~4.2 us on that segment (upper bound: a megakernel still does bnd's work + a grid
   barrier ~1 us): realistic v1 sl ~2-3 us (~0.25-0.35% layer; v1 full ~0.1%). Posted to layer (COORD Requests).
+## s81 (2026-10-27 11:03-11:55Z): lane (b): ported moe s31 attention deltas layer lacked -> branch proj/attn31 c71dbb6: H100 TIE
+- No judge runs. No new layer/moe bundle since v128. Diffed r-moe muse_attention_decode (171ee8b..6c4fee3) vs layer attn_src.py:
+  layer v128 has the nvs cl part only. Missing: (1) csl decode/verify owner merge `vscale / den` and `ni / (1 + exp)` ->
+  __fdividef (NOT bitwise without fast-math: <= 2 ulp, FP32; d1/d16/v1 sl), (2) nds (decode 32 sliding) page-table L2 bulk
+  prefetch at kernel start (agentic-length heuristic span; hint only), (3) nds K-early (ready after K lands, new readyv for
+  P@V after the V transpose). csl's batched pt prefetch NOT ported: in-layer csl at T=16 is CSL_PW (page table read pre-wait).
+- Branch proj/attn31 (c71dbb6, on layer main fa3f107 = v128): bench test 13/13, tools/attn_probe.py 29/29 (8 passes).
+- H100 tools/ab_files.py sliding 6 rounds: A B A: d1 85.32/85.04/85.36, d16 188.18/187.93/187.87, d32 192.82/191.03/193.12,
+  v1 141.62/140.84/141.54, v16/v32 tie. B A B: d1 85.46/85.30/85.28, d32 193.14/191.21/192.90, v1 141.91/141.34/141.81.
+  => the MIDDLE file slot is ~1.8 us faster at d32 sl (and ~0.5 at v1) whatever its code: position artefact of ab_files
+  (each file's own prepare/tuner/allocations). Net effect of the deltas: tie (<= ~0.3 us) everywhere. Not worth a check alone;
+  stackable (low risk) into any layer bundle. LESSON for everyone: ab_files A/B/A must be repeated as B/A/B.

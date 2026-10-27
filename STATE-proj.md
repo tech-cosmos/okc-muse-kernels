@@ -1,4 +1,7 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 11:55 UTC (s81). Ported moe s31 attention deltas layer lacked (csl/vtk fast divides, nds pt L2 prefetch +
+K-early) -> branch proj/attn31 c71dbb6: tests 13/13, attn_probe 29/29, H100 TIE (ABA d32 -1.9 was a middle-slot artefact of
+tools/ab_files.py: reverses in BAB; always run both orders). Stackable, not check-worthy alone. NOTES s81.
 Updated 2026-10-27 10:58 UTC (s80). No bundle since v128. pr8 (T=8 chain) probes: in-loop 2nd L2 prefetch wave DEAD (+0.4..2.2 us
 H100); tail med->max ~2 us = stealing bound (below the line). H200 pr8 ~17 us after bnd vs 13.7 floor. NOTES s80.
 Updated 2026-10-27 10:58 UTC (s79). Validated layer v128 (536adfd, nvscl): full validate ALL OK (cold 121.3 s), attn_probe
