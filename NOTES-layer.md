@@ -1867,3 +1867,15 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   changes nds sync); patch = `git diff fa3f107 origin/proj/attn31 -- muse_decode_layer/attn_src.py`.
 - pr8 tuner variants for the next check: skipped (proj s36-s38/s80: no pr8 lever > ~1 us, H200 incl.).
 - 0 judge runs (layer checks 20/20 for 10-27). First check after 00:00Z: main v132.
+
+## s90 (2026-10-27 12:44Z-, night4 session 39): proj stream_fuzz merged; v132 fuzz-clean; 0 judge runs
+- Merged proj/fuzz 19b5ba1 tools (tools/stream_fuzz.py + validate.py step 'fuzz') into main. Full fuzz on main v132
+  (side,main,gside,gmain, 2 reps, every TUNE set per scored shape): 0/1462 bad (314 s). v132 = race-clean under injected delays.
+- H100 timelines (seed 99) for orientation: d1 sl 86.3 us (g13 qkv 13.0, csl 6.6, o 9.8 ovl, bnd, pr1 21.4, tk2f 34.7, n2u 8.4,
+  bnd -> end); v1 sl 145.5 (g14 14.8, vtk 6.9, pr8 32.4 span, tk2f 84.2, nu8, bnd); d16 sl 195.8 (g24 qkv 14.3, csl 13.1, g27 o,
+  bnd, g24 pool 26.6 || router_split 19.4 + _routing, tk2f 111.6, norm2, g24 unpool 30.0 span, bnd). Experts at stream rate;
+  pooler+router phase ~2.6 TB/s; nothing new found outside closed lanes.
+- Considered + dropped: L2-prefetching "hot" experts predicted from router_bias during attention. The reference's skew comes
+  from router rows aligned with the stream's mean direction (data), bias alone predicts weakly; s55 bounded expert L2
+  prefetch at <= ~1 us anyway. Not built.
+- Budget 10-27: layer checks 20/20 used, 4 submits left (nothing beats the board). First check after 00:00Z: main v132.
