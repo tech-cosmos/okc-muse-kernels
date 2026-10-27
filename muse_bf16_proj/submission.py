@@ -7463,14 +7463,39 @@ def _diag_guest():
     if t > GUEST_CAP - 150:
         print(f"guest skipped: proj prepare at {t:.0f} s", flush=True)
         return
+    import sys, tempfile, importlib.util
     g = json.loads(zlib.decompress(base64.b64decode(GUEST)))
-    ns = {"__name__": "guest_sub"}
+    mods = g.get("mods", {})  # guest-side modules (e.g. the layer's reference/nvfp4/checks), only while the guest runs
+    saved = {k: sys.modules.get(k) for k in mods}
+    tmp = tempfile.mkdtemp(prefix="pj_guest_")  # real files: triton's @jit needs inspect.getsource
+
+    def load(name, src):
+        f = f"{tmp}/{name}.py"
+        open(f, "w").write(src)
+        spec = importlib.util.spec_from_file_location(name, f)
+        m = importlib.util.module_from_spec(spec)
+        sys.modules[name] = m
+        spec.loader.exec_module(m)
+        return m
+
+    sub = None
     try:
-        exec(compile(g["sub"], "guest_sub.py", "exec"), ns)
-        exec(compile(g["driver"], "guest_driver.py", "exec"), {"sub": ns, "torch": torch, "T_LIMIT": _T_IMPORT + GUEST_CAP})
+        for name in g.get("order", list(mods)):
+            load(name, mods[name])
+        sub = load("guest_sub", g["sub"])
+        exec(compile(g["driver"], "guest_driver.py", "exec"), {"sub": vars(sub), "torch": torch,
+                                                               "mods": {k: sys.modules[k] for k in mods},
+                                                               "T_LIMIT": _T_IMPORT + GUEST_CAP})
     except Exception as e:
         print(f"guest failed: {type(e).__name__}: {str(e)[:400]}", flush=True)
+    finally:
+        sys.modules.pop("guest_sub", None)
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
     print(f"guest done at {time.time() - _T_IMPORT:.0f} s since import", flush=True)
-    ns.clear()
+    del sub
     torch.cuda.synchronize()
     torch.cuda.empty_cache()

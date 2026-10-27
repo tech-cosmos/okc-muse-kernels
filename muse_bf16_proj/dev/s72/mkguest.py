@@ -1,18 +1,28 @@
-"""python dev/s72/mkguest.py <guest submission.py> [driver.py] -> /tmp/pjg/submission.py (proj + GUEST; check only, never submit)."""
+"""python dev/s72/mkguest.py moe <moe submission.py>          (driver dev/s72/moe_driver.py)
+   python dev/s72/mkguest.py layer <r-layer muse_decode_layer dir> (submission.py + nvfp4/checks/reference; driver layer_driver.py)
+-> /tmp/pjg/submission.py = proj + GUEST (proj kernels off). Check only, NEVER submit."""
 import base64, json, os, re, sys, zlib
 d = os.path.dirname(os.path.abspath(__file__))
-guest = open(sys.argv[1]).read()
-driver = open(sys.argv[2] if len(sys.argv) > 2 else os.path.join(d, "moe_driver.py")).read()
-if "moe_w4a16" in guest:  # moe: force DIAG on
-    guest = re.sub(r"^DIAG = 0$", "DIAG = 1", guest, flags=re.M)
-blob = base64.b64encode(zlib.compress(json.dumps({"sub": guest, "driver": driver}).encode(), 9)).decode()
+kind, path = sys.argv[1], sys.argv[2]
+mods, order = {}, []
+if kind == "moe":
+    guest = open(path).read()
+    guest = re.sub(r"^DIAG = 0$", "DIAG = 1", guest, flags=re.M)  # moe: force DIAG on
+elif kind == "layer":  # the layer's own DIAG switches must already be set in its submission.py (e.g. _moe_DIAG = 1)
+    guest = open(os.path.join(path, "submission.py")).read()
+    order = ["nvfp4", "checks", "reference"]
+    mods = {m: open(os.path.join(path, m + ".py")).read() for m in order}
+else:
+    sys.exit("kind = moe | layer")
+driver = open(os.path.join(d, f"{kind}_driver.py")).read()
+blob = base64.b64encode(zlib.compress(json.dumps({"sub": guest, "driver": driver, "mods": mods, "order": order}).encode(), 9)).decode()
 s = open(os.path.join(d, "..", "..", "submission.py")).read()
 assert s.count('\nGUEST = ""\n') == 1
+s = s.replace('\nGUEST = ""\n', f'\nGUEST = "{blob}"\n')
 # proj's own kernels off (torch fallback): the check then pays only the guest's compile (judge prepare limit 300 s)
 imp = "    from torch.utils.cpp_extension import load_inline\n"
 assert s.count(imp) == 1
 s = s.replace(imp, "    def load_inline(*a, **k):\n        raise RuntimeError('GUEST build: proj kernels off')\n")
-s = s.replace('\nGUEST = ""\n', f'\nGUEST = "{blob}"\n')
 os.makedirs("/tmp/pjg", exist_ok=True)
 open("/tmp/pjg/submission.py", "w").write(s)
-print(f"wrote /tmp/pjg/submission.py ({len(s)} B, guest {len(guest)} B)")
+print(f"wrote /tmp/pjg/submission.py ({len(s)} B, guest {len(guest)} B, mods {list(mods)})")
