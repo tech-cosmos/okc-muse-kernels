@@ -1233,4 +1233,4 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - Check ed67748e9a684fe7 (ca7e557 = main, diags off): PASSED 1.3277x (3638.4 us), > board best 1.3110 (2480c53). Per-shape
   speedups: m1 qkv 1.41 o 1.08 pool 1.45 unp 1.84 router 2.92; m8 1.24/1.02/1.29/1.37/5.11; m16 1.11/1.07/1.15/1.09/2.77;
   m32 1.10/1.04/1.15/0.99/2.49; m128 1.14/1.04/1.23/1.01/1.84; m256 qkv 1.08 o 1.05 pool 1.12 unp 1.04.
-- Submit 1ff4721e87c844c2 (ca7e557, same code as ed67748e): queued 00:38Z (result in the session's Results line / next NOTES).
+- Submit 1ff4721e87c844c2 (ca7e557, same code as ed67748e): 1.3233x (3650.7 us), NEW BOARD BEST (was 1.3110), proj board #252. Budget 10-27: checks 2/20, scored 1/10.

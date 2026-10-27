@@ -4,11 +4,11 @@ Updated 2026-10-26 ~23:15 UTC (s55: g24 tail balancing / KC1024 / XPAR / lazy ze
 -1.1..-1.9 us/shape, handoff dev/s54/g24sk_layer.patch; DIAG24 carries SK twins. s53: gemv24 (per-warp TMA rings, no producer warp) = H100 layer WIN at T=16/32 (-0.5..-3.5 us/layer, tuner options); handoff dev/s53/g24_layer.patch; print-only _diag24 queued for the 00:00Z check. Checks 20/20 until 00:00Z).
 
 ## Board
-- **Best: submit 3810db09edb0479e = 2480c53, 1.3110x** (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
+- **Best: submit 1ff4721e87c844c2 = ca7e557, 1.3233x** (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-26 used: checks 20/20, scored 5/10 (job list in NOTES).
+- Budget 10-27 used (s56): checks 2/20, scored 1/10. prepare() limit is 300 s: diags must stay small (s56 fail).
 
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
 ## m256 11.18 (cuBLAS splitK GEMM 6.4 + splitKreduce 2.0 + hi+lo add 1.6). SGLang: 10.5/26.4/15.0/15.5/16.8/17.7.
