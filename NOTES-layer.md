@@ -1703,3 +1703,17 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   T=16 -3.0/-2.6, T=32 -3.3/-1.0 us = ~0.9% total score, unreachable in full (a free consumer does not exist). Real KPS 4
   kernels: tie/worse again (5th time). => tk2f at T<=32 is at its HBM stream rate; the lane is closed at <= ~0.3-0.5% realistic.
   Lead's "4.6+ TB/s" target: not available on this access pattern (moe sq64 fit ~4.26 TB/s + 3.8 us).
+
+## s82 (2026-10-27 09:29Z-, night4 session 31): submit v125 under the lead's 09:28Z rule -> 2.1339x board best
+- Rule check (lead 09:28Z): (a) v125 check 19163546 2.0731x >= 2.065x; (b) SCB targets v16/v32 twm: check v16 sl 268.0 us
+  (best v16 sl of all our runs; board 274.6), tuner T=128 sl 285.5 -> 282.1 and T=256 351.3 -> 341.6 vs v124's check; v32 sl
+  354.2 sits inside its 335.7-372.3 range over the last 15 runs (noise), no other shape out of range; (c) proj's tools/validate.py
+  on v125 ALL OK (proj s75: 13/13, scored 0/24, opt 0/300, tk2f 0/1200, replay 0/480, route 0/240, cold 120.4 s).
+- Submitted the exact checked file (`git show 2663c2c:muse_decode_layer/submission.py`, md5 3ada35dd...).
+- 09:30Z SUBMIT 35dd53d0 v125 = **2.1339x** [2.102, 2.166], 10,600 us, board #24 (was #38 at 2.0860). Per shape: d1 67.4/75.0,
+  d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6 (SGLang fast-ish on v16 sl 556.9).
+  Same code as check 19163546 (2.0731x): +2.9% between two runs of identical code = judge noise is ~+-1.5% as noted.
+- Attention gap (for the lead, COORD Requests s82): layer leaders colinlikescode/pjmullin3 are #1/#2 on muse_attention_decode
+  (3.03x, 1242 us vs our 1482 us = 16% less attention time). Attention = 7-27% of our layer loads; 16% faster attention on
+  every shape = +2.5% layer score (10% = +1.5%). In-layer H200 attention (profile 19163546) = standalone (gd_full d32 166.6,
+  gw_verify v32 190.7, v16 99.2 us). _red_fin/_new_tokens "GPU time" in the layer profile (124/25 us) is PDL wait overlap.

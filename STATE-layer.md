@@ -1,6 +1,8 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
+BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
+Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+s82: budget 10-27 left: 3 checks / 4 submits. Asked lead (COORD Requests s82) whether layer reopens full attention (+2.5% if at #1's attention speed).
 s80: **main = v125** (2663c2c) = v124 + moe s27 SCB (bitwise); check 19163546 2.0731x (noise tie, not submitted;
 d32 full 296.3 best yet). Budget 10-27 left: 4 checks (reserved for moe DIAGs) / 5 submits.
 s77: v124 (701bf12) = v123 + TUNE_BASE stacking of the options the H200 tuner won on >= 9/10 logs (T=1 {g13o, pr1_rb 32},
