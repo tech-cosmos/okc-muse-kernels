@@ -1422,3 +1422,13 @@
   s66ne (no hot): loss 17-23 us. q4 (no split): loss 30-33, last CTA +20 us after the median.
   diag12 same check: v16 s66h32ne 189.8 | s66ne 200.9; v32 twq 268.5.
   Next lever for v16 (and v32 twm): the N16-N32 consumer (per-step wgmma wait / dq latency chain), not bytes or passes.
+- TQ_DEEP (#define, default 0): tq_item with 4 A-fragment sets / wgmma.wait_group 3 (stage release moved to j0 == 2) instead of
+  2 sets / wait 1. Bitwise = main (tools/s24/deep_t.py 0/36; the TQ_DEEP 0 refactor = previous commit 0/36). H100 layer v16/v32
+  cold: tie (+-0.3 us); 1-expert L2-resident proxy (tools/s24/deep_warm.py, T40 with 8/16/24/32 tokens): tie. DEAD: the wgmma
+  wait is not what limits the twq consumer. (Proxy also shows one twq CTA at N8 needs ~50 us per 1 MB item from L2 = consumer-bound
+  even at N8; N32 +20%.)
+- SASS of moe_twq<8, SA> N8 k-chunk loop: 166 instructions per warp per k chunk (stage): ~100 dequant (43 LOP3, 32 HMUL2, 18 SHF,
+  IMAD), 8 HGMMA + 8 WARPGROUP, the rest (~50) = mbarrier wait/arrive, 3 LDS, descriptor/address math (LEA/R2UR/UIADD3),
+  branch. 16 warps -> 664 issue-clk per stage per SM vs H200 measured ~1330 clk (43 us / 64 stages @ ~1.98 GHz) = ~50% issue
+  efficiency (same as tk2f, ncu s22). Stream rate needs ~1170 clk/stage. Levers: 2 k-chunks per stage (KPS 2, as tk2f: -3..4% there)
+  to halve the per-stage ~50 instr, and for N16-N32 the HGMMA cost itself (N32 items +45%).

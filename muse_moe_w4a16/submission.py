@@ -2480,6 +2480,8 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 #ifndef HOT_EMU
 #define HOT_EMU 0  // s29: H200-proxy emulation in moe_twm/moe_hot (tests only; see moe_twm)
 #endif
+#define TQ_DEEP 0  // s24: moe_twq consumer: 0 = 2 A sets / 1 wgmma group in flight; 1 = 4 sets / 3 groups
+#define TQ_NS (TQ_DEEP ? 4 : 2)
 #ifndef TWQ_PREG
 #define TWQ_PREG 32  // s17 moe_twq: producer warpgroup / consumer registers after setmaxnreg (640 threads: 96 at launch)
 #define TWQ_CREG 112
@@ -3106,7 +3108,7 @@ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64
   for (int r = 0; r < 2; ++r)
 #pragma unroll
     for (int i = 0; i < NA; ++i) acc[r][i] = 0.f;
-  uint32_t afA[2][4], afB[2][4];
+  uint32_t af[TQ_NS][2][4];  // s24 TQ_DEEP: TQ_NS A-fragment sets, wgmma groups in flight TQ_NS - 1
   const int w8 = warp >> 1, sub = warp & 1;
   const int wo0 = (w8 * 4 + (g2 ? 2 * sub : sub)) * 32 + lane, wo1 = wo0 + (g2 ? 32 : 64);
   const uint32_t sel = g2 ? (sub ? 0x7654u : 0x3210u) : (sub ? 0x7632u : 0x5410u);
@@ -3132,25 +3134,20 @@ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64
     const uint64_t d0 = sw128_desc(sb);
 #pragma unroll
     for (int j0 = 0; j0 < 4; ++j0) {
-      const bool odd = j0 & 1;
 #pragma unroll
       for (int r = 0; r < 2; ++r) {
-        if (odd) dq(u4get(wv[r], j0), s0[r], s1[r], afB[r]);
-        else dq(u4get(wv[r], j0), s0[r], s1[r], afA[r]);
+        dq(u4get(wv[r], j0), s0[r], s1[r], af[j0 % TQ_NS][r]);
       }
       wg_fence();
 #pragma unroll
-      for (int r = 0; r < 2; ++r) wgmma_bf16<N>(acc[r], odd ? afB[r] : afA[r], d0 + j0 * 2);
+      for (int r = 0; r < 2; ++r) wgmma_bf16<N>(acc[r], af[j0 % TQ_NS][r], d0 + j0 * 2);
       wg_commit();
-      wg_wait<1>();
+      wg_wait<TQ_NS - 1>();
 #pragma unroll
       for (int r = 0; r < 2; ++r)
 #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-          if (odd) fence_r(afA[r][i]);
-          else fence_r(afB[r][i]);
-        }
-      if (j0 == 0 && pst >= 0) mbar_arrive(&empty[pst]);
+        for (int i = 0; i < 4; ++i) fence_r(af[(j0 + 1) % TQ_NS][r][i]);
+      if (j0 == TQ_NS - 2 && pst >= 0) mbar_arrive(&empty[pst]);  // groups of stage pst all complete
     }
     pst = st;
     if (++st == NSTG) { st = 0; ph ^= 1; }
@@ -3159,7 +3156,9 @@ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64
 #pragma unroll
   for (int r = 0; r < 2; ++r) {
 #pragma unroll
-    for (int i = 0; i < 4; ++i) { fence_r(afA[r][i]); fence_r(afB[r][i]); }
+    for (int q = 0; q < TQ_NS; ++q)
+#pragma unroll
+      for (int i = 0; i < 4; ++i) fence_r(af[q][r][i]);
 #pragma unroll
     for (int i = 0; i < NA; ++i) fence_f(acc[r][i]);
   }
