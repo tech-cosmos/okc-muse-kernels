@@ -164,6 +164,8 @@ DIAG24 = {"pooler": [(16, 1024, 2, 4, 16, 2, 1), (16, 1024, 4, 3, 12, 2, 1), (32
           "o": [(16, 512, 2, 4, 16, 2, 1), (32, 512, 2, 4, 16, 2, 1)]}
 DIAG24 = {k: v + [c[:6] + (257,) for c in v] for k, v in DIAG24.items()}  # s54: + SK twins (r = 1 | 256: stream-K stages)
 DIAG24_GRIDS = (132, 108)
+DIAG19D = {}  # s56: diag19d/diag24 done (check 636c89fc FAILED setup: prepare() 325.6 s > 300 s with them on; lines in NOTES s56)
+DIAG24 = {}
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
