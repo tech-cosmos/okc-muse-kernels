@@ -770,9 +770,11 @@ _G30 = {}
 # proj s96 g30n (proj s95, r-proj dev/s95: G30_MTOK 32/16 + G30_S cluster split-K, DSMEM reduce in rank 0, BF16 out): T=16/32
 # unpool/pooler/qkv on g30. One build per (MTOK, S, NW, NS); NW >= 16 keeps 1 CTA/SM (2 CTAs/SM under PDL +5 us). H100 standalone
 # after a 3 us PDL pred vs g24: d32 unp 17.3 vs 20.3, pool 18.9 vs 21.5, qkv 12.3 vs 13.4; d16 unp 17.2 vs 18.7, pool 18.4 vs 18.75.
-G30N_CFG = {("unpool", 32): (1, 20, 8), ("pooler", 32): (2, 20, 16), ("qkv_gate", 32): (3, 16, 16),
-            ("unpool", 16): (1, 16, 16), ("pooler", 16): (2, 16, 8), ("qkv_gate", 16): (3, 16, 16)}  # (S, NW, NS)
+G30N_CFG = {("unpool", 32): (1, 20, 8), ("pooler", 32): (1, 20, 8), ("qkv_gate", 32): (3, 16, 16),
+            ("unpool", 16): (1, 16, 16), ("pooler", 16): (1, 16, 16), ("qkv_gate", 16): (3, 16, 16)}  # (S, NW, NS)
 G30N_DEFAULT_ON = set()  # (key, T) on without TUNE; otherwise TUNE option "g30n:<key>"
+# s96 H100 in-layer (TUNE off, 3 rounds x seeds 99/7): unpool T=32 -1.2..-2.1 us (2 runs); pooler S2 +9..11 (128 cluster CTAs vs the
+# side-stream router), S1 d16 sl +2.5..3.3 full -0.8; T=16 unpool / qkv S3 tie. TUNE option: T=32 g30n:unpool (validate tuner: sl picks it -1.0..-1.4 us, full +9 us -> default; T=16 g30n:pooler sl +14 us, dropped).
 _G30N = {}
 # proj s57 gemv27 (g27_src.cu = r-proj muse_bf16_proj/dev/s57/gemv27.cu): o at T=16/32 without cross-block split-K: a
 # block owns RGB whole 16-row groups, its warps split k (KQ), partials summed in smem, plain FP32 stores (no out zeroing,
@@ -2692,7 +2694,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
              {"g27:o": False},  # s84: attention plan (full layers only)
              ),
-        32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
+        32: ({}, {"g30n:unpool": True}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
