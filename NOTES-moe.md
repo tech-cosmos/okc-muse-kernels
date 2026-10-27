@@ -1731,3 +1731,11 @@
 - Re-read the layer STATE prefetch dead-ends (s6/s14/s55/s61: weight L2 prefetch during attention/csl/tk2f/norm, G10_PFL2,
   UPF*): every overlap form I could add from the moe side is already measured there. Nothing new to build.
 - Session result: no open moe/attention item; attention budget 10-27 unchanged (12/20 checks, 2/10 scored).
+
+## Night4 session 38 (2026-10-27 13:43Z - ~13:55Z) -- no lane answer; no build; 0 checks
+- Lead still hasn't answered the s34 lane request; newest Human decision for moe is 09:45Z (lead 10:50Z/11:50Z are layer-only).
+- Re-read layer STATE/NOTES s93-s94 for the biggest open gap: twm dq-bound at v16/v32 (~6.6% weighted; moe s27-s29: ALU +
+  tensor do not overlap SM-wide, dq at the 8-op minimum: closed) and g24 pooler+unpool at d32 (~2.0 TB/s, ~2.5% weighted;
+  proj s50-s62: consumer/latency-bound at 30% issue, BF16 no-decode rows cost the same, g23/cuBLASLt lose: proj-closed).
+  Neither has a new design I can put forward: no build, so the shared GPU stays free for layer/proj.
+- Attention budget 10-27 unchanged: checks 12/20, scored 2/10 (no tie checks).
