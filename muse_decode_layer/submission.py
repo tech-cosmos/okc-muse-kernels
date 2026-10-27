@@ -7266,7 +7266,9 @@ int64_t moe_twm_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 template <int N, int NSTG, bool SA>
 __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
                                         const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
-                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, bool g2) {
+                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, bool g2,
+                                        int nkc = 64, float* part = nullptr, int* tick = nullptr, int* s_flag = nullptr,
+                                        int h = 0, int np = 1) {
   using C = TWC<4, true, 8>;
   constexpr int NA = N / 2, STRIDE = C::STG;
   float acc[2][NA];
@@ -7281,7 +7283,7 @@ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64
   const int so = C::XB + C::WB + (w8 * 32 + lane) * 8;
   int pst = -1;
 #pragma unroll 1
-  for (int kc = 0; kc < 64; ++kc) {
+  for (int kc = 0; kc < nkc; ++kc) {
     const char* sb = smem + st * STRIDE;
     if (kc) mbar_wait(&full[st], ph);
     const uint4* wp = reinterpret_cast<const uint4*>(sb + C::XB);
@@ -7332,6 +7334,31 @@ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64
     for (int i = 0; i < NA; ++i) fence_f(acc[r][i]);
   }
   mbar_arrive(&empty[pst]);
+  if (part) {  // n21 K-split tail item (np parts of 64 / np k chunks, gemm2 only): every part stores its FP32 partial,
+    // then takes a ticket; the last one sums the np partials in part order (deterministic) and runs the epilogue
+    const int ct = warp * 32 + lane;
+#pragma unroll
+    for (int r = 0; r < 2; ++r)
+#pragma unroll
+      for (int i = 0; i < NA; ++i) __stcg(part + (size_t)h * 16384 + (r * NA + i) * 512 + ct, acc[r][i]);
+    __threadfence();
+    asm volatile("bar.sync 1, 512;" ::: "memory");  // s_flag is free (the previous split item is done with it)
+    if (ct == 0) {
+      const int o = atomicAdd(tick, 1);
+      if (o == np - 1) { *tick = 0; __threadfence(); }  // last user: zero for the next call
+      *s_flag = o;
+    }
+    asm volatile("bar.sync 1, 512;" ::: "memory");
+    if (*s_flag != np - 1) return;
+#pragma unroll
+    for (int r = 0; r < 2; ++r)
+#pragma unroll
+      for (int i = 0; i < NA; ++i) {
+        float v = __ldcg(part + (r * NA + i) * 512 + ct);
+        for (int q = 1; q < np; ++q) v += __ldcg(part + (size_t)q * 16384 + (r * NA + i) * 512 + ct);
+        acc[r][i] = v;
+      }
+  }
   if (g2) tw_epi<2, N, false, 16>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
   else tw_epi<2, N, true, 16>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
 }
@@ -7342,16 +7369,19 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
     int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
-    __nv_bfloat16* __restrict__ Y, float* __restrict__ part, int flags) {
+    __nv_bfloat16* __restrict__ Y, float* __restrict__ part, int flags, int* __restrict__ tick) {
   using C = TWC<4, true, 8>;
   constexpr int STRIDE = C::STG, NR13 = TWC<4, true, 8>::NRB, NR2 = TWC<4, false, 8>::NRB;
   extern __shared__ __align__(1024) uint4 smem_tw[];
   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
   __shared__ uint32_t slut[256];
-  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_big[32];
+  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_big[32], s_flag;
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   int* done = meta + 68;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  // n21 K split: the last ~(flags >> 8 & 255) gemm2 items (from an expert boundary) run as 2^(flags >> 16 & 3) K parts
+  const int kq = (flags >> 16) & 3, npt = 1 << kq;
+  int nsplit = kq ? (flags >> 8) & 255 : 0;
   for (int i = tid; i < 256; i += 640) slut[i] = lut[i];
   asm volatile("griddepcontrol.wait;" ::: "memory");
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
@@ -7381,10 +7411,23 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     }
   }
   __syncthreads();
-  const int n13 = s_cum[0][32], nitems = n13 + s_cum[1][32];
-  auto decode = [&](int item, int& g2, int& a, int& p, int& rb) {
+  const int n13 = s_cum[0][32], n2 = s_cum[1][32];
+  int n2f = n2;
+  if (nsplit > 0)
+    for (int a = 32; a >= 0; --a)
+      if (s_cum[1][a] >= n2 - nsplit) n2f = s_cum[1][a];
+  const int ns = n2 - n2f, nitems = n13 + n2f + 2 * ns;
+  // item -> (gemm2?, active slot a, pass p, row block rb, K half h (-1: whole K), split slot j)
+  auto decode = [&](int item, int& g2, int& a, int& p, int& rb, int& h, int& j) {
     g2 = item >= n13;
-    const int it = g2 ? item - n13 : item;
+    h = -1;
+    j = 0;
+    int it = g2 ? item - n13 : item;
+    if (g2 && it >= n2f) {
+      j = (it - n2f) >> 1;
+      h = (it - n2f) & 1;
+      it = n2f + j;
+    }
     const int* cum = s_cum[g2];
     a = 0;
     while (cum[a + 1] <= it) ++a;
@@ -7410,10 +7453,11 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
         mbar_arrive(&full[st]);
         break;
       }
-      int g2, a, p, rb;
-      decode(item, g2, a, p, rb);
+      int g2, a, p, rb, h, j;
+      decode(item, g2, a, p, rb, h, j);
       const int e = s_e[a], PS = s_big[a] ? 64 : 32;
       const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
+      const int k0 = h < 0 ? 0 : h * (64 >> kq), k1 = h < 0 ? 64 : k0 + (64 >> kq);
       const int mi = nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
       const int nrb = g2 ? NR2 : NR13;
       const char* wsrc = (g2 ? W2 : W13) + ((size_t)e * nrb + rb) * 64 * C::WB;
@@ -7430,10 +7474,10 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
         }
         asm volatile("fence.proxy.async.global;" ::: "memory");
       }
-      for (int kc = 0; kc < 64; ++kc, ++i) {
-        if (kc && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+      for (int kc = k0; kc < k1; ++kc, ++i) {
+        if (kc != k0 && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
         char* sb = smem + st * STRIDE;
-        if (!kc) s_item[st] = item;
+        if (kc == k0) s_item[st] = item;
         mbar_expect_tx(&full[st], bytes);
         tma2d(sb, map, kc * 64, off, &full[st]);
         bulk_g2s(sb + C::XB, wsrc + (size_t)kc * C::WB, C::WB, &full[st]);
@@ -7460,13 +7504,15 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     }
 #endif
     if (item < 0) break;
-    int g2, a, p, rb;
-    decode(item, g2, a, p, rb);
+    int g2, a, p, rb, h, j;
+    decode(item, g2, a, p, rb, h, j);
     const int e = s_e[a], PS = s_big[a] ? 64 : 32;
     const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
     __nv_bfloat16* out = g2 ? Y : Inter;
-#define TQI(NN) tq_item<NN, NSTG, SA>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2)
+    float* pt = h < 0 ? nullptr : part + (size_t)j * npt * 16384;
+#define TQI(NN) tq_item<NN, NSTG, SA>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
+                                      h < 0 ? 64 : 64 >> kq, pt, tick + j, &s_flag, h, npt)
     switch ((nv + 7) >> 3) {
       case 1: TQI(8); break;
       case 2: TQI(16); break;
@@ -7489,10 +7535,17 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
   }
 }
 
+// n21: clamp the K-split item count to the partial buffer (16384 floats per part) and the ticket words
+static int64_t twq_flags(int64_t f, int64_t npart, int64_t ntk) {
+  const int64_t kq = (f >> 16) & 3, ns = (f >> 8) & 255;
+  if (!kq || !ns) return f & ~((int64_t)0x3FF00);
+  const int64_t m = std::min<int64_t>(ns, std::min<int64_t>(npart / (16384 << kq), ntk));
+  return (f & ~((int64_t)0x3FF00)) | (m << 8) | (m ? kq << 16 : 0);
+}
 template <bool SA>
 static int64_t twq_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
-                      torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, int64_t flags) {
+                      torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, torch::Tensor tk_, int64_t flags) {
   constexpr int NSTG = 8;
   constexpr int SMEM = NSTG * TWC<4, true, 8>::STG + 1024;
   static int grid = 0;
@@ -7510,12 +7563,12 @@ static int64_t twq_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
       (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(),
-      (float*)part_.data_ptr(), (int)flags);
+      (float*)part_.data_ptr(), (int)twq_flags(flags, part_.numel(), tk_.numel()), (int*)tk_.data_ptr());
 }
 int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                        torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
-                       torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, int64_t flags) {
-#define TWQA w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, part_, flags
+                       torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, torch::Tensor tk_, int64_t flags) {
+#define TWQA w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, part_, tk_, flags
   return (g_sa & 1) ? twq_go<true>(TWQA) : twq_go<false>(TWQA);
 #undef TWQA
 }
@@ -8837,7 +8890,7 @@ _moe__CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::T
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, torch::Tensor, torch::Tensor, "
         "torch::Tensor, double);"
         "int64_t moe_twq_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
+        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
         "int64_t moe_set_pdl(int64_t, int64_t);"
         "int64_t moe_set_blk(int64_t);"
         "int64_t moe_set_sa(int64_t);"
@@ -9361,9 +9414,12 @@ def _moe_kernel_fn(data, st):
             part = (torch.full if _moe_TWF_DBG else torch.empty)((max(66 if ns >= 1022 else ns, 1) * 32768,), *((float("nan"),) if _moe_TWF_DBG else ()), dtype=torch.float32, device=dev)
             if _moe_TWQ_M.get(M, _moe_TWQ):
                 q = _moe_TWQ_M.get(M, _moe_TWQ)
+                qs, qk = (q >> 8) & 255, (q >> 16) & 3  # n21: K-split tail in the flags: q | items << 8 | log2 parts << 16
+                if qs and qk and not _moe_DIAG_TL:
+                    part = torch.empty((qs << qk) * 16384, dtype=torch.float32, device=dev)
                 if _moe_DIAG_TL and _moe_TWM_ORDER_M.get(M, _moe_TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
                 lib.moe_twq_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["lut"], xg,
-                                   meta, sroutes, inter, y, part, q)
+                                   meta, sroutes, inter, y, part, st["tk"], q)
             elif _moe_TWF_MIX and "w2b2" in st:
                 tl = _moe_TWM_TAIL_M.get(M, _moe_TWM_TAIL) + 4096 * _moe_TWM_TAIL13_M.get(M, _moe_TWM_TAIL13) + (_moe_TWM_ORDER_M.get(M, _moe_TWM_ORDER) << 24)
                 tl += (1 << 23) if _moe_TWM_HOT_M.get(M, _moe_TWM_HOT) else 0
@@ -15249,7 +15305,8 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
               {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
-              {"fr": True, "twf_split": 66}),
+              {"fr": True, "twf_split": 66}, {"twq": 73988}, {"twq": 73996}, {"twq": 73988, "fr": True},
+              {"twq": 73988, "lt:o": True, "lt:unpool": True}),  # s75: moe n21 twq K-split tail (4|33<<8|1<<16; 12|..): H200 moe-only v16 -10.6 us
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
