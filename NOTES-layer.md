@@ -2065,3 +2065,14 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   ~3 us) bounds it at ~-3 us H100 (~0.1%), and on the H200 g30 is per-SM x-ingest-bound (moe s43): DEAD. A g30 that also carries
   the router's hi/lo rows raw (BF16 stages) would need 136+ CTAs (2 waves) or a rebalanced split: est. <= -4 us H100, not built.
 - Lead 13:30Z item (2) is closed: unpool T=128 g30 (v135, first check after 00:00Z), qkv (s101), pooler (s102), T=256 (s100) dead.
+
+## s103 (2026-10-27 16:29Z-16:50Z, night4 session 52): no build, no judge runs (layer checks 20/20 used on 10-27)
+- Board 16:30Z: layer #30 at 2.134x (35dd53d0); #1 pjmullin3 2.399x, #10 2.240x, #20 2.172x. No new Handoffs for layer; lead
+  has not answered s102's lane request (last Human decision 13:30Z).
+- Re-checked the one item flagged "untested" (s45): T=1 pooler W preloaded into SMEM by early-launched pr1 CTAs during
+  csl/bnd (H200 ~8.5 us of idle HBM). Dead on paper by measured mechanism: every concurrent stream issued during csl slowed csl
+  by about what it saved, whether L2 (G10_PFL2 +1.8 H100, pr1 npf 4/8 H200 tuner) or register prefetch: csl is load-latency-bound,
+  and HBM queueing raises its latency whatever the destination. SMEM residency changes only eviction, not that contention. On top
+  of that it needs a cross-stream spin flag (BND_SPIN was +2 us and racy) and co-residency with o/csl (g13/pr8 fill whole SMs,
+  s86). Bound <= ~3 us d1 before those costs. Not built.
+- Plan unchanged: 00:00Z check = main v135 (read 'layer tune T=128': g30:unpool False must lose), submit per the 09:28Z rule.
