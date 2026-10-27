@@ -1671,3 +1671,35 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   T=32 175.4/340.4 -> 163.4/332.8, T=128 285.5/396.3 -> 282.1/362.1, T=256 351.3/564.1 -> 341.6/530.3: a different/faster H200, so
   cross-run tuner numbers cannot isolate SCB's ~1-5 us. SCB stays on main (bitwise per moe, H100 -0.2..-2 us, moe H200 diag -1..-5).
 - okc check client was killed by my 25 min background timeout while the job was still queued; the job ran on. Poll `okc jobs` instead.
+
+## s81 (2026-10-27 09:12Z-, night4 session 30): lane (1) per lead 08:55Z = tk2f is layer's kernel now; H200 joint-ceiling DIAG
+- Lane start: re-read moe's tk2f record (NOTES-moe n9-n14, n22). In-layer H200 tk2f (profile 19163546: d1 sl 20.6 / full 27.0,
+  d16 54.7/57.1, d32 (tk2h) 83.0/87.1, v1 57.1/61.6 us) is already AT moe's H200 stream-probe floor for 18 KB copies (n13
+  diag9s sq18: d16 57.5, d32 73.0, v1 60.5; the in-layer kernel starts streaming before its PDL wait, so its duration overlaps
+  pr1). sq32/sq64 (contiguous 32-64 KB copies) are 2-6 us lower; the probe's t = 3.8 us + bytes / 4.26 TB/s (sq64 fit over
+  d1..v1): the lead's "4.6+ TB/s" is not reachable on these routings, the stream ceiling is ~4.2-4.3 TB/s.
+- Paper bound of the lane: tk2f at sq32 speed everywhere = d1 ~2, d16 ~4.4, d32 ~5.6, v1 ~4.7 us per layer = ~2% total if
+  fully reached. moe's per-slice fused gemm13->gemm2 idea (no phase barrier) was bounded by moe n11 at ~0.6 us (d1).
+- Open H200 question (never measured): with NO consumer math, do 36 KB single-copy stages (KPS 4 SQ) stream faster than
+  18 KB ones inside the real tk2f structure (hints on)? H100 says no (DRAM-bound); moe's H200 real-kernel sq402/403 (with
+  math) were flat (consumer-limited?). If nm402 << nm204 on the H200, the lever = a consumer that keeps up with 36 KB stages.
+- Built (r-layer 9783a61): TK2F_DIAG (python flag in moe_src, False on main; `_moe__lib` turns it into `#define TK2F_DIAG 1`):
+  moe_tk2f SQ dispatch cfgs 184402/184403 (KPS 4 SQ NSTG 2/3 on _sq_pack nq 2 buffers st w13sq4/w2sq4), 184214/184412/184413
+  (same + PF 256 = no consumer math, wrong output). Layer: TUNE option "tk2x" (1 nm204, 2 sq402, 3 sq403, 4 nm402, 5 nm403,
+  6 plain SQ 204), options with "diag": True are timed and printed but NEVER selected (tuner min over non-diag only). In a
+  DIAG build TUNE = {T=1/16/32: default + the 6 probes} (T=16 with bal off, T=32 with tk2h 0 + a {tk2h 0} reference).
+  Tests: bench test 13/13 on main and on the DIAG copy (variants/diag81.py = sed _moe_TK2F_DIAG = True); cold ~2 min.
+- 09:20Z CHECK 93a0990d (DIAG copy of 9783a61, NOT for submit) 2.0734x, 10,910 us (= v125 noise; tuner only had the probes, all
+  picks default). H200 'layer tune' whole-layer us (synthetic skewed routing; ref = plain SQ 204 (code 6), T=32 ref = {tk2h 0}):
+            default | SQ ref | nm204 | sq402 | sq403 | nm402 | nm403
+    T=1  sl  69.4   | 69.8   | 68.3  | 70.6  | 71.9  | 68.4  | 68.0
+    T=1  fu  74.3   | 74.6   | 73.0  | 74.2  | 75.2  | 73.2  | 72.3
+    T=16 sl 160.8   | 162.3  | 158.0 | 162.7 | 161.8 | 158.2 | 157.8   (probes with bal off; default has bal)
+    T=16 fu 247.0   | 248.0  | 246.3 | 249.3 | 248.0 | 245.7 | 244.4
+    T=32 sl 163.9   | 166.0  | 163.6 | 179.0?| 166.6 | 163.0 | 160.6   (default = tk2h 4)
+    T=32 fu 324.9   | 328.2  | 326.4 | 331.3 | 329.1 | 325.6 | 323.9
+  READING: in-layer on the H200 the WHOLE tk2f consumer math costs only 1.5-4.3 us (ref - nm204), and with no math the
+  36 KB stages add only 0-3 us more (nm403). Joint ceiling (free consumer + best stages) vs today's default: T=1 -1.4/-2.0,
+  T=16 -3.0/-2.6, T=32 -3.3/-1.0 us = ~0.9% total score, unreachable in full (a free consumer does not exist). Real KPS 4
+  kernels: tie/worse again (5th time). => tk2f at T<=32 is at its HBM stream rate; the lane is closed at <= ~0.3-0.5% realistic.
+  Lead's "4.6+ TB/s" target: not available on this access pattern (moe sq64 fit ~4.26 TB/s + 3.8 us).

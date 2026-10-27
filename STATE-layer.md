@@ -13,6 +13,10 @@ Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
 Judge noise dominates: identical-ish code 2.04-2.12x across checks; per-shape T=32 moves 5-10%.
 
+s81: **tk2f lane CLOSED by H200 diag 93a0990d** (TK2F_DIAG probes, r-layer 9783a61; NOTES s81): in-layer, ALL consumer math =
+1.5-4.3 us, no-math + 36 KB stages = best stream; joint ceiling vs default T=1 -1.4/-2.0, T=16 -3.0/-2.6, T=32 -3.3/-1.0 us
+(~0.9% total, unreachable). Budget 10-27 left: 3 checks / 5 submits. Asked the lead for a new lane (COORD Requests s81).
+
 ## Per-load H200 us vs the s12 floor (board run 19ebde23 = v108; lead 05:07Z request; s74)
 Score %/us = gain in total score per us saved on that layer type (geomean of 6 loads x (46 sl + 16 full)).
 | load | sliding us / floor / gap | %/us sl | full us / floor / gap | %/us full | gap x weight (sl + full) |
