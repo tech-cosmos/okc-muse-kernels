@@ -1,6 +1,6 @@
 # STATE-moe
 
-## NOW (night5 s1, 2026-10-27 20:05Z): pr32 built, handed to layer/proj as a TUNE option; H200 tuner is the gate
+## NOW (night5 s2, 2026-10-27 21:15Z): pr32 built, handed to layer/proj as a TUNE option; H200 tuner is the gate
 - pr32 = T=16/32 pooler (g30n S2 12-bit) + router (hi/lo BF16 rows, first 8 stages of every streaming CTA) + routing, ONE launch:
   grid (66,2) pairs; x 0/1 = 4 finisher CTAs (spare SMs) poll a counter, bulk-pull pair partials, route 1 token/warp (redux top-8).
   Files: muse_moe_w4a16/tools/n5s1/pr32_src.cu (= head.cu + body3.cu; edit those, then `cat head.cu body3.cu > pr32_src.cu` and
@@ -10,6 +10,9 @@
   NW/NS there (NW 8/NS 16 now; H200 may want deeper W ring) and try MTOK 16 S1 variants. (2) If the H200 rejects it: look at
   the timeline on the H200 via a layer DIAG (finisher chain ~10-12 us must end before the pooler). (3) Ideas: put the router
   rows' partial store on a non-streaming path earlier (stage order), cut warp 10's fence wait (4.6 us at NW 8).
+- n5s2 H200 PROXY (PR_L2W: weights L2-resident): pr32 M32 consumer+chain floor 17.9 us (H100 HBM-bound 23.0), pooler streaming
+  ends 12.0-12.8 us = ~4.6 TB/s-equivalent > H200 HBM: on the H200 pr32 should stream at ~HBM rate (est. 15-17 us vs g24 ~25/call);
+  routing (finishers) ends at 11.0 < pooler end: chain hidden. NW/NS sweep spread <= 0.5 us: keep 8/16. Waiting for H200 tune lines.
 - moe checks 20/20 used on 10-27 (reset 00:00Z); moe board best febfcb1f 2.2469x; attention board best 957cabd7 2.5962x.
 
 ## g34 (s47-s49): g30 at m16/m32 built, superseded by proj g30n (on layer main as TUNE[32] g30n:unpool). Closed.

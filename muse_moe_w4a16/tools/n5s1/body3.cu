@@ -191,8 +191,13 @@ pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
   }
   if (warp == 8) {  // W: router stages then pooler stages (weights only: before griddepcontrol.wait)
     if (lane == 0) {
+#ifdef PR_L2W  // H200 proxy: every CTA streams group (g & 3)'s weights (~3 MB, L2-resident) = consumer-bound floor
+      const uint8_t* rsrc = ra.rw + ((size_t)(rg & 0) * 128 + (size_t)rks * PR_NR) * PR_RST;
+      const uint8_t* src = wp + ((size_t)(g & 3) * KS + i0) * G30_WST;
+#else
       const uint8_t* rsrc = ra.rw + ((size_t)rg * 128 + (size_t)rks * PR_NR) * PR_RST;
       const uint8_t* src = wp + ((size_t)g * KS + i0) * G30_WST;
+#endif
       for (int i = 0; i < nst; i++) {
         const int st = i % G30_NW, ph = (i / G30_NW) & 1;
         mbar_wait(&wempty[st], ph ^ 1);

@@ -1980,3 +1980,25 @@
 - Capture gotcha: the pr32 branch must still fork the side stream (side_stream.wait_stream(main)) because later code joins it.
 - Handoff posted (COORD): TUNE option {"pr32": True} at T=16/32, patch tools/n5s1/patch_layer_pr32.py (test form reads the .cu
   from r-moe at prepare: the integrator must embed it like _G30_SRC and put the build on _BUILD_POOL).
+
+## Night5 session 2 (2026-10-27 20:02Z - ) -- pr32 H200 proxy (L2-resident weights); 0 checks
+- 20:02-20:40Z GPU lock blocked twice by layer's /tmp/tl_opts.py (held the flock, then bench.time_graph re-locked on a new fd =
+  self-deadlock). Told layer (COORD + SendMessage); layer fixed it. Check /proc/locks when a timing run hangs.
+- New compile flag PR_L2W (body3.cu): every CTA streams pooler group (g & 3) and router group 0 = ~3 MB of weights, L2-resident
+  -> consumer + chain floor with HBM out of the picture (the H200 has ~1.35x the H100's HBM bandwidth).
+  H100 us over a 3 us PDL pred (NW 8, NS 16): M32 normal 23.0 / L2W 17.9; M16 normal 22.2 / L2W 16.9.
+  Timeline (PR_TL, M32, us from first pstart): L2W: pdone med 12.0 max 12.8, rpart (router pair partials stored) max 5.1,
+  fpoll 5.4, fingest 7.7, froute 11.0 -> routing finishes BEFORE the pooler: the finisher chain is hidden.
+  Normal (HBM-bound): pdone med 18.4 max 20.0, froute 17.9.
+  => pooler streaming floor 12.8 us for 58.7 MB (~4.6 TB/s equivalent) vs H200 HBM ~13.7 us at 4.3 TB/s: on the H200 pr32
+  should run ~HBM rate (est. 15-17 us incl. launch/tail) vs g24 pooler ~25 us/call in-layer at d32 (+ router on the side
+  stream). Predicts a real H200 win at d16/d32 if the in-layer router/routing removal holds. H200 tuner decides.
+- Layer FYI (s?, v140 783caa6): torch.cuda.Stream() pool streams can alias the harness capture stream -> side branch captured
+  in line (~10 us outliers in in-layer A/Bs on older r-layer copies, every 32nd tuner candidate). n5s1's in-layer A/B used v137.
+- Ring sweep under PR_L2W (M32, us): NW/NS 8/16 17.9, 16/8 17.5, 12/12 17.8, 10/16 18.5, 12/16 18.7; 6/16 and 8/8 invalid
+  (the finisher's 64 x 2 KB ingest needs 128 KB of the ring smem: "pr32: finisher smem"). Spread <= 0.5 us: keep NW 8/NS 16
+  (it won the HBM-bound H100 runs through the shorter router-fence wait); no second build for the tuner.
+- zsh gotcha: `set -- $c` does not word-split in zsh (use NW=${c%:*} NS=${c#*:} with "a:b" pairs).
+- Next: the H200 'layer tune T=16/32' pr32 lines from layer's 00:00Z bundle (layer promised to paste them). If pr32 wins there,
+  try MTOK 16 S1 (more CTAs per K) and the router stage order; if it loses vs the 4.6 TB/s-equivalent floor measured here, the
+  loss is HBM-side contention (H200 DIAG timeline via layer).
