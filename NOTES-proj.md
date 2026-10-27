@@ -1632,3 +1632,9 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - v125 (2663c2c): ALL OK: bench test 13/13, scored 0/24, opt_test 0/300, tk2f_stress 0/1200, replay 0/480, route_judge 0/240
   (worst gap 0.0256 / drop-lead 0.0179; limits 0.05 / 0.03), cold prepare 120.4 s. Total ~6 min (GPU idle otherwise).
 - Posted: Handoffs (validate), Requests (proj -> layer: send bundles), Results. Checks 10-27 proj: 8/20, scored 1/10 (unchanged).
+
+## s76 (2026-10-27 09:20-09:30Z, night4 session 33): lane (b), nothing to port; no judge runs
+- COORD re-read: no new Human decision after 08:55Z; no layer bundle or new Handoff since moe s27 SCB (already in v125, which s75
+  validated ALL OK). layer s81 = tk2f in-layer (its own lane now), moe s28 = twm item-overhead ablations (H100). origin/main
+  muse_decode_layer unchanged since 2663c2c. Re-grepped L2-prefetch/overlap ideas for the T>=16 pooler/unpool: all closed
+  (layer s55/s61/s106, proj s32-s36). Kept the session short to leave the H100 to layer/moe. Checks 10-27 proj 8/20, scored 1/10.

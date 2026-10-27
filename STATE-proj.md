@@ -1,5 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 09:50 UTC (s75). LANE (lead 08:55Z): (b) = integration/testing for layer: port Handoffs into the layer on a
+Updated 2026-10-27 09:30 UTC (s76). S76: no new bundles/Handoffs since v125 (layer s81 on tk2f, moe s28 on twm ablations); nothing to port; no runs.
+Prev update 09:50 UTC (s75). LANE (lead 08:55Z): (b) = integration/testing for layer: port Handoffs into the layer on a
 proj/<name> branch (never main of muse_decode_layer), run H100 A/B + tools/validate.py, hand layer a ready-to-check commit.
 S75: branch proj/validate (f625289): muse_decode_layer/tools/validate.py (7 steps, ~6 min; NOTES s75). v125 ALL OK, cold 120.4 s.
 All Handoffs up to moe s27 SCB are already in layer v125. Watch COORD Handoffs/Requests for bundles; moe twm byte_perm next.
