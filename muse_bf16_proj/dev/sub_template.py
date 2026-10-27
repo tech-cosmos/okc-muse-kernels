@@ -57,6 +57,7 @@ _G17_SRC = r'''@@GEMV17@@'''
 _G21_SRC = r'''@@GEMV21@@'''
 _R3_SRC = r'''@@ROUTER3@@'''
 _LT_SRC = r'''@@LT@@'''
+_G30_SRC = r'''@@G30@@'''
 
 # Router FP32 kernel configs (mp, rows per block, threads), dev/router2.cu, chosen on the H100 (dev/r2.py).
 ROUTER_F32 = [(1, (1, 2, 512)), (8, (8, 2, 512))]
@@ -212,6 +213,13 @@ BF16_G12 = {"qkv_gate": [(8, 2, 2, 4, 32, 1, 1)], "pooler": [(8, 8, 8, 4, 128, 1
 # the fastest (or F.linear).
 BF16_LT = @@LTCFG@@
 LT_WS_BYTES = 32 << 20
+# s100: g30 (layer's 12-bit W decoded into wgmma A registers, swap-AB; MTOK 16/32 = proj s95 g30n with a (1, S, 1) cluster
+# split-K + DSMEM reduce; MTOK 128 = layer s99 g30). Per (layer, m): (S, NW, NS) tuner candidates; one build per (m, S, NW, NS).
+BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 16, 16)], ("qkv_gate", 16): [(3, 16, 16), (2, 16, 16)],
+            ("o", 16): [(1, 16, 16), (2, 16, 16)],
+            ("unpooler", 32): [(1, 20, 8)], ("pooler", 32): [(1, 20, 8), (2, 20, 8)], ("qkv_gate", 32): [(3, 16, 16), (2, 20, 8)],
+            ("o", 32): [(1, 20, 8), (2, 20, 8)],
+            ("unpooler", 128): [(1, 10, 10)], ("pooler", 128): [(1, 10, 10)], ("qkv_gate", 128): [(1, 10, 10)], ("o", 128): [(1, 10, 10)]}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
         _GEMV_SRC.replace("G7_CONFIGS", " ".join("G7_CASE(%d,%d,%d,%d,%d)" % c for c in _G7)) + "\n" +
@@ -333,6 +341,30 @@ except Exception as _e:  # noqa: BLE001
     print("muse_proj cuBLASLt build failed, using F.linear:", _e)
     _lt = None
 
+_G30 = {}
+
+
+def _g30_build(c):
+    """c = (MTOK, S, NW, NS) -> g30 lib (None on failure)."""
+    try:
+        import hashlib
+        dfs = [f"-DG30_MTOK={c[0]}", f"-DG30_S={c[1]}", f"-DG30_NW={c[2]}", f"-DG30_NS={c[3]}"]
+        return load_inline(
+            name="muse_proj_g30_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
+            cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
+            cuda_sources=_G30_SRC, functions=["g30_gemm"],
+            extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
+    except Exception as ex:  # noqa: BLE001
+        print("muse_proj g30 build failed:", c, ex)
+        return None
+
+
+if BF16_G30:
+    from concurrent.futures import ThreadPoolExecutor
+    _cs = sorted({(m, *c) for (_l, m), v in BF16_G30.items() for c in v})
+    with ThreadPoolExecutor(len(_cs)) as _ex:
+        _G30.update(zip(_cs, _ex.map(_g30_build, _cs)))
+
 ROUTER_FP32_MAX_TOKENS = 8
 
 
@@ -411,6 +443,19 @@ def _dec3(sm, code):
             and torch.equal(b3 >> 7, code & 1) and torch.equal(b3 & 0x7F, sm & 0x7F)):
         raise RuntimeError("DEC3 packing round trip failed")
     return b3.to(torch.uint8), torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
+
+
+def _pack30(code, sm):
+    """[N, K] codes / sign|mantissa bytes -> [N/64][K/64][6144 B] g30 stages: DEC3 bytes [2][128 thr][16], words [128][4]
+    (thread = (w, gq, q) of the wgmma A fragment; layer pack30)."""
+    n, k = code.shape
+    G, KS = n // 64, k // 64
+    # row = 16 w + 8 rr + gq ; k = 16 j + 8 kh + 2 q + h ; element e = (kh, rr, h) ; thread = (w, gq, q)
+    perm = lambda t: t.view(G, 4, 2, 8, KS, 4, 2, 4, 2).permute(0, 4, 1, 3, 7, 5, 6, 2, 8).reshape(G, KS, 128, 4, 8)  # noqa: E731
+    b3, v = _dec3(perm(sm), perm(code))
+    Sb = b3.view(G, KS, 128, 2, 16).permute(0, 1, 3, 2, 4).reshape(G, KS, 4096)
+    Nb = v.contiguous().view(torch.uint8).view(G, KS, 2048)
+    return torch.cat([Sb, Nb], 2).contiguous()
 
 
 def _pack13(w):
@@ -557,6 +602,20 @@ def prepare(weights):
     st["ws12"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=r.device)
     st["cnt12"] = torch.zeros(1024, dtype=torch.int32, device=r.device)
     st["ltws"] = torch.empty(LT_WS_BYTES, dtype=torch.uint8, device=r.device)
+    if _G30:
+        for name in sorted({l for l, _m in BF16_G30}):
+            n, k = weights[name].shape
+            if n % 64 or k % 128:
+                continue
+            c = _compress(weights[name])
+            if c is None:
+                continue
+            code, sm, hdr, scale = c
+            v = hdr[:, :, 1]
+            if not torch.equal(v.bfloat16().float(), v) or bool(((v != 0) & (v.abs() < 2.0 ** -126)).any()):
+                print("g30 dropped (escape value not exact in BF16):", name)  # g30 patches escapes as BF16 A halves
+                continue
+            st[("g30", name)] = (_pack30(code, sm), hdr.contiguous(), scale)
     st["pick"] = _tune(st)
     _diag19(st)
     _diag19q(st)
@@ -614,6 +673,9 @@ def _run(st, layer, x, out, cand):
         _mod.g17_gemv(st[layer], x, out, *c)  # W[:n] prefix rows, in place
     elif kind == "tg2":
         _tg2.tg2(x, st[layer][:out.shape[1]], out, False)  # W[:n] prefix rows, BF16 out
+    elif kind == "g30":
+        P, hdr, scale = st[("g30", layer)]
+        _G30[c].g30_gemm(x, P, hdr, out, scale, 0)
     elif kind == "g12":
         _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
     else:
@@ -681,6 +743,12 @@ def _tune(st, reps=25):
         for layer, cfgs in BF16_TG2.items():
             for c in cfgs:
                 shapes.setdefault((layer, c[0]), []).append(("tg2", c))
+    for (layer, m), cfgs in BF16_G30.items():
+        if ("g30", layer) in st:
+            k = st[layer].shape[1]
+            for c in cfgs:
+                if _G30.get((m, *c)) is not None and k // 64 >= 4 * c[0]:
+                    shapes.setdefault((layer, m), []).append(("g30", (m, *c)))
     if _lt is not None:
         for key, cfgs in BF16_LT.items():
             shapes.setdefault(key, []).extend(("lt", c) for c in cfgs)
@@ -726,7 +794,8 @@ def _tune(st, reps=25):
         if cands[best] is not None:
             picks[(layer, m)] = cands[best]
         print(f"tune {layer} m{m}: best {cands[best]} {med[best] * 1e3:.2f} us; "
-              + " ".join(f"{'F' if c is None else c[0]}:{t * 1e3:.2f}" for c, t in zip(cands, med)))
+              + " ".join(f"{'F' if c is None else c[0] + ('' if c[0] != 'g30' else 'S%dW%dN%d' % c[1][1:])}:{t * 1e3:.2f}"
+                         for c, t in zip(cands, med)))
     del flush
     return picks
 
