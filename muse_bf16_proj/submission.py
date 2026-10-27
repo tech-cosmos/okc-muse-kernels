@@ -7003,9 +7003,10 @@ BF16_LT = {('o', 8): [(66, 312, 35, 1, 0, 0, 3, 3), (66, 312, 35, 1, 0, 0, 7, 3)
 LT_WS_BYTES = 32 << 20
 # s100: g30 (layer's 12-bit W decoded into wgmma A registers, swap-AB; MTOK 16/32 = proj s95 g30n with a (1, S, 1) cluster
 # split-K + DSMEM reduce; MTOK 128 = layer s99 g30). Per (layer, m): (S, NW, NS) tuner candidates; one build per (m, S, NW, NS).
-BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 16, 16)], ("qkv_gate", 16): [(3, 16, 16), (2, 16, 16)],
+BF16_G30 = {("unpooler", 16): [(1, 16, 16), (1, 20, 8)], ("pooler", 16): [(2, 16, 16), (2, 20, 8)],
+            ("qkv_gate", 16): [(3, 16, 16), (3, 20, 8)],
             ("o", 16): [(1, 16, 16), (2, 16, 16)],
-            ("unpooler", 32): [(1, 20, 8), (1, 16, 16)], ("pooler", 32): [(2, 16, 16), (2, 20, 8)], ("qkv_gate", 32): [(3, 16, 16), (2, 20, 8)],
+            ("unpooler", 32): [(1, 20, 8), (1, 16, 16)], ("pooler", 32): [(2, 16, 16), (2, 20, 8)], ("qkv_gate", 32): [(3, 16, 16), (3, 20, 8)],
             ("o", 32): [(1, 20, 8), (2, 20, 8)],
             ("unpooler", 128): [(1, 10, 10)]}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
