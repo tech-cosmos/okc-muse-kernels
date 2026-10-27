@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 16:55 UTC (s93). g30_sort in-layer = TIE (r-layer branch proj/g30sort ad581f9, bitwise same). g30 split-K with
+DSMEM K-cluster reduce (dev/s93, G30_KC=1/2) DEAD: cluster+reduce ~2-2.5 us; qkv S3 18.9 vs cuBLAS 19.8, pool S2 loses. NOTES s93.
 Updated 2026-10-27 16:50 UTC (s92). g30 ESC_FIX cheaper: candidates sorted once, pop = register shift (dev/s92/g30_sort_layer.diff
 on layer f7a1cdc g30_src.cu): H100 unp T=128 -0.33..0.4 us natural, -1.5 adversarial; bitwise == layer g30, one-hot exact. Handoffs proj s92.
 Updated 2026-10-27 16:10 UTC (s91). g30 ESCAPES (layer s99 T=128 12-bit wgmma GEMM): escape value patched into the owning

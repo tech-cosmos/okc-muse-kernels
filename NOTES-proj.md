@@ -1896,3 +1896,20 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   muse_decode_layer/g30_src.cu; drops esc_pop, adds G30_POP + the sort). No interface change.
 - Not measured (standalone can't show it): G30_PRE in g30v.cu = consumers read the escape header before griddepcontrol.wait
   (weights only); might hide ~0.5 us of header latency in-layer as a PDL secondary. Left as an option for layer (in g30v.cu).
+
+## s93 (2026-10-27 16:07-16:55Z, night4 session 50): g30_sort in-layer tie; g30 split-K via DSMEM K-cluster DEAD; 0 checks
+- g30_sort (s92) ported onto layer main f7a1cdc: r-layer branch proj/g30sort (ad581f9; g30_src.cu + rebuilt submission.py).
+  In-layer H100, dev/s93/ab2.py (ab_files with TUNE = {} in both files, A B / B A order, 6 rounds, seeds 99/7/13, v16 = T=128):
+  sl 301.66/301.68, 297.00/296.51, 309.34/308.38; full 438.08/437.36, 422.34/421.80, 383.00/383.28 us = TIE (-0.9..+0.3).
+  Outputs bitwise equal to main on all 6 inputs. validate.py NOT run (tie; layer may take it or leave it).
+- Layer s101 is building g30 split-K (uneven K split, FP32 slabs) for qkv (36 row groups) / pooler. Complement tried here:
+  G30_KC (dev/s93/s101_g30.cu = layer's dev/s101_g30.cu @16:06Z + KC): cluster (1, S, 1) along K, partials summed via
+  DSMEM (KC=1: rank 0 pulls all; KC=2: reduce-scatter, rank r owns 16/S token groups), BF16 out, no slabs/reduce kernel.
+  H100 cold L2 standalone (no escapes; harness dev/s93/s101_g30.py, run from a muse_decode_layer/dev copy), us:
+    qkv 2304x8192 S3: slabs (no reduce counted) 16.3-16.6 | KC NORED (cluster + syncs only) 17.6 | KC=1 19.2-19.6 | KC=2 18.8-18.9 | cuBLAS 19.8-20.0
+    qkv S2 KC 22.1 (NORED) / 23.3; S4 slabs 24.6, KC 32.3 (2 waves: max active clusters 39 x 3).
+    pool 4096x8192 S2: slabs 25.4-25.7 | KC=1 24.6-27.3 | KC=2 27.0-27.2 steady (first call in a process 24.0) | cuBLAS 26.1-26.8
+  => cluster co-scheduling/rank skew ~1.2 us + DSMEM reduce ~1.3 us (KC=1) / ~1 us (KC=2). Only qkv S3 beats cuBLAS (-0.9 us
+  standalone, before escapes ~+0.4..0.9): DEAD as a lever (v16 sl %/us 0.041 -> <= 0.04%). Slabs + reduce fused into the next
+  kernel's prologue (layer's path) is the only form that can beat it. Pitfall: the first g30 timing in a process reads 1.5-3 us
+  faster than steady state (pool 22.7/24.0 vs 25.6/27.1): always repeat a shape and take the later numbers.
