@@ -48,6 +48,7 @@ _G15_SRC = r'''@@GEMV15@@'''
 _G16_SRC = r'''@@GEMV16@@'''
 _G19_SRC = r'''@@GEMV19@@'''
 _G24_SRC = r'''@@GEMV24@@'''
+_G27_SRC = r'''@@GEMV27@@'''
 _G20_SRC = r'''@@GEMV20@@'''
 _G22_SRC = r'''@@GEMV22@@'''
 _TG2_SRC = r'''@@TG2@@'''
@@ -166,6 +167,12 @@ DIAG24 = {k: v + [c[:6] + (257,) for c in v] for k, v in DIAG24.items()}  # s54:
 DIAG24_GRIDS = (132, 108)
 DIAG19D = {}  # s56: diag19d/diag24 done (check 636c89fc FAILED setup: prepare() 325.6 s > 300 s with them on; lines in NOTES s56)
 DIAG24 = {}
+# s57: _diag27 only (print): gemv27 (dev/s57/gemv27.cu: no cross-block split-K; block = RGB whole row groups, warps split
+# k, smem sum, plain stores: no zeroing / epoch barrier / atomics; ns >= 100 = PD: W decoded into registers BEFORE
+# griddepcontrol.wait) for the layer's o at T=16/32 vs g24's layer cfg / cuBLAS / lt pick, after a 3 us PDL pred.
+# H100 (us over pred): o m16 PD 5.1-5.4 | g24 6.7 | cuBLAS 7.9; m32 PD 7.0 | g24 7.2 | cuBLAS 8.4.
+DIAG27 = {"o": [(16, 4, 4, 108, 4, 0), (16, 4, 4, 2, 4, 0), (32, 4, 4, 108, 4, 0), (32, 4, 4, 2, 4, 0)]}
+DIAG27_G24 = {("o", 16): (16, 512, 2, 4, 16, 2, 1), ("o", 32): (32, 512, 4, 3, 12, 2, 1)}
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
@@ -535,6 +542,7 @@ def prepare(weights):
     _diag19_stream()
     _diag19d(st)
     _diag24(st)
+    _diag27(st)
     _diag_slab(st)
     _diag_ext(st)
     st["rpick"] = _tune_router(st)
@@ -815,6 +823,71 @@ def _diag24(st):
                 continue
             print(f"diag24 {layer} m{m} {c} (pred {med[0] * 1e3:.2f}, rel err {err:.1e}):", " | ".join(
                 f"G{grid} +{(t - med[0]) * 1e3:.2f}" for grid, t in zip(DIAG24_GRIDS, med[1:])))
+
+
+def _diag27(st):
+    """Print only: gemv27 per DIAG27 config vs gemv24 (DIAG27_G24), F.linear and the pick, us over a 3 us PDL predecessor."""
+    if _g19 is None or not DIAG27:
+        return
+    try:
+        c24 = sorted(set(DIAG27_G24.values()))
+        mod = load_inline(name="muse_proj_g27", cpp_sources="void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, "
+                          "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); "
+                          "void g27_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                          cuda_sources=_G24_SRC.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in c24)) + "\n" +
+                          _G27_SRC.replace("G27_CONFIGS", " ".join("G27_CASE(%d,%d,%d,%d,%d,%s)" % (c[:5] + ("true" if c[5] else "false",)) for c in sorted(
+                              {c for v in DIAG27.values() for c in v}))),
+                          functions=["g24_gemm", "g27_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+    except Exception as e:  # noqa: BLE001
+        print("diag27 build failed:", e)
+        return
+    g = torch.Generator(device="cuda")
+    g.manual_seed(6)
+    for layer, cfgs in DIAG27.items():
+        w = st[layer]
+        n, k = w.shape
+        c_ = _compress(w)
+        if c_ is None:
+            continue
+        for m in sorted({c[0] for c in cfgs}):
+            xs = torch.randn(m, k, generator=g, device="cuda").to(torch.bfloat16)
+            x = xs.clone()
+            ref = x.float() @ w.float().T
+            out = torch.empty(m, n, dtype=torch.bfloat16, device="cuda")
+            pick = st["pick"].get((layer, m))
+            fns = [lambda: _g19.g19_pred(xs, x, 3000), lambda: (_g19.g19_pred(xs, x, 3000), F.linear(x, w)),
+                   lambda: (_g19.g19_pred(xs, x, 3000), _run(st, layer, x, out, pick))]
+            names, errs = ["cublas", f"pick {pick[0] if pick else None}"], ["", ""]
+            c4 = DIAG27_G24.get((layer, m))
+            try:
+                if c4:
+                    P4, h4, s4 = _pack19(c_, c4[1], c4[2], c4[6] & 0xff)
+                    o4 = torch.empty(m, n, dtype=torch.float32, device="cuda")
+                    ctr = torch.zeros(2, dtype=torch.int32, device="cuda")
+                    a4 = c4[1:6] + (_SMS, c4[3], c4[6])
+                    mod.g24_gemm(P4, h4, s4, x, o4, ctr, *a4)
+                    torch.cuda.synchronize()
+                    errs.append(f"{((o4 - ref).norm() / ref.norm()).item():.1e}")
+                    fns.append(lambda: (_g19.g19_pred(xs, x, 3000), mod.g24_gemm(P4, h4, s4, x, o4, ctr, *a4)))
+                    names.append(f"g24 {c4[1:]}")
+                for c in cfgs:
+                    if c[0] != m:
+                        continue
+                    kq, ap, ns, rgb, obf = c[1:]
+                    P, hdr, scale = _pack19(c_, k // kq, ap, 1)
+                    o27 = torch.empty(m, n, dtype=torch.bfloat16 if obf else torch.float32, device="cuda")
+                    a27 = (kq, ap, ns, rgb, ns if ns < 100 else 99)
+                    mod.g27_gemm(P, hdr, scale, x, o27, *a27)
+                    torch.cuda.synchronize()
+                    errs.append(f"{((o27.float() - ref).norm() / ref.norm()).item():.1e}")
+                    fns.append(lambda P=P, hdr=hdr, scale=scale, o27=o27, a27=a27: (_g19.g19_pred(xs, x, 3000), mod.g27_gemm(P, hdr, scale, x, o27, *a27)))
+                    names.append(f"g27 {c[1:]}")
+                med = _graph_medians(fns)
+            except Exception as e:  # noqa: BLE001
+                print("diag27", layer, m, "failed:", e)
+                continue
+            print(f"diag27 {layer} m{m} (pred {med[0] * 1e3:.2f}):", " | ".join(
+                f"{nm} +{(t - med[0]) * 1e3:.2f}{' err ' + er if er else ''}" for nm, t, er in zip(names, med[1:], errs)))
 
 
 def _diag19q(st):

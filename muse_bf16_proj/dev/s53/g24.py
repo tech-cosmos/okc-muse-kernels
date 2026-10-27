@@ -64,8 +64,8 @@ for nm, layer, n in SH:
     for M in sorted({c[0] for c in cfgs}):
         x = torch.randn(M, k, device="cuda").bfloat16()
         xsrc = x.clone()
-        pre = lambda: mod.g24_pred(xsrc, x, PRED)
-        e = bench.time_graph(pre)
+        pre = (lambda: mod.g24_pred(xsrc, x, PRED)) if PRED >= 0 else (lambda: None)  # PRED<0: no predecessor (graph's first op)
+        e = bench.time_graph(pre) if PRED >= 0 else 0.0
         tc = bench.time_graph(lambda: (pre(), F.linear(x, W))) - e
         line = f"{nm:5s} m{M}: pred {e:6.2f} cublas {tc:6.2f}"
         out = torch.empty(M, n, device="cuda")
