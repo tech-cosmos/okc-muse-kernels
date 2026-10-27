@@ -1394,3 +1394,8 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - 00:27Z **submit 129ad449 = v102 (code of check c973ab6f): 2.0398x [2.009, 2.070], 11,089 us/step: NEW BOARD BEST** (was 703d3a7e
   1.9954x); layer board #39 at 00:52Z (#1 2.380x). d1 70.2/75.5, d16 132.6/216.6, d32 161.8/319.1, v1 116.4/129.3,
   v16 273.3/367.3, v32 359.6/527.8. vs its check: d1 sl +4.7, v1 +7.5/+13.4 (T=1/8 routing draw: local expert count), rest +-2.
+- 00:37Z **check 0eb3484a = v103 (174a655): 2.065x [2.034, 2.096], 10,954 us**: d1 68.6/75.3, d16 127.7/214.3 (sl -4.6 vs c973ab6f),
+  d32 177.1/333.5 (sl +13.5: T=32 code identical to v102; the H200 tuner's own T=32 default was 169.1 vs 168.8 us: run noise),
+  v1 110.7/122.5, v16 279.8/368.2, v32 358.9/524.2. H200 tuner g24z off: T=16 sl 172.8 vs 170.6, full 238.2 vs 237.0 (g24z wins).
+  H200 T=32 picks flipped between runs ({tk2h 4, lt:o} -1.4/-2.6 in c973ab6f, +3.2/+4.9 in 0eb3484a): keep it tuner-only.
+- 01:01Z submit b9685e03 = v103 (check beat board 2.0398).
