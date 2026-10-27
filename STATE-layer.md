@@ -4,8 +4,8 @@ BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
 s88: **main = v131** = v130 + pr8 template generalized (light 512-thr / x-ring configs, none compiled). Light pr8 and
 OB8+light pr8 measured DEAD on H100 (NOTES s88): pr8 ends at the same time whatever precedes it; boundary already hidden.
-Open there: pr8's STREAM RATE on the H200 (21.3 us vs pr1 17.5 us for ~the same bytes): H200 diag of PF/WG/prefetch variants
-in the first check after 00:00Z. validate --quick ALL OK, cold 116.8 s. 0 judge runs.
+pr8's stream rate (H200 ~17 us after bnd vs 13.7 floor) was already worked by proj s36-s38/s80 (PF, bulk/2nd-wave prefetch,
+RGI, stealing bound ~2 us): no lever > ~1 us. First check after 00:00Z: main v131 + any handoff bundle. validate --quick ALL OK, cold 116.8 s. 0 judge runs.
 s87: main = v130 = v129 minus all {pr1: False} TUNE[8] options (lead 11:50Z: never picked on 22 H200 logs incl. board run
 35dd53d0, +1.7..5.8 us; board run clean, no withdraw). validate --quick ALL OK, nu8_race 0/180, cold prepare 147.8 s. 0 judge runs.
 First check after 00:00Z: main v130 + any proj bundle (light pr1/pr8 asked, COORD Requests s87).
