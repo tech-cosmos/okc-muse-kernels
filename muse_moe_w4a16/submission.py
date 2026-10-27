@@ -2891,7 +2891,8 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
 // serializes the HGMMAs (s28). moe_twm runs as its PDL secondary (hx) on the SMs this grid leaves free and skips these
 // experts. Items: all gemm13 items, then all gemm2 items (they wait on done[e] as in twm; deadlock-free the same way).
 // Stage = x 128-row box (16 KB, SW128) + weights 8 KB + scales 1 KB.
-template <int NSTG, bool SA>
+// s23 NH 64: the experts with 33..64 tokens in one N 64 pass (layer T = 128), with moe_twq (flags bit 20) skipping them.
+template <int NSTG, bool SA, int NH = 128>
 __global__ void __launch_bounds__(384, 1) moe_hot(
     const char* __restrict__ W13, const char* __restrict__ S13, const float* __restrict__ gs13,
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
@@ -2900,7 +2901,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     __nv_bfloat16* __restrict__ Y) {
   using HG = TWC<2, true, 8>;
   using HN = TWC<2, false, 8>;
-  constexpr int XB = 128 * 128, STRIDE = XB + HG::WB + HG::SB;
+  constexpr int XB = NH * 128, STRIDE = XB + HG::WB + HG::SB;
   static_assert(STRIDE % 1024 == 0 && HG::WB == HN::WB && HG::SB == HN::SB, "stage layout");
   extern __shared__ __align__(1024) uint4 smem_tw[];
   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
@@ -2922,7 +2923,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int nact = meta[0];
     const int e = tid < nact ? meta[1 + tid] : 0;
     const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0;
-    const bool h = nt > 64 && nt <= 128;
+    const bool h = nt > NH / 2 && nt <= NH;
     const unsigned b = __ballot_sync(0xffffffffu, h);
     if (h) s_e[__popc(b & ((1u << tid) - 1))] = e;
     if (tid == 0) s_nh = __popc(b);
@@ -2947,7 +2948,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
       const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e];
       const char* wsrc = (g2 ? W2 : W13) + ((size_t)e * nrb + rb) * 64 * HG::WB;
       const char* ssrc = (g2 ? S2 : S13) + ((size_t)e * nrb + rb) * 64 * HG::SB;
-      const CUtensorMap* map = g2 ? &maps2.m[5] : &maps13.m[5];
+      const CUtensorMap* map = g2 ? &maps2.m[NH == 128 ? 5 : 3] : &maps13.m[NH == 128 ? 5 : 3];
       if (g2) {
         int v;
         for (;;) {
@@ -2979,7 +2980,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int g2 = item >= n13, it = g2 ? item - n13 : item, nrb = g2 ? HN::NRB : HG::NRB;
     const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e], nv = s_off[e + 1] - off;
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
-    tw_item<2, 1, 128, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb,
+    tw_item<2, 1, NH, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb,
                                                            gsc, sroutes, g2 ? Y : Inter, g2);
     if (!g2) {
       asm volatile("fence.proxy.async.global;" ::: "memory");
@@ -3013,21 +3014,21 @@ int64_t moe_stream_launch(torch::Tensor desc_, torch::Tensor beg_, int64_t sb, i
 #undef STRM
   return (int)cudaGetLastError();
 }
-template <bool SA>
+template <bool SA, int NH>
 static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
   constexpr int NSTG = 8;
-  constexpr int SMEM = NSTG * (128 * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024;
+  constexpr int SMEM = NSTG * (NH * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024;
   static bool init = false;
   if (!init) {
-    cudaFuncSetAttribute(moe_hot<NSTG, SA>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    cudaFuncSetAttribute(moe_hot<NSTG, SA, NH>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     init = true;
   }
   TMaps m13, m2;
   tw_maps(m13, xg_.data_ptr(), xg_.size(0));
   tw_maps(m2, inter_.data_ptr(), inter_.size(0));
-  return launch_k(moe_hot<NSTG, SA>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+  return launch_k(moe_hot<NSTG, SA, NH>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
       (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr());
@@ -3036,7 +3037,8 @@ int64_t moe_hot_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
                        torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                        torch::Tensor inter_, torch::Tensor y_, int64_t grid) {
 #define HOTA w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, (int)grid
-  return (g_sa & 1) ? hot_go<true>(HOTA) : hot_go<false>(HOTA);
+  if (g_hot & 4) return (g_sa & 1) ? hot_go<true, 64>(HOTA) : hot_go<false, 64>(HOTA);  // s23: 33..64-token experts
+  return (g_sa & 1) ? hot_go<true, 128>(HOTA) : hot_go<false, 128>(HOTA);
 #undef HOTA
 }
 template <bool SA>
@@ -3215,8 +3217,11 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
   // griddepcontrol.wait, so moe_route's meta / sroutes are complete here (read with __ldcg); only xg (the x TMA source)
   // is the primary's output: the producer streams its first stages' weights + scales now and issues their x TMAs after
   // its griddepcontrol.wait (before any blocking wait of its own). Consumers read x only from smem.
-  const int wbw = flags & 16;
-  if (!wbw) asm volatile("griddepcontrol.wait;" ::: "memory");
+  // s23 hx (flags bit 20): moe_hot<NH 64> (the PDL primary) runs the experts with 33..64 tokens: skip them, no wait at
+  // entry (moe_hot triggers after its own wait: the gather is complete), wait at the end (moe_norm sees moe_hot's Y)
+  const int hx = (flags >> 20) & 1;
+  const int wbw = hx ? 0 : flags & 16;
+  if (!wbw && !hx) asm volatile("griddepcontrol.wait;" ::: "memory");
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (tid < 33) s_off[tid] = __ldcg(meta + 33 + tid);
   if (tid == 0) {
@@ -3228,7 +3233,9 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     const int nact = __ldcg(meta);
     const int e = tid < nact ? __ldcg(meta + 1 + tid) : 0;
     s_e[tid] = e;
-    const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0, big = 0;  // s17: 64-token passes do not fit (registers)
+    int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0;
+    if (hx && nt > 32 && nt <= 64) nt = 0;
+    const int big = 0;  // s17: 64-token passes do not fit (registers)
     const int npass = big ? (nt + 63) / 64 : (nt + 31) / 32;
     s_big[tid] = big;
 #pragma unroll
@@ -3382,6 +3389,7 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     ++ntl;
 #endif
   }
+  if (hx && tid == 0) asm volatile("griddepcontrol.wait;" ::: "memory");
 }
 
 // n21: clamp the K-split item count to the partial buffer (16384 floats per part) and the ticket words
@@ -5162,6 +5170,7 @@ TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if 
 #   bit 3 = pass-minor item order; use 4 for plain on)
 TWQ_M = {}  # s17: per-M override, e.g. {128: 4} (proxy: v16 -6.5 proxy-us, v32 +4.6)
 TWQ_SPLIT = (0, 0)  # n21: moe_twq K-split tail (items, log2 parts): the last ~items gemm2 items (from an expert boundary)
+HOTQ_M = {}  # s23: {M: grid}: moe_hot<NH 64> (33..64-token experts, one N 64 pass) on that many CTAs before moe_twq (skips them)
 TWQ_SPLIT_M = {}  #   run as 2^parts K slices, FP32 partials summed in part order by the last one (per-M override)
 TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
 TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
@@ -5199,15 +5208,15 @@ SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 DIAG = 0
 _DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('decode 1', 17, 1), ('decode 1', 99, 1), ('decode 16', 7, 16), ('decode 16', 11, 16), ('decode 16', 13, 16), ('decode 16', 17, 16), ('decode 16', 99, 16), ('decode 32', 7, 32), ('decode 32', 11, 32), ('decode 32', 13, 32), ('decode 32', 17, 32), ('decode 32', 99, 32), ('verify 1', 7, 8), ('verify 1', 11, 8), ('verify 1', 13, 8), ('verify 1', 17, 8), ('verify 1', 99, 8), ('verify 16', 7, 128), ('verify 16', 11, 128), ('verify 16', 13, 128), ('verify 16', 17, 128), ('verify 16', 99, 128), ('verify 32', 7, 256), ('verify 32', 11, 256), ('verify 32', 13, 256), ('verify 32', 17, 256), ('verify 32', 99, 256)]
 _DIAG_R = "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"
-DIAG_VARIANTS = {  # n21: moe_twq K-split tail (TWQ_SPLIT = (items, log2 parts)) at T=128/256; b = repeats
+DIAG_VARIANTS = {  # s23: moe_hot<NH 64> (33..64-token experts, one pass) beside moe_twq at T=128 (HOTQ_M grid); b = repeats
     "dec": [("sq", {})],
-    "big": [("q4", {"RG": 0, "TWQ_M": {128: 4, 256: 4}}),
-            ("s24h", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "TWQ_SPLIT": (24, 1)}),
-            ("s33h", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "TWQ_SPLIT": (33, 1)}),
-            ("s66h", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "TWQ_SPLIT": (66, 1)}),
-            ("s33q", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "TWQ_SPLIT": (33, 2)}),
-            ("q4b", {"RG": 0, "TWQ_M": {128: 4, 256: 4}}),
-            ("s33hb", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "TWQ_SPLIT": (33, 1)})],
+    "big": [("s33h", {"RG": 0, "TWQ_M": {128: 73988, 256: 4}}),
+            ("s33h24", {"RG": 0, "TWQ_M": {128: 73988, 256: 4}, "HOTQ_M": {128: 24}}),
+            ("s33h32", {"RG": 0, "TWQ_M": {128: 73988, 256: 4}, "HOTQ_M": {128: 32}}),
+            ("s33h40", {"RG": 0, "TWQ_M": {128: 73988, 256: 4}, "HOTQ_M": {128: 40}}),
+            ("q4h32", {"RG": 0, "TWQ_M": {128: 4, 256: 4}, "HOTQ_M": {128: 32}}),
+            ("s33hb", {"RG": 0, "TWQ_M": {128: 73988, 256: 4}}),
+            ("s33h32b", {"RG": 0, "TWQ_M": {128: 73988, 256: 4}, "HOTQ_M": {128: 32}})],
 }
 
 
@@ -5552,6 +5561,12 @@ def kernel_fn(data, st):
                 if qs and qk and not DIAG_TL:
                     part = torch.empty((qs << qk) * 16384, dtype=torch.float32, device=dev)
                 if DIAG_TL and TWM_ORDER_M.get(M, TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
+                hq = HOTQ_M.get(M, 0)
+                if hq:  # s23: 33..64-token experts in one N 64 pass on hq CTAs; moe_twq (PDL secondary) skips them
+                    lib.moe_set_hot(4)
+                    lib.moe_hot_launch(st["w13b2"], st["w13sb2"], st["gs13"], st["w2b2"], st["w2sb2"], st["gs2"], st["lut"],
+                                       xg, meta, sroutes, inter, y, hq)
+                    q |= 1 << 20
                 lib.moe_twq_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["lut"], xg,
                                    meta, sroutes, inter, y, part, st["tk"], q)
             elif TWF_MIX and "w2b2" in st:
