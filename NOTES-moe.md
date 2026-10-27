@@ -1859,7 +1859,7 @@
   ~ 15 us at ~65-70 GB/s/SM) may become the bound: then R2 (128 rows/CTA, 0.5 MB x) forms win there and not here. Only an
   H200 run can rank g30 forms.
 
-## Night4 session 44 (2026-10-27 16:13Z - ~16:35Z) -- attention lane: verify 1 full softmax-reference probes (all dead); 0 checks
+## Night4 session 44 (2026-10-27 16:13Z - 16:20Z) -- attention lane: verify 1 full softmax-reference probes (all dead); 0 checks
 - Per-load speedups of board run 957cabd7 (vs SGLang H200): d1 3.66x, v1 3.20x, d16 2.55x, d32 2.33x, v16 2.11x, v32 2.09x
   (full shapes 1.97-2.58x, sliding 2.47-4.69x). #1 (3.03x) needs ~+17% geomean: not reachable from the full kernels alone
   (s40 bounds), so the #1 team must be far ahead on batch-1 and/or sliding shapes too.
