@@ -88,7 +88,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
-#define TK2F_L2H 1       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
+#define TK2F_L2H 4       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
 #define NORM_EARLY 1     // n4s1 (layer s53: set here, layer has its own _lib): twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them
 #ifndef TK2G_PAR4
 #define TK2G_PAR4 1      // n17: tk2g_bound's 4 calls on 4 warps + 32-bit p (bitwise: same bounds)
@@ -3192,7 +3192,8 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
     const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
     const char* qsrc = reinterpret_cast<const char*>(Wq) + ((size_t)e * RPE + lr) * NQ * SB;  // SQ
 #if TK2F_L2H
-    const bool nfin = R + RPE < s_rs[a + 1];  // a later group of this expert re-reads this row
+    // mode 4: every group of a multi-group expert (the other group's CTA may read the same row first)
+    const bool nfin = TK2F_L2H == 4 ? s_rs[a + 1] - s_rs[a] > RPE : R + RPE < s_rs[a + 1];
     const int hk = nfin ? (TK2F_L2H == 3 ? 0 : 1) : (TK2F_L2H == 2 ? 0 : 2);  // 0 none, 1 evict_last, 2 evict_first
     const uint64_t pol = hk == 1 ? pol_last : pol_first;
 #endif

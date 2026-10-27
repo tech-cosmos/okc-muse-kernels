@@ -4406,7 +4406,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
-#define TK2F_L2H 1       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
+#define TK2F_L2H 4       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
 #define NORM_EARLY 1     // n4s1 (layer s53: set here, layer has its own _lib): twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them
 #ifndef TK2G_PAR4
 #define TK2G_PAR4 1      // n17: tk2g_bound's 4 calls on 4 warps + 32-bit p (bitwise: same bounds)
@@ -7510,7 +7510,8 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
     const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
     const char* qsrc = reinterpret_cast<const char*>(Wq) + ((size_t)e * RPE + lr) * NQ * SB;  // SQ
 #if TK2F_L2H
-    const bool nfin = R + RPE < s_rs[a + 1];  // a later group of this expert re-reads this row
+    // mode 4: every group of a multi-group expert (the other group's CTA may read the same row first)
+    const bool nfin = TK2F_L2H == 4 ? s_rs[a + 1] - s_rs[a] > RPE : R + RPE < s_rs[a + 1];
     const int hk = nfin ? (TK2F_L2H == 3 ? 0 : 1) : (TK2F_L2H == 2 ? 0 : 2);  // 0 none, 1 evict_last, 2 evict_first
     const uint64_t pol = hk == 1 ? pol_last : pol_first;
 #endif
@@ -12849,6 +12850,14 @@ G24Z_TOKENS = {16}  # T=32: H100 in-layer d32 +1..2.5 us (pooler m32 ZN stores +
 G24_EZUSE = True  # A/B knob: False = the ZN stores happen but the consumer still zeroes itself
 G24_EZPF = False  # True: the zeroed-ahead out is L2-prefetched before the consumer's griddepcontrol.wait (H100 d16/d32 tie: off)
 _G24_ZN = {}  # (key, m) -> zeroed out for that call; cleared at every kernel_fn start
+# proj s59 G24X (cross-call EZ for the graph's first op): qkv's FP32 out at T in G24X_TOKENS is a persistent buffer
+# (state["g24x"][T], zeros from prepare) that the qkv g24 consumes as EZ (no zero + fence + grid epoch barrier); the
+# call's g24 unpool zeroes it again as its ZN (qkv's out is dead after attention). If unpool did not (other path),
+# kernel_fn zeroes it at its end: invariant = the buffer is zero between calls. H100 standalone first-op qkv m16
+# 18.5 -> 17.6 us, m32 21.1 -> 19.2. H100 layer ab_files (TUNE {}, A B B A, 8 rounds) d16 sl -1.56, full -0.68 us;
+# T=32 (only when the tuner picks g24:qkv_gate, a TUNE[32] option): g24 qkv -0.5/-0.9 us vs without G24X (6 rounds).
+G24X_TOKENS = {16, 32}
+_G24X = []  # the pending buffer of this call (unpool's ZN target)
 BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
 G19_ON = {"pooler", "unpool", "qkv_gate", "o"}  # o: H100 tie (cuBLAS after attention)
 G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32), ("qkv_gate", 8), ("o", 8), ("pooler", 8)}  # prepared, used only if TUNE picks them (H100: tie/+3 us)
@@ -15029,6 +15038,8 @@ def _g24_prepare(state, w, comp, g):
             ok = False
         if ok:
             state[sd][(key, m)] = e
+            if key == "qkv_gate" and sd == "g24":
+                state.setdefault("g24x", {})[m] = torch.zeros((m, w[key].shape[0]), dtype=torch.float32, device=dev)
         else:
             print("layer gemv24 config dropped:", key, m, c)
     _g27_prepare(state, w, comp, g, packs)
@@ -15100,7 +15111,7 @@ def _g27_prepare(state, w, comp, g, packs):
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
             {"rf_trig": False}, {"g13o": True}),
-        16: ({}, {"g24z": False}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
+        16: ({}, {"g24z": False}, {"g24x": False}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
              {"bal": True}, {"bal": False}, {"cslpw": False}, {"cslcarve": True},
@@ -15358,6 +15369,8 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
         zo = _NOZ(x.device)
         if en is not None:  # this g24 zeroes the next one's out after its own work (ZN)
             zo = _G24_ZN[(nk, m)] = torch.empty((m, en[1].shape[0]), dtype=torch.float32, device=x.device)
+        elif key == "unpool" and _G24X and _G24X[0].shape[0] == m:  # s59 G24X: zero the next call's qkv out
+            zo = _G24X.pop()
         grid = G19_GRID.get((key, m), _G19_SMS)
         ctr = e[3].get(grid)
         if ctr is None:
@@ -15576,8 +15589,21 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
 
 
 def kernel_fn(data, state):
+    _G24X.clear()
+    r = _kernel_fn(data, state)
+    if _G24X:  # s59 G24X: unpool did not zero qkv's persistent out: restore the zero invariant
+        _G24X.pop().zero_()
+    return r
+
+
+def _kernel_fn(data, state):
     cfg = data["config"]
     _G24_ZN.clear()
+    if cfg["tokens"] in G24X_TOKENS and _opt(state, cfg["tokens"], "g24x", True) and _g24_sel(state, "qkv_gate", cfg["tokens"]) is not None:
+        xb = state.get("g24x", {}).get(cfg["tokens"])
+        if xb is not None and _g24_sel(state, "qkv_gate", cfg["tokens"])[4][0] == cfg["tokens"]:
+            _G24_ZN[("qkv_gate", cfg["tokens"])] = xb  # zero (invariant): the qkv g24 runs EZ on it
+            _G24X.append(xb)
     _SLIDING[0] = cfg["window"] > 0
     batch, length, tokens = cfg["batch"], cfg["q_len"], cfg["tokens"]
     hq, d = cfg["num_q_heads"], cfg["head_dim"]
