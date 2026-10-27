@@ -1,29 +1,17 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-Updated 2026-10-26 22:50Z (s66): **main = v102 = v101 + proj s54 g24 stream-K (g24sk) default at T=32 pooler+unpool** (H100 ab_flag
-3 seeds d32 sl -0.9..-2.1, full -1.3..-2.0 us; T=16 SK and T=32 SK qkv = TUNE options; tests 13/13, d32 scored/replay/route_judge 0 bad; NOTES s66).
-s65: v101 = v100 + proj s53 gemv24 default at T=16 (all 4 GEMMs) and T=32 (pooler+unpool)**: H100 ab_flag d16 sl/full -2.9/-3.0, d32 -1.5/-1.8 us; tuner off-options; tests/replay/route_judge 0 bad, cold 5:05 (NOTES s65). v100 = v99 + safety comment only. v99 = v97 + CSL_PW (d16 sliding csl = PDL
-secondary of the g19 qkv, K/V gathers before griddepcontrol.wait; H100 d16 sl -0.7..-1.0 us) + vtk PW as TUNE[8] option
-{cslpw: True}. NOT judge-checked. s63 AUDITED CSL_PW for the lead (NOTES s63): pre-wait loads read only inputs + context rows
-< seq_lens; tools/pw_race.py bitwise 0/40 diffs (control race 40/40 seen); safe to check. KEEP the qkv GEMM the graph's first
-kernel at T=8/16 (else PW can race). FIRST CHECK AFTER 00:00Z = main: read 'layer tune T=8' nu8d/cslpw, 'T=16' bal/tk2h/
-cslpw/cslcarve, 'T=32' bal/tk2h lines. NOTES s59-s63.
-Board 21:00Z: #52 at 1.995x (#1 2.380x). Per-load ratios: d1 2.43, d16 1.88, d32 1.68, v1 2.19, v16 1.93, v32 2.00.
+Updated 2026-10-27 01:30Z (s67): **main = v103 = v102 + proj s56 g24z (T=16 zero-ahead chain qkv->o->pooler->unpool). BOARD BEST =
+submit b9685e03 = v103, 2.0606x, 10,977 us/step, layer board #30** (#1 2.380x). Previous: 129ad449 = v102 2.0398x; 703d3a7e = v70 1.9954x.
+Per shape (H200 us, b9685e03): d1 70.3/77.0, d16 133.4/216.1, d32 164.7/320.7, v1 114.0/122.9, v16 271.3/360.5, v32 352.9/520.7.
+Checks: c973ab6f v102 2.0817x, 0eb3484a v103 2.065x. Check->submit spread ~1-2% (d1/v1 routing draw moves 5-13 us).
+H200 tuner picks per run are in NOTES s67 (T=32 {tk2h 4, lt:o} flips sign between runs: tuner-only; g24z wins on H200).
+Budget 2026-10-27: 18 checks / 8 submits left after s67 (resets 00:00Z).
 
-Mains since v89 (all NOT judge-checked, H100-validated; NOTES s52-s59): v90 NORM_EARLY (T>=128) | v91 __ldcg moe_norm/norm2 |
-v92 pr1 __ldcg | v93 BND_SEP (T=8, v1 -1.0) | v94 G19_TRIG (T=16/32 boundaries PDL after g19, d16/d32 -1..2.8; TUNE g19trig) |
-v95 moe tk2h GS16+PF4 at T=16/32 (TUNE tk2h 3/4; G88 proxy d32 sl -9 proxy-us; H100 tuner picks tk2h 4 at T=32) | v96 NU8D | v97 BAL + TAG2 | v98 CSL_PW (T=16) | v99 vtk PW (TUNE[8]).
-The 00:00Z check reads the H200 tuner lines for all of these ('layer tune T=8/16/32/256'). Persistent T<=8 tail: bounded
-<= 1-2 us on paper (s57), not built.
-
-## FIRST THING NEXT SANDBOX (budget resets 00:00Z: 20 checks, 10 submits)
-1. `okc check muse_decode_layer/submission.py --json` on main (v102; read the g24 + g24sk tune lines too). Compare per shape vs 703d3a7e (d1 69.6/77.8,
-   d16 143.3/227.7, d32 174.0/326.6, v1 117.7/128.2, v16 272.2/367.7, v32 356.4/550.5; tools/ckparse.py). Expected:
-   v32 -8..14 us (moe_hot, RG), v1 -2..4 (pr8 npf 212, BND_SEP, NU8D), d16/d32 -1..5 (G19_TRIG, tk2h), d1 -1..2. Submit if > 1.9954x.
-2. Copy the profile's 'layer tune' lines into NOTES (every T: which TUNE option the H200 picked, and by how much).
-3. If the check loses on some shape vs 703d3a7e, bisect with ONE check of a DIAG build that forces the suspect
-   options per shape (the tuner lines in the log already A/B every TUNE option on the H200: read them first).
-4. Then: integrate new moe/proj Handoffs (stack several into one check), check, submit only on a beat.
+## NEXT
+1. Integrate new moe/proj Handoffs on top of v103 (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
+   cold compile < ~5.5 min), then check; submit only if the check beats 2.0606x.
+2. Weakest ratios on the board run: d32 sl 1.589, v16 sl 1.923, d16 sl 1.976: experts (tk2f/twm) are moe's lane; ask moe.
+3. okc check can exceed a 600 s tool timeout: run it in the background, poll `okc jobs`, read with `okc status <job> --json`.
 
 Mains since the board best (v70), all H100-validated (bench test 13/13, replay_test + route_judge 0 fails), details in
 NOTES s32-s44: v71 BND_SPLIT | v72 O_PF (d32/v16 sl) | v73 moe TK2F_L2H | v74 pr1_npf 0 at T=1 | v75 TUNE_BASE (H200-agreed
