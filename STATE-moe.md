@@ -76,38 +76,10 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   RULE: every big-M DIAG keeps a twm control (DIAG_VARIANTS has one now). Checks today 18/20.
   NEXT: twm at v16/v32 = the real big-M path: drain ~22 us (items 36-50 us, 3.5 waves) + first wave ~2.7 TB/s (n15 timeline).
 
-## Night4 session 24 (06:27-06:55Z): TWQ_NE = NORM_EARLY for moe_twq (moe_norme in twq's drain; twq flags | 1 << 21 or TWQ_NE = 1).
-  Bitwise (tools/s24/ne_t.py 0/78). H200 check 11f0161e: v16 s66h32 192.4 -> 191.1 (every seed), s33h -2.1, twq v32 -6.5 us.
-  Layer port tools/s24/patch_layer_ne.py, TUNE[128] {"twq": 539050500}; Handoffs/Requests 06:50Z. Checks today 16/20.
-  Paper result: v32 hot chain (hot128 -> hot64 -> twq) saves 0 passes (twm + hot128 = 1 pass/expert on every layer seed): not built.
-  v16 per seed is linear in #experts (17: 187, 18: 193, 19: 202 us = ~7.5 us/expert + ~60 us fixed vs tk2f's 14 us fixed):
-  seed 13 is just 19 experts. The big-M gap is that ~45 us of extra fixed/drain/consumer cost, not passes.
-  H200 twq timeline (check fccff52d, tools/s24/mktl_twq.py): item = 1 MB; N8 43 us (~3.45 TB/s aggregate), N16 49, N24 58, N32 62 us
-  = consumer-bound, worse with N. TQ_DEEP (3 wgmma groups in flight) bitwise but DEAD (tie). twq N8 loop = 166 instr/warp/k-chunk
-  (~100 dq, ~50 per-stage overhead), ~50% issue. Checks today 17/20.
-  NEXT: twq KPS 2 (2 k-chunks per stage: halve the ~50 per-stage instr; tk2f got -3..4% from it) and, for N16-N32 items, why
-  HGMMA time adds instead of overlapping (ncu on deep_warm.py's T40/32-token case: tensor-pipe vs issue stalls).
-
-## Night4 session 23 (05:45Z-): HOTQ = moe_hot<NH 64> (33..64-token experts, ONE N 64 pass) beside moe_twq at v16 (twq flags
-  bit 20 skips them; hot grid in twq flags bits 24..30 or HOTQ_M). Bitwise = twq (tools/s23/hq_t.py 0/26). H200 moe-only v16:
-  s33h (n21) 201.5 -> s33h32 194.8..196.5 -> **s66h32 191.8** (check 3187c4e7; twq 536953348 = 4|66<<8|1<<16|32<<24).
-  Seed 13 (one 36-token hot expert) gains nothing; seeds 17/99 -13. Off in moe; layer port tools/s23/patch_layer_hotq.py,
-  Handoffs/Requests 06:05Z. Checks today 16/20. Skipped s21's twm store-then-ticket idea (twm's combine already ~0 spin).
-  Check ecb491a2 confirms s66h32 191.1/191.4 (split 80/100, grid 24/40, quarters all worse). NEXT: a 16-warp hot pass (twq-style RT 1 N 64) if
-  the 8-warp hot items are the limit; HOTQ-style hot64 at v32 needs hx in moe_hot too (twm already single-passes 33..64).
-
-## Night4 session 22 (05:35-05:50Z): DQW (dq rotations as IMAD.WIDE on the FMA pipe, bitwise) DEAD: consumer-bound proxy T16 +1.9,
-  T32 +3.9, T64 +15 us; layer routings v32 +15.7 (H100; same SM as H200, no check spent). ncu: tk2f consumer is NOT pipe-bound
-  (ALU 50%, FMA-heavy 34%, issue 50%; stalls wait 0.92 / long_sb 0.79 / throttle 0.40 per issue): it is LATENCY-bound
-  (2 consumer warps per SMSP). n20's ALU-pipe hypothesis was wrong. Next decode-consumer ideas must add ILP / cut dependent
-  chains, not move ops between pipes. Checks today still 12/20. NEXT unchanged from s21 (layer's H200 tuner on twq 73988).
-
-## Night4 session 21 (05:13Z-): moe_twq K-split tail (TWQ_SPLIT / twq flags | items << 8 | log2 parts << 16): H200 v16 -10.6 us
-  (check 1ebfc1e3: q4 209.9 -> s33h 199.3, every seed; v32 -2). Store-then-ticket, last part sums in part order (deterministic).
-  Off by default in moe (board bs128 uses twm). Layer port tools/n21/patch_layer_twq.py + TUNE {"twq": 73988} at T=128 (posted).
-  H100 in-layer: sliding -5, full +5 (unexplained): the layer's H200 tuner decides. Quarters lose to halves. Checks today 12/20.
-  NEXT: same store-then-ticket split for twm (its 2-way split spins on the other half); twq split of gemm13 tail items? (no: gemm13
-  items come first). Check the layer's H200 tuner line for twq 73988 when they run it.
+## Night4 sessions 21-24 (twq line, all DEAD per s25: twq loses to twm): n21 twq K-split (TWQ_SPLIT / flags items<<8 | 1<<16),
+  s23 HOTQ (moe_hot<NH 64> beside twq, flags grid<<24), s24 TWQ_NE (moe_norme after twq, flags | 1<<21), TQ_DEEP (tie). Code kept, off.
+  s24 twq timeline (check fccff52d): N8 items ~3.45 TB/s, N16 +15%, N32 +45% for the same bytes (consumer-bound); twq loop
+  166 instr/warp/k-chunk at ~50% issue. s22: DQW (dq on the FMA pipe) dead; the decode consumer is latency-bound (ncu), not pipe-bound.
 
 ## Night4 session 20 (04:33-05:35Z): S6 = 6-bit block-scale codes in the tk2f/tk2h SQ stages (lossless, -2.8% bytes, bitwise) DEAD
   on the H200 (checks 13b528a8, c6b296a3): d16 +0.8, d32 +2.7 (tk2h +1.2), v1 -0.5 us; S6P (aligned starts) = S6. H100 said -2 us.
