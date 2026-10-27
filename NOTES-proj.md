@@ -1261,3 +1261,34 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   Tests 13/13; replay_test d16 + d32 (g27 forced at T=32 too) seeds 11,23 0/160. ab_flag TUNE {} 4 rounds x seeds 7,11,99
   (A B A): d16 sl 157.24/152.34/189.93 vs g24 158.06/153.20/190.94 (-0.8/-0.9/-1.0), full -0.1/0/-0.2. T=32 o g27 +1.1..1.8
   (3 rounds x 7,11): T=32 left out. Handoff: dev/s57/g27_layer.patch (git apply on origin/main v105 f9b702a/66fda6e: clean).
+
+## s58 (2026-10-27 02:05-03:00Z, sandbox okc-night4, session 15): g27 x loading (MC), main decl fix
+- BUG found + fixed: 0cfca9f (s57's last commit, never judged) ran a regex that appended ", torch::Tensor" to 14 cpp_sources
+  declarations in dev/sub_template.py (g10/g12/g13/g14/g15/g16/g19/g19_bf16/g20/g22/g24/...), not only g27_gemm: the main
+  native libs (muse_proj_v14, g19a) failed to load ("undefined symbol") -> silent torch fallback. fbec9e1 (judged) was fine.
+  Fixed in c2b541b (only g27_gemm keeps its zo Tensor). LESSON: after any template edit grep the prepare output for
+  "build failed"; local runs must use a fresh TORCH_EXTENSIONS_DIR (/tmp/...) when sources change but names do not.
+- dev/s58/gemv27.cu: G27_MC (default 1). 0 = old cp.async xload; 1 = x as cp.async.bulk copies, one per (row) [plain] or
+  (row, k slice) [PD], spread over all threads, barriers armed (expect_tx) before griddepcontrol.wait; >1 = cluster of
+  G27_MC CTAs, each issues 1/C of the rows with .multicast::cluster into all (cluster barrier before the wait).
+- H100 standalone (dev/s58/g27.py, o, us over 3 us pred, 2-3 runs): m16 PD MC0 5.12-5.25 | MC1 5.12-5.26 | MC2 5.3-5.9;
+  m32 PD MC0 7.49-7.52 | MC1 6.99-7.20 | MC2 7.25-7.58; non-PD m32 MC0 8.0-8.1 | MC1 7.55 | MC2 6.96-7.10. MC4 bad (+3..4).
+- Trace (MC0/1/2): ~28 of 128 blocks start only when the pred's blocks exit (PD = 127 regs x 512 thr = whole RF: no
+  co-residency); their W stream + decode after the wait = the tail. Lower-footprint PD shapes all lose: RGB 2 (256 blocks,
+  x read twice: m16 8.2 us!), KQ 8 (1024 thr) 6.1. Same-x reads by all blocks are expensive (+4 MB x = +3 us).
+- Layer H100 (/tmp/pj57/L copy of r-layer 66fda6e + s57 g27; ab_files, TUNE {} in all files, 8 rounds, seed 99):
+  d16 sl MC0 190.26 | MC1 188.45 | MC2 189.01; d16 full 291.41 | 290.36 | 291.92 -> MC1 -1.8 / -1.05. (With the tuner on:
+  -1.24/-0.25.) T=32 o via g27 MC1 vs g24: sl 192.24 vs 192.14, full 411.23 vs 411.91 = tie (s57 MC0 was +1.1..1.8).
+  Layer copy /tmp/pj58/L (g27_src.cu = s58 file): bench test 13/13, replay_test d16 40 x seeds 11,23 0/160.
+  Handoff dev/s58/g27mc_layer.patch (s57 + s58 on r-layer 5637814; or cp the .cu if s57 patch already applied).
+- Local cold prepare (fresh TORCH_EXTENSIONS_DIR) with diag27 (2 g27 modules, PD cfgs only): ~200 s wall on the H100.
+- H200 check a4962d70da9d40b4 (c2b541b, diag27 MC1 vs MC0; picks unchanged): 1.3116x (CI 1.29-1.33; not a beat of 1.3233).
+  diag27 (us over a 3 us pred): o m16 PD mc1 4.42 | mc0 5.28 | g24 (2,4,16) 6.59 | lt pick 6.34 | cuBLAS 6.82;
+  o m32 PD mc1 6.27 | mc0 6.88 | g24 (4,3,12) 7.33 | lt pick 6.72 | cuBLAS 6.98. MC1 = -0.86/-0.61 us on H200.
+  Log: profiles/submission.a4962d70da9d40b4.json. Diag off again in main (DIAG27 = {}).
+- Layer handoff dev/s58/g27mc_inc_layer.patch on r-layer d4fd834 (which already has s57 g27): g27_src.cu = s58 file,
+  G27_CFG += ("o", 32), TUNE[32] += {"g27:o": True}. On d4fd834: tests 13/13, replay d16 0/40; d32 forced 0/160 (pj58/L).
+- g24 XSP (dev/s58/gemv24.cu G24_XSP=1: x barriers armed pre-wait, x copies spread over threads instead of thread 0
+  after the wait): dev/s58/g24.py H100, us: m16 qkv/pool/unp -0.25/-0.1/-0.06..+0.13 (tie); m32 (512,4,3,12,2) +0.13..
+  +0.4 (worse; 2 runs). DEAD: g24 is W-stream-bound and its per-block x chunk is small. (Default in the s58 copy is 1;
+  dev/s53/gemv24.cu, the one used everywhere, is unchanged.)

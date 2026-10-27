@@ -1,6 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-27 02:25 UTC (s57: gemv27 o T=16 for the layer: H200 o m16 5.25 vs g24 6.43 us after pred; handoff
+Updated 2026-10-27 03:00 UTC (s58: FIXED main's broken cpp decls (0cfca9f regex; native libs fell back to torch); g27 G27_MC 1
+(x by spread bulk copies) H100 layer d16 sl -1.8 full -1.05 us; H200 (check a4962d70) o m16 4.42 vs 5.28, m32 6.27 vs lt 6.72;
+handoff dev/s58/g27mc_inc_layer.patch (on r-layer d4fd834, + T=32 TUNE option). g24 XSP (same trick in g24) DEAD. s57: gemv27 o T=16 for the layer: H200 o m16 5.25 vs g24 6.43 us after pred; handoff
 dev/s57/g27_layer.patch, H100 layer d16 sl -0.8..-1.0. Older: s55: g24 tail balancing / KC1024 / XPAR / lazy zero all dead. s54: gemv24 SK = stream-K over ring stages (template r|256): H100 layer d32 pool+unp
 -1.1..-1.9 us/shape, handoff dev/s54/g24sk_layer.patch; DIAG24 carries SK twins. s53: gemv24 (per-warp TMA rings, no producer warp) = H100 layer WIN at T=16/32 (-0.5..-3.5 us/layer, tuner options); handoff dev/s53/g24_layer.patch; print-only _diag24 queued for the 00:00Z check. Checks 20/20 until 00:00Z).
 
@@ -9,7 +11,7 @@ dev/s57/g27_layer.patch, H100 layer d16 sl -0.8..-1.0. Older: s55: g24 tail bala
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-27 used (s57): checks 3/20, scored 1/10. prepare() limit is 300 s: diags must stay small (s56 fail).
+- Budget 10-27 used (s58): checks 4/20, scored 1/10. (0cfca9f had broken cpp decls -> fixed c2b541b: grep prepare output for 'build failed'.) prepare() limit is 300 s: diags must stay small (s56 fail).
 
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
 ## m256 11.18 (cuBLAS splitK GEMM 6.4 + splitKreduce 2.0 + hi+lo add 1.6). SGLang: 10.5/26.4/15.0/15.5/16.8/17.7.
@@ -143,8 +145,10 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## barrier/atomics); PD = W decoded into registers before griddepcontrol.wait. H200 o m16 5.25 vs g24 6.43 (layer default),
 ## m32 loses to cuBLAS. Handoff dev/s57/g27_layer.patch (T=16 o). Left: x arrival ~1.8 us/2.6 us (m16/m32) = bytes from L2
 ## with all 128 blocks reading the same x: try cluster TMA multicast of x (g27 and g24), and PD for qkv/pool T=16 slices.
+## s58: G27_MC 1 = x as bulk copies spread over threads (layer d16 -1.8/-1.05); cluster multicast (MC2/4) DEAD for PD.
 ## Next (ranked):
-1. Layer: watch for g27 (Handoffs proj s57) in a layer check; read its "layer tune T=16" g27:o line.
-2. x multicast (cluster 2/4 TMA .multicast::cluster) in g27 and g24: x arrival is ~1 us + bytes; est. -0.5..1 us per call.
+1. Layer: watch for g27 (Handoffs proj s57/s58) in a layer check; read its "layer tune T=16" g27:o line.
+2. g27-style (no cross-block split-K, PD) for other T=16/32 calls is limited by registers (PD 127 regs x 512 thr): look at
+   2 CTAs/SM g27 with fewer regs that keeps x reads per SM low (x is read by every block: +4 MB = +3 us at m16).
 3. PD (pre-wait decode into registers) for other T=16 g24 calls where a warp slice fits (qkv/pool need split-K: g24 PD).
 4. Below the line: pr8 K-split tail (~0.1%), 11-bit (~0.2-0.3%), g22/g23/DeepGEMM m128/256 (dead).

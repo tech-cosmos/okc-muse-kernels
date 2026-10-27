@@ -5683,6 +5683,9 @@ DIAG27 = {}
 # -1.05 us vs 0 = cp.async xload; standalone m32 -0.5, m16 tie), 2/4 = cluster multicast (H100 loses for PD). H200 A/B:
 DIAG27 = {"o": [(16, 4, 4, 108, 4, 0), (32, 4, 4, 108, 4, 0)]}
 DIAG27_MC = (1, 0)
+# H200 check a4962d70 (us over pred): o m16 g27 PD mc1 +4.42 | mc0 +5.28 | g24 +6.59 | lt pick +6.34 | cuBLAS +6.82;
+# m32 mc1 +6.27 | mc0 +6.88 | g24 +7.33 | lt pick +6.72 | cuBLAS +6.98. -> layer handoff dev/s58 (T=16 on, T=32 TUNE). Off now.
+DIAG27 = {}
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
