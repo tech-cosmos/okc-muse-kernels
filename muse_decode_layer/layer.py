@@ -2525,7 +2525,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
               {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
-              {"fr": True, "twf_split": 66}),
+              {"fr": True, "twf_split": 66}, {"qss": True}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
@@ -2883,6 +2883,8 @@ NU8_DEFAULT = False
 # rounded to BF16 (RN) at each load: bit-identical to the torch cast it drops (H200 ea9421fa: 1.2-1.3 us per layer).
 QF32 = True
 QSS_NS = 2  # proj s22: H200 (proj check ccf41026, tuner us) qkv T=32 bmm 2 slabs 16.03 vs cuBLASLt split-K + reduce 17.50
+QSS_VERIFY = True  # s72: QSS also at verify sliding (nvs + _combine_hb load the slabs): TUNE option at T=128 only
+# (H100 ab_flag 3 rounds x seeds 7,11: v16 sl -0.9/+0.0, v32 sl +2.0/+1.5 us; nvs's FP32 slab loads +1.6 us vs bmm -1.0)
 QSS_DEFAULT = {32: True}  # tokens -> default of TUNE option qss (H100 layer, options pinned: d32 sliding -1.5, full -1.5 us)
 # s34 O_PF {tokens: fraction}: sliding attention (csl/nds/nvs) L2-prefetches the first fraction of o's weight once each
 # CTA's K/V loads are out (HBM idles in the latency-bound attention; o then starts L2-warm). H100 ab_flag: d32 sliding
@@ -3014,8 +3016,12 @@ def _kernel_fn(data, state):
                trig=csl_pw and (1 + 2 * bool(_opt(state, tokens, "cslcarve", CSL_PW_CARVE))))
     csl_pw = csl_pw and (qkv is not None or tokens in (1, 8))  # T=1/8: the qkv gemv13/14 trigger at start (GEMV_PDL)
     slabs, qss = None, 0
-    if (qkv is None and length == 1 and batch >= NDS_MIN_BATCH and HAVE_GLUON and USE_GDEC and QF32_NDS
-            and (_NDS is not None or cfg["window"] == 0) and _opt(state, tokens, "qss", QSS_DEFAULT.get(tokens, False))):
+    if (qkv is None and (length == 1 and batch >= NDS_MIN_BATCH and HAVE_GLUON and USE_GDEC and QF32_NDS
+                         and (_NDS is not None or cfg["window"] == 0)
+                         # s72: verify sliding on nvs (it sums the 2 slabs at its loads, as nds)
+                         or length == 8 and batch >= NVS_MIN_BATCH and _NVS is not None and cfg["window"] == 2048
+                         and cfg["page_size"] == 1 and QSS_VERIFY)
+            and _opt(state, tokens, "qss", QSS_DEFAULT.get(tokens, False))):
         # proj s22 (QSS): qkv split over k into QSS_NS FP32 slabs by one strided batched GEMM (no split-K reduce
         # kernel); attention adds the slabs in FP32 and rounds to BF16 at each load (= cuBLAS split-K + BF16 out).
         x, w = data["attn_input"], dense["qkv_gate"]

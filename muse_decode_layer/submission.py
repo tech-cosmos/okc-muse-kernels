@@ -1194,13 +1194,33 @@ __device__ __forceinline__ void mask(float (&s)[32], int lane, int nvalid, int t
     }
 }
 
-template <int NS>
-__device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const __nv_bfloat16* __restrict__ qkv,
+// layer s72 (QSS at verify sliding): qkv may be 2 FP32 split-K slabs qss elements apart (one batched GEMM, no
+// split-K reduce kernel): the partials are added in FP32 and rounded to BF16 (RN) at the load (= splitKreduce + BF16 out).
+struct qs2 { float v; };
+__device__ __forceinline__ unsigned qpk(float lo, float hi) {
+    __nv_bfloat162 t = __floats2bfloat162_rn(lo, hi);
+    return *(unsigned*)&t;
+}
+__device__ __forceinline__ uint4 qld8(const __nv_bfloat16* p, int) { return *reinterpret_cast<const uint4*>(p); }
+__device__ __forceinline__ uint4 qld8(const qs2* q, int qss) {
+    const float* p = reinterpret_cast<const float*>(q);
+    const float4 a = reinterpret_cast<const float4*>(p)[0], b = reinterpret_cast<const float4*>(p)[1];
+    const float4 c = reinterpret_cast<const float4*>(p + qss)[0], d = reinterpret_cast<const float4*>(p + qss)[1];
+    return make_uint4(qpk(a.x + c.x, a.y + c.y), qpk(a.z + c.z, a.w + c.w), qpk(b.x + d.x, b.y + d.y), qpk(b.z + d.z, b.w + d.w));
+}
+__device__ __forceinline__ uint2 qld4(const __nv_bfloat16* p, int) { return *reinterpret_cast<const uint2*>(p); }
+__device__ __forceinline__ uint2 qld4(const qs2* q, int qss) {
+    const float* p = reinterpret_cast<const float*>(q);
+    const float4 a = *reinterpret_cast<const float4*>(p), c = *reinterpret_cast<const float4*>(p + qss);
+    return make_uint2(qpk(a.x + c.x, a.y + c.y), qpk(a.z + c.z, a.w + c.w));
+}
+template <int NS, typename QT>
+__device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const QT* __restrict__ qkv,
                                          const float* __restrict__ cs, Range rg, int split, int S, int qkv_w,
                                          float scale, int win, float* __restrict__ pacc, float* __restrict__ pml,
                                          uint8_t* __restrict__ kc,
                                          uint8_t* __restrict__ vc, const long long* __restrict__ loc, float ksv,
-                                         float vsv, int H, int total) {
+                                         float vsv, int H, int total, int qss) {
     // NV_HALF: h is the consumer's half (smem slot) of KV head H's split; else h is the KV head (H unused).
     const int tid = threadIdx.x & 127, lane = tid & 31, w = tid >> 5;
     const int HH = NV_HALF ? H : h;
@@ -1210,10 +1230,10 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const __nv_bfloat1
     {   // Queries: row r = token r / 8, head h * 8 + r % 8; 2 threads per row (32 d each); RMS-norm, RoPE, FP8.
         const int r = tid >> 1, half = tid & 1;
         const int pos = rg.seq + (r >> 3);
-        const __nv_bfloat16* src = qkv + (long long)(b * 8 + (r >> 3)) * qkv_w + (HH * 8 + (r & 7)) * HD + half * 32;
+        const QT* src = qkv + (long long)(b * 8 + (r >> 3)) * qkv_w + (HH * 8 + (r & 7)) * HD + half * 32;
         uint4 raw[4];
 #pragma unroll
-        for (int j = 0; j < 4; ++j) raw[j] = reinterpret_cast<const uint4*>(src)[j];
+        for (int j = 0; j < 4; ++j) raw[j] = qld8(src + 8 * j, qss);
         float4 cv[4], sv[4];
         const float4* cp = reinterpret_cast<const float4*>(cs + (long long)pos * HD + half * 16);
 #pragma unroll
@@ -1246,8 +1266,8 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const __nv_bfloat1
             // The block's new token t = tid / 16, d 4 (tid % 16) + 0..3 of this KV head: RMS-norm + RoPE, E4M3 (as
             // _new), stored into the cache and into the new-token K / V^T tiles.
             const int t = tid >> 4, d0 = (tid & 15) * 4, tok = b * 8 + t, npos = rg.seq + t;
-            const __nv_bfloat16* kp = qkv + (long long)tok * qkv_w + (16 + HH) * HD + d0;
-            const uint2 kr = *reinterpret_cast<const uint2*>(kp), vr = *reinterpret_cast<const uint2*>(kp + 2 * HD);
+            const QT* kp = qkv + (long long)tok * qkv_w + (16 + HH) * HD + d0;
+            const uint2 kr = qld4(kp, qss), vr = qld4(kp + 2 * HD, qss);
             const float2 c2 = *reinterpret_cast<const float2*>(cs + (long long)npos * HD + d0 / 2);
             const float2 s2 = *reinterpret_cast<const float2*>(cs + (long long)npos * HD + 32 + d0 / 2);
             const long long slot = loc[tok];
@@ -1411,14 +1431,14 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const __nv_bfloat1
     }
 }
 
-template <int NS, int LAG>
-__global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restrict__ qkv, const float* __restrict__ cs,
+template <int NS, int LAG, typename QT>
+__global__ void __launch_bounds__(384, NV_MINB) nvs(const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               uint8_t* __restrict__ kc, uint8_t* __restrict__ vc,
                                               const float* __restrict__ ks, const float* __restrict__ vsc,
                                               const long long* __restrict__ loc, const int* __restrict__ pt,
                                               const int* __restrict__ seq, float* __restrict__ pacc,
                                               float* __restrict__ pml, float qk_scale, int S, int ch, int maxp,
-                                              int qkv_w, int win, const uint8_t* __restrict__ pf, long long pfb) {
+                                              int qkv_w, int win, const uint8_t* __restrict__ pf, long long pfb, int qss) {
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
@@ -1443,8 +1463,8 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
         }
     } else {
         asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(NV_CREGS));
-        consumer<NS>(sm, wg - 1, qkv, cs, wg == 1 ? r0 : r1, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc,
-                     loc, ks[0], vsc[0], H, r0.n);
+        consumer<NS, QT>(sm, wg - 1, qkv, cs, wg == 1 ? r0 : r1, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc,
+                     loc, ks[0], vsc[0], H, r0.n, qss);
     }
 #else
     const Range rg = rng(seq, blockIdx.x / S, split, ch, win);
@@ -1458,7 +1478,7 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
         }
     } else {
         asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(NV_CREGS));
-        consumer<NS>(sm, wg - 1, qkv, cs, rg, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc, loc, ks[0], vsc[0], 0, 0);
+        consumer<NS, QT>(sm, wg - 1, qkv, cs, rg, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc, loc, ks[0], vsc[0], 0, 0, qss);
     }
 #endif
 }
@@ -1467,22 +1487,23 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const __nv_bfloat16* __restr
 void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor ks, torch::Tensor vsc,
          torch::Tensor loc, torch::Tensor pt,
          torch::Tensor seq, torch::Tensor pacc, torch::Tensor pml, double qk_scale, int64_t S, int64_t ch, int64_t win,
-         int64_t pf_ptr, int64_t pf_bytes) {
+         int64_t pf_ptr, int64_t pf_bytes, int64_t qss) {
     // Producer lag NV_LAG (1) at every S: LAG 2 at 4 splits was H100 -0.18 us but H200 +0.2 (check 9249146d, verify 32).
-    auto f = nv::nvs<NV_NS, NV_LAG>;
+    // qss > 0 (layer s72): qkv = FP32 slab 0 of 2 split-K slabs qss elements apart, summed at the loads.
     const int smem = (int)sizeof(nv::Smem<NV_NS>) + 1024;
-    static bool once = false;
-    if (!once) {
-        cudaFuncSetAttribute(nv::nvs<NV_NS, NV_LAG>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
-        once = true;
-    }
     const int B = (int)seq.size(0);
-    f<<<dim3((unsigned)(S * B * (1 + NV_HALF))), 384, smem, c10::cuda::getCurrentCUDAStream()>>>(
-        (const __nv_bfloat16*)qkv.data_ptr(), (const float*)cs.data_ptr(), (uint8_t*)kc.data_ptr(),
-        (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(),
-        (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(),
-        (const int*)seq.data_ptr(), (float*)pacc.data_ptr(), (float*)pml.data_ptr(), (float)qk_scale, (int)S, (int)ch,
-        (int)pt.size(1), (int)qkv.size(-1), (int)win, (const uint8_t*)pf_ptr, (long long)pf_bytes);
+#define NVS_LAUNCH(QT_) { \
+        auto f = nv::nvs<NV_NS, NV_LAG, QT_>; \
+        static bool once = false; \
+        if (!once) { cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; } \
+        f<<<dim3((unsigned)(S * B * (1 + NV_HALF))), 384, smem, c10::cuda::getCurrentCUDAStream()>>>( \
+            (const QT_*)qkv.data_ptr(), (const float*)cs.data_ptr(), (uint8_t*)kc.data_ptr(), \
+            (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(), \
+            (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(), \
+            (const int*)seq.data_ptr(), (float*)pacc.data_ptr(), (float*)pml.data_ptr(), (float)qk_scale, (int)S, (int)ch, \
+            (int)pt.size(1), (int)qkv.size(-1), (int)win, (const uint8_t*)pf_ptr, (long long)pf_bytes, (int)qss); }
+    if (qss) { TORCH_CHECK(qkv.scalar_type() == at::kFloat, "nvs: QSS needs FP32 slabs"); NVS_LAUNCH(nv::qs2) }
+    else { TORCH_CHECK(qkv.scalar_type() == at::kBFloat16, "nvs: qkv bf16"); NVS_LAUNCH(__nv_bfloat16) }
 }
 '''
 try:
@@ -1490,7 +1511,7 @@ try:
         name="muse_nvs_a2s13h_" + __import__("hashlib").sha256(_NVS_SRC.encode()).hexdigest()[:10],
         cpp_sources="void nvs(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, int64_t, "
-                    "int64_t, int64_t, int64_t);",
+                    "int64_t, int64_t, int64_t, int64_t);",
         cuda_sources=_NVS_SRC, functions=["nvs"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
@@ -3995,11 +4016,12 @@ def _verify_nvs(data, cfg):
     out = torch.empty((batch, length, hq * d), dtype=torch.bfloat16, device=device)
     _NVS.nvs(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], data["k_scale"],
              data["v_scale"], data["cache_loc"], data["page_table"], data["seq_lens"], pacc, pml,
-             cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], *data.get("o_pf", (0, 0)))
+             cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], *data.get("o_pf", (0, 0)),
+             data.get("qkv_ss", 0))
     _combine_hb[(batch * length, hq // 2)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=hq // hkv, L=length, M=rows, D=d, S=S, S_PAD=triton.next_power_of_2(S), SB=S, HB=2,
-        ONE=MERGE1, PDL=USE_PDL, num_warps=1, launch_pdl=USE_PDL)
+        ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL)
     return out
 
 
@@ -4033,7 +4055,9 @@ def attn_kernel_fn(data: Inputs) -> torch.Tensor:
     device = qkv.device
     page_table = data["page_table"]
     max_pages = page_table.shape[1]
-    if data.get("qkv_ss", 0) and not (length == 1 and batch >= NDS_MIN_BATCH):  # proj s22: csl/vtk/nvs: summed slabs
+    nvs_ok = (_NVS is not None and cfg["window"] == 2048 and length == 8 and batch >= NVS_MIN_BATCH and hq == 16
+              and hkv == 2 and d == 64 and cfg["page_size"] == 1 and cfg["rope_theta"])
+    if data.get("qkv_ss", 0) and not (length == 1 and batch >= NDS_MIN_BATCH or nvs_ok):  # proj s22: csl/vtk: summed slabs (s72: nvs loads them)
         qkv = data["qkv_slabs"].sum(0).view(qkv.shape)
         data = {**data, "qkv": qkv, "qkv_ss": 0}
     if _CSL is not None and cfg["window"] == 2048 and length == 1 and batch <= CSL_MAX_BATCH and hq == 16 \
@@ -15135,7 +15159,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
               {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
-              {"fr": True, "twf_split": 66}),
+              {"fr": True, "twf_split": 66}, {"qss": True}),
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
@@ -15493,6 +15517,8 @@ NU8_DEFAULT = False
 # rounded to BF16 (RN) at each load: bit-identical to the torch cast it drops (H200 ea9421fa: 1.2-1.3 us per layer).
 QF32 = True
 QSS_NS = 2  # proj s22: H200 (proj check ccf41026, tuner us) qkv T=32 bmm 2 slabs 16.03 vs cuBLASLt split-K + reduce 17.50
+QSS_VERIFY = True  # s72: QSS also at verify sliding (nvs + _combine_hb load the slabs): TUNE option at T=128 only
+# (H100 ab_flag 3 rounds x seeds 7,11: v16 sl -0.9/+0.0, v32 sl +2.0/+1.5 us; nvs's FP32 slab loads +1.6 us vs bmm -1.0)
 QSS_DEFAULT = {32: True}  # tokens -> default of TUNE option qss (H100 layer, options pinned: d32 sliding -1.5, full -1.5 us)
 # s34 O_PF {tokens: fraction}: sliding attention (csl/nds/nvs) L2-prefetches the first fraction of o's weight once each
 # CTA's K/V loads are out (HBM idles in the latency-bound attention; o then starts L2-warm). H100 ab_flag: d32 sliding
@@ -15624,8 +15650,12 @@ def _kernel_fn(data, state):
                trig=csl_pw and (1 + 2 * bool(_opt(state, tokens, "cslcarve", CSL_PW_CARVE))))
     csl_pw = csl_pw and (qkv is not None or tokens in (1, 8))  # T=1/8: the qkv gemv13/14 trigger at start (GEMV_PDL)
     slabs, qss = None, 0
-    if (qkv is None and length == 1 and batch >= NDS_MIN_BATCH and HAVE_GLUON and USE_GDEC and QF32_NDS
-            and (_NDS is not None or cfg["window"] == 0) and _opt(state, tokens, "qss", QSS_DEFAULT.get(tokens, False))):
+    if (qkv is None and (length == 1 and batch >= NDS_MIN_BATCH and HAVE_GLUON and USE_GDEC and QF32_NDS
+                         and (_NDS is not None or cfg["window"] == 0)
+                         # s72: verify sliding on nvs (it sums the 2 slabs at its loads, as nds)
+                         or length == 8 and batch >= NVS_MIN_BATCH and _NVS is not None and cfg["window"] == 2048
+                         and cfg["page_size"] == 1 and QSS_VERIFY)
+            and _opt(state, tokens, "qss", QSS_DEFAULT.get(tokens, False))):
         # proj s22 (QSS): qkv split over k into QSS_NS FP32 slabs by one strided batched GEMM (no split-K reduce
         # kernel); attention adds the slabs in FP32 and rounds to BF16 at each load (= cuBLAS split-K + BF16 out).
         x, w = data["attn_input"], dense["qkv_gate"]
