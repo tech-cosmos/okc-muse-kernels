@@ -1215,3 +1215,22 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   at d16: -0.3..-1.2 sl (less than the full chain). A/A noise floor of ab_flag here +-0.5 us.
   NB ab_flag stmts persist across variants in one namespace: "pass" after "X = set()" is an A/A run (my first try).
 - Handoff dev/s56/g24z_layer.patch (git apply in r-layer a2a2d41): G24Z_TOKENS {16} on, TUNE[16] += {"g24z": False}.
+- 00:00Z check 636c89fcd45e49a5 (a3c49ba = main with DIAG19D + DIAG24 incl. s54 SK twins): FAILED setup, "prepare() took
+  longer than 300 s" (325.6 s). Not counted on the board; all diag lines printed. LESSON: the 300 s prepare limit; the SK
+  twins doubled diag24. Main now has DIAG19D/DIAG24 off (ca7e557, local prepare 1.6 s).
+- H200 diag24 (us after a 3 us PDL pred; dev/s56/diag_read.py; layer cfgs: pool G108, rest G132):
+  pool m16: layer (2,4,16) G108 18.34 | (4,3,12) G108 15.36 | best SK (4,3,12) G132 15.33. pool m32: layer SK (2,4,16) G108
+  21.15 | SK (4,3,12) G108 20.00 | static (2,4,16) G132 18.69. qkv m16: layer static 10.53 | SK 9.89 (G132/G108).
+  qkv m32: SK G132 13.15 (diag19 lt pick 13.92). unp m16 15.58 = best (tie SK 4,3,12 15.55); unp m32 layer SK 17.38 |
+  (4,3,12) r1 17.15. o m16 layer 6.34 = best (lt pick 6.30); o m32 SK 7.62 / r1 7.68.
+  H200 diag19d (g19, us): TAG2 vs NOTM pool m32 -0.42/-0.13, m16 +0.03/-0.35, unp m32 +0.39/+0.20: noise, TAG2 DEAD.
+  H200 pool m32 G132: main 19.17, NOW 16.26, NOW NOMMA 10.59 (consumer/decode bound as before).
+  Standalone tune lines (cold, no pred): m16 pooler lt 22.21, qkv lt 16.93, unp g16 20.70; m32 pool lt 22.21, unp lt 22.37.
+- Layer H100 ab_files (A = r-layer worktree 00:21Z incl. g24z, B = pooler T=16 (4,3,12) + T=32 SK (4,3,12); A B B A,
+  4 rounds, TUNE {}): d16 sl -0.9, full -0.4; d32 sl +1.7, full +1.2. qkv T=16 SK (ab_flag): +0..0.6 on H100.
+  -> handoff dev/s56/g24cfg_h200_layer.patch = pooler T=16 (4,3,12) only (applies on r-layer worktree, tests 13/13).
+  NB ab_flag cannot change G24_CFG (packed at prepare): use ab_files for config changes.
+- Check ed67748e9a684fe7 (ca7e557 = main, diags off): PASSED 1.3277x (3638.4 us), > board best 1.3110 (2480c53). Per-shape
+  speedups: m1 qkv 1.41 o 1.08 pool 1.45 unp 1.84 router 2.92; m8 1.24/1.02/1.29/1.37/5.11; m16 1.11/1.07/1.15/1.09/2.77;
+  m32 1.10/1.04/1.15/0.99/2.49; m128 1.14/1.04/1.23/1.01/1.84; m256 qkv 1.08 o 1.05 pool 1.12 unp 1.04.
+- Submit 1ff4721e87c844c2 (ca7e557, same code as ed67748e): queued 00:38Z (result in the session's Results line / next NOTES).

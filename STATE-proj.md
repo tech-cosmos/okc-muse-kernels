@@ -135,7 +135,9 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## out-zero fence (LZ/LZ2 +0.4..2). Upper bounds (illegal probes): x arrival 0.4-1.4 us, zero+fence 0.4-1.7 us at m32. NOTES s55.
 ## s56: g24 EZ/ZN zero-ahead chain at T=16 (each g24 zeroes the next g24's out; consumer skips zero+fence+epoch barrier):
 ## H100 layer d16 sl -0.3..-1.7, full tie; T=32 loses (+2..4, off). Handoff dev/s56/g24z_layer.patch. dev/s56/diag_read.py
-## = readout for the 00:00Z log. NOTES s56.
+## = readout for the 00:00Z log. NOTES s56. 00:00Z check 636c89fc FAILED setup: prepare() 325.6 s > 300 s (diag24 SK twins):
+## KEEP DIAGS SMALL (prepare limit 300 s). Diag read: H200 pooler T=16 (4,3,12) -3.0 us vs layer cfg -> handoff
+## dev/s56/g24cfg_h200_layer.patch (H100 d16 -0.9/-0.4); TAG2 dead; pooler T=32 SK (4,3,12) H200 -1.15 but H100 +1.2..1.7.
 ## Next (00:00Z check, ranked):
 ## -2. (s54) In the same log: diag24 r257 lines vs r1 (H200 SK vs static per op/m/grid): post which g24sk:<key> to default
 ##    ON (layer TUNE_BASE) per T; check pool/unp m16 G108 (16,1024,4,3,12) vs (16,1024,2,4,16) (H100 layer: sl -0.6..0.8).

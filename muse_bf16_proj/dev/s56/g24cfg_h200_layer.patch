@@ -1,0 +1,23 @@
+--- a/muse_decode_layer/layer.py	2026-10-27 00:28:57.087591868 +0000
++++ b/muse_decode_layer/layer.py	2026-10-27 00:29:59.642543549 +0000
+@@ -738,7 +738,7 @@
+ # PDL dependent streaming W before its wait, npre bit 16 = trigger at start) with per-warp TMA rings (no producer warp /
+ # stage barriers). TUNE option g24:<key> (replaces g19 / cuBLAS at that call site). (m, kc, ap, ns, wpb, xb, r).
+ # proj H200 proxy (H100 G72, after a 3 us pred; g24 | g19): m32 pool 24.8|26.6, unp 23.9|24.7, o 8.7|9.9, qkv 16.1|16.4.
+-G24_CFG = {("pooler", 16): (16, 1024, 2, 4, 16, 2, 1), ("unpool", 16): (16, 1024, 2, 4, 16, 2, 1),
++G24_CFG = {("pooler", 16): (16, 1024, 4, 3, 12, 2, 1), ("unpool", 16): (16, 1024, 2, 4, 16, 2, 1),
+            ("qkv_gate", 16): (16, 1024, 2, 4, 16, 2, 1), ("o", 16): (16, 512, 2, 4, 16, 2, 1),
+            ("pooler", 32): (32, 512, 4, 3, 12, 2, 1), ("unpool", 32): (32, 512, 4, 3, 12, 2, 1),
+            ("qkv_gate", 32): (32, 512, 4, 3, 12, 2, 1), ("o", 32): (32, 512, 4, 3, 12, 2, 1)}
+@@ -746,6 +746,11 @@
+ # TUNE option g24sk:<key> (bool) runs these configs instead (overrides g24/g19/cuBLAS at that call site). proj H200 proxy
+ # (H100 G88/G108 standalone, after a 3 us pred; SK | static): qkv m16 11.4 | 11.8, m32 13.9 | 14.9; pool m32 21.1 | 21.5;
+ # unp m32 21.3 | 22.1; pool m16 at G108 19.5 | 21.5 (static 4,3,12 19.1); o loses (+0.4..0.9).
++# proj s56 H200 diag (check 636c89fc, standalone after a 3 us PDL pred, us): pooler m16 G108 (4,3,12) 15.36 vs (2,4,16)
++# 18.34; pooler m32 G108 SK (4,3,12) 20.00 vs SK (2,4,16) 21.15; qkv m16 SK 9.89 vs static 10.53;
++# qkv m32 SK 13.15 vs lt 13.92 (first op at T=32: tuner only); unpool/o: g24 configs in use are best or tie.
++# H100 layer ab_files A B B A: pooler T=16 (4,3,12): d16 sl -0.9, full -0.4 (default); pooler T=32 SK (4,3,12) d32 +1.2..1.7
++# and qkv T=16 SK +0..0.6 on the H100: not default (g24sk:qkv_gate stays a TUNE[16] candidate).
+ G24_SKCFG = {("pooler", 16): (16, 1024, 2, 4, 16, 2, 257), ("unpool", 16): (16, 1024, 2, 4, 16, 2, 257),
+              ("qkv_gate", 16): (16, 1024, 2, 4, 16, 2, 257), ("pooler", 32): (32, 512, 2, 4, 16, 2, 257),
+              ("unpool", 32): (32, 512, 2, 4, 16, 2, 257), ("qkv_gate", 32): (32, 512, 2, 4, 16, 2, 257)}
