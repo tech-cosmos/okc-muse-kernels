@@ -2096,3 +2096,17 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   even in its own window (emax 116); concat [pooler; hi; lo] -> 1000 esc/row. So the fused form needs raw BF16 stages for the 256
   lo rows (new producer/consumer path + FP32 epilogue) or 24+ escape slots (register cost in the consumers). Bound <= -4 us H100
   v16 (~0.15%), H200 maybe x-ingest-bound: not started; next session's candidate if nothing better arrives.
+
+## s105 (2026-10-27 17:01Z-17:30Z, night4 session 54): one-launch pooler+router g30 at T=128 measured DEAD (H100 standalone); 0 judge runs
+- Layer checks 20/20 used on 10-27; sandbox moves ~18:00Z. Measured the last queued g30 form (s104) before building it.
+- dev/s105_frbound.py (main g30_gemm, S=1) and dev/s105_slabbound.py (s102 g30_slab: old g30_src @1d405c8 + the g30_src.cu hunks
+  of dev/s102_g30sp.patch, path as argv[1]); extra rows = pooler copies (12-bit, cheapest case: raw-BF16 lo rows would cost more).
+  H100 T=128 cold L2, cuBLAS FR torch.mm [4608 x 8192] FP32 out = 29.3 us (pooler alone 26.4):
+  | g30 form | N=4096 | +256 | +512 | +640 | +768 |
+  | S1 g30_gemm | 36.3 | 36.8 | 37.0 | 37.1 | 37.1 |
+  | S2 g30_slab | 25.6 | 43.7 | 43.8 | 43.7 | 44.0 |
+  | S3 g30_slab | 33.1 | 33.5 | 33.8 | 33.8 | 34.0 |
+  S2 at N=4096 is exactly 128 CTAs (one wave on 132 SMs); any router rows make it 136+ CTAs = 2 waves. S3 and S1 are already slower
+  than cuBLAS FR before escapes, FP32 router out and the slab sum. Uneven splits leave unsplit CTAs doing 2x K (~S1 time), and
+  128-row CTAs were dead in s99. So the fused pooler+router g30 is DEAD whatever the router-lo format. g30 at T=128 = unpool only (v136).
+- main unchanged = v136; first check after 00:00Z = v136 (read 'layer tune T=128': g30:unpool False must lose).
