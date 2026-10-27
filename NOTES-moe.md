@@ -1835,3 +1835,26 @@
   dequantized in registers, x resident in smem 128 KB as B with m64n128 per WG on alternate tiles = 64 B/clk smem; fits
   x 128 + recv 64 + raw ring 24 KB). NOT handoff-ready; no moe-problem DIAG for it (lead 08:13Z: a problem's checks run
   only that problem's kernels): the H200 number has to come from a layer TUNE option once it at least ties on the H100.
+
+## Night4 session 43 (2026-10-27 15:38Z - ~16:15Z) -- T=256 12-bit GEMM (layer g30 extended) + g30 T=128 bound diagnosis: dev/s43; 0 checks
+- xr3 (s42, unp m128 34.0 vs cuBLAS 28.6) is dominated by layer s99's g30 (21.6 vs 25.7): xr3 CLOSED.
+- Tools: dev/s43/g31.py (copy of r-layer dev/s99_g30.py; env SRC=<.cu> T=128|256 PAIR=0|1 DEFS=... VB=1 for ptxas -v), cub.py
+  (cuBLAS T=128 vs 256). H100 cuBLAS: unp 8192x4096 25.8 -> 27.2 us at T=256 (632 TF/s), pool 4096x8192 26.2 -> 31.7,
+  qkv 2304x8192 20.0 -> 21.6. H200 profile 940a4fca (layer v32 = T=256): unp ~26.9, pool 33.6, qkv 20.7 -> cuBLAS at T=256 is
+  compute-bound on both GPUs (H200 = H100 compute).
+- g31.cu (T=256, both WGs decode the same W stage, WG w = tokens 128w.., m64n128 each, x box 32 KB NS5): unp 34.7 us vs
+  cuBLAS 27.6. No-load floor (NOX+NOW) 28.5: two m64n128 RS chains ~60% of peak. DEAD.
+- g32.cu (T=256, m64n256k16 RS per WG, WGs on alternate k stages, end exchange through smem, 384 thr + setmaxnreg 56/224):
+  correct; unp 31.7-32.6, pool S2 33.0-36.1 vs cuBLAS 27.7 / 33.9. Ablations (unp): no loads 25.5, NOMMA 31.6, W only 27.9,
+  x only 28.8 -> per-CTA x ingest (2 MB at T=256 per 64 W rows, ~70 GB/s/SM) binds; CL=2 x multicast 33.9 (no help: multicast
+  still lands the full box in every SM), CL=4 doesn't fit (30 clusters). T=256 12-bit GEMM DEAD on paper and measured.
+  ptxas lesson: setmaxnreg is IGNORED (C7507 -> C7512 wgmma serialized) if dec/inc sit in an if/else that re-joins, or the
+  producers `goto` a shared exit label; it works with dec inside the producer branch that `return`s and inc at consumer start.
+- g33.cu (T=128 g30 R2 = 128 W rows per CTA, S=2 k-split pair as a (1,2) cluster, rank 1 st.async-pushes its FP32 acc into
+  rank 0's smem, rank 0 adds + BF16 out; no slabs): correct; unp 28.1-28.9 vs no-reduce 24.7, slab form (PAIR=0) 23.4-24.2,
+  cuBLAS 25.7. Push+pair wait = +3.5..4 us (dedicated recv buffer, no rdy wait: same). DEAD on the H100.
+- **Diagnosis of g30 at T=128 on the H100 (g33 PAIR=0, unp S2):** W stream+decode only 20.9 us (50 MB, ~2.8 TB/s net of
+  ~3 us fixed), MMA+decode only 16.4, x only 9.6. => g30 is HBM(W)-bound on the H100, not ingest- or L2-bound (fits layer's
+  "multicast buys nothing"). On the H200 (HBM 1.45x) the W stream drops to ~12-13 us and per-CTA x ingest (1 MB per 64-row CTA
+  ~ 15 us at ~65-70 GB/s/SM) may become the bound: then R2 (128 rows/CTA, 0.5 MB x) forms win there and not here. Only an
+  H200 run can rank g30 forms.

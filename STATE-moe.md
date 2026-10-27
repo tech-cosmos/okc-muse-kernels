@@ -99,6 +99,10 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   double-buffered recv): unp m128 H100 34.0 vs cuBLAS 28.6 us (incl 4.9 harness), correct + deterministic; stream-only 31.3.
   Limits: cluster-8 max 15 active (120 SMs), 9 vs 8.53 tile imbalance. NEXT: n40 tail tiles (balance, est -1.2), fragment-major x
   from the producing kernel (assumed), then 12-bit W (roles flip, see NOTES s42). Gate: H100 tie before any layer TUNE option.
+- s43 (dev/s43, NOTES s43): xr3 CLOSED (layer g30 21.6 beats it). T=256 12-bit GEMM DEAD (g31 m64n128 x2 34.7, g32 m64n256 RS
+  31.7 vs cuBLAS 27.6: no-load floor 25.5, x ingest 2 MB/CTA binds, CL2 multicast no help). g33 T=128 R2 k-split CTA pair with
+  DSMEM push reduce: +3.5..4 us over no-reduce (28.5 vs cuBLAS 25.7) DEAD on H100. g30 T=128 is W-HBM-bound on the H100 (W
+  stream+decode alone 20.9 us): H100 can't rank g30 forms; on the H200 x ingest may bind (R2 forms). Told layer (COORD).
 ## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)
 - Floors (pt trip + 20.5 MB random 128-B rows, all in flight, incl. launch): ~8.0 us d1 and v1; dense 7.4.
 - Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.
