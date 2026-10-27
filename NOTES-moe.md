@@ -1506,3 +1506,32 @@
   v32 twm 218.5 -> 213.7 (repeat 217.7 -> 213.4), q4 / s66h32ne also -2..-3. Plain main check ed55a5c0 2.2635x
   (bs1 26.8, bs8 63.6, bs16 89.7, bs32 124.8, bs128 206.4, bs256 245.6 us) -> submit febfcb1f 2.2469x (new board best, was 2.190x).
   Checks 20/20 used on 10-27; 1/10 submits.
+
+## Night4 session 28 (2026-10-27 09:10Z - ~09:50Z; moe checks 20/20 used on 10-27, no judge runs) -- twm per-stage overhead bisected: no lever
+- Lane per lead 08:55Z: twm/twf at v16/v32 only. Goal this session: find the ~230 cyc/stage of in-kernel overhead (s27) with
+  timing-only ablations on the 1-expert warm proxy (tools/s27m/twm_itl.py; 16 gemm13 + 8 gemm2 items, so 16 CTAs: no L2 limit).
+  Ablation builds: tools/s28/mk.py <v> (from /tmp/s28/sub_nc.py = TWM_TL build + NOCOPY producer: after the first ring fill the
+  producer only arrives on full[], no copies). gemm13 item medians, us, H100 (GPU shared, +-0.5..1):
+                     N8    N16   N24   N32
+    TL (copies)     35.1  39.0  39.8  47.6
+    NOCOPY          32.7  36.9  40.3  45.8   (feed = only ~2 us of the overhead)
+    + tid in regs   32.6  37.8  40.6  44.1   (S2R SR_TID.X is rematerialized at every stage top; fence_r keeps offsets)
+    + 2x mbar_wait  35.1  38.2  42.0  46.6   (the full wait costs ~1-2 us/item)
+    + no weight LDS 33.9  36.9  37.3  43.5   (LDS->dq latency ~2-3 us at N24/N32)
+  vs bare dq+MMA microbench (mb_x MODE 3, same session): N8 28.9, N32 38.1 us/64 stages. So the overhead is several ~1-2 us
+  latency items (wait, LDS latency, tid remat, prologue/epilogue), no single big one.
+- ncu (tools/s28/drv.py + stall.py/loop.py, NTOK 32): loop = 280 SASS (LOP3 83, HMUL2 64, SHF 34, IMAD 17, HGMMA 16, ~40
+  uniform/control ops). Stall samples in the loop: selected 21%, wait 20%, dispatch 16%, not_selected 8%, short_sb 5%
+  (PRMT after the scale LDS.64: 86% short_sb); first HGMMA of each group holds ~27% of loop samples (tensor-pipe wait).
+- tid fix on the real kernel (sub_tidm: wl/sl offsets kept in registers with fence_r, all tw_item users): bitwise, H100 cold
+  layer routings (/tmp/s28/ab.py = scb_ab.py on v16/v32, 3 rounds): v16 193.5 -> 195.2, v32 232.7 -> 231.6 = noise. DEAD.
+- Microbench tools/s28/mb16.py (mb_x + 512-thread variants): same 512-row stage as 16 warps x RT2 vs 8 x RT4, cycles/stage:
+    N8  ALU/MMA/both 750/421/792 -> 691/416/769;  N16 750/445/902 -> 691/429/877;  N32 750/532/1046 -> 691/516/985
+  i.e. 4 warps/SMSP buy only 3-6% even in the microbench: the ALU pipe is near its limit (7 ALU-pipe ops per 8 weights at
+  16 lanes/SMSP = 448 cyc/stage + the MMA ~512 at N32, which sit near peak FLOPs: 32 m64n32k16 per stage = 16 cyc each).
+  This design is moe_twq (s17), which lost to twm on the H200, consistent with that. Don't rebuild it.
+- Readings: twm consumer ~= ALU-pipe time + tensor time + ~150-250 cyc/stage of latency bits that each cost ~1-2 us/item and
+  sit under the noise when fixed alone. The N32 tensor time is real FLOPs (no FP8 path: activations stay BF16). The kernel-level
+  lane for twm is exhausted; what is left is scheduling (v16 drain ~17 us after s66, first wave ~10 us at ~2.7 TB/s, n15).
+- In-layer check (layer profile 19163546, H200): v16 sl twm 157.8 us (moe-only diag 166 before SCB), so twm runs in-layer
+  as fast as standalone. The full-layer row (193.7) includes overlap/wait next to _gw_verify, not slower expert work.

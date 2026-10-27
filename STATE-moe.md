@@ -71,6 +71,10 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 28 (09:10-09:50Z): no build kept, no checks (20/20 used 10-27). twm overhead bisected (NOTES s28): NOCOPY feed ~2 us/item,
+  full wait ~1-2, LDS->dq latency ~2-3, per-stage S2R tid remat (fix bitwise but v16/v32 noise: DEAD). Microbench 16w x RT2 vs 8w x RT4
+  = only -3..6% (ALU pipe near limit; = twq, which lost). twm kernel-level lane EXHAUSTED; in-layer twm (19163546 v16 sl 157.8) =
+  standalone speed. NEXT (if anything in this lane): scheduling only: v16 drain ~17 us (after s66 split), first wave ~2.7 TB/s.
 ## Night4 session 27 (07:54-~09:00Z): SCB kept (above). Checks 20/20 used 10-27 (5ad98078 DIAG, + one plain main check).
   CLOSED for good (s27 mb_x.py): tensor work does not overlap CUDA-core work even in another warpgroup (RS or SS, dq or FFMA):
   consumer = ALU + tensor time. dq extraction is minimal (8 ops/8 weights, exhaustive search). twm items carry ~230 cyc/stage
