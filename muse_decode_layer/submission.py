@@ -4430,6 +4430,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
+#define TK2F_DIAG 0      // layer s81: tk2f DIAG instantiations (no-math / KPS 4 SQ timing probes, tuner-only; set by TK2F_DIAG below)
 #define TK2F_L2H 4       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
 #define NORM_EARLY 1     // n4s1 (layer s53: set here, layer has its own _lib): twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them
 #ifndef TK2G_PAR4
@@ -7753,6 +7754,10 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
           sc[3] = slut[sw[h] >> 24];
         }
         const int qq = q * KPS + h;
+        if (PF & 256) {  // layer s81 (moe n10 probe): timing only (wrong output), never selectable: no math, keep the loads
+          acc[0][0] += __uint_as_float(sc[0] ^ wv0[h].x ^ wv1[h].y ^ xf[qq][0].x);
+          continue;
+        }
 #pragma unroll
         for (int ii = 0; ii < 2; ++ii) {
           const uint4 wv = ii ? wv1[h] : wv0[h];
@@ -8701,6 +8706,15 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
   if (sq) {  // SA 84204 only (+ BAL): d1 slot, T = 16 / 32
     if (cfg >= 140000 && cfg < 150000 && cfg % 1000 == 4)  // moe n16: tk2h GS16 + PF4 on SQ stages
       return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4 | 512>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+#if TK2F_DIAG
+    // layer s81 DIAG (tuner timing only, never selectable): 184402/184403 = KPS 4 SQ stages (36 KB, _sq_pack nq 2 buffers),
+    // NSTG 2/3; 184214 / 184412 / 184413 = the same (and 204) with no consumer math (PF 256: wrong output)
+    if (cfg == 184402) return tk2f_go<8, 2, 4, false, false, true, 8, 0, 4 | 512>(0, TK2F_ARGS0);
+    if (cfg == 184403) return tk2f_go<8, 3, 4, false, false, true, 8, 0, 4 | 512>(0, TK2F_ARGS0);
+    if (cfg == 184214) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512 | 256>(0, TK2F_ARGS0);
+    if (cfg == 184412) return tk2f_go<8, 2, 4, false, false, true, 8, 0, 4 | 512 | 256>(0, TK2F_ARGS0);
+    if (cfg == 184413) return tk2f_go<8, 3, 4, false, false, true, 8, 0, 4 | 512 | 256>(0, TK2F_ARGS0);
+#endif
     TORCH_CHECK(cfg == 184204, "moe_tk2f SQ: cfg ", cfg);
     if (bal) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 36 | 512>(0, TK2F_ARGS0);
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512>(0, TK2F_ARGS0);
@@ -9073,6 +9087,9 @@ def _moe_prepare(weights):
     if _moe_TK2F_SQ and (not s6 or _moe_TK2F_S6_KEEPSQ):  # layer s68 (moe n14): tk2f single-copy stage images (lossless repack of w13q/w2q + w13s2/w2s2)
         st["w13sq"] = _moe__sq_pack(st["w13q"], st["w13s2"])
         st["w2sq"] = _moe__sq_pack(st["w2q"], st["w2s2"])
+    if _moe_TK2F_DIAG:  # layer s81: KPS 4 (36 KB) single-copy stage images for the DIAG probes
+        st["w13sq4"] = _moe__sq_pack(st["w13q"], st["w13s2"], 2)
+        st["w2sq4"] = _moe__sq_pack(st["w2q"], st["w2s2"], 2)
     if _moe_TW_CFG:
         rt = 2 if _moe_TW_CFG >= 1000 else _moe_TW_CFG // 100
         if rt not in _moe_TB_PACK:
@@ -9344,6 +9361,20 @@ def _moe__tk2f_w(c, st):
     return c, st["w13q"], st["w2q"]
 
 
+_moe_TK2F_DIAG = False  # layer s81: build the tk2f DIAG probes (DIAG check copies only; sed to True)
+_moe_TK2X_M = {}  # layer s81 DIAG: M -> probe code (tuner timing only): 1 nm204, 2 sq402, 3 sq403, 4 nm402, 5 nm403, 6 plain SQ 204
+
+
+def _moe__tk2x(c, st, code):
+    """layer s81 DIAG: (cfg, w13, w2) of probe `code` (c = the SQ 184204 cfg) -- wrong outputs for the nm codes."""
+    assert _moe_TK2F_DIAG and c == 10184204, c
+    if code == 6:
+        return c, st["w13sq"], st["w2sq"]
+    if code == 1:
+        return 10184214, st["w13sq"], st["w2sq"]
+    return 10000000 + (184402, 184403, 184412, 184413)[code - 2], st["w13sq4"], st["w2sq4"]
+
+
 def _moe__tk2f_cfg0(M, st):
     sa = 100000 if _moe_TK2SA and st["sa"] else 0
     if _moe_TK2H_M.get(M) and sa:
@@ -9379,6 +9410,8 @@ def _moe_kernel_fn(data, st):
             return out
         if _moe_TK2F:
             c, w13_, w2_ = _moe__tk2f_w(_moe__tk2f_cfg(M, st), st)
+            if _moe_TK2X_M.get(M):  # layer s81 DIAG
+                c, w13_, w2_ = _moe__tk2x(c, st, _moe_TK2X_M[M])
             lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
             c5 = c % 1000000 % 100000
@@ -10010,6 +10043,9 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
         _moe_TK2F_BAL_M.clear()
         if _opt(state, m, "bal", TK2F_BAL_DEFAULT):  # moe n8 BAL (balanced tk2f phases, per-segment counters) at T=8/16/32
             _moe_TK2F_BAL_M.add(m)
+        _moe_TK2X_M.clear()
+        if _opt(state, m, "tk2x", 0):  # s81 DIAG probes (tuner timing only, never selected)
+            _moe_TK2X_M[m] = _opt(state, m, "tk2x", 0)
         _moe_TK2H_M.clear()
         if _opt(state, m, "tk2h", 0):  # s58: moe n6 tk2h (GS16 merged consumer + PF4) at T=16/32, value = 2-group weight W + 1
             _moe_TK2H_M[m] = _opt(state, m, "tk2h", 0)
@@ -14051,8 +14087,9 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
     global _moe__LIB
     if _moe__LIB is None:
         from torch.utils.cpp_extension import load_inline
-        h = hashlib.sha256(_moe_CUDA_SRC.encode()).hexdigest()[:12]
-        _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=_moe_CUDA_SRC,
+        src = _moe_CUDA_SRC.replace("#define TK2F_DIAG 0", "#define TK2F_DIAG 1") if _moe_TK2F_DIAG else _moe_CUDA_SRC  # s81
+        h = hashlib.sha256(src.encode()).hexdigest()[:12]
+        _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=src,
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
@@ -15382,6 +15419,9 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
 CSL_PW_TOKENS = (16,)
 CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem carveout so 1 csl CTA/SM fits beside it from
 # the start (H100: csl starts at 2.8 us, but its gathers slow g19 17.3 -> 20.6 us: d16 sl +0.3..0.6 net; xb 1 qkv: same)
+if _moe_TK2F_DIAG:  # s81: DIAG check copies only: the tk2f probes (+ the defaults) at T = 1/16/32, no other tuning
+    _TK2X = [{"tk2x": k, "diag": True} for k in (6, 1, 2, 3, 4, 5)]
+    TUNE = {1: ({}, *_TK2X), 16: ({}, *[dict(o, bal=False) for o in _TK2X]), 32: ({}, {"tk2h": 0, "diag": True}, *[dict(o, tk2h=0) for o in _TK2X[1:]])}
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
@@ -15491,7 +15531,7 @@ def _tune(state):
                     if r >= 3:
                         ts[i].append(a.elapsed_time(b))
             med = [sorted(v)[len(v) // 2] for v in ts]
-            best = min(idx, key=lambda i: med[i])
+            best = min((i for i in idx if not cands[i].get("diag")), key=lambda i: med[i])  # s81: DIAG probes never picked
             conf = ""
             if best != 0 and cands[0] == {}:  # s24: confirm against the defaults (winner's curse of a min over many noisy medians)
                 c2 = [[], []]
@@ -15694,6 +15734,8 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     c = (84204 if slot else _moe_TK2F) + (100000 if _moe_TK2SA and st["sa"] else 0)
     # s68: moe n14 SQ off here (H100 ab_flag 4 rounds x 3 seeds d1 +0.4..0.9 us; H200 moe diag d1 0)
     c, w13_, w2_ = _moe__tk2f_w(c, st) if TK2F_SQ_T1 else (c, st["w13q"], st["w2q"])
+    if _opt(state, 1, "tk2x", 0):  # s81 DIAG probes (tuner timing only, never selected)
+        c, w13_, w2_ = _moe__tk2x(_moe__tk2f_w(c, st)[0], st, _opt(state, 1, "tk2x", 0))
     lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"], c)
     f = torch.empty((1, UNPOOL_SLICE), dtype=torch.bfloat16, device=dev)

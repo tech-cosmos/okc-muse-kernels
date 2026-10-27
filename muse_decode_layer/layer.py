@@ -584,6 +584,9 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
         _moe_TK2F_BAL_M.clear()
         if _opt(state, m, "bal", TK2F_BAL_DEFAULT):  # moe n8 BAL (balanced tk2f phases, per-segment counters) at T=8/16/32
             _moe_TK2F_BAL_M.add(m)
+        _moe_TK2X_M.clear()
+        if _opt(state, m, "tk2x", 0):  # s81 DIAG probes (tuner timing only, never selected)
+            _moe_TK2X_M[m] = _opt(state, m, "tk2x", 0)
         _moe_TK2H_M.clear()
         if _opt(state, m, "tk2h", 0):  # s58: moe n6 tk2h (GS16 merged consumer + PF4) at T=16/32, value = 2-group weight W + 1
             _moe_TK2H_M[m] = _opt(state, m, "tk2h", 0)
@@ -1673,8 +1676,9 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
     global _moe__LIB
     if _moe__LIB is None:
         from torch.utils.cpp_extension import load_inline
-        h = hashlib.sha256(_moe_CUDA_SRC.encode()).hexdigest()[:12]
-        _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=_moe_CUDA_SRC,
+        src = _moe_CUDA_SRC.replace("#define TK2F_DIAG 0", "#define TK2F_DIAG 1") if _moe_TK2F_DIAG else _moe_CUDA_SRC  # s81
+        h = hashlib.sha256(src.encode()).hexdigest()[:12]
+        _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=src,
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
@@ -2584,6 +2588,9 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
 CSL_PW_TOKENS = (16,)
 CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem carveout so 1 csl CTA/SM fits beside it from
 # the start (H100: csl starts at 2.8 us, but its gathers slow g19 17.3 -> 20.6 us: d16 sl +0.3..0.6 net; xb 1 qkv: same)
+if _moe_TK2F_DIAG:  # s81: DIAG check copies only: the tk2f probes (+ the defaults) at T = 1/16/32, no other tuning
+    _TK2X = [{"tk2x": k, "diag": True} for k in (6, 1, 2, 3, 4, 5)]
+    TUNE = {1: ({}, *_TK2X), 16: ({}, *[dict(o, bal=False) for o in _TK2X]), 32: ({}, {"tk2h": 0, "diag": True}, *[dict(o, tk2h=0) for o in _TK2X[1:]])}
 TUNE_REPS = 40
 TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
 TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
@@ -2693,7 +2700,7 @@ def _tune(state):
                     if r >= 3:
                         ts[i].append(a.elapsed_time(b))
             med = [sorted(v)[len(v) // 2] for v in ts]
-            best = min(idx, key=lambda i: med[i])
+            best = min((i for i in idx if not cands[i].get("diag")), key=lambda i: med[i])  # s81: DIAG probes never picked
             conf = ""
             if best != 0 and cands[0] == {}:  # s24: confirm against the defaults (winner's curse of a min over many noisy medians)
                 c2 = [[], []]
@@ -2896,6 +2903,8 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     c = (84204 if slot else _moe_TK2F) + (100000 if _moe_TK2SA and st["sa"] else 0)
     # s68: moe n14 SQ off here (H100 ab_flag 4 rounds x 3 seeds d1 +0.4..0.9 us; H200 moe diag d1 0)
     c, w13_, w2_ = _moe__tk2f_w(c, st) if TK2F_SQ_T1 else (c, st["w13q"], st["w2q"])
+    if _opt(state, 1, "tk2x", 0):  # s81 DIAG probes (tuner timing only, never selected)
+        c, w13_, w2_ = _moe__tk2x(_moe__tk2f_w(c, st)[0], st, _opt(state, 1, "tk2x", 0))
     lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"], c)
     f = torch.empty((1, UNPOOL_SLICE), dtype=torch.bfloat16, device=dev)
