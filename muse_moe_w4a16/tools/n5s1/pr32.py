@@ -42,7 +42,7 @@ bias = W["router_bias"].float().contiguous()
 ls = torch.tensor([int(os.environ.get("LS", 64))], dtype=torch.int32, device=dev)
 ids = torch.empty(M, 8, dtype=torch.int32, device=dev); lids = torch.empty_like(ids); wts = torch.empty(M, 8, dtype=torch.float32, device=dev)
 out = torch.empty(M, 4096, dtype=torch.bfloat16, device=dev)
-TL = torch.zeros(132 * 8, dtype=torch.int64, device=dev)
+TL = torch.zeros(132 * 12, dtype=torch.int64, device=dev)
 MULT, REPS, LOCAL = L.ROUTER_MULTIPLIER, L.ROUTE_EPS, L.LOCAL_EXPERTS
 run = lambda x, pdl=0: lib.pr32_launch(x, wp, hdr, out, scale, rw, part, logits, cnt, bias, ls, ids, lids, wts, MULT, REPS, LOCAL, pdl, TL)  # noqa
 bad = 0
@@ -73,13 +73,16 @@ print("BAD", bad)
 if "PR_TL" in DEFS:
     for _ in range(3):
         TL.zero_(); x = torch.randn(M, 8192, device=dev).bfloat16(); torch.cuda.synchronize(); run(x); torch.cuda.synchronize()
-    tl = TL.view(-1, 8)[:65 * int(os.environ.get('S', 2))].cpu().double()
-    t0 = tl[tl[:, 4] > 0, 4].min()
+    tl = TL.view(-1, 12)[:66 * int(os.environ.get('S', 2))].cpu().double()
+    t0 = tl[tl[:, 8] > 0, 8].min()
     rel = torch.where(tl > 0, (tl - t0) / 1000, torch.full_like(tl, float('nan')))
-    names = ["rstore", "rpart", "fingest", "fxchg", "pstart", "pdone", "fpoll", "froute"]
+    names = ["rstore", "rpart", "fingest", "fxchg", "pstart", "pdone", "fpoll", "froute", "entry", "xwait", "end"]
     for i, n in enumerate(names):
         c = rel[:, i]; c = c[~c.isnan()]
         if len(c): print(f"{n:7s} n {len(c):3d} min {c.min():6.2f} med {c.median():6.2f} max {c.max():6.2f} us")
+    pr = rel[4:].view(-1, 2, 12)
+    pd = torch.maximum(pr[:, 0, 5], pr[:, 1, 5]); tail = pr[:, 0, 10] - pd; imb = (pr[:, 0, 5] - pr[:, 1, 5]).abs()
+    print(f"pair tail end-max(pdone) min {tail.min():.2f} med {tail.median():.2f} max {tail.max():.2f} | pair pdone imbalance med {imb.median():.2f} max {imb.max():.2f}")
     print("rg reducers (cta, rgred):", [(i, round(float(rel[i, 2]), 2)) for i in range(rel.shape[0]) if not rel[i, 2].isnan()])
 
 if os.environ.get("TIME", "1") == "1":
