@@ -71,6 +71,9 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 29 (09:30-10:00Z): no build, no checks. Big-M lane bound (NOTES s29): v16 twm = bytes 127 + consumer ~9 + drain ~17;
+  v32 = 156 bytes + ~30 N16-N32 consumer (ALU+tensor at floor) + ~20 drain/hot; every listed drain/overlap lever already DEAD.
+  Asked lead to close the lane or reassign (COORD Requests). NEXT: whatever the lead assigns.
 ## Night4 session 28 (09:10-09:50Z): no build kept, no checks (20/20 used 10-27). twm overhead bisected (NOTES s28): NOCOPY feed ~2 us/item,
   full wait ~1-2, LDS->dq latency ~2-3, per-stage S2R tid remat (fix bitwise but v16/v32 noise: DEAD). Microbench 16w x RT2 vs 8w x RT4
   = only -3..6% (ALU pipe near limit; = twq, which lost). twm kernel-level lane EXHAUSTED; in-layer twm (19163546 v16 sl 157.8) =

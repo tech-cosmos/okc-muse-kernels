@@ -1535,3 +1535,20 @@
   lane for twm is exhausted; what is left is scheduling (v16 drain ~17 us after s66, first wave ~10 us at ~2.7 TB/s, n15).
 - In-layer check (layer profile 19163546, H200): v16 sl twm 157.8 us (moe-only diag 166 before SCB), so twm runs in-layer
   as fast as standalone. The full-layer row (193.7) includes overlap/wait next to _gw_verify, not slower expert work.
+
+## Night4 session 29 (2026-10-27 09:30Z - ~10:00Z; moe checks 20/20 used on 10-27, no judge runs) -- big-M lane bound; no build
+- Goal (s28 NEXT): twm scheduling at v16/v32 (drain, first wave). Re-read s15/s19/s20/s25 + layer NOTES; nothing new to build:
+  drain fixes tried = K halves (s66: the only winner, kept by layer), AUTO split, quarters/eighths (lose: part overhead),
+  row-split tails (TWM_TAIL/TAIL13), orders (o76/o4), HOT_TWG grids; drain-time L2 prefetch of the unpool W = layer s6
+  (twf counter-out, H100 +1..5), UPF3 (H200 DIAG b1ee542c -4% d32), UPF4 (s26). First-wave low HBM rate is not a loss by
+  itself (s19: order only moves per-SM-bound work around).
+- Bound (H200 profile 19163546 + s15 item times): N8 items run AT the per-SM HBM share (37.6 us/1.13 MB at 4.0 TB/s); only
+  N16/N24/N32 items are consumer-bound (44/47/50 us). v16 sl: twm 157.8 = bytes ~127 + consumer excess ~9 + drain ~17 + start.
+  v32 sl: twm 205.7 || moe_hot 154.5 (32 SMs) vs ~624 MB / 4.0 = 156: ~30 us N16-N32 consumer excess (ALU+tensor, s27/s28:
+  dq at the 8-op minimum, MMA at N32 = tensor peak for real FLOPs) + ~20 drain/hot imbalance. Every listed lever on these
+  is measured dead; what remains are 1-2 us latency bits per item (s28) that each sit under the judge noise.
+- Ideas rejected on paper this session: FP8 wgmma (activations must stay BF16; a 3-term FP8 split of x costs 1.5x tensor
+  time); scale after the MMA (needs per-k16 temp accumulators: same FFMA count at N8, more at N16+, kills the wgmma ring);
+  per-block scaled PRMT LUT (LUT built per 4 weights per thread: dead, as s27); exponent-add scale fold (breaks zeros);
+  unpool started on finished tokens (64 MB W > L2: streams W twice).
+- Asked the lead (COORD Requests) to close moe's big-M lane or name a new one.
