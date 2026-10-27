@@ -1655,3 +1655,12 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   one bf16 FMA (bmul); a byte_perm LUT would save ~3 of 11 per 8 weights = moe's twm item (lead 07:42Z (a)): if moe
   lands it for twm, the same dq swap in tk2f_consume / tk2g_row is the layer's port (d16/d32 are consumer-ALU-bound).
 - H200 d1 sl profile (08d10234): tk2f 27.6, pr1 18.0, qkv g13 10.8, bnd 2x 3.1, o g13 6.0, n2u 5.5, csl 4.0, rmsnorm 1.3 us.
+
+## s80 (2026-10-27 08:47Z-, night4 session 29): v125 = v124 + moe s27 SCB
+- Ported moe s27 SCB (cheaper e4m3 block-scale decode, bitwise per moe; r-moe 40de385) with
+  `python ~/r-moe/muse_moe_w4a16/tools/s27m/patch_layer_scb.py muse_decode_layer/moe_src.py` (5 sites, clean on v124).
+  moe H200 moe-only diag (5ad98078 vs b14b8be4) on the layer routings: d16 -0.8, d32 -1.3, v16 twm -5.4, v32 twm -4.8 us.
+- Tests: bench test 13/13, scored_test all shapes x2 seeds 0 bad, tk2f_stress 300 0/1200, replay_test seeds 11,23 x20 0/480,
+  cold prepare 120.3 s (join 96.7, tune 22.9).
+- tools/files_eq.py is NOT usable to show bitwise equality with the tuner on: v124 vs v124 itself differs on 11 rows
+  (tuner picks differ between prepares; decode 32 sl seed 0 even flips a routing tie). Use a forced-tune variant for that.
