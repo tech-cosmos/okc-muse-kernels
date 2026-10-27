@@ -644,7 +644,7 @@ def _join_builds():
             f.result()
         except Exception as e:  # noqa: BLE001  (retried serially below / at first use)
             print("layer prebuild failed (retrying serially):", e)
-    for d in (_G10, _LT, _G22, _G24):
+    for d in (_G10, _LT, _G22, _G24, _G27):
         if d.get("lib", 0) is None:
             d.pop("lib")
     g = globals()
@@ -752,6 +752,20 @@ _G13_SRC = None  # @@G13@@
 _G14_SRC = None  # @@G14@@
 _G19_SRC = None  # @@G19@@
 _G24_SRC = None  # @@G24@@
+_G27_SRC = None  # @@G27@@
+# proj s57 gemv27 (g27_src.cu = r-proj muse_bf16_proj/dev/s57/gemv27.cu): o at T=16/32 without cross-block split-K: a
+# block owns RGB whole 16-row groups, its warps split k (KQ), partials summed in smem, plain FP32 stores (no out zeroing,
+# fence, epoch barrier or atomics; deterministic); ns >= 100 = PD: each warp's whole W slice (ns - 100 atoms) is streamed
+# and DECODED into registers before griddepcontrol.wait, so after the wait only x + mma + the block sum remain.
+# Config (m, KQ, AP, ns, RGB, bf16 out). Same 12-bit pack as g24 (_pack24 with kc = k / KQ). Takes ZN like g24 (zeroes the
+# next g24's out) and never needs a zeroed out itself. proj H100 standalone after a 3 us PDL pred (us): o m16 PD 4.8-5.4
+# vs g24 6.2-6.9 vs cuBLAS 7.8; m32 PD 6.2-7.0 vs 6.9-7.2. TUNE option g27:<key> (bool); default on where G27_ON.
+# H200 (proj check c7b58683, after a 3 us PDL pred): o m16 PD 5.25 vs g24 6.43 vs cuBLAS 6.75 vs lt 7.20; m32 6.69 vs
+# cuBLAS 6.43 (and H100 layer d32 +1.1..1.8): T=16 only. H100 layer ab_flag (TUNE {}, 4 rounds x seeds 7,11,99): d16 sl
+# -0.6..-0.9, full -0.1..-0.3 us vs g24 o.
+G27_CFG = {("o", 16): (16, 4, 4, 108, 4, 0)}
+G27_ON = {("o", 16)}
+_G27 = {}
 _GPR1_SRC = None  # @@GPR1@@
 _GPR8_SRC = None  # @@GPR8@@
 # proj's gemv19 (g19_src.cu = r-proj dev/gemv19.cu @6996d0c): m = 16/32 GEMM over the 12-bit weights, FP32 out zeroed
@@ -774,7 +788,7 @@ G19_BUILD = [(16, 1024, 4, 4, 2, 2)]  # also compiled (A/B)
 # PDL dependent streaming W before its wait, npre bit 16 = trigger at start) with per-warp TMA rings (no producer warp /
 # stage barriers). TUNE option g24:<key> (replaces g19 / cuBLAS at that call site). (m, kc, ap, ns, wpb, xb, r).
 # proj H200 proxy (H100 G72, after a 3 us pred; g24 | g19): m32 pool 24.8|26.6, unp 23.9|24.7, o 8.7|9.9, qkv 16.1|16.4.
-G24_CFG = {("pooler", 16): (16, 1024, 2, 4, 16, 2, 1), ("unpool", 16): (16, 1024, 2, 4, 16, 2, 1),
+G24_CFG = {("pooler", 16): (16, 1024, 4, 3, 12, 2, 1), ("unpool", 16): (16, 1024, 2, 4, 16, 2, 1),
            ("qkv_gate", 16): (16, 1024, 2, 4, 16, 2, 1), ("o", 16): (16, 512, 2, 4, 16, 2, 1),
            ("pooler", 32): (32, 512, 4, 3, 12, 2, 1), ("unpool", 32): (32, 512, 4, 3, 12, 2, 1),
            ("qkv_gate", 32): (32, 512, 4, 3, 12, 2, 1), ("o", 32): (32, 512, 4, 3, 12, 2, 1)}
@@ -782,6 +796,11 @@ G24_CFG = {("pooler", 16): (16, 1024, 2, 4, 16, 2, 1), ("unpool", 16): (16, 1024
 # TUNE option g24sk:<key> (bool) runs these configs instead (overrides g24/g19/cuBLAS at that call site). proj H200 proxy
 # (H100 G88/G108 standalone, after a 3 us pred; SK | static): qkv m16 11.4 | 11.8, m32 13.9 | 14.9; pool m32 21.1 | 21.5;
 # unp m32 21.3 | 22.1; pool m16 at G108 19.5 | 21.5 (static 4,3,12 19.1); o loses (+0.4..0.9).
+# proj s56 H200 diag (check 636c89fc, standalone after a 3 us PDL pred, us): pooler m16 G108 (4,3,12) 15.36 vs (2,4,16)
+# 18.34; pooler m32 G108 SK (4,3,12) 20.00 vs SK (2,4,16) 21.15; qkv m16 SK 9.89 vs static 10.53;
+# qkv m32 SK 13.15 vs lt 13.92 (first op at T=32: tuner only); unpool/o: g24 configs in use are best or tie.
+# H100 layer ab_files A B B A: pooler T=16 (4,3,12): d16 sl -0.9, full -0.4 (default); pooler T=32 SK (4,3,12) d32 +1.2..1.7
+# and qkv T=16 SK +0..0.6 on the H100: not default (g24sk:qkv_gate stays a TUNE[16] candidate).
 G24_SKCFG = {("pooler", 16): (16, 1024, 2, 4, 16, 2, 257), ("unpool", 16): (16, 1024, 2, 4, 16, 2, 257),
              ("qkv_gate", 16): (16, 1024, 2, 4, 16, 2, 257), ("pooler", 32): (32, 512, 2, 4, 16, 2, 257),
              ("unpool", 32): (32, 512, 2, 4, 16, 2, 257), ("qkv_gate", 32): (32, 512, 2, 4, 16, 2, 257)}
@@ -2400,6 +2419,63 @@ def _g24_prepare(state, w, comp, g):
             state[sd][(key, m)] = e
         else:
             print("layer gemv24 config dropped:", key, m, c)
+    _g27_prepare(state, w, comp, g, packs)
+
+
+def _g27_build():
+    if not G27_CFG or _G27_SRC is None:
+        return
+    if "lib" not in _G27:
+        try:
+            import hashlib
+            from torch.utils.cpp_extension import load_inline
+            _G27["lib"] = load_inline(
+                name="layer_g27_" + hashlib.sha256(_G27_SRC.encode()).hexdigest()[:10] + "_" + str(len(G27_CFG)),
+                cpp_sources="void g27_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
+                cuda_sources=_G27_SRC.replace("G27_CONFIGS", " ".join("G27_CASE(%d,%d,%d,%d,%d,%s)" % (c[:5] + ("true" if c[5] else "false",)) for c in sorted(set(G27_CFG.values())))),
+                functions=["g27_gemm"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
+        except Exception as ex:  # noqa: BLE001
+            print("layer gemv27 build failed:", ex)
+            _G27["lib"] = None
+
+
+def _g27_prepare(state, w, comp, g, packs):
+    state["g27"] = {}
+    if not G27_CFG or _G27_SRC is None:
+        return
+    _g27_build()
+    lib = _G27["lib"]
+    if lib is None:
+        return
+    dev = state["unpool"].device
+    for (key, m), c in G27_CFG.items():
+        if key not in comp:
+            comp[key] = _compress(w[key])
+        if comp[key] is None:
+            continue
+        k = w[key].shape[1]
+        if k % (c[1] * 32 * c[2]) or (c[3] >= 100 and (c[3] - 100) * 32 * c[1] != k):
+            print("layer gemv27 config dropped (shape):", key, m, c)
+            continue
+        kc = k // c[1]
+        pk = packs.get((key, kc, c[2]))
+        if pk is None:
+            pk = packs[(key, kc, c[2])] = _pack24(comp[key], kc, c[2])
+        e = (pk, comp[key][2], comp[key][3], c)
+        x = torch.randn((m, k), generator=g, device=dev).to(torch.bfloat16)
+        out = torch.full((m, w[key].shape[0]), float("nan"), dtype=torch.bfloat16 if c[5] else torch.float32, device=dev)
+        try:
+            lib.g27_gemm(e[0], e[1], e[2], x, out, c[1], c[2], c[3], c[4], 99, _NOZ(dev))
+            torch.cuda.synchronize()
+            ref = F.linear(x, w[key]).float()
+            ok = ((out.float() - ref).norm() / ref.norm()).item() < 1e-2
+        except Exception as ex:  # noqa: BLE001
+            print("layer gemv27 failed:", key, m, ex)
+            ok = False
+        if ok:
+            state["g27"][(key, m)] = e
+        else:
+            print("layer gemv27 config dropped:", key, m, c)
 
 
 # (s18/s19) Choices where the H100 and the judge's H200 may disagree, tuned in prepare(): the whole layer is timed
@@ -2415,16 +2491,17 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         16: ({}, {"g24z": False}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
-             {"tk2h": 3}, {"tk2h": 4}, {"bal": True}, {"bal": False}, {"cslpw": False}, {"cslcarve": True},
+             {"bal": True}, {"bal": False}, {"cslpw": False}, {"cslcarve": True},
              {"g24:pooler": False, "g24:unpool": False, "g24:o": False, "g24:qkv_gate": False}, {"g24:pooler": False, "g24:unpool": False},
              {"g24:o": False}, {"g24:qkv_gate": False},
-             {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True}),
+             {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
+             {"g27:o": False}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
              {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
-             {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
+             {"o_pf": 0}, {"g19trig": False}, {"tk2h": 0}, {"tk2h": 3}, {"tk2h": 0, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
              {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True},
              {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
@@ -2448,12 +2525,14 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
 _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
 TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True, "bal": True, **_G24_ALL},
-             (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True},
-             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True},
+             (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4},
+             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4},
              (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
 # proj s54: T=32 pooler+unpool on stream-K g24 (g24sk): H100 ab_flag 5 rounds x 2 seeds d32 sl -1.3/-1.9, full -1.5/-1.1 us;
 # g24sk at T=16 +0.4..0.9 and qkv at T=32 +1..1.5 on the H100 (W-bound): TUNE candidates only.
 # H100 ab_flag 4 rounds x 3 seeds, TUNE {}: d16 sl/full -2.9/-3.0 us, d32 sl/full -1.5/-1.8 (o on g24 at T=32 sl +2.3; qkv tie/-1)
+# s69: T=32 tk2h 4 (W3) on SQ stages by default (moe n13/n16 H200 moe-only on layer routings: -1.9 / -1.7 us vs gs8 SQ);
+# tk2h dropped from TUNE[16] (moe n13 H200: every tk2h loses +3..5 us at T=16).
 # s61: T=16 sliding moe n8 BAL (H100 real routings 4 seeds -2.6 us mean); s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
 # s62: tokens where decode sliding csl is a PDL secondary of the qkv GEMM (TUNE option cslpw). H100 ab_flag 5-6 rounds x
 # 3 seeds: d16 sliding -0.7..-1.0 us (csl CTAs still wait for g19's SMs: launch + prologue overlap only); d1 +1.3..1.7 (off);
@@ -2603,8 +2682,17 @@ def _tune(state):
     torch.cuda.empty_cache()
 
 
+def _g27_sel(state, key, m):
+    """The gemv27 entry _g19 runs for (key, m), or None."""
+    if key is None or not _opt(state, m, "g27:" + key, (key, m) in G27_ON):
+        return None
+    return state.get("g27", {}).get((key, m))
+
+
 def _g24_sel(state, key, m):
     """The gemv24 entry _g19 runs for (key, m), or None (g22 or g19/cuBLAS take it)."""
+    if _g27_sel(state, key, m) is not None:
+        return None
     if _opt(state, m, "g22:" + key, False) and state.get("g22", {}).get((key, m)) is not None:
         return None
     e = state.get("g24sk", {}).get((key, m)) if _opt(state, m, "g24sk:" + key, False) else None
@@ -2631,6 +2719,18 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
         c = e[3]
         out = torch.empty((m, e[2]), dtype=torch.float32, device=x.device)
         _G22["lib"].g22_gemm(e[0], e[1], x.contiguous(), out, c[1], c[2], c[3], _G19_SMS, 0, c[2])
+        return out
+    e = _g27_sel(state, key, m)
+    if e is not None:  # proj s57: gemv27 (no zeroed out needed; ZN for the next g24 like g24)
+        c = e[3]
+        _G24_ZN.pop((key, m), None)
+        out = torch.empty((m, e[1].shape[0]), dtype=torch.float32, device=x.device)
+        nk = G24_ZCHAIN.get(key)
+        en = _g24_sel(state, nk, m) if nk is not None and _opt(state, m, "g24z", m in G24Z_TOKENS) else None
+        zo = _NOZ(x.device)
+        if en is not None:
+            zo = _G24_ZN[(nk, m)] = torch.empty((m, en[1].shape[0]), dtype=torch.float32, device=x.device)
+        _G27["lib"].g27_gemm(e[0], e[1], e[2], x.contiguous(), out, c[1], c[2], c[3], c[4], 99 | ((int(trig) & 1) << 16), zo)
         return out
     e = _g24_sel(state, key, m)
     if e is not None:  # proj s53: gemv24, where TUNE picks it
@@ -2905,7 +3005,8 @@ def kernel_fn(data, state):
     pf_frac = _opt(state, tokens, "o_pf", O_PF.get(tokens, 0)) if cfg["window"] > 0 else 0
     if pf_frac:  # s34: decode sliding attention (csl / nds) L2-prefetches the first pf_frac of o's weight once its K/V are in
         e = state.get("g19", {}).get(("o", tokens)) if "o" in G19_ON and _opt(state, tokens, "g19:o", ("o", tokens) not in G19_DEFAULT_OFF) else None
-        w = e[0] if e is not None else dense["o"]
+        e27 = _g27_sel(state, "o", tokens)  # proj s57: gemv27's pack when it runs o
+        w = e27[0] if e27 is not None else e[0] if e is not None else dense["o"]
         o_pf = (w.data_ptr(), int(w.numel() * w.element_size() * pf_frac) & ~15)
     o = attn_kernel_fn({
         "o_pf": o_pf, "csl_pw": csl_pw,
@@ -3097,4 +3198,4 @@ def kernel_fn(data, state):
     return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
 
 
-_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build)]
+_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build)]

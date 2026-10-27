@@ -4230,6 +4230,8 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
   const bool bal = cfg >= 1000000;  // moe n8: + 1000000 = BAL (PF | 32; SA pf 4 / 5 only)
   cfg %= 1000000;
   if (sq) {  // SA 84204 only (+ BAL): d1 slot, T = 16 / 32
+    if (cfg >= 140000 && cfg < 150000 && cfg % 1000 == 4)  // moe n16: tk2h GS16 + PF4 on SQ stages
+      return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4 | 512>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
     TORCH_CHECK(cfg == 184204, "moe_tk2f SQ: cfg ", cfg);
     if (bal) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 36 | 512>(0, TK2F_ARGS0);
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512>(0, TK2F_ARGS0);
@@ -4825,6 +4827,8 @@ TK2F_SQ = 1  # layer s68 (moe n14, H200 d32 -1.5, d16 -0.55 us, bitwise = off): 
 def _tk2f_w(c, st):
     """(cfg, w13, w2) for moe_tk2f_launch: SA 84204 (+ BAL) -> + 10000000 on the single-copy buffers (SQ)."""
     if TK2F_SQ and "w13sq" in st and c % 1000000 == 184204:
+        return c + 10000000, st["w13sq"], st["w2sq"]
+    if TK2F_SQ and "w13sq" in st and 140000 <= c % 1000000 < 150000 and c % 1000 == 4:  # moe n16 tk2h on SQ
         return c + 10000000, st["w13sq"], st["w2sq"]
     return c, st["w13q"], st["w2q"]
 
