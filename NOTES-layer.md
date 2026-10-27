@@ -1939,3 +1939,15 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   double the consumer warps per W byte. proj's cluster grids lost before (NOTES-proj s2/s58: max active clusters, MC dead for
   PD), so I'm noting it as a proj idea and not building it here.
 - First check after 00:00Z = main v134 (unchanged plan).
+
+## s96 (2026-10-27 14:00Z-, night4 session 45): s95's g24 m32 M-split idea measured DEAD (consumer oracle); 0 judge runs
+- Layer checks 20/20 used until 00:00Z; main = v134 unchanged; no new Handoffs/Requests for layer.
+- s95 idea (split M=32 into 2 x M16 consumers sharing one W tile: cluster multicast or warp pairs on one ring slot) would
+  DUPLICATE the 12-bit decode (dec8 is per W byte, independent of M), so it only wins if doubling consumer warps nearly
+  halves the m16 consumer time. Oracle with proj's harness (run in place, read-only: ~/r-proj/muse_bf16_proj/dev/s61/g24.py,
+  SH=pool, H100, us over a 3 us pred), G24_NOW (consumer only, no W HBM):
+  m16 (1024,4,3,12,2) 12.03 | (1024,4,2,12,2) 12.26 | (512,4,2,24 warps,2) 11.74 ; m32 (512,4,3,12,2) 15.42 | (512,4,2,16,2) 14.82.
+  Full (HBM): m16 18.59 / 20.35 / 19.07 ; m32 22.43 / 22.82.
+  24 warps at m16 = -2.4% vs 12 warps: the consumer is per-SM throughput-bound, not warp-latency-bound. A pair split would
+  cost ~2 x 11.7 = ~23 us of consumer time vs 15.4 for today's m32: DEAD (both cluster and intra-CTA forms). Not sent to proj.
+- Nothing else open on the layer side (STATE CLOSED list). First check after 00:00Z = main v134 (unchanged plan).
