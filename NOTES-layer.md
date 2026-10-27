@@ -1928,3 +1928,14 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - First check after 00:00Z = main v134: read 'layer tune T=128' ltalt:pooler lines and 'T=8' pr8_npf lines; d1 full per-shape.
 - Not built: re-read moe's twm microbenchmarks (NOTES-moe s18): dq ALU and wgmma don't overlap in one WG, WS/SS variants worse:
   nothing new to try there from the layer side.
+
+## s95 (2026-10-27 13:43Z-, night4 session 44): plateau re-check, no build; 0 judge runs
+- Board: #28 at 2.134x (35dd53d0); #1 pjmullin3 2.399x, #20 2.172x. Layer checks 20/20 used until 00:00Z; main = v134 unchanged.
+- No new Handoffs/Requests for layer since s94. moe and proj both report no open >= 0.1% attention/expert item (COORD s36/s37/s84).
+- Re-read 940a4fca d32 sl profile (weakest ratio, 1.61x): tk2f 88.1, g24 pool+unp 49.6, g24 qkv 13.2, norm2 12.3 (includes its
+  PDL wait; s72 oracle: norm2 is free), nds 10.3, bnd 2x 4. Re-checked the g24 m32 consumer against proj s61 (ncu 30% issue,
+  2.75 active warps/sched, latency-bound; XSP/DF/EZ dead on H200; G24P = the pooler EZ chain already a TUNE[32] option here).
+  Only untried form I see: split M=32 across 2 co-scheduled CTAs (M16 each) sharing one W tile via cluster TMA multicast, to
+  double the consumer warps per W byte. proj's cluster grids lost before (NOTES-proj s2/s58: max active clusters, MC dead for
+  PD), so I'm noting it as a proj idea and not building it here.
+- First check after 00:00Z = main v134 (unchanged plan).
