@@ -1,7 +1,7 @@
-import sys, torch
+import os, sys, torch
 sys.path.insert(0, ".")
 import bench
-sub = bench.load_sub("submission.py")
+sub = bench.load_sub(os.environ.get("SUB", "submission.py"))  # proj validate: SUB=<file>
 w, s = bench.weights_state(sub)
 st = s["moe"]
 g = torch.Generator(device="cuda").manual_seed(7)

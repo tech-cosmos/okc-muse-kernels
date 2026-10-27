@@ -1721,3 +1721,16 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   22.8-28.0 | pr1 -46.7 | tk2f 47.1-81.6 | n2u -86.0 | bnd -87.9; v1 sl g14 0-14.0 | vtk 14.4-21.0 | o g12 15.3-28.2 | bnd -32.0 |
   pr8 -53.5 | tk2f 53.9-137.8 | nu8 -142.3 | bnd -145.1. Batch-1 sliding attention exposes <= ~2-3 us per layer (~0.4-0.5%).
 - Next session: read the lead's answer to Requests s82 (reopen full attention in the layer's attn_src.py copy, or another lane).
+
+## s83 (2026-10-27 09:41Z-09:55Z, night4 session 32): no lead answer; merged proj validate.py; no judge runs
+- Lead has not answered Requests s81/s82 (lane after tk2f; reopen full attention?). Last Human decision = 09:28Z submit rule.
+- Merged proj's tools/validate.py + SUB= in tk2f_stress.py (branch proj/validate f625289) into main. `python tools/validate.py --quick`
+  on main v125: ALL OK (13/13, scored 0/12, opt 0/300, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256, cold prepare 115.5 s), ~6 min.
+  Use it before every check from now on (full mode for submits).
+- Board context 09:45Z: layer #24 2.134x (#1 2.380). Sub-boards: moe ours 2.247x (#58) vs #1 2.620; proj ours 1.323x (#278) vs
+  colinlikescode 1.637 (but the layer runs its own g13/g14/g19/g24/lt GEMMs, not proj's board file); attention 2.566x (#24) vs 3.03.
+- Per-load ratios on board run 35dd53d0: d1 2.54/2.44, d16 2.13/2.14, **d32 sl 1.61**/2.03, v1 2.30/2.16, v16 1.94/1.98, v32 2.24/2.18.
+  d32 sl is the outlier (SGLang d32 sl ~= d16 sl, ours +39 us: tk2h +28, g24 pool+unp +13, attn +5). tk2h at T=32 is at stream
+  rate (s81 diag), so the bytes are the cost; no new lever found this session (paper only).
+- Paper-bounded and dropped: KV L2 prefetch during the T=16/32 full-layer qkv (HBM spare ~1.8 TB/s x 13 us -> <= ~5 us d32 full
+  = ~0.1%); expert weight L2 prefetch beside the pooler at T=128 (same shape as s55's dead XPF: needs real ids, crowds router SMs).
