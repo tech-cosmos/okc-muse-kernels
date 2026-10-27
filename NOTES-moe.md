@@ -1800,3 +1800,38 @@
   ~31 MB total), owner writes BF16/FP32 out with plain stores (no zeroing, no reds). Gate: H100 xr+DSMEM <= ~24 us (beats
   cuBLAS 29.5 incl. overhead) -> then 12-bit W (proj DEC3 decode into RS A fragments: m128 has 64 clk MMA per 64x16 box vs
   ~100 clk stream, dequant cheap at N=128) -> layer TUNE option at T=128. T=256 (v32): x slice 256 KB does not fit; skip.
+
+## Night4 session 42 (2026-10-27 14:50Z - ~15:45Z) -- xr (T=128 GEMM, lead 13:30Z item 2) cluster k-split reduce: dev/s42; 0 checks
+- Goal from s41: replace xr's FP32 red.add out (+15..17 us) by a DSMEM reduce inside a cluster of the 8 k-splits (unp m128:
+  N 8192, K 4096, KC 512 -> S = 8 = cluster). Tools: dev/s42/xr2.py (build/correct/determinism/time, SRC=xr3_src.cu for xr3),
+  dev/s42/tl.py (per-tile globaltimer timeline of cluster 0; -DXR_TLON). Times incl. 4.9 us harness; H100 cuBLAS 28.5-28.7.
+- **Correction to s41 (important):** (1) s41's xr kernel ran with ALL wgmmas serialized (ptxas C7520 "serialized due to
+  WG.AR in divergent path": DEPBAR gsb0 0x0 after every HGMMA). Causes: empty-slot arrive under `if ((tid & 127) == 0)`
+  and no wgmma.fence per stage. Fix = every consumer thread arrives (empty count 128/256) + wgmma.fence before each
+  stage's MMAs (as twf does). (2) s41's "stream-only, MMA hidden 22.5 us" = XR_RED 0 diag in which the MMA results were
+  dead: ptxas replaced the HGMMAs by dummy `HGMMA.64x8x16 RZ`. So it was a pure stream number. Always keep MMA results
+  live in diags (I sum them into a never-true store) and grep SASS for HGMMA shape + DEPBAR 0x0.
+- (3) SS m64n64 swap-AB with both WGs reading the same 8 KB W box per wgmma = ~128 B/clk of smem: smem-bound, ~2.3 us per
+  64-row tile even unserialized. m64n128 per WG (WG k-split + combine) is fine for the MMA rate but needs an intra-CTA combine.
+- Cluster facts (H100, 1 CTA/SM ~200+ KB smem): max active clusters C=8: 15 (120 CTAs), C=4: 30 (120), C=2: 66 (132). So a
+  16-cluster grid runs in 2 waves (77 us); use G = 15 n-groups with uneven tile ranges (128 tiles -> 8 or 9 per CTA).
+- xr2 (x resident in smem 128 KB, W SS-A, pull-reduce over ld.shared::cluster, mbarrier ready/free): every form 48-98 us.
+  The chain ready-arrive -> DSMEM pull -> free-arrive was ~1-2 us per hop under load, and the smem left over (ring 4-8 stages,
+  1-2 staging buffers) cannot hide it. Dead.
+- **xr3 (dev/s42/xr3_src.cu): x K-slice in REGISTERS** as wgmma RS A fragments (M = tokens, WG w = tokens 64w.., 32 k16 x 4
+  = 128 regs; setmaxnreg 208/40/56, 512 threads, no spills), W = smem B operand (64-row x 64-k SW128 TMA boxes, 16-stage
+  ring = 128 KB), D[tok][n]: column group j = owner CTA j. Correct (rel err = cuBLAS's), bitwise deterministic.
+  | xr3 variant (unp m128, G15) | us |
+  | x via strided 4-B __ldg, pull reduce | 47.6-48.1 (x load alone ~6.5 us at kernel start) |
+  | + fragment-major x (XR_XF: xf[s][wg][wi][c][lane] uint4; host-permuted here, a producing kernel could write it) | 43.9 |
+  | + **PUSH** (XR_PUSH: st.async.v2 from registers into the owner's double-buffered recv, complete_tx; reducer reads locally) | **34.0** |
+  | stream only (DIAG1, MMA live, XF) | 31.3 |  | NS 20 instead of 16 | 36.2 (worse) |
+  | pool m128 (S 16 -> 2 clusters per n-group, FP32 red out, G7) | 36.6 + zero (cuBLAS 29.6) |
+  Push costs only +2.7 us over stream-only (vs +12.5 for pull). The rest of the gap to cuBLAS is 120 of 132 SMs (cluster 8
+  cap) x 9-vs-8.53 tiles imbalance: stream-only 26.4 net vs cuBLAS 23.7 net.
+- Verdict: on the H100 xr3 push is cuBLAS + 5.4 us at unp m128. Bound if the tail imbalance were fixed (n40 tail tiles):
+  ~27.9 = tie. A layer win needs the H200 (cuBLAS at 2.2-3.2 TB/s there vs ~4.0 stream x 120/132) and/or 12-bit W. Since W
+  is the smem B operand in xr3, 12-bit needs a dequant warpgroup writing BF16 boxes to smem (or flip roles again: W as RS A
+  dequantized in registers, x resident in smem 128 KB as B with m64n128 per WG on alternate tiles = 64 B/clk smem; fits
+  x 128 + recv 64 + raw ring 24 KB). NOT handoff-ready; no moe-problem DIAG for it (lead 08:13Z: a problem's checks run
+  only that problem's kernels): the H200 number has to come from a layer TUNE option once it at least ties on the H100.

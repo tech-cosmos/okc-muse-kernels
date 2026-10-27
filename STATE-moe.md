@@ -88,18 +88,17 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - = 410dcb6 + agent2 halfpfkr (v32 sl cl, csl/nds pt prefetch, nds K-early) + verify 16 on the pre-cl nvs build (_NVS0) +
   csl/vtk owner fast divides. SUBMITTED s32: 90b7ce85 2.5653x (tie with board 2.566x). The same code timed 2.619 / 2.639 /
   2.589x inside s32's DIAG checks (node noise +-3% whole-run): board best stays 2.566x (06456b7e).
-- Checks used 2026-10-27: 12/20 (s32: 5 DIAGs, s33: 2, s35: 2 DIAGs, s36: 76983f6b main+qf 2.5964x = tie, not submitted). Scored 2/10.
 - s36: csl SASS audit: independent work already hoisted under the gathers; csl closed. No open >= 0.1% attention item.
-- s37: d1 full 2-warp tile split closed on paper (= splits 1023, which loses on the H200). Lane request to the lead still open.
-- s38: no lane answer, no build, 0 checks (NOTES s38).
-- s39: same; verify full (1.96-2.0x) is our lowest attention shape but consumer-bound and closed (NOTES s39).
 - s40 H200 DIAG d5bf959a (tools/s40/mkdiag.py): random-row gather ceiling ~4.1 TB/s (d32 floor 159, d16 79; dense 144/72).
   Decode full at 92-95% of it (headroom d32<=9, d16<=7 us). Verify full consumer-bound (all-L2 v32 170 / v16 93 vs main 188/102,
   floors 157/80): headroom only via a faster _gw_verify consumer. Full kernels at perfect overlap = ~-4% attention score max.
 - Checks used 2026-10-27: 13/20, scored 2/10.
-- s41 (lead 13:30Z item 2, dev/s41 xr): T=128 GEMM with resident x K-slice per CTA, W streamed, FP32 red out. H100: W stream at
-  2.98 TB/s with MMA hidden (net 22.5 vs cuBLAS 24.6 us pooler/unpool m128), but 33.5 MB of FP32 reds add +15..17 us (v4 = v2).
-  NEXT: cluster-of-k-splits DSMEM reduce-scatter (no reds/zeroing), then 12-bit W. NOTES s41. 0 checks.
+- s41 (dev/s41 xr, resident-x smem + FP32 red out): superseded by s42 (its timings were with serialized wgmma).
+- s42 (dev/s42, NOTES s42): s41's xr numbers were invalid (wgmma serialized, C7520; its "stream-only" diag had dead MMAs that
+  ptxas dropped). New xr3 = x in REGISTERS (RS A, 128 regs) + W smem B + cluster-8 k-split PUSH reduce (st.async into owner's
+  double-buffered recv): unp m128 H100 34.0 vs cuBLAS 28.6 us (incl 4.9 harness), correct + deterministic; stream-only 31.3.
+  Limits: cluster-8 max 15 active (120 SMs), 9 vs 8.53 tile imbalance. NEXT: n40 tail tiles (balance, est -1.2), fragment-major x
+  from the producing kernel (assumed), then 12-bit W (roles flip, see NOTES s42). Gate: H100 tie before any layer TUNE option.
 ## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)
 - Floors (pt trip + 20.5 MB random 128-B rows, all in flight, incl. launch): ~8.0 us d1 and v1; dense 7.4.
 - Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.
@@ -125,38 +124,8 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
 ## moe sessions n3-n30: see NOTES-moe.md (moe lane closed by lead 2026-10-27 09:45Z, LANE DECISION 2).
 
-## Ranked ideas
--9. DEAD (s26 re-read of s19): warp-specialized twm consumer (dq WGs -> BF16 A in smem -> SS wgmma WG) was already
-   microbenchmarked in s19 (tools/s19/mb_ws.py): full ~= T + M (no overlap even across warps), SS slower than RS (smem
-   bandwidth: 64 KB A written + read per RT4 stage). s22 pingpong: also nothing. Do not rebuild it.
-   Also: mma.sync for N8 items (s18 microbench -7%) buys nothing on the H200: light N8 items already run at the per-SM HBM
-   share (s23); N16 only -3%. Big-M levers left = the drain (~20 us/call, TWF_SPLIT_M halves already a layer TUNE option).
--8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
-   all their tokens needs N 96-128 accumulators = a SEPARATE kernel (ptxas sizes registers for the whole function).
-   E.g. hot experts on their own launch on a subset of SMs concurrently with twm/twq for the rest (2 streams or one
-   kernel with blockIdx-split roles: the dependency counters already work across CTAs). Est. v32 -20 H200 us.
-   s18: such a kernel could also take finer N (40/48: hot-pass stage -24/-14%) that twm cannot (register limit).
--7. (s17/s18) tk2f fixed cost: weights-before-wait is DONE by layer (v62/63 TK2FX/TK2FJ); per-chunk gemm2 readiness
-   is likely ~0 (s12 per-segment counters gave 0 on the H200). d1 is at ~85% of HBM (2-3 experts, 20 us).
--5. (s14) Drain of twm is still ~20-30 us (items ~40 us). Half-size tail items (TWM_TAIL) clash with the merge order;
-   try tail class only for the LAST B items after the merge window, or K-split of the last wave. And: fewer dq per token
-   for hot experts (128-token passes need N 128: registers).
--4. (s13) Consumer dq is ~73% of instrs and both int pipes are half rate: only fewer dq ops per weight (sharing a dequant
-   across >8 tokens = GS16, unexplained H200 loss) or a cheaper decode can move d16/d32 much. Phase-2 12% per-row gap on
-   the H200 is NOT the segment change / counter spin (s13 diag). Untested: phase-2 timeline with no extra groups
-   (synthetic 10 experts x 8 tokens) to tell L2-dedup effects from per-row cost.
--3. (s12) Phase 2 (gemm2/w2) of tk2f streams ~12% slower per byte than phase 1 on the H200 (timeline): ~3 us at d32,
-   ~2 at d16. Find out why with the diag timeline (stamp per-row times in phase 2; try phase-2 rows = 2 rps per
-   ring pass, or w2 tile pairs adjacent instead of 2048 rows apart (prepare repack), or x (inter) prefetch earlier).
-   Also: first data at 3.6 us (routing 1.5 + 2.1 latency): let the producer warp do the routing alone (it only needs
-   s_rs/s_e) and start bulk copies while the consumers build s_srt; or prefetch expert-0 weights of ALL experts? no.
--1. (s10) Re-check the layer copied the race fix (COORD Requests). Then: why are GS16 phase-2 rows slower (timeline tool in
-   NOTES s10: globaltimer per CTA at phase ends)? If fixable, GS16 cuts 8-17% instructions on the layer's d16/d32 and halves
-   DRAM when L2 cannot dedup. Suspects: 64 KB extra smem (L1 carveout: inter __ldg x loads), xs LDS before mbar_wait, s_red x2.
-   Try: xs in the ring's slack / smaller (bf16 x of group 2 only for the warp's k chunks is already minimal), or GS16 in gemm13
-   only (phase 1 tied) with GS8 segments in gemm2 (needs inter rows of 16-token segments readable as 2 x 8: they are).
-3. Big-M: let idle tail CTAs start moe_norm rows whose experts are done (per-token flags); fuse moe_gather into
-   moe_route (multi-CTA route) -1 launch (~3 us).
+## Ranked ideas (moe lane, closed 09:45Z): items -9..3 of s10-s27 (hot-expert kernel, twm drain, tk2f phase-2, GS16)
+are in git history of this file (r-moe 7e64a1f STATE-moe.md) and NOTES s10-s27. Open now: xr3 (s42 line above).
 
 ## Dead ends (older ones: NOTES-moe.md)
 - (s26) L2 prefetch of the unpool W from twm (spread over its main phase, evict_last): v32 +5..10 H100 us, unpool -1.
