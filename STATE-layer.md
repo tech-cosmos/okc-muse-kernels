@@ -2,30 +2,23 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-s85: **main = v128** (536adfd) = v127 + moe s31 verify-32 sliding 2-CTA cluster nvs (attn_src _NVSCL, TUNE nvscl default on;
+s86: **main = v129** = v128 + fix of a latent race in the non-default T=8 {pr1: False} path (nu8d rmsnorm read side-stream
+local_ids before the join; old main failed 7/30 seeds there; tuner never picked it) + inert OB8 code. Lead 10:50Z lane (a) built
+and MEASURED DEAD on H100: OB8 (T=8 o GEMM + first boundary in its epilogue, grid barrier, ob8_src.cu) v1 sl +2.2..2.5, full
++0.2..0.6 us: pr8/pr1 fill a whole SM (1024 thr x 64 regs) so they cannot ramp beside o blocks; the separate 16-program boundary
+hides pr8's W ramp, a barrier exposes it. T=1 analogue closed by the same mechanism (+ PR1_BND s74). NOTES s86. 0 judge runs.
+Only open form: a lighter pr1/pr8 (<= 512 thr) that co-resides with o (proj redesign; ask under Requests).
+s85: main = v128 (536adfd) = v127 + moe s31 verify-32 sliding 2-CTA cluster nvs (attn_src _NVSCL, TUNE nvscl default on;
 H100 v32 sl -1.1, H200 tuner -0.9 us). Check 940a4fca 2.0943x (noise; not submitted, < 1% rule). Budget 10-27: 0 checks / 4 submits.
 Lane question to the lead still open (Requests s84). tools/attn_probe.py (proj) now on main: run --only=<shape> --passes=0 after attention changes.
-s84: lane 2 (full attention in-layer, lead 09:45Z) MEASURED + CLOSED: H200 DIAG cf5e1621: d16/d32 full purely gather-bound (no math
--1 us), v32 full free consumer -8 / free memory -20, v16 free consumer +21; H200 tuner (check 3df61290 v126, 2.0844x) rejects every
-attention plan variant (+2..37 us). Ceiling of full-attention work ~0.15% (+ unproven gather rate <= 0.4%). main = v127 (v125 code paths).
-Budget 10-27 left: 1 check / 4 submits. NOTES s84. Waiting for the lead's next lane (COORD Requests s84).
-s83: no lead answer to s81/s82 lane question; merged proj tools/validate.py (main ALL OK --quick, cold 115.5 s); 0 judge runs.
-s82: budget 10-27 left: 3 checks / 4 submits. Asked lead (COORD Requests s82) whether layer reopens full attention (+2.5% if at #1's attention speed).
-s80: **main = v125** (2663c2c) = v124 + moe s27 SCB (bitwise); check 19163546 2.0731x (noise tie, not submitted;
-d32 full 296.3 best yet). Budget 10-27 left: 4 checks (reserved for moe DIAGs) / 5 submits.
-s77: v124 (701bf12) = v123 + TUNE_BASE stacking of the options the H200 tuner won on >= 9/10 logs (T=1 {g13o, pr1_rb 32},
-T=8 sl g14alt:qkv_gate 3, T=16 sl tk2fj False, T=128 fr) + stack combos (T=8 cslpw, T=128 twf_split66+lt, T=256 rg+split+lt).
-Check 08d10234 v124 2.0832x (tie; not submitted). tools/opt_test.py = every TUNE option forced on the base (0/300 bad).
-Budget 10-27 left: 5 checks (4 reserved for moe in-layer DIAG bundles, lead 06:41Z) / 5 submits. Tuner-level stacking is
-below judge noise: no more tuner-option work; the gap to #1 (2.380x) is the experts (d32 sl tk2f 95 us = 46%, v16/v32 twm).
+
+CLOSED lanes (measured): tk2f (s81 H200 diag, <= 0.9% unreachable), full attention in-layer (s84, ~0.15%), T<=8 glue/tail
+(s78), o+bnd+pr fusion T=1/T=8 (s86). Remaining open: moe/proj handoffs (attention csl/vtk/nvs ports), lighter pr1/pr8.
 
 Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
 Judge noise dominates: identical-ish code 2.04-2.12x across checks; per-shape T=32 moves 5-10%.
 
-s81: **tk2f lane CLOSED by H200 diag 93a0990d** (TK2F_DIAG probes, r-layer 9783a61; NOTES s81): in-layer, ALL consumer math =
-1.5-4.3 us, no-math + 36 KB stages = best stream; joint ceiling vs default T=1 -1.4/-2.0, T=16 -3.0/-2.6, T=32 -3.3/-1.0 us
-(~0.9% total, unreachable). Budget 10-27 left: 3 checks / 5 submits. Asked the lead for a new lane (COORD Requests s81).
 
 ## Per-load H200 us vs the s12 floor (board run 19ebde23 = v108; lead 05:07Z request; s74)
 Score %/us = gain in total score per us saved on that layer type (geomean of 6 loads x (46 sl + 16 full)).

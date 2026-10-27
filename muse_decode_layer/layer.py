@@ -774,6 +774,7 @@ G27_ON = {("o", 16)}
 _G27 = {}
 _GPR1_SRC = None  # @@GPR1@@
 _GPR8_SRC = None  # @@GPR8@@
+_GOB8_SRC = None  # @@GOB8@@
 # proj's gemv19 (g19_src.cu = r-proj dev/gemv19.cu @6996d0c): m = 16/32 GEMM over the 12-bit weights, FP32 out zeroed
 # in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
 # kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
@@ -873,6 +874,8 @@ PR1_TOKENS = (1, 8)  # 8: proj pr8 (r-proj dev/pr8.cu@3be546b): gemv14 pooler bl
 PR8_CFG = {8: (8, 8, 4, 128, 1, 212)}
 PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 0)}  # s35: npf 4 -> 0 (H200 tuner picked npf 0 at T=1 sliding in both logged checks: -0.8/-2.3 us)
 PR1_PF_ALT = (2,)  # s23: pr1 pooler PF (rows in flight per virtual block) alternatives, TUNE option "pr1_pf" (H200 GEMVs ~2.5 TB/s)
+OB8_LATE = False  # s86: ob8 triggers pr8 after its W loop (else at start)
+OB8 = False  # s86 DEAD: T=8 o GEMM (gemv12 body) with the first boundary fused into its epilogue (ob8_src.cu, grid barrier), pr8 its PDL secondary. H100 ab_flag v1 sl +2.2..2.5, full +0.3..0.7 us: pr8 (1024 thr x 64 regs = a whole SM) cannot co-reside with o blocks; the barrier holds all 128 SMs to the last block, so pr8 loses the pre-wait W ramp it gets behind the 16-program boundary
 PR1_BND = False  # s11: the boundary fused into pr1 as a per-block prologue (each block re-reads 144 KB: H100 d1 +1.2/+0.3 us even with s/alpha/beta/gain loaded before the wait): off
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
 
@@ -1108,6 +1111,10 @@ def _g10_lib():
                     src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4]) for c in sorted(set(PR8_CFG.values()))))
             else:
                 src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
+            if _GOB8_SRC is not None and OB8:  # s86: dead (H100), built only when forced on
+                src = src + "\n" + _GOB8_SRC.replace("OB8_CONFIGS", "OB8_CASE(%d)" % G12_CFG["o"][2])
+            else:
+                src = src + "\nvoid ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t) {}\n"
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
@@ -1131,8 +1138,9 @@ def _g10_lib():
                             "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double);\n"
                             + ("void pr8_launch(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
                                "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                               "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else ""),
-                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
+                               "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else "")
+                            + "void ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t);\n",
+                cuda_sources=src, functions=["ob8_gemm", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
                 + (["pr8_launch"] if _GPR1_SRC is not None and _GPR8_SRC is not None else []),
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
@@ -2834,6 +2842,8 @@ def _g12_prepare(state):
     state["g12"] = {key: _pack12(w[key], 1024 * c[0]) for key, c in G12_CFG.items()}
     state["g12_ws"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=dev)
     state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
+    state["ob8_part"] = torch.empty(G12_CFG["o"][3] * 32, dtype=torch.float32, device=dev)  # s86 OB8 per-block partials
+    state["ob8_bar"] = torch.zeros(1, dtype=torch.int32, device=dev)  # s86 OB8 grid barrier (epoch counter)
     state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)  # pr1's router ticket (self-resetting)
     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n2u's last-block counter (self-resetting)
     state["g13"] = {key: pk for key in list(G13_CFG) + (["o"] if G13_O else []) if (pk := _pack13(w[key])) is not None}
@@ -3107,12 +3117,6 @@ def _kernel_fn(data, state):
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
         "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
         "seq_lens": data["seq_lens"], "config": cfg, "qkv_ss": qss, "qkv_slabs": slabs}).view(tokens, hq * d)
-    otrig = _opt(state, tokens, "g19trig", tokens in G19_TRIG_O_TOKENS)
-    a = _g19(o, "o", state, otrig)
-    otrig = otrig and a is not None  # s57: the first boundary is then the o GEMM's PDL secondary
-    if a is None:
-        a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
-
     fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
     pdl = GLUE_PDL or (GEMV_PDL and tokens in PDL_TOKENS and _G10.get("lib") is not None)
     stream1 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev)
@@ -3123,7 +3127,23 @@ def _kernel_fn(data, state):
     pr1 = (tokens in PR1_TOKENS and _opt(state, tokens, "pr1", True) and pdl and fp32_router and _GPR1_SRC is not None and not npf
            and (tokens == 1 and "pooler" in state.get("g13", {}) or tokens == 8 and _GPR8_SRC is not None
                 and "pooler" in state.get("g14", {}) and G14_CFG["pooler"][0] == 8))
-    bnd = pr1 and tokens == 1 and _opt(state, tokens, "pr1bnd", PR1_BND) and a.dtype == torch.bfloat16  # s74: TUNE option
+    # s86 OB8: the T=8 o GEMM writes the boundary's stream1 / h / h32 itself (pr8 = its PDL secondary)
+    ob8 = (pr1 and tokens == 8 and _GOB8_SRC is not None and _opt(state, tokens, "ob8", OB8) and "g12" in state
+           and not (("o", 8) in state.get("g19", {}) and "o" in G19_ON and _opt(state, 8, "g19:o", ("o", 8) not in G19_DEFAULT_OFF))
+           and _g27_sel(state, "o", 8) is None and o.shape[1] == 1024)
+    otrig = _opt(state, tokens, "g19trig", tokens in G19_TRIG_O_TOKENS)
+    if ob8:
+        otrig, a = False, None
+        _G10["lib"].ob8_gemm(state["g12"]["o"], o.contiguous(), data["stream"], alpha, beta, state["pre_ffn"], stream1, h, h32,
+                             state["ob8_part"], state["ob8_bar"], HIDDEN // 8, G12_CFG["o"][2], G12_CFG["o"][3],
+                             POST_NORM_EPS, RMS_EPS, int(UNPOOL_PDL and "o" in GEMV_PDL_SECONDARY.get((8, cfg["window"] > 0), ()))
+                             | 2 * _opt(state, tokens, "ob8late", OB8_LATE))
+    else:
+        a = _g19(o, "o", state, otrig)
+        otrig = otrig and a is not None  # s57: the first boundary is then the o GEMM's PDL secondary
+        if a is None:
+            a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
+    bnd = ob8 or pr1 and tokens == 1 and _opt(state, tokens, "pr1bnd", PR1_BND) and a.dtype == torch.bfloat16  # s74: TUNE option
     if not bnd:
       spl = _opt(state, tokens, "bspl1", BND_SPLIT.get((tokens, 1), 1))  # s74: TUNE option
       _boundary[(tokens * spl + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
@@ -3249,7 +3269,9 @@ def _kernel_fn(data, state):
     if tk2fj:  # s27: join the side stream (routing) first: the rmsnorm loses its PDL, moe_tk2f becomes its PDL secondary
         main_stream.wait_stream(side_stream)
     rpdl = pdl and not tk2_pdl and not tk2fj
-    nu8d = nu8 and _nu8_d(state, tokens) and local_ids.is_contiguous()
+    # s86: the rmsnorm below reads local_ids (nu8d ZL): the routing must be on this stream (pr1) or joined (tk2fj).
+    # Without pr1 it is still running on the side stream there: opt test verify 1 sliding {pr1: False} failed 7/30 seeds.
+    nu8d = nu8 and _nu8_d(state, tokens) and local_ids.is_contiguous() and (pr1 or tk2fj)
     y32 = torch.empty((81 if nu8d else 65, D_EXPERT), dtype=torch.float32, device=dev) if nu8 else None
     gnorm = (not pr1 and not nu8 and tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and pooled.dim() == 2
              and pooled.is_contiguous() and _opt(state, tokens, "gnorm", GNORM_DEFAULT))

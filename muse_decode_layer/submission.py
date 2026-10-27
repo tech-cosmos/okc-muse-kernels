@@ -13806,6 +13806,174 @@ void pr8_launch(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double sca
     TORCH_CHECK(false, "pr8: no config");
 }
 '''
+_GOB8_SRC = r'''// layer s86 OB8: the T=8 o GEMM (proj's gemv12 body, m = 8, one k-chunk) with the first boundary fused into its
+// epilogue, so pr8 (its PDL secondary) starts right after it (H100 oracle proj s80: no boundary = o->pr8 end -4.2 us).
+// Boundary (the Triton _boundary, RB off): b = bf16(o out); s' = alpha s + beta b rb, rb = rsqrt(sum b^2 / N + eps_post);
+// h = s' rs gain, rs = rsqrt(sum s'^2 / N + eps). Each thread owns one (token, column) of its block's 64 columns.
+// Per block and token, four FP32 partial sums over its columns (sum b^2, (alpha s)^2, (alpha s)(beta b), (beta b)^2;
+// sum s'^2 = A + 2 rb C + rb^2 D) go to part[block][token][4]; a grid barrier (all blocks are resident: the PDL
+// dependent launches only after every block triggered); then every block sums the partials in a fixed order
+// (deterministic) and writes s', h (BF16) and h32 (FP32) for its own columns.
+#include <torch/extension.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+namespace ob8 {
+__device__ __forceinline__ uint4 ldw(const uint4* p) {
+    uint4 v;
+    asm volatile("ld.global.nc.L1::no_allocate.L2::256B.v4.u32 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(v.x), "=r"(v.y), "=r"(v.z), "=r"(v.w) : "l"(p));
+    return v;
+}
+__device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned b0, unsigned b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+struct Bnd {
+    const float* s; const float* alpha; const float* beta; const float* gain;
+    float* s_out; __nv_bfloat16* h; float* h32; float* part; unsigned* bar; float eps_post, eps; int pdl;
+};
+constexpr int M = 8, WG = 2, NT = 8;
+template <int PF>
+__global__ void __launch_bounds__(512, 1) gemm(const uint4* __restrict__ W, const __nv_bfloat16* __restrict__ x,
+                                               int n, int nrg_all, int k, const Bnd B) {
+    if (!(B.pdl & 2)) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // pdl & 2: after the W loop
+    constexpr int KC = 1024, XS = KC * 2 + 64, NA = KC / 32 / WG;
+    static_assert(NA % PF == 0, "PF must divide the atoms per warp");
+    extern __shared__ __align__(16) unsigned char smem[];
+    unsigned char* xs = smem;
+    float4* accp = (float4*)(smem + M * XS);
+    __shared__ float red[16][4][4];   // [warp][token in the warp][quantity]
+    __shared__ float red2[16][32];
+    __shared__ float fin[32];         // [token][quantity] grid totals
+    const int t = threadIdx.x, lane = t & 31, wp = t >> 5, g = lane >> 2, c = lane & 3;
+    const int gi = wp / WG, wi = wp % WG, NG = blockDim.x / (32 * WG);
+    const int rg0 = blockIdx.x * NG, rg = rg0 + gi;
+    // this thread's boundary element (independent of the producer: before the wait)
+    const int row8 = t & 7, tok = (t >> 3) % M, rgl = (t >> 3) / M, col = (rg0 + rgl) * 8 + row8;
+    const long ei = (long)tok * n + col;
+    const float sv = __ldg(B.s + ei), al = __ldg(B.alpha + col), be = __ldg(B.beta + col), gn = __ldg(B.gain + col);
+    const uint4* wb = W + ((long)rg * (KC / 32) + wi) * 32 + lane;
+    uint4 w[PF];
+    if (B.pdl & 1) {
+        const char* pb = (const char*)(W + (long)rg0 * KC);
+        for (long o = (long)t * 128; o < (long)NG * KC * 16; o += (long)blockDim.x * 128)
+            asm volatile("prefetch.global.L2 [%0];" :: "l"(pb + o));
+        asm volatile("griddepcontrol.wait;" ::: "memory");
+    }
+    for (int i = t; i < M * (KC / 8); i += blockDim.x) {
+        const int r = i / (KC / 8), q = i % (KC / 8);
+        const unsigned sa = (unsigned)__cvta_generic_to_shared(xs + r * XS + q * 16);
+        asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" :: "r"(sa), "l"((const uint4*)(x + (long)r * k) + q));
+    }
+    asm volatile("cp.async.commit_group;");
+#pragma unroll
+    for (int p = 0; p < PF; ++p) w[p] = ldw(wb + p * WG * 32);
+    asm volatile("cp.async.wait_all;");
+    __syncthreads();
+    float acc[4] = {0.f, 0.f, 0.f, 0.f};
+    for (int a = 0; a < NA; a += PF) {
+#pragma unroll
+        for (int p = 0; p < PF; ++p) {
+            const int kb = ((a + p) * WG + wi) * 32 + c * 8;
+            uint4 xa = *(const uint4*)(xs + g * XS + kb * 2);
+            mma(acc, xa.x, 0u, xa.y, 0u, w[p].x, w[p].y);
+            mma(acc, xa.z, 0u, xa.w, 0u, w[p].z, w[p].w);
+            if (a + p + PF < NA) w[p] = ldw(wb + (a + p + PF) * WG * 32);
+        }
+    }
+    if (B.pdl & 2) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+    accp[wp * 32 + lane] = make_float4(acc[0], acc[1], acc[2], acc[3]);
+    __syncthreads();
+    // gemv12's output i = (rgl * M + tok) * 8 + row8 = t: sum the WG warp slots of group rgl
+    float bt;
+    {
+        const int l = tok * 4 + (row8 >> 1), e = row8 & 1;
+        const float* base = (const float*)accp + (rgl * WG) * 128 + l * 4 + e;
+        bt = 0.f;
+#pragma unroll
+        for (int q = 0; q < WG; ++q) bt += base[q * 128];
+    }
+    const float bf = __bfloat162float(__float2bfloat16(bt));  // the BF16 the GEMM returns
+    const float xa = al * sv, yb = be * bf;
+    float v[4] = {bf * bf, xa * xa, xa * yb, yb * yb};
+#pragma unroll
+    for (int q = 0; q < 4; ++q)
+#pragma unroll
+        for (int o = 1; o < 8; o <<= 1) v[q] += __shfl_xor_sync(0xffffffffu, v[q], o);
+    if (row8 == 0)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) red[wp][lane >> 3][q] = v[q];
+    __syncthreads();
+    // warp wp holds tokens (wp & 1) * 4 + 0..3 (row groups wp / 2): block total per (token, quantity), fixed order
+    if (t < 32) {
+        const int tk = t >> 2, q = t & 3;
+        float s = 0.f;
+        for (int w2 = tk >> 2; w2 < 16; w2 += 2) s += red[w2][tk & 3][q];
+        __stcg(B.part + ((long)blockIdx.x * 32 + t), s);
+    }
+    __syncthreads();
+    if (t == 0) {  // grid barrier (epoch counter: never reset; gridDim divides 2^32)
+        __threadfence();
+        const unsigned tk = atomicAdd(B.bar, 1u), target = (tk / gridDim.x + 1u) * gridDim.x;
+        unsigned cur;
+        do {
+            asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(cur) : "l"(B.bar) : "memory");
+        } while ((int)(cur - target) < 0);
+    }
+    __syncthreads();
+    {   // grid totals: 16 chunks of gridDim / 16 blocks per (token, quantity), then the 16 chunk sums in order
+        const int p = t & 31, j = t >> 5, per = gridDim.x / 16;
+        if (j < 16) {
+            float s = 0.f;
+            for (int b = j * per; b < (j + 1) * per; ++b) s += __ldcg(B.part + (long)b * 32 + p);
+            red2[j][p] = s;
+        }
+    }
+    __syncthreads();
+    if (t < 32) {
+        float s = 0.f;
+#pragma unroll
+        for (int j = 0; j < 16; ++j) s += red2[j][t];
+        fin[t] = s;
+    }
+    __syncthreads();
+    const float rb = rsqrtf(fin[tok * 4] / n + B.eps_post);
+    const float s2 = fin[tok * 4 + 1] + 2.f * rb * fin[tok * 4 + 2] + rb * rb * fin[tok * 4 + 3];
+    const float rs = rsqrtf(s2 / n + B.eps);
+    const float sp = xa + be * (bf * rb);
+    const float hv = sp * rs * gn;
+    B.s_out[ei] = sp;
+    B.h[ei] = __float2bfloat16(hv);
+    if (B.h32) B.h32[ei] = hv;
+}
+}  // namespace ob8
+
+// w: _pack12(o W, 1024) [1][n/8][32][32][8] bf16; x bf16 [8, 1024]; s fp32 [8, n] (the stream); alpha/beta/gain fp32 [n];
+// s_out fp32 [8, n]; h bf16 [8, n]; h32 fp32 [8, n] or empty; part fp32 [blocks * 32]; bar int32 [1] (zeros once).
+void ob8_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor s, torch::Tensor alpha, torch::Tensor beta, torch::Tensor gain,
+              torch::Tensor s_out, torch::Tensor h, torch::Tensor h32, torch::Tensor part, torch::Tensor bar,
+              int64_t nrg_all, int64_t pf, int64_t bk, double eps_post, double eps, int64_t pdl) {
+    const int m = x.size(0), k = x.size(1), n = h.size(1);
+    constexpr int WG = ob8::WG;
+    const int ng = n / 8 / bk, threads = ng * WG * 32;
+    const int sm = m * (1024 * 2 + 64) + threads / 32 * 512;
+    TORCH_CHECK(m == 8 && k == 1024 && threads == 512 && n / 8 % bk == 0 && bk % 16 == 0 && part.numel() >= bk * 32
+                && s.size(1) == n, "ob8: shape");
+    ob8::Bnd B{s.data_ptr<float>(), alpha.data_ptr<float>(), beta.data_ptr<float>(), gain.data_ptr<float>(),
+               s_out.data_ptr<float>(), (__nv_bfloat16*)h.data_ptr(), h32.numel() ? h32.data_ptr<float>() : nullptr,
+               part.data_ptr<float>(), (unsigned*)bar.data_ptr(), (float)eps_post, (float)eps, (int)pdl};
+    cudaLaunchConfig_t lc = {}; lc.gridDim = bk; lc.blockDim = threads; lc.dynamicSmemBytes = sm;
+    lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
+    la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = (pdl & 1) ? 1 : 0;
+#define OB8_CASE(P_) \
+    if (pf == P_) { cudaFuncSetAttribute(ob8::gemm<P_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm); \
+        C10_CUDA_CHECK(cudaLaunchKernelEx(&lc, ob8::gemm<P_>, (const uint4*)w.data_ptr(), (const __nv_bfloat16*)x.data_ptr(), \
+                                          n, (int)nrg_all, k, B)); return; }
+    OB8_CONFIGS
+    TORCH_CHECK(false, "ob8: no config");
+}
+'''
 # proj's gemv19 (g19_src.cu = r-proj dev/gemv19.cu @6996d0c): m = 16/32 GEMM over the 12-bit weights, FP32 out zeroed
 # in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
 # kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
@@ -14062,6 +14230,8 @@ PR1_TOKENS = (1, 8)  # 8: proj pr8 (r-proj dev/pr8.cu@3be546b): gemv14 pooler bl
 PR8_CFG = {8: (8, 8, 4, 128, 1, 212)}
 PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 0)}  # s35: npf 4 -> 0 (H200 tuner picked npf 0 at T=1 sliding in both logged checks: -0.8/-2.3 us)
 PR1_PF_ALT = (2,)  # s23: pr1 pooler PF (rows in flight per virtual block) alternatives, TUNE option "pr1_pf" (H200 GEMVs ~2.5 TB/s)
+OB8_LATE = False  # s86: ob8 triggers pr8 after its W loop (else at start)
+OB8 = False  # s86 DEAD: T=8 o GEMM (gemv12 body) with the first boundary fused into its epilogue (ob8_src.cu, grid barrier), pr8 its PDL secondary. H100 ab_flag v1 sl +2.2..2.5, full +0.3..0.7 us: pr8 (1024 thr x 64 regs = a whole SM) cannot co-reside with o blocks; the barrier holds all 128 SMs to the last block, so pr8 loses the pre-wait W ramp it gets behind the 16-program boundary
 PR1_BND = False  # s11: the boundary fused into pr1 as a per-block prologue (each block re-reads 144 KB: H100 d1 +1.2/+0.3 us even with s/alpha/beta/gain loaded before the wait): off
 G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
 
@@ -14297,6 +14467,10 @@ def _g10_lib():
                     src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4]) for c in sorted(set(PR8_CFG.values()))))
             else:
                 src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
+            if _GOB8_SRC is not None and OB8:  # s86: dead (H100), built only when forced on
+                src = src + "\n" + _GOB8_SRC.replace("OB8_CONFIGS", "OB8_CASE(%d)" % G12_CFG["o"][2])
+            else:
+                src = src + "\nvoid ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t) {}\n"
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
@@ -14320,8 +14494,9 @@ def _g10_lib():
                             "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double);\n"
                             + ("void pr8_launch(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
                                "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                               "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else ""),
-                cuda_sources=src, functions=["g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
+                               "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else "")
+                            + "void ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t);\n",
+                cuda_sources=src, functions=["ob8_gemm", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
                 + (["pr8_launch"] if _GPR1_SRC is not None and _GPR8_SRC is not None else []),
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
         except Exception as e:  # noqa: BLE001
@@ -16443,6 +16618,8 @@ def _g12_prepare(state):
     state["g12"] = {key: _pack12(w[key], 1024 * c[0]) for key, c in G12_CFG.items()}
     state["g12_ws"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=dev)
     state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
+    state["ob8_part"] = torch.empty(G12_CFG["o"][3] * 32, dtype=torch.float32, device=dev)  # s86 OB8 per-block partials
+    state["ob8_bar"] = torch.zeros(1, dtype=torch.int32, device=dev)  # s86 OB8 grid barrier (epoch counter)
     state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)  # pr1's router ticket (self-resetting)
     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n2u's last-block counter (self-resetting)
     state["g13"] = {key: pk for key in list(G13_CFG) + (["o"] if G13_O else []) if (pk := _pack13(w[key])) is not None}
@@ -16716,12 +16893,6 @@ def _kernel_fn(data, state):
         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
         "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
         "seq_lens": data["seq_lens"], "config": cfg, "qkv_ss": qss, "qkv_slabs": slabs}).view(tokens, hq * d)
-    otrig = _opt(state, tokens, "g19trig", tokens in G19_TRIG_O_TOKENS)
-    a = _g19(o, "o", state, otrig)
-    otrig = otrig and a is not None  # s57: the first boundary is then the o GEMM's PDL secondary
-    if a is None:
-        a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
-
     fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
     pdl = GLUE_PDL or (GEMV_PDL and tokens in PDL_TOKENS and _G10.get("lib") is not None)
     stream1 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev)
@@ -16732,7 +16903,23 @@ def _kernel_fn(data, state):
     pr1 = (tokens in PR1_TOKENS and _opt(state, tokens, "pr1", True) and pdl and fp32_router and _GPR1_SRC is not None and not npf
            and (tokens == 1 and "pooler" in state.get("g13", {}) or tokens == 8 and _GPR8_SRC is not None
                 and "pooler" in state.get("g14", {}) and G14_CFG["pooler"][0] == 8))
-    bnd = pr1 and tokens == 1 and _opt(state, tokens, "pr1bnd", PR1_BND) and a.dtype == torch.bfloat16  # s74: TUNE option
+    # s86 OB8: the T=8 o GEMM writes the boundary's stream1 / h / h32 itself (pr8 = its PDL secondary)
+    ob8 = (pr1 and tokens == 8 and _GOB8_SRC is not None and _opt(state, tokens, "ob8", OB8) and "g12" in state
+           and not (("o", 8) in state.get("g19", {}) and "o" in G19_ON and _opt(state, 8, "g19:o", ("o", 8) not in G19_DEFAULT_OFF))
+           and _g27_sel(state, "o", 8) is None and o.shape[1] == 1024)
+    otrig = _opt(state, tokens, "g19trig", tokens in G19_TRIG_O_TOKENS)
+    if ob8:
+        otrig, a = False, None
+        _G10["lib"].ob8_gemm(state["g12"]["o"], o.contiguous(), data["stream"], alpha, beta, state["pre_ffn"], stream1, h, h32,
+                             state["ob8_part"], state["ob8_bar"], HIDDEN // 8, G12_CFG["o"][2], G12_CFG["o"][3],
+                             POST_NORM_EPS, RMS_EPS, int(UNPOOL_PDL and "o" in GEMV_PDL_SECONDARY.get((8, cfg["window"] > 0), ()))
+                             | 2 * _opt(state, tokens, "ob8late", OB8_LATE))
+    else:
+        a = _g19(o, "o", state, otrig)
+        otrig = otrig and a is not None  # s57: the first boundary is then the o GEMM's PDL secondary
+        if a is None:
+            a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
+    bnd = ob8 or pr1 and tokens == 1 and _opt(state, tokens, "pr1bnd", PR1_BND) and a.dtype == torch.bfloat16  # s74: TUNE option
     if not bnd:
       spl = _opt(state, tokens, "bspl1", BND_SPLIT.get((tokens, 1), 1))  # s74: TUNE option
       _boundary[(tokens * spl + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
@@ -16858,7 +17045,9 @@ def _kernel_fn(data, state):
     if tk2fj:  # s27: join the side stream (routing) first: the rmsnorm loses its PDL, moe_tk2f becomes its PDL secondary
         main_stream.wait_stream(side_stream)
     rpdl = pdl and not tk2_pdl and not tk2fj
-    nu8d = nu8 and _nu8_d(state, tokens) and local_ids.is_contiguous()
+    # s86: the rmsnorm below reads local_ids (nu8d ZL): the routing must be on this stream (pr1) or joined (tk2fj).
+    # Without pr1 it is still running on the side stream there: opt test verify 1 sliding {pr1: False} failed 7/30 seeds.
+    nu8d = nu8 and _nu8_d(state, tokens) and local_ids.is_contiguous() and (pr1 or tk2fj)
     y32 = torch.empty((81 if nu8d else 65, D_EXPERT), dtype=torch.float32, device=dev) if nu8 else None
     gnorm = (not pr1 and not nu8 and tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and pooled.dim() == 2
              and pooled.is_contiguous() and _opt(state, tokens, "gnorm", GNORM_DEFAULT))

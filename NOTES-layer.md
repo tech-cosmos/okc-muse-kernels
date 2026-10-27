@@ -1787,3 +1787,34 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   noise). H200 tuner T=256 sl: default (nvscl on) 349.7 vs {nvscl False} 350.6 us (-0.9 us, same sign as H100 and moe's standalone;
   below noise); tuner picked {hot 24} on confirm. NOT submitted: 1.9% under the board 2.1339x (lead 09:28Z rule needs within 1%).
   main = v128. Value of the item ~0.03-0.05% total: housekeeping, not a lever.
+
+## s86 (2026-10-27 11:18Z-, night4 session 35): lead 10:50Z lane (a) T=8 o+bnd+pr8 fusion built (OB8) -> DEAD on H100
+- Lead 10:50Z: build the T=1 o+bnd+pr1 megakernel and its T=8 analogue (proj s80 H100 oracle: no boundary at T=8 = o->pr8 end -4.2 us).
+- Built OB8 (ob8_src.cu, r-layer main, flag OB8 / OB8_LATE, off and not compiled unless OB8 = True): gemv12's m=8 body for o
+  (k 1024, 128 blocks x 512 thr, one (token, column) per thread) + the first boundary in its epilogue: per block/token 4 FP32
+  partials (sum b^2, (as)^2, (as)(bb), (bb)^2 -> sum s'^2 = A + 2 rb C + rb^2 D), part[block][tok][4], epoch-counter grid barrier
+  (all blocks resident: pr8 launches only after every block triggered), fixed-order sum (deterministic), then each block writes
+  stream1 / h / h32 for its columns; pr8 = its PDL secondary. bench test 13/13 PASS with OB8 forced on.
+- H100 ab_flag (TUNE[8] = ({},), SEEDS 99,7,13, 6 + 5 rounds), us base / OB8 (early trigger) / OB8_LATE (trigger after W loop):
+  v1 sl s99 140.96 / 143.42 / 143.17, s7 114.83 / 116.99 / 116.99, s13 134.38 / 136.58 / 136.02;
+  v1 full s99 153.54 / 153.71 / 153.86, s7 127.10 / 127.74 / 127.82, s13 153.66 / 154.24 / 154.13.  => +2.2..2.5 sl, +0.2..0.6 full.
+- Why (/tmp/s86/tlavg.py: median timeline of 25 cold replays, v1 sl seed 7): base g12 14.9-27.2 | bnd -31.0 | pr8 20.8-51.3;
+  OB8 ob8 14.7-29.0 (barrier + epilogue +1.8 us over g12's end) | pr8 19.1-52.9 (23.9 us after ob8 end vs 20.3 after bnd).
+  pr8 is 1024 threads x <= 64 regs (a whole SM's register file) + ~140 KB smem: it cannot share an SM with ANY o block. With the
+  16-program boundary, pr8 gets ~116 SMs as g12 blocks exit (~27 us) and runs its pre-wait W ramp behind the boundary (the
+  boundary's 3.8 us is effectively hidden). The grid barrier keeps all 128 SMs until the slowest o block + epilogue, so pr8's ramp
+  is exposed. proj's -4.2 us oracle (no boundary at all) does not survive any form that needs h before pr8 (an o-side barrier or
+  a pr8-side prologue, which needs 5x the x reads per block; PR1_BND s74 = the T=1 prologue form, dead on H100 + H200).
+- T=1 o+bnd+pr1 megakernel: same mechanism (pr1 = 1024 thr x 64 regs, o g13 = 528 blocks at 4/SM; PR1_BND s74 showed the ramp:
+  o end -> pr1 end 21.4 separate vs 22.5 fused). Not built: closed with this measurement. Lane (a) CLOSED on H100; no judge runs
+  (budget 10-27: 0 checks left).
+- Only remaining shape of the idea: make pr1/pr8 light enough to co-reside with o (<= 512 thr x 64 regs, so its W ramp runs
+  during o's tail) = a proj kernel redesign of pr1/pr8, after which the boundary fusion could pay. Not attempted.
+- main: OB8 code inert (layer.py allocates stream1/h/h32 before the o GEMM now: needed by the ob8 path); validate --quick: see below.
+- LATENT BUG FOUND + FIXED (validate --quick opt: `verify 1 sliding {'pr1': False}` FAIL; old main v128 fails the same, 7/30
+  seeds, /tmp/s86/pr1f.py): with pr1 off at T=8 the routing runs on the side stream, but the nu8d pre-expert _rmsnorm_gain reads
+  local_ids (ZL zeroing of y32 rows) on the main stream BEFORE main joins the side stream -> stale ids. Probe: {pr1 False} 5/7 bad,
+  + nu8 False 0/7, + nu8d False 0/7. Fix: nu8d only with pr1 or tk2fj (routing on/joined to the main stream). After: 0/30.
+  Default paths unaffected (pr1 on at T=8; the H200 tuners measured {pr1: False} +1.7..2.6 us and never picked it), but a noisy
+  tuner pick would have produced wrong outputs on the judge: the fix removes that risk.
+- validate --quick on v129: ALL OK (test 13/13, scored 0/12, opt 0/302, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256, cold prepare 118.1 s).
