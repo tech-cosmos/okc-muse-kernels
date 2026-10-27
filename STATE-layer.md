@@ -1,6 +1,9 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-PREVIOUS BEST = submit b9685e03 = v103, 2.0606x (s67; d1 70.3/77.0, d16 133.4/216.1, d32 164.7/320.7, v1 114.0/122.9, v16 271.3/360.5, v32 352.9/520.7). #1 2.380x.
+BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
+s70: **main = v108 = v107 + proj s58 g27mc + moe n17 TK2G_PAR4** (H100 d16 -1.1/-2.5, d32 -3.1/-2.0 us; tests 13/13, replay 0/160, cold prepare 137 s). Budget 10-27 left: 14 checks / 5 submits.
+
+OLDER BEST = submit b9685e03 = v103, 2.0606x (s67; d1 70.3/77.0, d16 133.4/216.1, d32 164.7/320.7, v1 114.0/122.9, v16 271.3/360.5, v32 352.9/520.7). #1 2.380x.
 
 s68: **main = v105 = v103 + v104 (all JIT builds concurrent: cold import+prepare 314 s -> 111 s on the H100, lead 00:48Z
 done) + moe n14 TK2F_SQ at T>1** (bitwise; H100 tie at T>1, +0.7 at d1 so off there). Check 18504372 = v105 2.0871x (best check); submit acce7f04 = v105 2.0525x (noise, board stays b9685e03 2.0606x).

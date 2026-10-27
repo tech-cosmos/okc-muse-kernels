@@ -1456,3 +1456,18 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - 03:02Z **submit 08b0704a = v106 (2c64a0a): 2.0678x [2.037, 2.099], 10,939 us/step: NEW BOARD BEST, layer board #25** (#1 colinlikescode
   2.380x). d1 68.7/76.4, d16 124.1/210.7, d32 162.1/314.6, v1 111.0/121.9, v16 269.9/361.9, v32 353.1/538.0.
   Budget 10-27 after s69: 15 checks / 6 submits left. main = v107 (tk2h tuner-only); v106 vs v107 differ only in the T=32 default.
+
+## s70 (2026-10-27 03:14Z-, session 19): v108 = v107 + proj s58 g27mc + moe n17 TK2G_PAR4
+- `git apply -p1 r-proj/muse_bf16_proj/dev/s58/g27mc_inc_layer.patch` (clean on v107): g27_src.cu G27_MC 1, G27_CFG ("o", 32),
+  TUNE[32] += {g27:o True}. moe n17 par4.diff hand-applied to moe_src.py (hunk 1 anchor differed; 3 edits, tk2g_bound only).
+- H100 ab_files 4 rounds v107 vs v108 (tuner on): d1 85.6/104.6 -> 85.4/104.4, d16 190.3/293.0 -> 189.2/290.5,
+  d32 193.7/409.9 -> 190.6/407.9.
+- Tests: bench test 13/13; replay d16 seeds 11,23 0/80; d32 with g27:o + tk2h 4 forced (TUNE = {}) 0/80; cold prepare 137 s.
+- 03:21Z **check 56d4f73b = v108 (85b5641): 2.1190x [2.087, 2.151], 10,675 us** (best check so far): d1 69.4/75.5, d16 127.1/210.3,
+  d32 170.7/291.2, v1 110.9/120.7, v16 273.6/357.7, v32 341.5/521.2. H200 tuner T=32 picked {tk2h 4, lt:o} (confirm sl 170.8 vs
+  167.3, full 330.7 vs 325.9; PAR4 makes tk2h competitive in-layer); T=16 {tk2fj False} (near tie); g27:o at T=32 tie (172.6 / 331.2).
+- 03:34Z **submit 19ebde23 = v108: 2.0860x [2.055, 2.117], 10,844 us: NEW BOARD BEST (layer #34; #1 2.380x)**: d1 67.7/75.8,
+  d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0. Its tuner did NOT pick tk2h at T=32
+  ({tk2h 4, lt:o} sl 176.1 vs 175.5, full 332.6 vs 332.6; {tk2h 4} alone +11/-0.3): the T=32 tuner picks are near-ties that flip
+  between runs; d32 full 291 (check) vs 327 (submit) is run noise, not a pick (tuner lines differ <= 5 us).
+- Budget 10-27 after s70: 14 checks / 5 submits left.
