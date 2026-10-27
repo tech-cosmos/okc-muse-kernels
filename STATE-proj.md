@@ -1,4 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 12:10 UTC (s82). FOUND+FIXED a T=8 race in layer (v128 and earlier): TUNE {'pr1': False} + nu8d -> rmsnorm reads
+side-stream local_ids before the join (14-20/60 wrong under GPU contention; H200 tuner never picks pr1 False: +1.7..2.6 us).
+Fix + tools/nu8_race.py on r-layer branch proj/nu8fix 357859d; bundle proj/b82 d4b2aba = attn31 + fix: validate ALL OK,
+opt 0/906 + replay 0/480 under a GPU hog. Lesson: run opt/replay under contention. NOTES s82.
 Updated 2026-10-27 11:55 UTC (s81). Ported moe s31 attention deltas layer lacked (csl/vtk fast divides, nds pt L2 prefetch +
 K-early) -> branch proj/attn31 c71dbb6: tests 13/13, attn_probe 29/29, H100 TIE (ABA d32 -1.9 was a middle-slot artefact of
 tools/ab_files.py: reverses in BAB; always run both orders). Stackable, not check-worthy alone. NOTES s81.

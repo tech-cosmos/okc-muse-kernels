@@ -1704,3 +1704,22 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   => the MIDDLE file slot is ~1.8 us faster at d32 sl (and ~0.5 at v1) whatever its code: position artefact of ab_files
   (each file's own prepare/tuner/allocations). Net effect of the deltas: tie (<= ~0.3 us) everywhere. Not worth a check alone;
   stackable (low risk) into any layer bundle. LESSON for everyone: ab_files A/B/A must be repeated as B/A/B.
+
+## s82 (2026-10-27 11:11-12:10Z, night4 session 39): lane (b): FOUND + FIXED a T=8 race (nu8d x {'pr1': False}); bundle proj/b82
+- No judge runs. No new layer/moe bundle since v128. Ran full tools/validate.py on proj/attn31 (c71dbb6): test 13/13, scored 0/24,
+  tk2f 0/1200, replay 0/480, route 0/240 (gap 0.0256), cold prepare 179.4 s (GPU loaded by my parallel probe runs; s79 121 s),
+  but opt_test 1/302 FAIL: verify 1 sliding {'pr1': False}, residual relative L2 3.801e-01 > 0.139.
+- Exhaustive attn_probe (--passes=0) on attn31's changed shapes: decode 1/16/32 sliding, verify 1 sliding: 33/33 PASS each.
+- Root cause (also on layer main v128 fa3f107; s79's 0/302 was luck): TUNE_BASE[8] = nu8 on, NU8_D on. With the TUNE candidate
+  {'pr1': False} the routing runs on the side stream (_route), but the pre-expert _rmsnorm_gain (nu8d: ZL zeroing via
+  ids_ptr=local_ids) reads local_ids on the main stream BEFORE main_stream.wait_stream(side_stream). Shows only when the side
+  stream runs late (GPU contention): alone 0/20; under a matmul+memset hog: {'pr1': False} 14-16/60, +g19:pooler 20/60;
+  with nu8d False or nu8 False 0/60 each; default (pr1 = pr8, ids on the main stream) 0/60.
+- Exposure: H200 tuner (diag81 log) has pr1 False +1.7/+2.6 us at T=8 sl/full, so most likely never picked on a board run;
+  but it is a live candidate (noise pick, or any pr8 build/condition fallback would race).
+- Fix (layer.py, after nu8d): if nu8d and not pr1 and not tk2_pdl and not tk2fj: main_stream.wait_stream(side_stream);
+  rpdl = False (same pattern as tk2fj). New tools/nu8_race.py (own hog subprocess): unfixed 32/180 bad, fixed 0/180.
+- Branches (r-layer, never main): proj/nu8fix 357859d (fix on v128), proj/b82 d4b2aba = attn31 + fix: validate test/scored/
+  opt/replay ALL OK (13/13, 0/24, 0/302, 0/480), nu8_race 0/180.
+- LESSON: cross-stream races hide in quiet-GPU tests. Run opt_test/replay under a GPU hog too (validate step idea).
+- Under the same GPU hog on proj/b82: opt_test 3 seeds 0/906, replay 0/480, route 0/240 (no other contention race found).
