@@ -4513,6 +4513,10 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
       return tk2f_go<8, 3, 4, false, false, true, 8, 0, 516>(0, TK2F_ARGS0);
     }
 #endif
+#if TK2H_P4 || TK2_EXP
+    if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 40000 && cfg < 50000 && cfg % 1000 == 4)  // n16: tk2h GS16 + PF4 on SQ stages
+      return tk2f_go<8, 4, 2, false, false, true, 16, 1, 516>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+#endif
     TORCH_CHECK(sa && g_tk2f_l2h == TK2F_L2H && (cfg == 204 || cfg == 84204), "moe_tk2f SQ: cfg ", cfg);
     if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 512>(0, TK2F_ARGS0);
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516>(0, TK2F_ARGS0);
@@ -4761,7 +4765,7 @@ def _lib():
         src = src.replace("#define NORM_EARLY 0 ", f"#define NORM_EARLY {int(NORM_EARLY)} ")
         src = src.replace("#define TWM_L2H 0 ", f"#define TWM_L2H {int(TWM_L2H)} ")
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
-            src = src.replace("#define TK2F_SQ4 0 ", "#define TK2F_SQ4 1 ")  # n14 (n13's TK2_EXP / TWM_PB48 variants: done)
+            src = src.replace("#define TK2H_P4 0 ", "#define TK2H_P4 1 ")  # n16 (n14's TK2F_SQ4 / n13's TK2_EXP / TWM_PB48: done)
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=src,
                            functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
@@ -4889,7 +4893,7 @@ def prepare(weights):
     if TK2F_SQ:  # n14: tk2f single-copy stage images (lossless repack of w13q/w2q + w13s2/w2s2)
         st["w13sq"] = _sq_pack(st["w13q"], st["w13s2"])
         st["w2sq"] = _sq_pack(st["w2q"], st["w2s2"])
-        if DIAG:  # n14: KPS 4 stage images (cfg 402/403 SQ)
+        if DIAG and TK2F_SQ4_DIAG:  # n14: KPS 4 stage images (cfg 402/403 SQ; needs #define TK2F_SQ4 1)
             st["w13sq4"] = _sq_pack(st["w13q"], st["w13s2"], 2)
             st["w2sq4"] = _sq_pack(st["w2q"], st["w2s2"], 2)
     if TW_CFG:
@@ -4986,14 +4990,12 @@ SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 DIAG = 0
 _DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('decode 1', 17, 1), ('decode 1', 99, 1), ('decode 16', 7, 16), ('decode 16', 11, 16), ('decode 16', 13, 16), ('decode 16', 17, 16), ('decode 16', 99, 16), ('decode 32', 7, 32), ('decode 32', 11, 32), ('decode 32', 13, 32), ('decode 32', 17, 32), ('decode 32', 99, 32), ('verify 1', 7, 8), ('verify 1', 11, 8), ('verify 1', 13, 8), ('verify 1', 17, 8), ('verify 1', 99, 8), ('verify 16', 7, 128), ('verify 16', 11, 128), ('verify 16', 13, 128), ('verify 16', 17, 128), ('verify 16', 99, 128), ('verify 32', 7, 256), ('verify 32', 11, 256), ('verify 32', 13, 256), ('verify 32', 17, 256), ('verify 32', 99, 256)]
 _DIAG_R = "eNqVXIt22zgOLc02laBVxDpQorWm/v+/5IpvAASdWZ8zjSVRJAjicXFJj0cfPmC9X66/7+HC+a940//zy9+vP+fD589b/jc/f/L71/XbW7z7T338ljosLUjL699P2qdnnZHr55/wb5Buy//5/Hfx/ee6b1uzMJ9w+f5gt/22pakm4ZZHfcA6In/a59ejjbvlx0sR75f3jzDQdv0J9+zmtW62dqONvbVpRbFdnUGQHUK3J5Yeyheg3eabc3rgvMX03IkpnL71A/Haso4c8kHit0uyP0L8J2lhpZ7se3nwWFRNvodb12sumpezVbj0Vm7O1xhDd67czCM8sqoeW7+CmHtbiJCPjUmzcfU9sOjrbI/o7H7FRw8i2Pb+S5mgLT1es/zjiDarUUS548UfFNIslwFVleQ21ULCajw80RebEBXjGfrxuBE9Vjd4T3PZ4oToZ0mmvHRzt6z3M+leeMwmNBVuvNcGT6LpoIZ7bbjprif850lXs3VcvD4tRnlkPVn8rci8EL+N7dsMHBMgrl9aZpcWxD6T2i0WPYXLLU0q+v2SXl2ez63zibMp+EF96+yn/i5eoM3lx8SnkFtAnYUr75l8v/PQue9axhfTX7ApIaCUVGt3je/qeJcshkQuaIOa6yuWu45KvGalhEiFZe2t78w+3/TvinsLQ/b2Mbbcak+a3s/O2avBpuZoy92lBZ4lW0m8ezkXjVZbZ3yhp0eV9X2jcgAN/DPRV/zSWh4ip8rP33D7M7vgNdr+VR9dmfkrdv6b6+6enD7k93vUw80L9W7nnek6NPqntPrKDvv3tyLO1+Xdf6+/v5O4X2F4Y7KkX8yqMkwxv4m81+e/faf3T2bcCzc5U2cQb9ySWp3/WZfxBlXnWD3J/+AGNVM1YMxldRWm+mAfOHBLtqfmp1qGr8O7OFwexDSdH8SgoMSD9RIUOjgABV+okabiDOxCUhgkmR1IOUsUuiS6h/tLeu8mBwBPTSjIPxPhPsMVSi0BN/MEds66qCeXBUkwxE6d6dYHuX2IGKZow5LbRg4EqQtEEKuI/XKTqZ8lanA/j1dmdlyUs5dsDs2AWOVMMchk6LqffYTGFpzDBV+nWcz/1uaN10PrcWStrBtso8KwcRF/Ap/AAWSJMdsUComkhOkFdGrCMw1mcsCbRONaMUHNezHvml/7hOD0ROGa8xttukAAeOvAscQyl9SpDwFxAItrjwik35AMy/NFSK7P2xyXFYnwwsIdm4BNygV93bVlpR4JuoGEr2u6uLebLiEtBy2gYrPl90tFU+rkYGPNbNyls8W4kDxCOtTj3nkkOW5eACna3l2NLuELWozPQDcYrGWz/zClGyzrXq0JWgy4lyura+6q9GgGqrjY8nWO9t+tjqG9xTQXE8smIPH1bVbWMiKz2MqxBAcsVYCmsUvKo93HIour8566uGA6J4CJY3fg2bbgSSAh52Qhg+W9fZgAkUwo6JDmUdfbve30kPoxpR4PRSYLC3tejIXkizfuS1aJrfAKdFdHWcVs1uvLPWeSHf9FmWF7m4GcLWEQF3ei5T09tzTulW6vNpMkKPznQI5bTCNzfDG89BdikD0tC5QyO9z04IQpd9WMcFMn7L4pwGzyq0/q9HgWF8aILkoHZx7+TeJy5EH/4PK62q3z33ygY3ssyzb7oIJUjMfYnUYiJzTiOGUQVoH2VKiNo0zP+mHYHz5Jzv2x54kRUA2OIZZa57ZyMVgduRXzrGkNapx1bORY6c/Q8WvQgW+UrMFSGhy6ehn8zP7yR3FqL6Y/zKdTWW8sdjV/Zx4V/8CrsiSE5sYcOu4GwNeSKMWghgBWP/ZN010CntyOgQ+R/GDVJtuiy/zSPyRdkaA3qupAQZ2Y+mev5pNHM/MrOAgZpKBm/nvB5RsCf7ZKSBk9yd0KTgcdBMf3kM2vAczBKky5s0nXG7ZYsrZYYr0+T2/1oOIowzyJoIwvcWNgA5rCsMPRA54jp3UFt6/e1mpzfoVd1fszc+nDxS2UbhITtyOx9MaTsngrSC6B77mlPC+lXDX2IHvYLAc5kfKEfWY4qAId5/xvnTJJFYcfAzCqBvhZpo1r9CvOwqk0n9UMATFhDzIIipeLwSNZKaOtJKSciDlw717zkrMkEEfhw67tw3SG8iG9GE5hHzcbZcTYPVaY+1/rXwE+zcyGdV9DbY6KM7N9ilaOup64QE8Beh5wsv1AqT6De1PHvWMAXB+HjIr5Dhk70uo6A9/CiNpi3ULvQONy0qybR/6eQItJi5UgYnwf7TeAJQxnOgAuZXxWy+jzxC74JNsqRHXUFkgzDQAvsZVImUugSqJ6Uky2rBwTAcH1Bn7z345W8Cca5nSOaxtpploo8hUCJUGmxukBawzfIcww0d0TFOMSdIVJr152Hq0BB1FcxOhVwB+ejjX0Y19rsvVg2SrMaf3L3FfVPCWbGdYb7/TWWax+h5yeQTE3I3P5PmURkOXwxlbsfVFIUQNIn5yR2c08kdSU39g5iwGyI4YO2teqmSn2jPPATNB0KSBlOmTRH1LOhlmHepZ2cvRJhWzfDILKmtXV3JwkMEkvb1NlJhrbn+313hHhGnWK/jVfU9PAUYSDQHhx+NUWuVZ8qkmfvNtpGE1rIVbqh2ZPwJkN1zKhcZHvmZXRiTJbV7b09paUfIVnCzTs7LkesUWiAvWB69Ni22whLIkn0Q4alXrWplbqfveqCccCiXtgC5Ib5QsiPzKz/dQRYLAj3HuT2cR1Kmym2rZdIrRfG1PGz5IAjrO1axU5sAHMnbTjFmxQIhzsaZ5qSE5SnvN3OILgOxJ3b76Hpr1f5Y0YZJAY/WsAx9UV1GoNjeFiB7Dt+6YlcAPoPCpkUBqUih9Nozvw1CjBblvmIBXV+hIvRaO+Auxz1wOA3G3rduYYr0K52LU8NoRPwKQprgbzmlebid296ZotVkf42PiChQ5JN9mfOKjIU5PJ66xrejyxPtn+y6yts9isXL2gB/4dOwc7Schz4Imwpu098KlmXDSnZ06nvKDZ45FdjJAYli4vMv9TT8KtSDf3K/+PrPpvrKzghGRc56+CHy2bmK9bi1uizqdsCycFzKgeMSJuGV7obTruG3KAtDh1g0g8ZdLCCQ2APBsIqqIKvgYZZXg+sv1Wfb5l2lSRxQHUAmU583QChU/gvX+xVK1e+IEa30vjD+YUoFETN7Xuto1dBgbCuf3X8G1rcLHXsmjISwlMH/kUhlImIGPWavwLGPYoIXNt/D3QebvqEfNglUHFka6/iTp/Hjr/zXFtlXpl893GUSlRWxNKGCDi5cKeHyXcg+bfHU/NDTecEDq6l49xwJy/42VAxASnzvZGCkkveCjmlgqv/4vCRUjbXk4Mv8iiXDZoEZGfbGL70tNIbcpCN35OxaFHOpfslKZWSzFLY1sCZfKDByjUVB8Pca0gyNnqPvYbHrjbMMhbMoASt3TbnuLvqtAB1g9LsGE0ONamZqpuZIFKXwtgS2qr5WKfOl6kmtuQP69j9IdgwOnOw0KK4haW2H1BZTX+Tx1+Y/Vx4RUnhS0j9f9cUwWyJRrPsj80hcN3LtnXth9I6XHr1W7MS4pNDww12prINzqe/6zw95vSM/qTnWjJfpZO2SDZcDb/H/ZgcWUp0zWzLDKbQ2WK7Bw4pdUKKsfKkiJuefzGqW01XyH8hwBtpCi8/mbBpjBgqrpRLacm48mpDNT9G4p5HpUdcR/dvk/DtROvQ2DgReM9tp+J5c0s8sLkmYV9SjfZdaxqYZAQ23k6b90RG995Ac2A5YRkT4HnI8GLOO7/TpKuTo/i7duPXAqIjX1yrDqhhsO2h0+p0gop04683RsfZEHZBHKtAFXP+UKa5ylpMxobul1BpvlSrwtiHGOZ+Iz8I0jcw6GXspAfHUMo+ZZY/HC2T+7fWZoTQU1rt+rL0AHn0PaoYR+VzTUm35gRsTx4AM84DhT2qzdp5L8ikvBJzRgfr89rQF1VltR5hxT9r2T+kM/LsbM7u6KYU2rrGDBarN2c7Q5eMMbKxofx9ugZM2TVnaHHytLCmfYdi3u9AQGKcf267d1ZWuAq5YNBKj+0Thi/Ho7eGq9Xz0nhuyBsHeNsxYElJvi80Sh4sEVypK5zCs7u9O/4OtDtXcqkQasV+DnzLixBy2Tl3o1Y/G3MHa2DWlzkrFqcEZbjI294mKmrm0WEBwWRQVNcf/7nxvSk/sDS/u394Wy4AQn650fpFX44jPNZTMuy+OA4ydWZ6dkZJWp2ioUC1OpDJ36wRd3lGXcqioYc2ZSbXEcseLqZL8FJJL78LpZDHtM/m0tN4F7CaWVX22lpjZxXLAHqlADAarL49KuZpbwP/Mj7mbb/QxJfSydA92+Qkj4SqHjPCaAsnlPr+XVKmwbl9WOQHW4Kj3pmRGt/oOCvQHp6+ZWS06BEOoDvBHDubcbW7VK2fpFfQKs4oxv9zsh/VKC6vqqtgHtt5oAmBVV4ti/i+e9rjtfVW/628v2mQjVapXXx8FlYqNMyTDOEE6gdr7yAcS92mOpB7vQSysdhf8C20yTsTC2WLz9v7X7k6o50mrq2fc5ZWwaBRVNfdzAbAUTzb95QWf03p0MWFZ7PBO+psPg2XDs0r8BU3bzCgkVhkudGtrmdTb9mOA/XriZV/lNMuekxSfO3GbS5UdHc9v4+6rqj8PMSb6BhCm2vmzGwqIA40HAa89xZhjTs8/osVfTmxa+ebOsind3XkVO8fygIm+9Bv13LfKCWjBLM3erPPySfkc71oFqT5pEj7HA6QrGy8i/4s56aQfa/LLDgfnUra/Lbqd1uSZweni+D0QH63r0qc4lt2+jkOwJiH1rYtPXphxadNc9KFVoTcwvstz6UNQTC9msO4s/YfvzCp/jRR3V3NPl/km4/FJo9ffsf7xy7jA=="
-DIAG_VARIANTS = {  # n15b: big-M drain fixes on the H200 with the layer's config (hot 32 at T=256, NORM_EARLY); b = repeat
-    "dec": [("sq", {})],
-    "big": [("h32", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}}),
-            ("s66", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "TWF_SPLIT_M": {128: 66, 256: 66}}),
-            ("a22", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "TWF_SPLIT_M": {128: 1022, 256: 1022}}),
-            ("a23", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "TWF_SPLIT_M": {128: 1023, 256: 1023}}),
-            ("t32", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "TWM_TAIL_M": {128: 32, 256: 32}}),
-            ("h32b", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}})],
+DIAG_VARIANTS = {  # n16: tk2h (GS16 + PF4) on SQ stages vs 3-copy at d16/d32 (layer runs tk2h at d32); b = repeat
+    "dec": [("sq", {}),
+            ("h16w2", {"TK2H_M": {16: 2, 32: 2}, "TK2H_SQ": 0}), ("h16w2sq", {"TK2H_M": {16: 2, 32: 2}}),
+            ("h16w3", {"TK2H_M": {16: 3, 32: 3}, "TK2H_SQ": 0}), ("h16w3sq", {"TK2H_M": {16: 3, 32: 3}}),
+            ("sqb", {})],
+    "big": [("s66", {"HOT_M": {256: 32}, "TWM_ORDER_M": {}, "TWF_SPLIT_M": {128: 66, 256: 66}})],
 }
 
 
@@ -5224,12 +5226,15 @@ TK2W = 0  # s12: weighted static row split for M > 1 (extra-group rows weigh TK2
 TK2H_PSC = 0  # s12: 1 = per-segment gemm13 -> gemm2 counters (cnt[64 + seg]) instead of the global one
 TK2H_M = {}  # n6: per-M GS16 tk2h PF4 weight W (overrides TK2H/TK2W); layer TUNE option "tk2h" = W + 1
 TK2H_PF4 = 0  # n6: 1 = tk2h writes y32 like tk2f PF 4 (slot order, pre-scaled) -> moe_norm3 (cfg + 4; kinds 3/4 only)
+TK2F_SQ4_DIAG = False  # n16: n14's KPS 4 SQ images in DIAG builds (dead; frees ~0.9 GB + prepare time)
+TK2H_SQ = 1  # n16: tk2h (TK2H_M, GS16 + PF4) on the TK2F_SQ single-copy stages (same smem image: bitwise = off)
 TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
 
 
 def _tk2f_cfg(M, st):
     c = _tk2f_cfg0(M, st)
     if TK2F_SQ and "w13sq" in st and TK2F_L2H_RT is None and (c in (100204, 184204) or (
+            TK2H_SQ and 140000 <= c < 150000 and c % 1000 == 4) or (
             "w13sq4" in st and c in (100402, 100403, 184402, 184403))):  # n14 SQ (SA, default configs; KPS 4 in DIAG)
         return c + 10000000
     return c + (1000000 * (TK2F_L2H_RT + 1) if TK2F_L2H and TK2F_L2H_RT is not None else 0)
