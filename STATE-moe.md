@@ -1,6 +1,6 @@
 # STATE-moe
 
-## NOW (night5 s2, 2026-10-27 21:15Z): pr32 built, handed to layer/proj as a TUNE option; H200 tuner is the gate
+## NOW (night5 s2, 2026-10-27 21:00Z): pr32 built, handed to layer/proj as a TUNE option; H200 tuner is the gate
 - pr32 = T=16/32 pooler (g30n S2 12-bit) + router (hi/lo BF16 rows, first 8 stages of every streaming CTA) + routing, ONE launch:
   grid (66,2) pairs; x 0/1 = 4 finisher CTAs (spare SMs) poll a counter, bulk-pull pair partials, route 1 token/warp (redux top-8).
   Files: muse_moe_w4a16/tools/n5s1/pr32_src.cu (= head.cu + body3.cu; edit those, then `cat head.cu body3.cu > pr32_src.cu` and
@@ -15,7 +15,6 @@
   routing (finishers) ends at 11.0 < pooler end: chain hidden. NW/NS sweep spread <= 0.5 us: keep 8/16. Waiting for H200 tune lines.
 - moe checks 20/20 used on 10-27 (reset 00:00Z); moe board best febfcb1f 2.2469x; attention board best 957cabd7 2.5962x.
 
-## g34 (s47-s49): g30 at m16/m32 built, superseded by proj g30n (on layer main as TUNE[32] g30n:unpool). Closed.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding

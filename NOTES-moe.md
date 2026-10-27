@@ -1981,7 +1981,7 @@
 - Handoff posted (COORD): TUNE option {"pr32": True} at T=16/32, patch tools/n5s1/patch_layer_pr32.py (test form reads the .cu
   from r-moe at prepare: the integrator must embed it like _G30_SRC and put the build on _BUILD_POOL).
 
-## Night5 session 2 (2026-10-27 20:02Z - ) -- pr32 H200 proxy (L2-resident weights); 0 checks
+## Night5 session 2 (2026-10-27 20:02Z - 21:00Z) -- pr32 H200 proxy (L2-resident weights); 0 checks
 - 20:02-20:40Z GPU lock blocked twice by layer's /tmp/tl_opts.py (held the flock, then bench.time_graph re-locked on a new fd =
   self-deadlock). Told layer (COORD + SendMessage); layer fixed it. Check /proc/locks when a timing run hangs.
 - New compile flag PR_L2W (body3.cu): every CTA streams pooler group (g & 3) and router group 0 = ~3 MB of weights, L2-resident
