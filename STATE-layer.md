@@ -2,6 +2,11 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s3: **main = v141** = v140 + proj/g30k139 deb4a62 (g30k stream-K pooler, g30n qkv_gate actually built (uneven S3), moe pr32 one-launch
+  pooler+router+routing; all TUNE options at T=16/32, off by default). validate --quick ALL OK (opt 0/344, fuzz 0/508), cold prepare 153.6 s.
+  H100 tuner T=32 sl: default 220.3, g30k104+g30n unp+qkv 215.0 (picked); full 439.8 vs 435.1 (g30k104+unp). T=16: ties (+-1).
+  **00:00Z: check 1 = v141** (covers v140 stream fix + g30k/g30n/pr32): submit if > 2.1339x or per the 09:28Z rule; paste the
+  'layer tune T=16/32' g30k/g30n/pr32 lines into NOTES and to moe (pr32) / proj (g30k).
 night5 s2: **main = v140** = v139 + OWN STREAMS: side_stream/hi_stream were torch pool streams; the harness's capture stream (pool,
   round-robin 32) could BE our side stream, so the side branch serialized (H100 first capture after prepare d16 sl 201.6 vs 192.2 us;
   also every 32nd tuner candidate). Now cudaStreamCreateWithPriority via ctypes -> ExternalStream (NOTES n5s2). validate ALL OK, cold 151.4 s.

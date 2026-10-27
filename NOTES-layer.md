@@ -2175,3 +2175,15 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - v140 validate --quick ALL OK: test 13/13, scored 0/12, opt 0/320, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/466, cold prepare 151.4 s.
 - **main = v140.** 00:00Z check 1 = v140. What to read: per-shape d16/d32/v16/v32 vs the board run (a judge shape that used to land on
   a colliding capture should drop ~5%); tuner lines should no longer show single ~+10 us outliers at T=16/32.
+
+## night5 s3 (2026-10-27 20:55Z-, okc-night5 session 3): v141 = v140 + proj/g30k139; 0 judge runs
+- Layer checks 20/20 for 10-27 (resets 00:00Z). Merged origin/proj/g30k139 deb4a62 (proj s99/s100/n5s3: g30k stream-K pooler on 104/120
+  CTAs with FP32 slabs summed in the rmsnorm; g30n qkv_gate built with uneven S3 K split (my v139 'K % 384' removal was wrong: proj's
+  g30 splits K unevenly); moe n5s1 pr32 = T=16/32 pooler+router+routing in one launch, embedded via build.py, built on _BUILD_POOL)
+  onto v140 (own streams). Clean auto-merge; build.py regenerates submission.py identically.
+- v141 validate --quick ALL OK: test 13/13, scored 0/12, opt 0/344, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/508,
+  cold prepare 153.6 s (<= 190 s lead rule; no option drop needed).
+- H100 tuner (validate prep): T=32 sl default 220.3 | g30n unp 217.1 | pr32 219.8 | pr32+unp 216.7 | unp+qkv 216.3 | g30k104 218.9 |
+  g30k120 231.4 | g30k104+unp 216.0 | g30k104+unp+qkv 215.0 (picked). T=32 full default 439.8 | g30k104+unp 435.1 | +qkv 435.3 | pr32+unp 436.4.
+  T=16 sl default 219.5, g30k104 220.4 (ties); T=16 full default 315.8, g30k104 313.1.
+- **main = v141.** 00:00Z check 1 = v141; read the H200 'layer tune T=16/T=32' lines (g30k/g30n/pr32) and copy them to NOTES + moe/proj.
