@@ -2125,3 +2125,20 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - build.py regenerates submission.py identically to proj's commit (git status clean after build).
 - 00:00Z: check 1 = v137 (covers v136 + g30n; read 'layer tune T=32' g30n lines; if the H200 picks it at full too, consider TUNE_BASE).
 - My re-validate of v137 (validate --quick, 17:35-17:43Z): ALL OK: bench test 13/13, scored 0/12, opt_test 0/318, tk2f_stress 0/300, replay 0/240, route_judge 0/240 (worst gap 0.0256), stream_fuzz 0/467, cold prepare 125.3 s (<= 200 s rule). Ready for the 00:00Z check.
+
+## night5 s1 (2026-10-27 18:57Z-, sandbox okc-night5 session 1): v137 re-validated on night5; v138 = v137 + g30n T=16/32 tuner options; 0 judge runs
+- Layer checks 20/20 used for 10-27 (4 submits left, unusable). Board #30 at 2.1339x (35dd53d0); #1 pjmullin3 2.399x, #10 2.240x, #20 2.172x.
+- night4's profiles/ were not in git (gitignored), so the board run's H200 profile was lost. Recovery: `okc status <FULL 16-hex job id> --json`
+  (short ids give "no such job") writes profiles/<job>.{txt,json,log} into the cwd. Restored 35dd53d0d33246a1 into profiles/.
+  Board run per kernel (H200 us): d1 sl tk2f 20.2, pr1 17.5, qkv g13 10.9, bnd 2x3.1, o g13 6.1, n2u 5.0, csl 3.9; d32 sl tk2f 102.0,
+  g24 pooler+unpool 47.0, qkv g24 13.5, nds 10.3, norm2 10.1, bnd 8.0, router_split 6.4, o nvjet 6.2.
+- main v137 on night5 H100: validate --quick ALL OK (test 13/13, scored 0/12, opt 0/318, tk2f 0/300, replay 0/240, route 0/240 gap
+  0.0256, fuzz 0/467), cold prepare 137.7 s (night4: 125.3; fresh machine, still <= 200 s).
+- v138 (variants/v138.py, layer.py TUNE only): TUNE[16] += {g30n:unpool}, {g30n:qkv_gate}, {both}; TUNE[32] += {g30n:qkv_gate},
+  {g30n:unpool + g30n:qkv_gate}. All builds already in G30N_CFG (no new compile). proj s95/s96 H100: T=16 unpool/qkv tie in-layer,
+  standalone d32 qkv S3 -1.1, d16 qkv -0.5, unp -1.5 us per call; the H200 is more consumer-bound than the H100 (g24 at ~2.0 TB/s
+  at d32), so let the H200 tuner decide on the one 00:00Z check that is happening anyway.
+- v138 validate --quick ALL OK: test 13/13, scored 0/12, opt 0/328, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/487,
+  cold prepare 144.3 s. H100 tuner lines (prep step): T=16 sl default 219.7, g30n unp 219.5 / qkv 219.4 / both 219.5 (tie; picked g24:o False);
+  T=32 sl default 222.0, unp 220.1, qkv 221.5, unp+qkv 220.0 -> picked unp+qkv; T=32 full default 440.7, g30n 439.7-440.5 (tie).
+- **main = v138.** 00:00Z check 1 = v138 (covers v136 + g30n): grep 'layer tune T=16' / 'T=32' g30n entries in the check log.
