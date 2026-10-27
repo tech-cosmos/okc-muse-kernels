@@ -1,0 +1,226 @@
+diff --git a/moe_src.py b/moe_src.py
+index 05a080b..451ce46 100644
+--- a/moe_src.py
++++ b/moe_src.py
+@@ -3085,7 +3085,9 @@ int64_t moe_twm_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
+ template <int N, int NSTG, bool SA>
+ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
+                                         const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
+-                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, bool g2) {
++                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out, bool g2,
++                                        int nkc = 64, float* part = nullptr, int* tick = nullptr, int* s_flag = nullptr,
++                                        int h = 0, int np = 1) {
+   using C = TWC<4, true, 8>;
+   constexpr int NA = N / 2, STRIDE = C::STG;
+   float acc[2][NA];
+@@ -3100,7 +3102,7 @@ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64
+   const int so = C::XB + C::WB + (w8 * 32 + lane) * 8;
+   int pst = -1;
+ #pragma unroll 1
+-  for (int kc = 0; kc < 64; ++kc) {
++  for (int kc = 0; kc < nkc; ++kc) {
+     const char* sb = smem + st * STRIDE;
+     if (kc) mbar_wait(&full[st], ph);
+     const uint4* wp = reinterpret_cast<const uint4*>(sb + C::XB);
+@@ -3151,6 +3153,31 @@ __device__ __forceinline__ void tq_item(const char* smem, uint64_t* full, uint64
+     for (int i = 0; i < NA; ++i) fence_f(acc[r][i]);
+   }
+   mbar_arrive(&empty[pst]);
++  if (part) {  // n21 K-split tail item (np parts of 64 / np k chunks, gemm2 only): every part stores its FP32 partial,
++    // then takes a ticket; the last one sums the np partials in part order (deterministic) and runs the epilogue
++    const int ct = warp * 32 + lane;
++#pragma unroll
++    for (int r = 0; r < 2; ++r)
++#pragma unroll
++      for (int i = 0; i < NA; ++i) __stcg(part + (size_t)h * 16384 + (r * NA + i) * 512 + ct, acc[r][i]);
++    __threadfence();
++    asm volatile("bar.sync 1, 512;" ::: "memory");  // s_flag is free (the previous split item is done with it)
++    if (ct == 0) {
++      const int o = atomicAdd(tick, 1);
++      if (o == np - 1) { *tick = 0; __threadfence(); }  // last user: zero for the next call
++      *s_flag = o;
++    }
++    asm volatile("bar.sync 1, 512;" ::: "memory");
++    if (*s_flag != np - 1) return;
++#pragma unroll
++    for (int r = 0; r < 2; ++r)
++#pragma unroll
++      for (int i = 0; i < NA; ++i) {
++        float v = __ldcg(part + (r * NA + i) * 512 + ct);
++        for (int q = 1; q < np; ++q) v += __ldcg(part + (size_t)q * 16384 + (r * NA + i) * 512 + ct);
++        acc[r][i] = v;
++      }
++  }
+   if (g2) tw_epi<2, N, false, 16>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
+   else tw_epi<2, N, true, 16>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
+ }
+@@ -3161,16 +3188,19 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
+     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
+     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
+     int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
+-    __nv_bfloat16* __restrict__ Y, float* __restrict__ part, int flags) {
++    __nv_bfloat16* __restrict__ Y, float* __restrict__ part, int flags, int* __restrict__ tick) {
+   using C = TWC<4, true, 8>;
+   constexpr int STRIDE = C::STG, NR13 = TWC<4, true, 8>::NRB, NR2 = TWC<4, false, 8>::NRB;
+   extern __shared__ __align__(1024) uint4 smem_tw[];
+   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
+   __shared__ uint32_t slut[256];
+-  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_big[32];
++  __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_big[32], s_flag;
+   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
+   int* done = meta + 68;
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
++  // n21 K split: the last ~(flags >> 8 & 255) gemm2 items (from an expert boundary) run as 2^(flags >> 16 & 3) K parts
++  const int kq = (flags >> 16) & 3, npt = 1 << kq;
++  int nsplit = kq ? (flags >> 8) & 255 : 0;
+   for (int i = tid; i < 256; i += 640) slut[i] = lut[i];
+   // n19 WBW (flags & 16): no wait at entry. The PDL primary (moe_gather / moe_routegather) triggers only after its own
+   // griddepcontrol.wait, so moe_route's meta / sroutes are complete here (read with __ldcg); only xg (the x TMA source)
+@@ -3205,10 +3235,23 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
+     }
+   }
+   __syncthreads();
+-  const int n13 = s_cum[0][32], nitems = n13 + s_cum[1][32];
+-  auto decode = [&](int item, int& g2, int& a, int& p, int& rb) {
++  const int n13 = s_cum[0][32], n2 = s_cum[1][32];
++  int n2f = n2;  // split from an expert boundary: a token's result must not depend on which pass it lands in
++  if (nsplit > 0)
++    for (int a = 32; a >= 0; --a)
++      if (s_cum[1][a] >= n2 - nsplit) n2f = s_cum[1][a];
++  const int ns = n2 - n2f, nitems = n13 + n2f + npt * ns;
++  // item -> (gemm2?, slot a, pass p, row block rb, K part h (-1: whole K), split slot j)
++  auto decode = [&](int item, int& g2, int& a, int& p, int& rb, int& h, int& j) {
+     g2 = item >= n13;
+-    const int it = g2 ? item - n13 : item;
++    int it = g2 ? item - n13 : item;
++    h = -1;
++    j = 0;
++    if (g2 && it >= n2f) {
++      j = (it - n2f) >> kq;
++      h = (it - n2f) & (npt - 1);
++      it = n2f + j;
++    }
+     const int* cum = s_cum[g2];
+     a = 0;
+     while (cum[a + 1] <= it) ++a;
+@@ -3244,10 +3287,11 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
+         mbar_arrive(&full[st]);
+         break;
+       }
+-      int g2, a, p, rb;
+-      decode(item, g2, a, p, rb);
++      int g2, a, p, rb, h, j;
++      decode(item, g2, a, p, rb, h, j);
+       const int e = s_e[a], PS = s_big[a] ? 64 : 32;
+       const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
++      const int k0 = h < 0 ? 0 : h * (64 >> kq), k1 = h < 0 ? 64 : k0 + (64 >> kq);
+       const int mi = nv <= 8 ? 0 : nv <= 16 ? 1 : nv <= 32 ? 2 : 3;
+       const int nrb = g2 ? NR2 : NR13;
+       const char* wsrc = (g2 ? W2 : W13) + ((size_t)e * nrb + rb) * 64 * C::WB;
+@@ -3265,11 +3309,11 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
+         }
+         asm volatile("fence.proxy.async.global;" ::: "memory");
+       }
+-      for (int kc = 0; kc < 64; ++kc, ++i) {
+-        if (kc && i >= NSTG) { flush(); mbar_wait(&empty[st], ph ^ 1); }
++      for (int kc = k0; kc < k1; ++kc, ++i) {
++        if (kc != k0 && i >= NSTG) { flush(); mbar_wait(&empty[st], ph ^ 1); }
+         if ((flags & 32) && np == 2) flush();  // n19 probe: at most 2 stages before the wait
+         char* sb = smem + st * STRIDE;
+-        if (!kc) s_item[st] = item;
++        if (kc == k0) s_item[st] = item;
+         mbar_expect_tx(&full[st], bytes);
+         if (np >= 0) { po = off; pm = mi; ++np; }  // np - 1 == st == kc while the ring's first pass fills
+         else tma2d(sb, map, kc * 64, off, &full[st]);
+@@ -3297,16 +3341,18 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
+     }
+ #endif
+     if (item < 0) break;
+-    int g2, a, p, rb;
+-    decode(item, g2, a, p, rb);
++    int g2, a, p, rb, h, j;
++    decode(item, g2, a, p, rb, h, j);
+     const int e = s_e[a], PS = s_big[a] ? 64 : 32;
+     const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
+     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
+     __nv_bfloat16* out = g2 ? Y : Inter;
++    float* pt = h < 0 ? nullptr : part + (size_t)j * npt * 16384;
+ #if TWM_TL
+     if (tl && tid == 0 && ntl < 20) tl[4 + 3 * ntl] = g2 | (min(p, 15) << 4) | (nv << 8) | (e << 16);  // n15 descriptor
+ #endif
+-#define TQI(NN) tq_item<NN, NSTG, SA>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2)
++#define TQI(NN) tq_item<NN, NSTG, SA>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
++                                      h < 0 ? 64 : 64 >> kq, pt, tick + j, &s_flag, h, npt)
+     switch ((nv + 7) >> 3) {
+       case 1: TQI(8); break;
+       case 2: TQI(16); break;
+@@ -3329,10 +3375,17 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
+   }
+ }
+ 
++// n21: clamp the K-split item count to the partial buffer (16384 floats per part) and the ticket words
++static int64_t twq_flags(int64_t f, int64_t npart, int64_t ntk) {
++  const int64_t kq = (f >> 16) & 3, ns = (f >> 8) & 255;
++  if (!kq || !ns) return f & ~((int64_t)0x3FF00);
++  const int64_t m = std::min<int64_t>(ns, std::min<int64_t>(npart / (16384 << kq), ntk));
++  return (f & ~((int64_t)0x3FF00)) | (m << 8) | (m ? kq << 16 : 0);
++}
+ template <bool SA>
+ static int64_t twq_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
+                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
+-                      torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, int64_t flags) {
++                      torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, torch::Tensor tk_, int64_t flags) {
+   constexpr int NSTG = 8;
+   constexpr int SMEM = NSTG * TWC<4, true, 8>::STG + 1024;
+   static int grid = 0;
+@@ -3350,12 +3403,12 @@ static int64_t twq_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
+       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
+       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
+       (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(),
+-      (float*)part_.data_ptr(), (int)flags);
++      (float*)part_.data_ptr(), (int)twq_flags(flags, part_.numel(), tk_.numel()), (int*)tk_.data_ptr());
+ }
+ int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
+                        torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
+-                       torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, int64_t flags) {
+-#define TWQA w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, part_, flags
++                       torch::Tensor inter_, torch::Tensor y_, torch::Tensor part_, torch::Tensor tk_, int64_t flags) {
++#define TWQA w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, part_, tk_, flags
+   return (g_sa & 1) ? twq_go<true>(TWQA) : twq_go<false>(TWQA);
+ #undef TWQA
+ }
+@@ -4854,7 +4907,7 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
+         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, torch::Tensor, torch::Tensor, "
+         "torch::Tensor, double);"
+         "int64_t moe_twq_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+-        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
++        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);"
+         "int64_t moe_stream_launch(torch::Tensor, torch::Tensor, int64_t, int64_t);"
+         "int64_t moe_set_pdl(int64_t, int64_t);"
+         "int64_t moe_set_blk(int64_t);"
+@@ -5095,6 +5148,8 @@ TWM_HOT_M = {}  # s17: per-M override
+ TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline,
+ #   bit 3 = pass-minor item order; use 4 for plain on)
+ TWQ_M = {}  # s17: per-M override, e.g. {128: 4} (proxy: v16 -6.5 proxy-us, v32 +4.6)
++TWQ_SPLIT = (0, 0)  # n21: moe_twq K-split tail (items, log2 parts): the last ~items gemm2 items (from an expert boundary)
++TWQ_SPLIT_M = {}  #   run as 2^parts K slices, FP32 partials summed in part order by the last one (per-M override)
+ TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
+ TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
+ _CFGS = (10, 11, 22, 118)
+@@ -5472,9 +5531,15 @@ def kernel_fn(data, st):
+             if TWQ_M.get(M, TWQ):
+                 q = TWQ_M.get(M, TWQ)
+                 if RG: q &= ~16  # n19 WBW needs a primary that does not write meta / sroutes (moe_gather, not moe_routegather)
++                qs, qk = TWQ_SPLIT_M.get(M, TWQ_SPLIT)
++                if qs and qk:  # n21: K-split tail (qs items, 2^qk parts each); also settable in the flags themselves:
++                    q = (q & ~0x3FF00) | (min(qs, 255) << 8) | (qk << 16)  # q | items << 8 | log2 parts << 16
++                qs, qk = (q >> 8) & 255, (q >> 16) & 3
++                if qs and qk and not DIAG_TL:
++                    part = torch.empty((qs << qk) * 16384, dtype=torch.float32, device=dev)
+                 if DIAG_TL and TWM_ORDER_M.get(M, TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
+                 lib.moe_twq_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["lut"], xg,
+-                                   meta, sroutes, inter, y, part, q)
++                                   meta, sroutes, inter, y, part, st["tk"], q)
+             elif TWF_MIX and "w2b2" in st:
+                 tl = TWM_TAIL_M.get(M, TWM_TAIL) + 4096 * TWM_TAIL13_M.get(M, TWM_TAIL13) + (TWM_ORDER_M.get(M, TWM_ORDER) << 24)
+                 tl += (1 << 23) if TWM_HOT_M.get(M, TWM_HOT) else 0

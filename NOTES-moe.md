@@ -1321,3 +1321,22 @@
   rotl(q,10/13), as o3 already does with *16648) -- the s17 search minimized instruction COUNT, not ALU-pipe load.
 - Main: TK2F_S6 = 0 (code kept; kernels compiled only when TK2F_S6 or DIAG via #define TK2F_S6K). Layer port script
   tools/n20/patch_layer_s6.py (applies to r-layer 9937f2e moe_src.py, layer test 13/13) NOT handed off: it loses.
+
+## Night4 session 21 (2026-10-27 05:13Z - ; moe checks 12/20 used today) -- moe_twq K-split tail (TWQ_SPLIT)
+- Why: the layer runs moe_twq at v16 sliding (H200 tuner: twq -11 us vs twm), and twq had NO K-split tail; the H200
+  timeline (n15) shows ~22 us drain loss at v16 for twq (items 36-50 us, 3.3-3.6 waves). twm's split (s66) was -3.5 H200 us.
+- Built (18dfa4c + flags form): twq flags | items << 8 | log2(parts) << 16 (python TWQ_SPLIT / TWQ_SPLIT_M = (items, log2 parts),
+  or directly in the TWQ_M / layer "twq" value). The last ~items gemm2 items, from an expert boundary (token results must not
+  depend on their pass), run as 2^k K slices (64 >> k k-chunks). New combine: every part __stcg's its FP32 partial, threadfence,
+  ticket (atomicAdd tick + j, st["tk"], reset by the last); the LAST sums the parts in part order 0..P-1 (deterministic, no spin)
+  and runs the epilogue. Partials 16384 floats per part (python allocates items << k * 16384). C++ twq_flags() clamps items to
+  the buffers. tq_item takes nkc / part / tick / s_flag / h / np.
+- Correctness: tools/n21/ks_t.py 0/78 bad (random + skewed bs33-257, layer v16/v32 routings; (66,1) (33,2) (66,2); eager +
+  3 replays bitwise equal = deterministic; vs unsplit <= 1 bf16 ulp). bench test 15/15. Flags form == TWQ_SPLIT form bitwise.
+- H100 moe-only, layer routings (tools/s22/proxy.py, 3 rounds, us): v16 q4 220.6 | halves s16 215.5 s24 213.3 s33 212.9 s50 213.7
+  s66 213.3 s80 214.2 s100 216.6 s132 224.3 | quarters s16 217.0 s24 217.3 s33 217.3 s66 219.7 s100 223.8 (quarters lose to
+  halves: per-item fixed cost). v32 (twq, not what the layer runs there) q4 285.0 | s50h 282.4, others ~tie.
+- H100 IN-LAYER (copy of r-layer aa08453 + tools/n21/patch_layer_twq.py, TUNE {}, twq forced at T=128, 4 rounds x seeds 7/11/99):
+  sliding twq4 309.0 | s24h 304.8 | s33h 303.9 | s66h 309.0 (per seed s33h +1.2/-7.3/-9.1); full 427.1 | 427.2 | 432.8 | 428.8
+  (per seed +2.6/+9.9/+4.7). Correct (scored verify 16 x 3 seeds both layer types, 0 bad). Full loses on the H100: unexplained
+  (same routings; the full layer's context differs). => TUNE candidate per (T, sliding), never a default without the H200.

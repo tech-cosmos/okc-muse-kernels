@@ -5532,9 +5532,11 @@ def kernel_fn(data, st):
                 q = TWQ_M.get(M, TWQ)
                 if RG: q &= ~16  # n19 WBW needs a primary that does not write meta / sroutes (moe_gather, not moe_routegather)
                 qs, qk = TWQ_SPLIT_M.get(M, TWQ_SPLIT)
-                if qs and qk:  # n21: K-split tail (qs items, 2^qk parts each)
-                    q |= (min(qs, 255) << 8) | (qk << 16)
-                    if not DIAG_TL: part = torch.empty((min(qs, 255) << qk) * 16384, dtype=torch.float32, device=dev)
+                if qs and qk:  # n21: K-split tail (qs items, 2^qk parts each); also settable in the flags themselves:
+                    q = (q & ~0x3FF00) | (min(qs, 255) << 8) | (qk << 16)  # q | items << 8 | log2 parts << 16
+                qs, qk = (q >> 8) & 255, (q >> 16) & 3
+                if qs and qk and not DIAG_TL:
+                    part = torch.empty((qs << qk) * 16384, dtype=torch.float32, device=dev)
                 if DIAG_TL and TWM_ORDER_M.get(M, TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
                 lib.moe_twq_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["lut"], xg,
                                    meta, sroutes, inter, y, part, st["tk"], q)
