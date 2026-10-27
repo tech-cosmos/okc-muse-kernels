@@ -1900,3 +1900,27 @@
   it needs < ~1 instr/weight AND > 50% issue efficiency; INT8/FP8 tensor paths fail on the 16-wide NVFP4 block scale (k32 MMAs
   span two scale blocks) and BF16 x exactness. Nothing new to build.
 - Attention budget 10-27: checks 13/20, scored 2/10 (unused; main = checked tie 76983f6b, no resubmit).
+
+## Night4 session 47 (2026-10-27 16:59Z - ~17:35Z) -- LANE DECISION 5: g30 structure at m16/m32 ("g34") built; H100 beats g24 at m32; 0 checks
+- Lead 16:45Z: build g30 (12-bit W decoded into wgmma A registers, swap-AB) at m32/m16 for the d32/d16 pooler + unpool.
+- muse_moe_w4a16/tools/s47/g34.cu (+ helpers.inc = g30_src.cu's helpers): CTA = 64 W rows x k-stage range [k0,k1) (uneven split
+  S = gridDim.y), x TMA box {64 k, MT rows} SW128, wgmma m64n{32,16}k16 RS, NWG consumer WGs on stages i = wg mod NWG + W / x
+  producer warps (g30 roles), smem WG reduce, out FP32 [MT][N]: S1 plain stores, S2 atomicAdd into a zeroed out (0+a+b is
+  order-independent: deterministic; S3 is not). Escapes = g30's A-half patch with candidates filtered to the CTA's k range and
+  its WG ((stage-k0) % NWG). SAME PACK as g30 (layer._pack30 + _compress hdr): no new prepare code.
+- Correct: rel err 1.66e-3 (= cuBLAS's) on the layer's real pooler/unpooler; tools/s47/g34exact.py (one-hot x at all 3607 / 2212
+  escape columns + random): 0 mismatches, S1 + S2, m16 + m32.
+- H100, us = graph(3 us PDL pred + kernel) - graph(pred), cold L2, median of 3-5 reps (g34.py; g24 via r-proj dev/s61/g24.py
+  with the layer's T=16/32 cfgs, same method). NOW = no W loads (consumer-only = the H200 proxy, g24 is consumer-bound there):
+  | shape | g24 layer cfg full / NOW | g34 NWG2 NS/NW10 full / NOW | **g34 NWG4 NS/NW20 full / NOW** | cuBLAS |
+  | pool m32 (S2) | 21.0 / 16.2 | 19.1 / 14.6 | **18.9 / 12.2** | 26-27 |
+  | unp m32 (S1)  | 20.5 / 15.7 | 19.1 / 14.2 | **18.9 / 12.3** | 25 |
+  | pool m16 (S2) | 18.5 / 10.9 | 19.0 / 14.0 | 18.4 / 11.3 (NW16: 19.0 / 11.1) | 26 |
+  | unp m16 (S1)  | 19.0 / 10.8 | 18.9 / 13.0 | 18.1 / 11.2 (NW16: 18.6 / 10.9) | 24.5 |
+  => m32: -2.1 / -1.6 us full, -4.0 / -3.4 us consumer-only per GEMM (d32 has both: est. H200 -4..7 us per d32 layer call).
+  m16: tie (full -0.1..-0.9, NOW +0.1..0.4): not worth porting at T=16 unless the in-layer A/B says otherwise.
+- Dead knobs: NWG2 deeper rings (NW16/24: 2 CTAs/SM lost, unp S2 = 2 waves, +2..5 us); S3 (+1.5..2, nondeterministic);
+  pool S1 (64 CTAs: 27 us); NWG6 (m16 23.6 full / 13.8 NOW; m32 does not fit smem).
+- Integration (for layer/proj): `g34_gemm(x[MT,K] bf16, wp=_pack30, hdr, out fp32 [MT,N], scale, S, pdl)`; pooler S2 needs a
+  zeroed out (the g24 EZ/ZN chain already provides one: o's ZN zeroes the pooler's out), unpool S1 needs none. Build flags
+  -DMT=32 (one build per MT). PDL like g30: W streams before griddepcontrol.wait, x + out after.

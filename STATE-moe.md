@@ -1,5 +1,12 @@
 # STATE-moe
 
+## LANE since 2026-10-27 16:45Z (lead LANE DECISION 5): g30 structure at m16/m32 for the d16/d32 pooler + unpool
+- s47 built **g34** (muse_moe_w4a16/tools/s47/g34.cu, harness g34.py, exactness g34exact.py; NOTES s47). Bit-exact, same pack as
+  layer g30. H100 vs g24 layer cfgs (full / consumer-only NOW, us): m32 pool 18.9/12.2 vs 21.0/16.2, unp 18.9/12.3 vs 20.5/15.7;
+  m16 tie. Default NWG 4, NS/NW 20, pool S2 (atomicAdd into zeroed FP32 out, deterministic), unp S1.
+- NEXT: in-layer A/B at d32 (TUNE option g34:pooler/g34:unpool at T=32 in a /tmp copy of r-layer, ab_flag rounds x seeds), then
+  hand to layer/proj for a check. Ideas: NWG4 with 2 row groups per CTA at unp (fewer x ingests), m16 only if in-layer wins.
+
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
 first; layer owns the full kernels (_gd_full d16/d32, _gw_verify v16/v32): don't work on those. Winners -> COORD Handoffs
@@ -93,7 +100,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   Decode full at 92-95% of it (headroom d32<=9, d16<=7 us). Verify full consumer-bound (all-L2 v32 170 / v16 93 vs main 188/102,
   floors 157/80): headroom only via a faster _gw_verify consumer. Full kernels at perfect overlap = ~-4% attention score max.
 - Checks used 2026-10-27: 13/20, scored 2/10.
-- s41 (dev/s41 xr, resident-x smem + FP32 red out): superseded by s42 (its timings were with serialized wgmma).
 - s42 (dev/s42, NOTES s42): s41's xr numbers were invalid (wgmma serialized, C7520; its "stream-only" diag had dead MMAs that
   ptxas dropped). New xr3 = x in REGISTERS (RS A, 128 regs) + W smem B + cluster-8 k-split PUSH reduce (st.async into owner's
   double-buffered recv): unp m128 H100 34.0 vs cuBLAS 28.6 us (incl 4.9 harness), correct + deterministic; stream-only 31.3.
@@ -103,10 +109,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   31.7 vs cuBLAS 27.6: no-load floor 25.5, x ingest 2 MB/CTA binds, CL2 multicast no help). g33 T=128 R2 k-split CTA pair with
   DSMEM push reduce: +3.5..4 us over no-reduce (28.5 vs cuBLAS 25.7) DEAD on H100. g30 T=128 is W-HBM-bound on the H100 (W
   stream+decode alone 20.9 us): H100 can't rank g30 forms; on the H200 x ingest may bind (R2 forms). Told layer (COORD).
-- s46: d1 full 2-warp tile split dead on paper (s33 SM saturation). 0 checks.
 - s45 (NOTES s45): re-audit, no untested lever on any attention shape; lane request to lead (COORD). 0 checks.
-- s44 (NOTES s44): v1 full softmax-reference probes all dead: constant reference (qk_scale_factor 5.47 -> scores span
-  ~63 log2 units), FIXL in-loop reference +0.35, L2D 2-D row sums +1.7 us H100. fix 0 = +1.2 us (max chain ~0.12 us/tile).
 ## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)
 - Floors (pt trip + 20.5 MB random 128-B rows, all in flight, incl. launch): ~8.0 us d1 and v1; dense 7.4.
 - Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.
@@ -130,15 +133,11 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - v16 sl merge: CLOSED s34 (cl S2 +1.7 us H100 3/3; 2 CTAs/SM impossible by registers; 4-clusters 30 < 32; S3 loses on
   arithmetic). d32 sl combine <= 0.3%: not worth a build. No open attention item >= 1% left in this list.
 
-## moe sessions n3-n30: see NOTES-moe.md (moe lane closed by lead 2026-10-27 09:45Z, LANE DECISION 2).
 
-## Ranked ideas (moe lane, closed 09:45Z): items -9..3 of s10-s27 (hot-expert kernel, twm drain, tk2f phase-2, GS16)
-are in git history of this file (r-moe 7e64a1f STATE-moe.md) and NOTES s10-s27. Open now: xr3 (s42 line above).
 
 ## Dead ends (older ones: NOTES-moe.md)
 - (s26) L2 prefetch of the unpool W from twm (spread over its main phase, evict_last): v32 +5..10 H100 us, unpool -1.
 - (s27) RSPLIT: weighted tk2f gemm13 split favouring CTAs that start early during pr1: +1.4..10 us (any imbalance costs).
-- (s14) tw_item next-stage weight/scale LDS prefetch: twm v32 +8, twf +9.5 us (H100). TWM_TAIL13; TWM_TAIL + merge order.
 - (s12, H200 diag on layer routings; REOPENED n4s5: its weighted split was slow + count split imbalanced) GS16 in any form (old, merged one-body tk2h, split weights 2-6): +4..8 us at d16/d32;
   per-segment gemm13->gemm2 counters (PSC): 0; deeper tk2f rings: +1..5; DYN: +3..10; NC16: +1..2. Weighted static
   split (TK2W): H100 worse, and the H200 timeline shows balanced CTAs (nothing to fix).
