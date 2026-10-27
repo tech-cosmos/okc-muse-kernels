@@ -69,6 +69,15 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 15 (01:06Z-): FIRST H200 big-M TIMELINE (check 5bbb03ca, NOTES n15): v16 twm co-bound (busy/G 136 vs ~127 bytes),
+  losses = drain ~22 us (items 36-50 us) + first wave at 2.7 TB/s; v32 consumer-bound in aggregate (hot passes, N16-32 items),
+  first 35 us at ~1 TB/s without hot; hot32 -7. twq4 LOSES on the H200 moe-only at v16 (+2.2). BUG fixed: twm launch clamped
+  AUTO split 1022/1023 to 66 (layer's moe_src too: its 'twf_split 1022' = 66). H100: s66 (+hot32) v32 -8..10, v16 -2..4;
+  real AUTO worse than 66; 66 = sweep optimum. HOT_TWG (reduced twm grid with hot) dead. H200 A/B of s66/a22/a23/t32 with
+  hot32: check 609ab981: H200 timelines s66 v16 -3.5, v32 -7.8 us (a22 -2.1/-7.2); MEANs lost (log_tail is BYTE-limited:
+  keep DIAG output <= ~60 short lines). Layer asked to make twf_split 66 default at T=128/256.
+  NEXT: first-wave mixing (v16 first 40 us at 2.7 TB/s; v32 w/o hot 1 TB/s) or cheaper N16-N32 items; see NOTES n15 end.
+
 ## Night4 session 14 (00:32-01:15Z): TK2F_SQ = 1 ON MAIN (f0c16e9): tk2f single-copy 18 KB stages (prepare _sq_pack ->
   st w13sq/w2sq, one cp.async.bulk per stage, PF 512, cfg + 10000000; bitwise 228/228). H200 DIAG df253e4c: d32 -1.5,
   d16 -0.55, d1/v1 0 us (repeatable to 0.1). KPS 4 SQ (36 KB stages): d1/v1 +1, dead. Handoff: tools/n14/sq_layer.md.

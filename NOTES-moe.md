@@ -1164,3 +1164,47 @@
   more but d1/v1 +1: dead (4th time KPS 4 fails in the real kernel). Layer weight: ~-1.5 x .056 + -0.55 x .072 = ~0.12%.
 - Handoff to layer posted (COORD): port = _sq_pack in prepare + SQ template bit in tk2f_produce + PF 512 at the producer
   call site + the w13sq/w2sq pointers at its 3 moe_tk2f_launch call sites (T = 1, 8, 16/32). tools/n14/sq_layer.md.
+
+## Night4 session 15 (2026-10-27 01:06Z - ; moe checks 6/20 used today) -- first H200 big-M timeline; AUTO-split clamp bug
+- DIAG timeline tool made generic (submission.py `_diag_tl` + `DIAG_TLV`; TWM_TL builds store a per-item descriptor
+  g2 | class << 1 | Khalf << 3 | pass << 4 | nv << 8 | e << 16 after decode, stamps now at part + 66*32768 floats, past the
+  K-split partials). Build: `sed 's/^DIAG = 0$/DIAG = 1/; s/^#define TWM_TL 0$/#define TWM_TL 1/; s/^DIAG_TL = () /DIAG_TL = (1,) /'`.
+  Summaries: /tmp/n15/an.py <log> (copy in tools/n15/an.py). ~110 log lines: fits the judge's log_tail.
+- H200 check 5bbb03ca (a2b0634 + DIAG, 2.215x test run, never submit). moe-only, layer routings, cold L2, MEAN 5 seeds:
+    v16 twm (off) 175.7 | twq4 177.9 (twq LOSES on the H200 moe-only, +2.2) | v32 off 223.7 | hot32 216.7 (-7.0)
+  Timelines (means over 5 seeds, us from first CTA start):
+    v16 twm:  exit min/med/max 120.5/140.2/157.9, busy/G 135.7, loss (= last exit - start - busy/G) 21.9, last gemm13 end 117.9
+    v16 twq4: 125.0/144.3/162.2, busy/G 139.3, loss 22.5
+    v32 twm:  165.9/186.7/203.2, busy/G 181.2, loss 21.7
+    v32 hot32 (twm CTAs only; 32 SMs on moe_hot until ~155-160, then the last twm CTAs start): 158.8/172.2/198.8
+  HBM rate (twm first-pass bytes only), TB/s per 20 us:
+    v16 twm   2.5 2.9 3.7 3.8 3.6 3.6 2.6 1.3       (first wave = heaviest experts: big RT2 N40-56 + N16/N32 items, consumer-bound)
+    v32 twm   0.9 1.4 3.2 3.4 3.8 3.8 2.4 2.9 3.4 1.5 0.2   (first ~35 us: ALL CTAs on the hot experts' 64-token RT2 passes)
+    v32 hot32 1.7 2.1 2.5 2.8 2.9 2.9 2.7 3.1 2.3 0.9  (+ ~0.37 TB/s of moe_hot's own bytes: twm on 100 SMs is consumer-limited)
+  Item times (us, H200, steady): gemm13 RT4 N8 37.6, N16 44, N24 47, N32 50; gemm2 N8 35.7, N16 39.5, N32 48; big RT2 N40-64
+  34-37 (0.56 MB: ~16 GB/s/SM, consumer-bound); 2nd (L2) passes 27-31. Peak sustained 3.8-4.0 TB/s mid-kernel.
+  Readings: (1) v16 is co-bound (busy/G 136 vs bytes ~127 us at 4.0); its losses are the drain (~22 us: items 36-50 us, 3.3-3.6
+  waves) and the first wave at ~2.7 TB/s (~10 us). (2) v32 is consumer-throughput-bound in aggregate (N16-N32 + hot passes);
+  hot32 helps 7 us but leaves twm on 100 SMs at ~2.7 TB/s. (3) the drain is ~20 us on EVERY variant.
+- HOT_TWG (new python option, off): with moe_hot, moe_twm grid = SMs - k (no late-starting twm CTAs on freed hot SMs).
+  H100 layer v32 (tools/n15/twg_ab.py, 2 rounds, bitwise): off 241.7 | h32 227.4 | h32g32 231.0 | h32g16 227.7 | h24g24 247.6 |
+  h40g40 232.4 => dead (late CTAs help).
+- BUG FOUND (twm launch): `ns = min(ns, part.numel() / 32768)` clamped TWF_SPLIT 1022/1023 (AUTO) to 66 whenever it was NOT
+  combined with order/hot bits (the negative encoding bypasses the clamp). So every plain "a22/a23" / twf_split 1022 number
+  since s20 (moe proxy, layer tuner) was a fixed 66-item K split. Fixed in twm only (twf has no AUTO). The layer's moe_src.py
+  has the same clamp: its {'twf_split': 1022} = {'twf_split': 66}; {'twf_split': 1022, 'twm_order': 76} = real AUTO.
+- H100 with the fix (layer routings, hot32 at 256, NE on, us): v16 h32 197.6 | s66 193.8 | a22 195.8 | a23 196.9 | t32 195.1;
+  v32 231.4 | 221.5 | 225.2 | 228.2 | 226.5. => the fixed 66 split beats the real AUTO; s66 + hot32 at v32 -10 H100 us.
+  Timelines (H100): v16 loss 26.6 -> 16.9 (s66), v32 67.4 -> 56.8. (The layer's H200 tuner already picks 66 at T=256:
+  v103 log sliding 344.3 -> 340.6, full 535.8 -> 529.5.)
+- Split-count sweep (H100, tools/n15/split_ab.py, hot32 at 256, 2 rounds): v32 h32 227.7 | s33 222.6 | s66 219.3 | s100 220.7 |
+  s132 223.8 | s200 224.3; v16 195.2 | 193.8 | 193.0 | 194.1 | 193.7 | 194.0 => 66 is the optimum (v32 -8.4, v16 -2.2).
+- H200 check 609ab981 (6147b67 + DIAG, 2.190x test run, never submit): the diag12 MEAN lines were LOST again: log_tail is
+  BYTE-limited (only the last 95 lines survived: the long "TB/s per 5us" / "kinds" lines). Next DIAG: <= ~60 short lines, or
+  print MEANs LAST. The diagtl summaries survived (5 seeds, twm CTAs, makespan = last exit, us):
+    v16 h32 160.1 | h32s66 156.6 (-3.5) | h32a22 158.0 (-2.1); loss 23.1 / 16.9 / 20.7
+    v32 h32 198.2 | h32s66 190.4 (-7.8) | h32a22 191.0 (-7.2); loss 61.7 / 51.7 / 53.9 (twm-only view, hot SMs counted idle)
+  => the fixed 66-item K split is the drain fix on the H200 too, at BOTH T=128 and T=256 (moe-only). Told layer.
+- Big-M levers left after this (all need new work): first-wave HBM under-use (v16 ~10 us at 2.7 TB/s; v32 without hot ~25 us
+  at ~1 TB/s), v32 aggregate consumer bound (N16-N32 items 44-50 us vs N8 37.6 for the same bytes; dq + MMA do not overlap,
+  s18), and the remaining ~17 us drain at v16 (halves only shorten the last items to ~half).
