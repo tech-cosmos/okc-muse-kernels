@@ -69,6 +69,12 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 20 (04:33-05:35Z): S6 = 6-bit block-scale codes in the tk2f/tk2h SQ stages (lossless, -2.8% bytes, bitwise) DEAD
+  on the H200 (checks 13b528a8, c6b296a3): d16 +0.8, d32 +2.7 (tk2h +1.2), v1 -0.5 us; S6P (aligned starts) = S6. H100 said -2 us.
+  Wins only on byte-bound single-group rows: the H200 consumer is ALU-pipe-bound at d16/d32 (S6 moved IMAD -> LOP3 + SHF).
+  NEXT idea from it: shift dq work from the ALU pipe to the FMA pipe (IMAD-based shifts, like o3's *16648) -- untested.
+  Checks today 11/20. TK2F_S6 = 0 on main (code kept).
+
 ## Night4 session 19 (03:27-04:45Z): moe_twq WBW (weights before griddepcontrol.wait, flags & 16, valid only with RG 0) DEAD:
   bitwise, but H100 v16 +2.0 / H200 check 9da19e71 v16 +2.5, v32 +2 us (2 stages: +1). Early weight traffic slows the
   gather -> x path (3rd time: RFLAG, PF2, WBW): no more pre-expert prefetch ideas. Checks today 9/20.
@@ -92,16 +98,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   still loses (68.8+ vs 65.3). Port note tools/n16/hsq_layer.md, posted to layer. Checks today 6/20.
   NEXT (unchanged big levers, NOTES n15 end): v16/v32 first-wave HBM under-use; big-M is dq-bound (s22 floor ~185 us v32).
 
-## Night4 session 15 (01:06Z-): FIRST H200 big-M TIMELINE (check 5bbb03ca, NOTES n15): v16 twm co-bound (busy/G 136 vs ~127 bytes),
-  losses = drain ~22 us (items 36-50 us) + first wave at 2.7 TB/s; v32 consumer-bound in aggregate (hot passes, N16-32 items),
-  first 35 us at ~1 TB/s without hot; hot32 -7. twq4 LOSES on the H200 moe-only at v16 (+2.2). BUG fixed: twm launch clamped
-  AUTO split 1022/1023 to 66 (layer's moe_src too: its 'twf_split 1022' = 66). H100: s66 (+hot32) v32 -8..10, v16 -2..4;
-  real AUTO worse than 66; 66 = sweep optimum. HOT_TWG (reduced twm grid with hot) dead. H200 A/B of s66/a22/a23/t32 with
-  hot32: check 609ab981: H200 timelines s66 v16 -3.5, v32 -7.8 us (a22 -2.1/-7.2); MEANs lost (log_tail is BYTE-limited:
-  keep DIAG output <= ~60 short lines). Layer asked to make twf_split 66 default at T=128/256.
-  NEXT: first-wave mixing (v16 first 40 us at 2.7 TB/s; v32 w/o hot 1 TB/s) or cheaper N16-N32 items; see NOTES n15 end.
-
-## Older sessions (n3-n14, s6-s7): see NOTES-moe.md (L2H run-time modes, TWM_PB48, BAL, tk2h PF4 are all there).
+## Older sessions (n3-n15, s6-s7): see NOTES-moe.md (L2H run-time modes, TWM_PB48, BAL, tk2h PF4 are all there).
 
 ## Ranked ideas
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves

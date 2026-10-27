@@ -1295,3 +1295,29 @@
     v16 q4 186.8 / q4b 186.3 | q20 189.0 / q20b 189.1 | q52 187.5;   v32 q4 246.5 / 246.8 | q20 248.7 / 248.1 | q52 246.8
   => +2.5 us (v16), +2 (v32): early weight traffic slows the gather -> x critical path on the H200 too. DEAD (code kept, off).
   Third confirmation (RFLAG s27, PF2 n18, WBW n19): HBM is never idle enough before the experts for prefetch to pay.
+
+## Night4 session 20 (2026-10-27 04:33Z - ~05:35Z; moe checks 11/20 used today) -- S6: 6-bit block-scale codes, lossless: DEAD on the H200
+- Idea: e2m1 codes are uniform random (4.0 bits, incompressible) but block scales are log2 ~ N(7, 0.4) clamped to [8, 448]:
+  measured over 32 local experts, every e4m3 scale byte is in 93..126 (clamp floor 8.0 = byte 80). Scales are 128 of the
+  1152 B per (warp, k chunk) of a tk2f stage (11%). 5 bits does not fit globally (34 distinct codes); per-tile-pair windows
+  would (max range 31) but need escapes. 6 bits with base 80 fits ALL possible scales of this generator, and base 80 makes
+  (c + 80) * 16 + 0x7700 = c * 16 | 0x7C00 (bits 4-9 of 0x7C00 are 0), so decode = PRMT + LOP3 (was PRMT + IMAD).
+- S6 (PF & 1024, cfg + 20000000, prepare _s6_pack, st w13s6/w2s6; fallback to 8-bit SQ if any scale byte outside
+  [80, 0x7E]): per lane per SQ stage (KPS 2) one nibble word (8 codes, bits 4k) + one u16 of high bits (bits 2k); stage
+  17920 vs 18432 B (-2.8%). Producer/consumer (tk2f_consume, tk2g_row/tk2h) stage stride SB6. s6dec() in the source.
+  Bitwise = SQ (tools/n20/s6_t.py 104/104 incl. tk2h W3; fb_t.py fallback ok); bench test 15/15; ptxas 162 -> 165 regs, no spill.
+- H100 moe-only, layer routings (tools/n20/s6_ab.py, DRAM-bound): tk2f d16 -1.7, d32 -2.4, v1 -2.0, d1 -0.1; tk2h W3 d32 -1.7 us.
+- H200 check 13b528a8 (4a87466 + DIAG, 2.208x test run, never submit), MEAN 5 seeds, us (b = repeat):
+    d1 sq 30.2/30.1 s6 30.3/30.4 | d16 sq 65.7/65.4 s6 66.4/66.4 | d32 sq 86.1/86.0 s6 89.0/89.0, tk2h hsq 82.4 h6 84.0 |
+    v1 sq 64.7/64.7 s6 63.9/63.9
+- S6P (DIAG only, PF & 2048, cfg + 40000000): S6 images at the 18432-B stride (aligned starts, 17920-B copies) to test
+  "misaligned bulk copies": H200 check c6b296a3 (6247aa1 + DIAG, 2.211x): s6p = s6 everywhere (d32 88.7 vs sq 86.0,
+  d16 66.7 vs 65.9, v1 64.0 vs 64.6). Not alignment.
+- Reading: S6 WINS where rows are single-group/byte-bound (d16 seed 99 with no expert > 8 tokens: 80.4 vs 82.7; v1 -0.5..0.8)
+  and LOSES wherever multi-group experts make the consumer the limit (d16 other seeds +1.4..2, d32 +2.7). Hypothesis: the
+  H200 decode consumer is integer-ALU-pipe-bound (dq = LOP3/SHF); S6 moves the scale decode from IMAD (FMA pipe) to LOP3
+  (ALU pipe) and adds 5 SHF per stage. => any byte saving that adds ALU work in the consumer loses at d16/d32.
+  Corollary worth a test (not done): move dq work FROM the ALU pipe TO the FMA pipe (IMAD.SHL / IMAD-based shifts for
+  rotl(q,10/13), as o3 already does with *16648) -- the s17 search minimized instruction COUNT, not ALU-pipe load.
+- Main: TK2F_S6 = 0 (code kept; kernels compiled only when TK2F_S6 or DIAG via #define TK2F_S6K). Layer port script
+  tools/n20/patch_layer_s6.py (applies to r-layer 9937f2e moe_src.py, layer test 13/13) NOT handed off: it loses.

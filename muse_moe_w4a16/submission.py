@@ -99,6 +99,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #ifndef TK2G_PAR
 #define TK2G_PAR 1       // n4s5: GS16 weighted split bounds by warp 0 (tk2g_bound) instead of every thread (tk2g_split)
 #endif
+#define TK2F_S6K 0       // n20: build the S6 (6-bit scale code) tk2f kernels (_lib sets it when TK2F_S6 or DIAG)
 #define TK2H_P4 0        // n6: build only the SA tk2h PF4 kernels (cfg 1x3x004 GS8 / 1x4w004 GS16) without TK2_EXP: layer tuner use
 #define TK2H_REG 1       // n18: tk2h keeps each phase's X/Out/gs pointers in registers (H100: one LDC stall per segment start)
 #define TK2F_SQRT 0      // n18: run-time L2 hint modes (per phase) on SQ stages (PF 576/580; DIAG builds)
@@ -4572,7 +4573,7 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
     (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
     cnt_.data_ptr()
-#if TK2H_P4
+#if TK2H_P4 && TK2F_S6K
   if (cfg >= 40000000) {  // n20 S6P (DIAG builds): S6 stages read from 18432-byte-strided images (aligned starts)
     cfg -= 40000000;
     g_tk2f_l2h = TK2F_L2H;
@@ -4590,6 +4591,7 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
   cfg %= 1000000;
   const bool sa = cfg >= 100000;  // + 100000: SA (arithmetic scale decode; prepare() checked the scales)
   cfg %= 100000;
+#if TK2F_S6K
   if (s6) {  // n20: SA, compile-time L2H, default configs only (tk2f 204 / 84204, tk2h GS16 + PF4)
     TORCH_CHECK(sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0, "moe_tk2f S6: cfg ", cfg);
     if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 1536>(0, TK2F_ARGS0);
@@ -4600,6 +4602,9 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #endif
     TORCH_CHECK(false, "moe_tk2f S6: cfg ", cfg);
   }
+#else
+  TORCH_CHECK(!s6, "moe_tk2f S6: needs a TK2F_S6K build");
+#endif
   if (sq) {  // n14: + 10000000 = single-copy stages (w13_ / w2_ = prepare's _sq_pack buffers); SA, compile-time L2H only
 #if TK2F_SQ4
     if (sa && g_tk2f_l2h == TK2F_L2H && (cfg == 402 || cfg == 403 || cfg == 84402 || cfg == 84403)) {  // n14: 36 KB stages (_sq_pack nq 2)
@@ -4866,6 +4871,8 @@ def _lib():
         src = CUDA_SRC.replace("#define TK2F_L2H 0 ", f"#define TK2F_L2H {int(TK2F_L2H)} ")
         src = src.replace("#define NORM_EARLY 0 ", f"#define NORM_EARLY {int(NORM_EARLY)} ")
         src = src.replace("#define TWM_L2H 0 ", f"#define TWM_L2H {int(TWM_L2H)} ")
+        if TK2F_S6 or DIAG:  # n20
+            src = src.replace("#define TK2F_S6K 0 ", "#define TK2F_S6K 1 ")
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
             src = src.replace("#define TK2H_P4 0 ", "#define TK2H_P4 1 ").replace("#define TK2F_SQRT 0 ", "#define TK2F_SQRT 1 ")  # n16 (n14's TK2F_SQ4 / n13's TK2_EXP / TWM_PB48: done)
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
@@ -5108,7 +5115,7 @@ NORM_EARLY = 1  # n4s1: moe_norm after moe_twm waits per token on its experts' g
 TK2F_L2H = 4  # s21: tk2f L2 cache hints on the weight copies (see #define TK2F_L2H; compile time, 0 = off). Bitwise = 0. DRAM bytes at d16/d32 = floor (ncu). moe-only layer routings (H100, 5 seeds): d16 -4.9, d32 -2.8, v1 -1.1, d1 -0.5 us (mode 1: d16 -1.2); layer harness (tuner off) mode 1/4: v1 -4..-6, d16 -0.5/-3.5, d32 0
 TK2F_L2H2_RT = None  # n18: run-time L2 hint mode of tk2f's gemm2 rows (None = as gemm13); SQ needs a DIAG build (TK2F_SQRT)
 TK2F_L2H_RT = None  # n4s3: run-time tk2f L2 hint mode 0..4 (None = TK2F_L2H); passed as cfg + 1000000 * (mode + 1), so the H200 diag / the layer's tuner can pick it
-TK2F_S6 = 1  # n20: build the 6-bit scale-code SQ stage images when every scale byte is in [80, 0x7E] (lossless)
+TK2F_S6 = 0  # n20 (DEAD on the H200, checks 13b528a8 / c6b296a3: d16 +0.8, d32 +2.7, tk2h d32 +1.2, v1 -0.5 us): build the 6-bit scale-code SQ stage images when every scale byte is in [80, 0x7E] (lossless)
 TK2F_S6P = False  # n20 DIAG: run the padded S6 images (S6P: aligned stage starts, same copy bytes as S6)
 TK2F_S6P_DIAG = True  # n20: build the S6P images in DIAG builds
 TK2F_S6_ON = True  # n20: run tk2f / tk2h on them (DIAG A/B: False = the 8-bit SQ stages)
