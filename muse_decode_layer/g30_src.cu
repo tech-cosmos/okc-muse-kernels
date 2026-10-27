@@ -5,7 +5,7 @@
 // alternate 64-k stages, summed through smem; epilogue staged token-major, 16 B stores. Escapes (proj s91, r-proj
 // dev/s91/g30e.cu): an escape decodes to 2^-15; the thread owning (row, k) in its A fragment overwrites that BF16 half
 // with v = true / scale from the header [N][ESC] float2 (col bits, v; empty slot (0, 2^-15)): exact like a plain BF16
-// GEMM (prepare() checks v is exact in BF16). Candidates live in registers as keys col<<18|rr<<16|bits; one compare per stage. PDL: W streams before griddepcontrol.wait (weights only), x after it; dependents triggered at start.
+// GEMM (prepare() checks v is exact in BF16). Candidates live in registers as keys col<<18|rr<<16|bits, sorted once (proj s92); one compare per stage. PDL: W streams before griddepcontrol.wait (weights only), x after it; dependents triggered at start.
 // H100 cold-L2 unp 8192x4096 21.6 vs cuBLAS 25.7 us (layer s99, NS10/NW10).
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -20,6 +20,9 @@
 #endif
 #ifndef G30_NW
 #define G30_NW 10
+#endif
+#ifndef G30_PRE
+#define G30_PRE 1  // proj s94: consumers read + sort the escape header before griddepcontrol.wait
 #endif
 #ifndef G30_ESC
 #define G30_ESC 8
@@ -69,15 +72,6 @@ __device__ __forceinline__ void esc_patch(unsigned (&a)[16], unsigned key) {
 #pragma unroll
   for (int u = 0; u < 16; u++)
     if (u == idx) a[u] = __byte_perm(a[u], vb, sel);
-}
-template <int NC>
-__device__ __forceinline__ unsigned esc_pop(unsigned (&c)[NC]) {  // smallest key (= smallest col), removed; ~0u: none
-  unsigned m = c[0];
-#pragma unroll
-  for (int u = 1; u < NC; u++) m = min(m, c[u]);
-#pragma unroll
-  for (int u = 0; u < NC; u++) c[u] = c[u] == m ? ~0u : c[u];
-  return m;
 }
 template <int P>
 __device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel3) {
@@ -131,8 +125,13 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
     }
     return;
   }
+#if !G30_PRE
   asm volatile("griddepcontrol.wait;" ::: "memory");  // x (and out's memory) belong to the previous kernels
+#endif
   if (warp == 9) {
+#if G30_PRE
+    asm volatile("griddepcontrol.wait;" ::: "memory");  // x belongs to the previous kernels
+#endif
     if (lane == 0) {
       for (int i = 0; i < KS; i++) {
         const int st = i % G30_NS, ph = (i / G30_NS) & 1;
@@ -149,6 +148,7 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
   for (int j = 0; j < 64; j++) d[j] = 0.f;
 #if G30_ESC
   unsigned cand[2 * G30_ESC], nxt;
+#define G30_POP { nxt = cand[0]; _Pragma("unroll") for (int e = 0; e < 2 * G30_ESC - 1; e++) cand[e] = cand[e + 1]; cand[2 * G30_ESC - 1] = ~0u; }
   {
     const int q = t & 3;
 #pragma unroll
@@ -160,9 +160,21 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
         const bool mine = hv.y != 0x1p-15f && ((col >> 1) & 3) == q && ((col >> 6) & 1) == wg;
         cand[rr * G30_ESC + e] = mine ? ((unsigned)col << 18) | ((unsigned)rr << 16) | (__float_as_uint(hv.y) >> 16) : ~0u;
       }
-    nxt = esc_pop(cand);
+    // sort the candidates once (ascending key = ascending col): the per-stage pop is then a register shift, not a
+    // 16-way min + compare chain on the warpgroup's critical path (proj s92: unp T=128 -0.4 us, adversarial -1.5 us)
+#pragma unroll
+    for (int a_ = 0; a_ < 2 * G30_ESC; a_++)
+#pragma unroll
+      for (int b_ = 2 * G30_ESC - 1; b_ > a_; b_--) {
+        const unsigned lo = min(cand[b_ - 1], cand[b_]), hi = max(cand[b_ - 1], cand[b_]);
+        cand[b_ - 1] = lo; cand[b_] = hi;
+      }
+    G30_POP;
   }
-#define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); nxt = esc_pop(cand); } }
+#if G30_PRE
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // consumers: escape header (weights) read before, out written after
+#endif
+#define G30_FIX(a) { const unsigned kend = (unsigned)(i + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); G30_POP } }
 #else
 #define G30_FIX(a)
 #endif
