@@ -1916,3 +1916,15 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   in depth (STATE-proj s12/s50/s55/s60/s61: consumer/latency-bound at 30% issue; wgmma consumers g20/WG mode, BF16 wgmma
   g23, cuBLASLt (in TUNE[32]) all lose). Re-opening it needs a new consumer design, not a tweak; flagged here, not started.
 - Expert weights incompressible (moe NOTES: e2m1 codes uniform, 4.0 bits). main = v133 unchanged; first check after 00:00Z = v133.
+
+## s94 (2026-10-27 13:26Z-, night4 session 43): main v134 = v133 + proj/qf35 bundle; 0 judge runs
+- Budget 10-27: layer checks 20/20 (none until 00:00Z), 4 submits left. Board #27 2.134x; #1 pjmullin3 2.399x.
+- Merged origin/proj/qf35 (ac340f7, merge 566828e) = v133 + (1) moe s35 qf=True on the batch-1 decode-full _gd_full plan
+  (query rows loaded before the first K/V gathers; moe H200 attention DIAGs 95f8158e+1259baad -0.28 us 5/5 pairs, H100 tie)
+  + (2) proj s68 LT_ALT (pooler,128) x2 + TUNE[128] {ltalt:pooler 1}, {ltalt:pooler 2}, {ltalt:pooler 1 + twf_split 66 +
+  lt:o + lt:unpool} (H200 standalone pooler m128 24.06 vs 26.75 us; H100 tuner picks the combo at T=128 sl 333.8 vs 336.3).
+  proj s85 validated the merged code: full validate (qf) ALL OK, --quick on the combination ALL OK, cold prepare 116.5 s.
+  Merge clean (no notes reverted); build.py regenerates submission.py identically.
+- First check after 00:00Z = main v134: read 'layer tune T=128' ltalt:pooler lines and 'T=8' pr8_npf lines; d1 full per-shape.
+- Not built: re-read moe's twm microbenchmarks (NOTES-moe s18): dq ALU and wgmma don't overlap in one WG, WS/SS variants worse:
+  nothing new to try there from the layer side.
