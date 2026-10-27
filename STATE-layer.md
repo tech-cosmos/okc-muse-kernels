@@ -26,7 +26,7 @@ floor per ~/attn STATE); g24 pooler+unpool d16 35, d32 48; pr1 17.3 (d1). Layer 
 Judge noise: one shape moves up to 10% between runs of the same code (v108: d32 full 291 vs 327 us).
 
 ## NEXT
-0. (s74) Nothing queued for a check: main v117 = v111 behavior. Next check needs a NEW win stacked (H200-gated: moe proxy/diag).
+0. (s76) Lead 06:41Z: up to 4 of the 10-27 checks go to moe as in-layer DIAG bundles (watch Handoffs for "moe DIAG for layer"; run on main, copy the tuner lines to moe). main v123 is unchecked: next check = v123 + any new win.
    Only unbuilt layer item: T=1 o+bnd+pr1 megakernel (bound ~-3 us d1 = ~+0.5%, multi-session, NOTES s45/s61/s74).
 1. Integrate new moe/proj Handoffs on top of main (v111) (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
    cold compile < ~5.5 min), then check; submit only if the check beats 2.0860x.
