@@ -1143,3 +1143,24 @@
 - The remaining tk2f lever = its copy stream: gs8 87.6 = tkp 86.8 at d32 (tk2f runs exactly at its copy pattern's rate).
   Probe pieces at d32 / d16 / v1 / d1: multi-group re-reads (tkp - uq) 9.3 / 4.6 / 0 / 0; 3 copies per 18 KB stage vs ONE
   contiguous 18 KB copy (uq - sq18) 4.5 / 3.5 / 3.5 / 1.1 us -> NEXT BUILD (below).
+
+## Night4 session 14 (2026-10-27 00:32Z - ~01:40Z; moe checks 3/20 used today) -- TK2F_SQ single-copy tk2f stages
+- Built n13's NEXT: prepare `_sq_pack` repacks w13q/w2q + w13s2/w2s2 into the tk2f stage images
+  [E][RPE][NQ][SB] = {tile lr kc q*16.., tile lr + RPE same kc, scales} (int32 [E, 256, 4, 4608] for w13, [E, 128, 4, 4608]
+  for w2; lossless, +~0.86 GB); tk2f_produce<.., SQ> issues ONE cp.async.bulk of SB = 18 KB per stage (same L2 hint per row);
+  consumer unchanged. Kernel PF bit 512 (PF 512 = M 1 cfg 204, PF 516 = M > 1 cfg 84204), host cfg + 10000000, python
+  TK2F_SQ = 1 (now default; kernel_fn passes st["w13sq"]/["w2sq"]). KPS 4 SQ (36 KB stages, _sq_pack nq 2, cfg 402/403 SQ,
+  #define TK2F_SQ4) compiled in DIAG builds only.
+- Bitwise vs off: 228/228 (tools/n14/sq_t.py: 20 layer routings + 56 random M 1..32, 3 reps each). bench test PASS.
+  H100 layer routings: d1 36.1/36.0, d16 82.7/82.2, d32 104.8/104.7, v1 83.9/83.8 (DRAM-bound locally, as expected).
+- H200 DIAG check df253e4c (01326b4 + DIAG = 1; 2.214x as a test run, not for submit). MEAN us (repeat in brackets):
+            gs8 (off)     sq            sq402   sq403
+    d1      30.3 [30.2]   30.2 [30.2]   31.3    31.3
+    d16     66.1 [66.1]   65.5 [65.6]   66.0    66.5
+    d32     87.6 [87.6]   86.1 [86.0]   85.8    87.3
+    v1      64.7 [64.8]   64.8 [64.7]   65.6    65.7
+  => SQ: d32 -1.5, d16 -0.55, d1/v1 0 (repeat agrees to 0.1 us). Only ~1/3 of the stream probe's uq -> sq18 gain
+  (probe: d32 -4.5, d16 -3.5, v1 -3.5): the probe's per-copy cost is not tk2f's limiter at d1/v1. KPS 4 SQ: d32 -0.3
+  more but d1/v1 +1: dead (4th time KPS 4 fails in the real kernel). Layer weight: ~-1.5 x .056 + -0.55 x .072 = ~0.12%.
+- Handoff to layer posted (COORD): port = _sq_pack in prepare + SQ template bit in tk2f_produce + PF 512 at the producer
+  call site + the w13sq/w2sq pointers at its 3 moe_tk2f_launch call sites (T = 1, 8, 16/32). tools/n14/sq_layer.md.
