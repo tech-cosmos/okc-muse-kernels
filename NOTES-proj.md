@@ -1834,3 +1834,16 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   C=4 multicast is cluster-round-trip-bound (per-box rate ~0.2-0.28 us/box regardless of C; needs NS >= 16, which the
   resident x leaves no smem for). Even an ideal C=4 (stream 29 + ~8 us of reds) loses to cuBLAS on H100. DEAD; the
   T=128 split-K reduction remains the blocker for every resident-x form (agrees with layer s98). 0 checks.
+
+## s90 (2026-10-27 15:13-15:45Z, sandbox okc-night4, session 47): no build; T=128 GEMM space re-bounded on paper; 0 judge runs
+- No layer bundle pending (no muse_decode_layer commit since v134 except layer s98 notes): lane (b) idle.
+- H200 standalone T=128 cuBLAS (proj check f45aa794 tune lines, incl. ~2-3 us graph overhead): qkv 18.9 (37.7 MB, ~2.0 TB/s),
+  pooler ~24, unp 23.0, o 10.7 vs floors 8.4/14.6/14.6/~3.7. cuBLAS qkv runs only ~36 N-tiles (N 4608), hence its low rate.
+- Paper bound for an own m128 GEMM (no new build): per-SM smem ingest ~47-60 GB/s (s16/s28) = ~1.9x HBM rate on the H200, so
+  x/W ingest must be <= ~0.9 -> BN >= ~142 rows per CTA -> split-K S >= ~4 for 128 CTAs -> FP32 partials S x N x 128 x 4 B
+  (qkv 9.4 MB, pooler 8.4 MB) = +3..4 us at red.add 2.1 TB/s (layer s98), or DSMEM reduce ~2.2-2.6 us/tile (layer s98).
+  Estimate H200 qkv ~14 vs ~16 net cuBLAS, pooler ~21.5 vs ~21 net: tie..-2 us, and g23 (s28: BF16 SS wgmma, tile split-K,
+  cluster DSMEM sum) already measured this family at qkv m128 22.1 vs cuBLAS 18.2 on the H100. Not rebuilt. Swap-AB / x
+  multicast forms don't cut per-SM ingest (s16). This is moe's claimed xr+DSMEM line (moe s42); posted the bound to moe.
+- Unpool-W L2 prefetch during twm (HBM slack while twm is consumer-bound): same as layer's dead UPF/UPF3 (H200 DIAG -4% at
+  d32 with tk2f), not retried.

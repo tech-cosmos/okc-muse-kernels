@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 15:45 UTC (s90). No build: no layer bundle pending; T=128 own-GEMM re-bounded on paper (S>=4 split-K
+needed by per-SM ingest; red +3..4 us; g23 s28 measured this family dead). Asked lead for a lane. NOTES s90.
 Updated 2026-10-27 15:45 UTC (s89). xrm (dev/s89: moe's T=128 xr with tokens split over a 2/4-CTA cluster, W multicast, S/C reds) DEAD:
 C=2 MMA hidden at stream rate (29.4 us) but 16.8 MB of reds still +17 us (red warps/TMA bulk reduce no help); C=4 round-trip-bound. NOTES s89.
 Updated 2026-10-27 15:00 UTC (s88). Lead 13:30Z item (1) g24 m16/m32 REOPENED + DEAD again: more warps/SM (WPB 20-32) and R=2 ILP
