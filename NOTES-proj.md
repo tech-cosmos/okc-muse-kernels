@@ -1599,3 +1599,18 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   Neither carrier run was submitted (withdraw applies only to board runs). Removed: hook out of dev/sub_template.py and
   submission.py (both = dc0401f again, bench test 39/39), dev/s72 deleted (git history only: do NOT revive), /tmp/pjg
   deleted. Do not use the carrier runs' numbers anywhere. Lesson: re-read COORD Human decisions right before EVERY check.
+
+## s73 (2026-10-27 08:32-09:00Z, sandbox okc-night4, session 30): independent re-test of moe's "dq ALU and wgmma don't overlap"
+- No lead answer to the s71 lane Request (only the 08:13Z GUEST ban). Lane (a) "second builder on the experts": moe's
+  queue is built or dead (hot single pass = moe_hot since s29; dq exhausted; WS/SS/pingpong dead s18/s19/s22), and the one
+  load-bearing negative result behind all of that is "dq ALU and RS wgmma never overlap, even across warpgroups". If wrong,
+  ~+1.5% layer (twm v16/v32 dq-bound). Re-tested it on the H100 with moe's own harness (r-moe tools/s27m/mb_x.py; my
+  variants dev/s73/mb_x5..7.py; dev/s73/ov.py = my own harness, its f32 builds are SERIALIZED by ptxas C7514, ignore them).
+- moe's harness is valid: MMA-only mode 11 SASS = 2 HGMMA per commit, DEPBAR.LE gsb0 0x1 (pipelined). Reproduced exactly:
+  RT2 N64 dq 336 | MMA 357 | dq||MMA (other WG) 600; RT4 N8 522|321|751; RT4 N32 522|358|830 cycles/stage.
+- Controls (RT2 N64, WG0 ALU || WG1 RS MMA): ALU-only dq (no IMAD/HMUL2, DQV=5) 274|357 -> 569; dq without its LDS 333 ->
+  582; f16 accumulators (diag only, not allowed) 336|361 -> 551; pure LOP/SHF/IADD chains ILP 8 267 -> 464, ILP 2 329 ->
+  488, ILP 1 646 -> 781 (MMA side 357 -> 379..464). FFMA chains overlap worst (79|357 -> 422 on the MMA side).
+  => not the FMA pipe, not smem, not latency/ILP, accumulator width only ~10%. Fits a per-HGMMA cost to the co-resident warp
+  of ~12 + 0.33*N cycles (N8 14, N32 19, N64 33 per HGMMA): RS wgmma steals issue/RF from other warps on the SMSP.
+  The only lever is fewer HGMMA per weight byte = larger N per pass (moe_hot already). moe's conclusion STANDS; nothing to build.
