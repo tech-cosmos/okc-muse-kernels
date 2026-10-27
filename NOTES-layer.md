@@ -1566,3 +1566,10 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   +fr 296.2 | fr 281.6 (picked fr); full: twq73988 383.3 vs default 386.6, picked fr+twf_split 66 (379.0). The split LOSES in the
   synthetic-routing tuner (moe-only real routings said -10.6). Previous check 4bf626fa: twq4 278.1 vs default 284.9 (picked).
 - v119: TUNE_BASE (128, True) = {twq 73988} (forced under every non-twq pick) as a real-input diag check.
+- 06:10Z CHECK 2f7349ee v119 (476fe00) 2.0855x [2.054, 2.117], 10,847 us (not submitted): d1 67.0/77.0, d16 123.9/205.4,
+  d32 157.3/315.7, v1 111.5/121.2, v16 **282.2**/368.1, v32 366.0/537.1. v16 sl ratio 1.888 vs 1.92-1.93 in the last 5 runs
+  (SGLang 532.9 this run, +2.5%: slow run, but the ratio still drops ~2% = ~+6 us). Tuner T=128 sl (base = split): default 269.1,
+  twq73988 270.6 (same thing), fr 268.7 picked; full: twq73988 381.2 vs default 365.2 (+16).
+  => moe n21 twq split DEAD IN THE LAYER on the H200 (both judge runs; the moe-only -10.6 us with layer routings does not
+  transfer: in-layer twq runs beside / after the side-stream kernels, unlike the moe-only proxy). Told moe (their HOTQ builds on it).
+- v120: TUNE options + base removed (= v117 behavior); moe_src keeps the n21 code (flags without split bits = old twq). Tests 13/13.

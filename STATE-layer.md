@@ -1,9 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
 BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
-s74: **main = v117 = v111 behavior** (+ `_opt` hooks pr1bnd / bspl1 / bspl2, no TUNE entries). Check 4bf626fa v116 2.0841x (not
-submitted, < 2.0860): its H200 tuner says PR1_BND +0.6..1.4 us (dead on both GPUs), BND_SPLIT 1/2/4/8 noise. s73: G24P and moe S6
-H200-dead. Checks v109-v116 all 2.058-2.084 (= v108 within noise). Budget 10-27 left: 10 checks / 5 submits.
+s75: **main = v120 = v111 behavior** (moe_src has moe n21 twq split code, off). moe n21 twq K-split DEAD in-layer on the H200:
+check a0bcbbf4 v118 2.0866x (tuner options: synthetic sl twq73988 298 vs default 287, not picked; not submitted = same behavior
+as board), check 2f7349ee v119 2.0855x (split forced at T=128 sl: v16 sl 282.2 us, ratio 1.888 vs 1.92-1.93). Budget 10-27 left:
+8 checks / 5 submits. Checks v109-v119 all 2.058-2.087 (= v108 within noise).
 
 Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
@@ -107,6 +108,7 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
    program); qkv/o g19 at T=32; csl overlapped with g13; T=8 norm3+unpool cluster fusion.
 
 ## Dead ends (details in NOTES)
+- s75: moe n21 twq K-split at T=128 (moe-only H200 -10.6 us) loses in-layer on H200 (+6 us sl real, +11..16 tuner).
 - s74: PR1_BND (boundary fused into pr1 at T=1) H100 +1.3..1.8, H200 tuner +0.6..1.4 us; BND_SPLIT 1/2/4/8 per T: noise on both.
 - s72: QSS (2-slab split-K qkv bmm, slabs summed at load) at verify sliding T=128/256 (nvs FP32 loads +1.6 us; H200 tie);
   moe_norm2 -> unpool prologue fusion (oracle: norm2 is free, it hosts the unpool's PDL window).
