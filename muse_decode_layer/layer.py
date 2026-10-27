@@ -39,6 +39,25 @@ try:
 except ImportError:
     HAVE_SGL = False
 
+# s68: every JIT build (attention csl/nvs/nds, moe, g10, lt, g24) runs at once on this pool from import on; prepare()
+# joins them (cold H100: serial import 97 s + prepare 217 s). Each build has its own name/dir; a build that fails on the
+# pool is retried serially in prepare (attention: Triton fallback as before).
+import concurrent.futures as _cf
+_BUILD_POOL = _cf.ThreadPoolExecutor(8)
+
+
+class _LazyBuild:
+    def __init__(self, fut, name):
+        self.fut, self.name = fut, name
+
+    def get(self):
+        try:
+            return self.fut.result()
+        except Exception as e:  # noqa: BLE001
+            print(f"{self.name} build failed, using Triton:", e)
+            return None
+
+
 # @@ATTENTION@@
 # @@MOE@@
 
@@ -618,6 +637,22 @@ def _residual(gate):
     return alpha.contiguous(), beta.contiguous()
 
 
+def _join_builds():
+    """Wait for the import-time JIT builds (s68); resolve the attention extensions."""
+    for f in _PREBUILD:
+        try:
+            f.result()
+        except Exception as e:  # noqa: BLE001  (retried serially below / at first use)
+            print("layer prebuild failed (retrying serially):", e)
+    for d in (_G10, _LT, _G22, _G24):
+        if d.get("lib", 0) is None:
+            d.pop("lib")
+    g = globals()
+    for n in ("_CSL", "_NVS", "_NDS"):
+        if isinstance(g.get(n), _LazyBuild):
+            g[n] = g[n].get()
+
+
 def prepare(weights):
     router = weights["router"].contiguous()
     hi = router.to(torch.bfloat16)
@@ -640,6 +675,7 @@ def prepare(weights):
         "side_stream": torch.cuda.Stream(weights["qkv_gate"].device),
         "hi_stream": torch.cuda.Stream(weights["qkv_gate"].device, priority=-1),
     }
+    _join_builds()
     state["moe"] = _moe_prepare({"w13": weights["w13"], "w13_sf": weights["w13_sf"], "w13_gs": weights["w13_gs"],
                                  "w2": weights["w2"], "w2_sf": weights["w2_sf"], "w2_gs": weights["w2_gs"],
                                  "post_norm_w": weights["post_expert_norm"]})
@@ -2094,9 +2130,7 @@ _LT_SRC = None  # @@LT@@
 _LT = {}
 
 
-def _lt_prepare(state):
-    """Build the cuBLASLt wrapper; keep the configs that launch on this GPU and match F.linear."""
-    state["lt_ok"] = {}
+def _lt_build():
     if not LT_CFG or _LT_SRC is None:
         return
     if "lib" not in _LT:
@@ -2110,6 +2144,14 @@ def _lt_prepare(state):
         except Exception as e:  # noqa: BLE001
             print("layer cuBLASLt build failed, F.linear instead:", e)
             _LT["lib"] = None
+
+
+def _lt_prepare(state):
+    """Build the cuBLASLt wrapper; keep the configs that launch on this GPU and match F.linear."""
+    state["lt_ok"] = {}
+    if not LT_CFG or _LT_SRC is None:
+        return
+    _lt_build()
     lib = _LT["lib"]
     if lib is None:
         return
@@ -2175,9 +2217,7 @@ def _pack22(c, ap, E):
     return torch.cat([P, EV.view(torch.uint8).view(ks * ntr, -1)], 1).contiguous()
 
 
-def _g22_prepare(state):
-    """gemv22 packs per (key, T), each checked once against F.linear (dropped -> the default path)."""
-    state["g22"] = {}
+def _g22_build():
     if not G22_CFG or _G22_SRC is None:
         return
     if "lib" not in _G22:
@@ -2192,6 +2232,14 @@ def _g22_prepare(state):
         except Exception as e:  # noqa: BLE001
             print("layer gemv22 build failed:", e)
             _G22["lib"] = None
+
+
+def _g22_prepare(state):
+    """gemv22 packs per (key, T), each checked once against F.linear (dropped -> the default path)."""
+    state["g22"] = {}
+    if not G22_CFG or _G22_SRC is None:
+        return
+    _g22_build()
     lib = _G22["lib"]
     if lib is None:
         return
@@ -2299,9 +2347,7 @@ def _pack24(c, kc, ap):
     return torch.cat([S, N], 1).contiguous()
 
 
-def _g24_prepare(state, w, comp, g):
-    state["g24"] = {}
-    state["g24sk"] = {}
+def _g24_build():
     if not G24_CFG or _G24_SRC is None:
         return
     if "lib" not in _G24:
@@ -2317,6 +2363,14 @@ def _g24_prepare(state, w, comp, g):
         except Exception as ex:  # noqa: BLE001
             print("layer gemv24 build failed:", ex)
             _G24["lib"] = None
+
+
+def _g24_prepare(state, w, comp, g):
+    state["g24"] = {}
+    state["g24sk"] = {}
+    if not G24_CFG or _G24_SRC is None:
+        return
+    _g24_build()
     lib = _G24["lib"]
     if lib is None:
         return
@@ -3036,3 +3090,6 @@ def kernel_fn(data, state):
     else:
         moe = (_experts_marlin if HAVE_SGL else _experts_local)(p, topk_weights, local_ids, state)
     return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
+
+
+_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build)]

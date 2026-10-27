@@ -33,6 +33,11 @@ layer = (here / "layer.py").read_text()
 attn = attn.split("\n", 1)[1]  # drop its "# okc: problem=" line
 assert attn.count("\ndef kernel_fn(") == 1
 attn = attn.replace("\ndef kernel_fn(", "\ndef attn_kernel_fn(")
+_a = "from torch.utils.cpp_extension import load_inline as _load_inline\n"
+assert attn.count(_a) == 1
+attn = attn.replace(_a, "def _load_inline(**kw):  # s68: built on layer's _BUILD_POOL, resolved in prepare (_join_builds)\n"
+                        "    from torch.utils.cpp_extension import load_inline\n"
+                        "    return _LazyBuild(_BUILD_POOL.submit(load_inline, **kw), kw['name'])\n")
 # In the judge image SGLang's import leaves triton.next_power_of_2 a plain function, which a @triton.jit body
 # can't call (check 7e3e63a1): use our own constexpr function inside kernels.
 jit_np2 = "PF_N: tl.constexpr = triton.next_power_of_2("
