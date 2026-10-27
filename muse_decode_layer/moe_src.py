@@ -4900,7 +4900,7 @@ def _tk2f_cfg(M, st):
     return _tk2f_cfg0(M, st) + (1000000 if M in TK2F_BAL_M and TK2SA and st["sa"] else 0)
 
 
-TK2F_S6 = 1  # layer s73 (moe n20, r-moe 4a87466): 6-bit scale-code SQ stages when every scale byte is in [80, 0x7E]
+TK2F_S6 = 0  # layer s73 (moe n20, r-moe 4a87466): 6-bit scale-code SQ stages when every scale byte is in [80, 0x7E]. OFF: H200 moe diag 13b528a8 tk2f d16 +0.7..1.0, d32 +2.9, tk2h W3 d32 +1.6 us (H100 -1..-3 = DRAM-bound artefact)
 TK2F_S6_ON = True  # run tk2f / tk2h on them (False: the 8-bit SQ stages; needs TK2F_S6_KEEPSQ)
 TK2F_S6_KEEPSQ = False  # also build the 8-bit SQ images when S6 is on (A/B tests)
 
