@@ -1531,3 +1531,6 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - Side look (d1 = highest %/us): H100 bench "decode 1" qkv g13 13.15 us (28.4 MB) vs a bare ld.global.nc grid-stride read of
   the same bytes 11.4-12.0 us (dev-less /tmp/pj70/rd.py, 2.4-2.5 TB/s: not a good reader; s-notes' best reader slope 3.24 TB/s
   + ~2 us fixed): g13 sits ~1-2 us over a bare stream on both qkv and pooler, as found in s5-s16. No new lever found there.
+- dev/g13.py repaired (it packed the pre-DEC3 layout -> wrong results; now packs with submission._pack13). H100 qkv m1 sweep
+  (us, cuBLAS 17.8): U2V4P1 13.41, U2V2P2 13.39, U2V4P2 14.54, U2V2P3 13.73 (g132); VT512 g264: U1V2P1 13.98, U1V1P2 13.12,
+  U1V1P4 16.51, U1V1B2P2 13.47. Deeper register prefetch does not help (regs); within noise of main. qkv g13: no lever.

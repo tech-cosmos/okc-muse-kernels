@@ -4,6 +4,7 @@ import os, sys, torch, torch.nn.functional as F, hashlib
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from torch.utils.cpp_extension import load_inline
 import bench, reference
+import submission as _sub
 
 ESC = 8
 
@@ -63,7 +64,7 @@ if __name__ == "__main__":
     e = bench.empty_cost()
     for nm, n, k in SH:
         W = Wr[names[nm]][:n].contiguous()
-        pk = pack13(W)
+        pk = _sub._pack13(W)  # s70: the kernels decode DEC3 (s35); the old pack13 above is the pre-DEC3 layout
         assert pk is not None
         sm, nib, hdr, scale = pk
         print(nm, "escapes", int((hdr[:, :, 1] != 2.0 ** -15).sum()), "scale", scale, flush=True)
