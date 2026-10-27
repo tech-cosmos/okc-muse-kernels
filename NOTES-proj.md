@@ -2033,3 +2033,22 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Next ideas: (a) H200 truth from layer's next check tune lines (g30k 104 vs 120: if 120 wins on the H200, try 112/116 there);
   (b) g30k for qkv at T=32 (36 tiles; g30n S3 108 CTAs standalone 12.3 vs g24 13.4, in-layer tie) and unpool at T=16;
   (c) if moe's one-launch pooler+router lands, g30k's stream-K split is the natural pooler half for it.
+
+## s100 (2026-10-27 19:51Z-20:15Z, night5 session 2): g30k rebased on v138; g30n into proj's own tuner -> board 1.3483x
+- r-layer branch proj/g30k138 73cae8f = proj/g30k rebased onto main 327198b (v138). One conflict: TUNE[32] = union (v138's
+  g30n unp/qkv/both + g30k 104, 120, 104+unp, 104+unp+qkv). validate --quick ALL OK (test 13/13, scored 0/12, opt 0/338, tk2f 0/300,
+  replay 0/240, route 0/240 worst gap 0.0256, fuzz 0/507), cold prepare 146.4 s; submission md5 628de5b7. Asked layer to check it at 00:00Z.
+- proj submission: dev/g30_src.cu (copy of r-layer muse_decode_layer/g30_src.cu incl. g30k part, ifdef'd off), _pack30 (layer's),
+  BF16_G30 {(layer, m): [(S, NW, NS)]}, one load_inline per (m, S, NW, NS) built in a thread pool at import (8 builds), kind "g30"
+  in _run (pdl 0), candidates in _tune (prints g30S<S>W<NW>N<NS>). Escape values checked exact in BF16 (else no g30 for that layer).
+  bench test 39/39. Cold import+prepare+test 3:34 wall here.
+- Tune lines (us incl ~4-5 us graph cost, cold L2), H100 | H200 (check 3291ae79), g30 best vs best other:
+  pooler m16 S2 25.41 vs 28.03 | 20.10 vs 22.27 ; pooler m32 S2 26.66 vs 28.80 | 22.66 vs 22.46 (lt picked)
+  unp m16 S1 23.49 vs 25.31 | 19.10 vs 20.67 ; unp m32 S1 25.89 vs 28.48 | 21.34 vs 21.70 ; unp m128 24.96 vs 29.57 | 24.99 vs 22.75
+  qkv m16 S3 18.53 vs 19.30 | 15.90 vs 16.80 ; qkv m32 S3 19.04 vs 20.48 | 16.48 vs 17.15 ; o m16 S1 11.17 vs 11.78 | 10.11 vs 9.92
+  o m32 11.84 vs 11.90 | 10.72 vs 10.11 ; m128 pooler/qkv (64/?? CTAs at S1) lose badly (40/39 us) on both.
+  S1 pooler (64 CTAs) loses everywhere; S2 for o/qkv loses (2 waves). H100 wins at m128/m32-o do NOT carry to the H200.
+  H200 after a 3 us PDL pred (diag19): g30 qkv m32 12.70 vs g19 14.40, unp m32 17.60 vs 18.37, pool m16 16.80 vs 15.71, unp m16 15.81 vs 15.62.
+- check 3291ae79 (79fdba1) 1.3502x [1.330, 1.370]; submit a12513ed 1.3483x [1.328, 1.369] = proj board best (was 1.3233).
+- Next ideas: pooler m32 more configs (S2 NW16 NS16, S2 NW12) since H200 ties; m128 g30 at S2 for pooler needs smem trim
+  (NS 10 x 16 KB + rbuf 32 KB too big): NS 6; o g30 not worth it.
