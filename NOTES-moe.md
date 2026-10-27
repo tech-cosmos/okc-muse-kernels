@@ -2084,3 +2084,40 @@
   Early weight streaming during pr1/pr8 = RFLAG s27 (zero-sum, HBM busy). v16/v32: twm/twq/HOTQ/single pass all built + measured
   (s17-s30, n4s23). No unmeasured moe item found; did not rebuild a dead end.
 - Next: after 00:00Z read v143's 'layer tune T=16/32' pr32 lines (STATE n5s5 recipe) and act on them; else wait for a lane.
+
+## Night5 session 8 (2026-10-27 22:38Z - ) -- pr32 at T=8 with an FP32 router (PR_F32) to replace pr8; 0 checks
+- Why: layer n5s6 measured T=8 g30k pooler + side router DEAD and wrote "a g30 pooler would need the router fused like pr32
+  (FP32 router at T=8)". SGLang at T <= 8 = FP32 F.linear on the FP32 router input (baseline.py ROUTER_FP32_MAX_TOKENS 8):
+  a hi/lo BF16 split is NOT allowed there (x itself is FP32).
+- Built (tools/n5s8: head.cu + body3.cu -> pr32_src.cu; pr32.py; patch_layer_pr8.py): G30_MTOK 8 (wgmma m64n8k16, epilogue
+  store predicate) + PR_F32: router W FP32 [4 G][256 KS of 32 k][64 rows][32 k] (8 KB stages, same 8 MB as hi/lo BF16, same
+  8 stages per CTA, 4 groups x 32 K slices = 128 CTAs), x = FP32 h32 by a 2nd TMA map (8 tok x 32 k, SWIZZLE_128B),
+  consumer FMA (thread = rows rp, rp+32 x tokens 2tp, 2tp+1, explicit ld.shared), finisher 4 G x 16 pair slices (same 64
+  partials), 256 logits (no hi+lo). T=16/32 builds unchanged (pr32.py M16/M32 BAD 0).
+- Exact: pr32.py M=8 DEFS="PR_F32 1" RS=3: routing == layer _routing on our logits, == FP64 routing, logit max err
+  1.8e-6 / 5.3e-6 / 9.2e-6 vs torch FP32 F.linear's 3.3e-6 / 6.8e-6 / 1.2e-5 (same seeds): FP32-class.
+- H100 standalone (after a 3 us PDL pred, same method as proj s80's pr8 24.4 us): hi/lo router (not allowed, reference
+  only) 20.5 us; PR_F32 21.0 us; L2W proxy (weights L2-resident ~ H200 consumer floor): hi/lo 16.0, PR_F32 17.25.
+  Fixes on the way: generic LD.E.128 -> explicit ld.shared (18.4 -> 17.6 L2W); per-lane k rotation broke LDS broadcast
+  (4 wavefronts) -> swizzled W pack + TMA SW128 x (17.6 -> 17.25). PR_IL (router stages interleaved with the first pooler
+  stages, P R P R per WG) is WORSE: 18.25 (routing chain then ends ~3 us later: froute 16.6 vs 13.8 us).
+  Remaining F32 cost: router phase xwait->pstart 2.3 us vs 1.28 for hi/lo wgmma (~0.25 us per FMA stage, 4 per WG).
+- H200 question: pr8 there = 21.2 us GPU incl. ~4 us bnd wait (proj s80) ~ 17 us after bnd; pr32-F32 L2W proxy 17.25. Tie
+  to small win on paper; the H200 tuner decides -> TUNE[8] options {pr32}, {pr32, cslpw}.
+- Layer patch: tools/n5s8/patch_layer_pr8.py <copy>/layer.py (v144 4b30a76) + copy tools/n5s8/pr32_src.cu over its pr32_src.cu
+  (T=16/32 calls get xr = h, unused). Path: inside the pr1 branch at T=8 (pr1 semantics kept: one main-stream kernel does
+  pooler + routing), pooler pack = the g30n ("pooler", 16) entry's (wp, hdr, scale) (MTOK-independent), FP32 router packed
+  in _pr32_prepare. PR8_32 = module default (False).
+- bench test with PR8_32 = True (sub_f.py): 13/13 PASS.
+- IN-LAYER H100 A/B (/tmp copy of r-layer v144 + patch, TUNE[8] pr32 entries stripped so only PR8_32 decides; tools/ab_flag.py
+  SEEDS 99,7): DEAD. Run 1 (4 rounds) pr8 | pr32: v1 sl s99 142.74 | 145.01, s7 115.10 | 116.95; full s99 154.93 | 158.91,
+  s7 126.39 | 130.66. Run 2 (3 rounds) pr8 | pr32 PDL | pr32 no PDL: sl s99 144.29 | 146.13 | 147.79, s7 115.95 | 117.84 |
+  119.47; full s99 155.71 | 159.90 | 160.69, s7 129.20 | 133.02 | 134.16. => +1.8..4.3 us, no-PDL worse still.
+- Timeline (tools/timeline.py "verify 1 full", s99): both launch at 44.0 us (PDL secondary of the 16-program boundary, which
+  ends 51.3 / 50.5); pr8 ends 73.3 (22.0 after bnd), pr32 76.1 (25.6 after bnd); pr32's 132 one-per-SM CTAs also keep the
+  rmsnorm from co-residing (starts 70.7 vs 48.9). Standalone "pr8 24.4 us" (proj s80, other day/contention) was not a fair
+  baseline: in-layer pr8 streams 58.5 MB in ~22 us after bnd on the H100. Standalone with a 16x1024-thread pred (blocks 16
+  SMs like the boundary) did not slow pr32 (GPU noisy then: 22.7 vs 23.7 us), so the late-CTA theory is unproven.
+- H200 on paper: pr8 ~17 us after bnd vs pr32-F32 L2W proxy 17.25: no win there either. NOT handed off (no TUNE option:
+  costs a build + tuner time for an H100 loss). Kept in tools/n5s8 (PR_F32 / MTOK 8 / PREDBT knob in pr32.py).
+- Lesson: compare against the incumbent IN-LAYER (ab_flag) before building on a standalone number from another session.

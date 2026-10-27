@@ -105,7 +105,8 @@ if "PR_TL" in DEFS:
 
 if os.environ.get("TIME", "1") == "1":
     PRED = 3000
-    pm = load_inline(name="n5_pred", cpp_sources="void pred(torch::Tensor, torch::Tensor, int64_t);", cuda_sources=r"""
+    PB, PT = (int(v) for v in os.environ.get("PREDBT", "32x256").split("x"))  # n5s8: 16x1024 blocks 16 SMs like the layer's T=8 boundary
+    pm = load_inline(name=f"n5_pred_{PB}x{PT}", cpp_sources="void pred(torch::Tensor, torch::Tensor, int64_t);", cuda_sources=f"#define PREDB {PB}\n#define PREDT {PT}\n" + r"""
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 __global__ void pk(const uint4* __restrict__ src, uint4* __restrict__ dst, int n8, int ns_) {
@@ -116,7 +117,7 @@ __global__ void pk(const uint4* __restrict__ src, uint4* __restrict__ dst, int n
     do { asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t1)); } while (t1 - t0 < (unsigned long long)ns_);
 }
 void pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
-    pk<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * 2 / 16, ns_);
+    pk<<<PREDB, PREDT, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * 2 / 16, ns_);
 }""", functions=["pred"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
     x = torch.randn(M, 8192, device=dev).bfloat16(); xs = x.clone()
     WARM = float(os.environ.get("WARM", 0))  # n5s4: fraction of every CTA's pooler stream (+ all router W) L2-warm first

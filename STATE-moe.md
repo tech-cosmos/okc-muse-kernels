@@ -1,17 +1,12 @@
 # STATE-moe
 
-## n5s7 (22:35Z): re-audit only (batch-1 tk2f = fit; all v16/v32 forms measured); no item. Same next step as n5s5.
+## n5s8 (23:40Z): BUILT pr32 at T=8 with an FP32 router (PR_F32, tools/n5s8) to replace pr8: exact (FP32-class logits), standalone
+H100 21.0 us, but IN-LAYER H100 DEAD (v1 sl +1.8..2.3, full +3.8..4.3 us vs pr8; no-PDL worse). Not handed off. NOTES n5s8.
+Next: still the 00:00Z v144 H200 'layer tune T=16/32' pr32 lines (n5s5 recipe); no other open moe item.
 
-## n5s6 (22:20Z): re-derived scale compression (5-bit per-row window fits 100% of this generator's rows, -4.2% bytes) before
-finding it is n20's S6 (6-bit lossless scales, -2.8% bytes): H200 DEAD (d32 +2.7, d16 +1 us; decode consumer is latency-bound,
-any added decode op loses). Listed under Dead ends now. Still no lane answer; waiting for layer's 00:00Z pr32 tune lines.
-
-## n5s5 (22:05Z): paper bounds only (pr32 pre-wait L2 prefetch zero-sum: ring fills the boundary window; MTOK16 S1 = 64 CTAs). Lane request to lead.
-H200 verdict: grep "layer tune T=\(16\|32\)" in r-layer profiles/<v143 check>.log, keep pr32/default fields (NOTES n5s5).
-
-## n5s4 (21:45Z): PR_HL (router hi+lo folded in-CTA, half the partial bytes) exact, chain -1.3 us, end-to-end TIE (chain already
-hidden after PR_SA): off. pr32 = pooler stream + ~1 us tail now. Pooler-W L2 prefetch during attention bounded:
-H100 best -2 us (half the stream warm), H200 <= ~1 us: not built (NOTES n5s4). Waiting for the 00:00Z v141 H200 pr32 tune lines (NOTES n5s4).
+## n5s4-n5s7 (21:32-22:35Z): PR_HL tie (off); paper bounds (pr32 pre-wait L2 prefetch zero-sum, MTOK16 S1 64 CTAs, 5/6-bit scale
+compression = n20 S6 dead); audits found no unmeasured item. H200 pr32 verdict recipe: grep "layer tune T=\(16\|32\)" in
+r-layer profiles/<v143+ check>.log, keep pr32/default fields; pr32 wins if > ~1 us better than default (NOTES n5s5).
 
 ## NOW (night5 s3, 2026-10-27 22:00Z): pr32 in layer main v141 (TUNE option); PR_SA (r-moe 11d49b7) -0.5..0.7 us H200 proxy
 - n5s3: PR_SA 1 (in-layer validate ALL OK) = st.async pair handoffs (NOTES n5s3): L2W M16 16.8->16.2, M32 17.9->17.3; chain -1 us. Layer:
@@ -125,42 +120,23 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   Decode full at 92-95% of it (headroom d32<=9, d16<=7 us). Verify full consumer-bound (all-L2 v32 170 / v16 93 vs main 188/102,
   floors 157/80): headroom only via a faster _gw_verify consumer. Full kernels at perfect overlap = ~-4% attention score max.
 - Checks used 2026-10-27: 13/20, scored 2/10.
-- s42 (dev/s42, NOTES s42): s41's xr numbers were invalid (wgmma serialized, C7520; its "stream-only" diag had dead MMAs that
-  ptxas dropped). New xr3 = x in REGISTERS (RS A, 128 regs) + W smem B + cluster-8 k-split PUSH reduce (st.async into owner's
-  double-buffered recv): unp m128 H100 34.0 vs cuBLAS 28.6 us (incl 4.9 harness), correct + deterministic; stream-only 31.3.
-  Limits: cluster-8 max 15 active (120 SMs), 9 vs 8.53 tile imbalance. NEXT: n40 tail tiles (balance, est -1.2), fragment-major x
-  from the producing kernel (assumed), then 12-bit W (roles flip, see NOTES s42). Gate: H100 tie before any layer TUNE option.
-- s43 (dev/s43, NOTES s43): xr3 CLOSED (layer g30 21.6 beats it). T=256 12-bit GEMM DEAD (g31 m64n128 x2 34.7, g32 m64n256 RS
-  31.7 vs cuBLAS 27.6: no-load floor 25.5, x ingest 2 MB/CTA binds, CL2 multicast no help). g33 T=128 R2 k-split CTA pair with
-  DSMEM push reduce: +3.5..4 us over no-reduce (28.5 vs cuBLAS 25.7) DEAD on H100. g30 T=128 is W-HBM-bound on the H100 (W
-  stream+decode alone 20.9 us): H100 can't rank g30 forms; on the H200 x ingest may bind (R2 forms). Told layer (COORD).
+- s42/s43 (NOTES): T=128/256 GEMM prototypes xr3 / g31 / g32 / g33 all DEAD vs layer g30 / cuBLAS.
 - s45 (NOTES s45): re-audit, no untested lever on any attention shape; lane request to lead (COORD). 0 checks.
 ## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)
 - Floors (pt trip + 20.5 MB random 128-B rows, all in flight, incl. launch): ~8.0 us d1 and v1; dense 7.4.
 - Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.
 - Every plan knob loses (stages, splits 63-1023, BN, warps 8, pre/pf/fix, qk16, Gluon gw 127-263 +-gfuse, gbal).
 - Next: H200 per-program timeline of _attn_split (v1) / _gd_full (d1) via the diag hook; build only once it names the cost.
-## Attention: v1 full (s33, H100 timeline tools/s33/mktl.py; NOTES s33)
-- Loop = flat 0.94 us per 64-key tile, same all-L2; per-SM saturation (1/2/4 programs per SM: 0.66/0.92/~1.67 us/tile);
-  q phase 2.0, FIX tile 1.1, merge tail 2.0 us. H100 = valid proxy here (matches s32 H200 diag). peel/mif dead. CLOSED.
-- s33 ON MAIN: spec=True in the v1-full plan: H200 DIAG -0.63/-0.7 us (4/4 pairs, checks 4fe17fa9, 28658e59). d1 spec stays (tie).
+## Attention: closed items (NOTES s31-s35: csl tail, v16 merge, v1 full CLOSED; s33 spec=True on main)
 ## Attention: d1 full (s35; NOTES s35)
 - ON MAIN 9855088: plan qf=True (query rows loaded before _gd_full's prologue copies): H200 -0.28 us (5/5 pairs, DIAGs
   95f8158e, 1259baad), H100 tie. Not yet in a scored run (rides with the next submit). Handoff to layer posted.
 - H100 timeline (tools/s35/mktl_d1.py + run_d1.py): q 1.1, first tile +2.8, 1.17/tile (gather rate), red 0.45, _red_fin
   1.5 after the last program. H200: deeper stages, splits 640/1023/255, qf+640 all lose/tie. Unbuilt: 2-warp programs
   splitting each tile (per-warp chain 0.86 us/tile).
-## Attention: ranked ideas / bounds (s31)
-- csl (d1 sl) post-gather tail is ~1.5 us cold H100: compute 0.45, premerge+cluster 0.2, push/slowest-CTA 0.37, owner 0.33.
-  The slowest CTA's 12 random gathers per thread set the push time; owner merge is now ~0.33. No >0.2 us lever seen in the
-  csl structure (many tried in ~/attn s72-s126). Untested: fewer distinct row loads per thread (wider per-lane rows) to cut
-  the max-of-12-latencies tail; 2 query heads per mma (rows 8..15 of the m16 tile are zero today).
-- v16 sl merge: CLOSED s34 (cl S2 +1.7 us H100 3/3; 2 CTAs/SM impossible by registers; 4-clusters 30 < 32; S3 loses on
-  arithmetic). d32 sl combine <= 0.3%: not worth a build. No open attention item >= 1% left in this list.
-
-
-
 ## Dead ends (older ones: NOTES-moe.md)
+- (n5s8) pr32 at T=8 (g30n pooler + FP32 router FMA + routing, one launch) instead of pr8: H100 in-layer +1.8..4.3 us (pr8 already
+  ~22 us after bnd in-layer); H200 L2W proxy 17.25 vs pr8 ~17: no win. PR_IL (router stages interleaved) worse.
 - (n20, H200 13b528a8) LOSSLESS SCALE COMPRESSION (S6 6-bit codes, base 80; 5-bit windows would need escapes): loses at d16/d32
   (+1..2.7 us), wins only v1 -0.5..0.8: extra decode ops on a latency-bound consumer. Weight codes are uniform (4.0 bits): no gain there.
 - (s26) L2 prefetch of the unpool W from twm (spread over its main phase, evict_last): v32 +5..10 H100 us, unpool -1.
