@@ -1,0 +1,4 @@
+n5s9 ramp/tail audit of the layer's batch-1 serial chain (lead 2026-10-27 22:45Z). Run from a COPY of r-layer/muse_decode_layer:
+  python tl2.py submission.py "decode 1 sliding"      # graph timeline of two back-to-back layer calls (r-layer tools/timeline.py + 2x)
+  ncu --profile-from-start off --metrics gpu__time_duration.sum,dram__bytes_read.sum,dram__bytes_write.sum,\
+dram__throughput.avg.pct_of_peak_sustained_elapsed --csv python ncu_drv.py "decode 1 sliding" > x.csv; python parse.py x.csv

@@ -2121,3 +2121,39 @@
 - H200 on paper: pr8 ~17 us after bnd vs pr32-F32 L2W proxy 17.25: no win there either. NOT handed off (no TUNE option:
   costs a build + tuner time for an H100 loss). Kept in tools/n5s8 (PR_F32 / MTOK 8 / PREDBT knob in pr32.py).
 - Lesson: compare against the incumbent IN-LAYER (ab_flag) before building on a standalone number from another session.
+
+## Night5 session 9 (2026-10-27 23:31Z - 23:55Z) -- lead 22:45Z step 1: batch-1 serial-chain ramp/tail audit (H100, main v144); 0 runs
+- Tools: muse_moe_w4a16/tools/n5s9 (README). Bytes = ncu dram__bytes_read per kernel (cold L2, seed 99); times = graph-replay
+  timeline (cold L2). H100 achievable read rate measured 3.12 TB/s (torch.sum over 2 GB). "excess" = segment time - bytes/3.12.
+  Segment = previous segment's end -> this kernel's end (PDL overlap folded in).
+- d1 sliding (85.1 us; 196 MB -> floor 62.8; excess 22.3):
+    qkv g13      0 -> 13.2   29.0 MB  2.20 TB/s  excess 3.9   (2nd back-to-back call: 12.8 us: not a first-op effect; NOTES-proj
+                                                               qkv m1 swept, 13.1-13.4 standalone, "no lever")
+    csl + o g13  -> 22.5     13.7 MB  1.47        excess 4.9   (o's W prefetch already fills csl's window: pr1_npf/G10_PFL2 lost)
+    bnd + pr1    -> 43.8     59.3 MB  2.78        excess 2.3
+    rms + tk2f   -> 78.6     85.0 MB  2.44        excess 7.6   (3 experts; H200 s12 stamps: routing 1.5 + first copy 2.1, ring
+                                                               absorbs the gemm13->gemm2 wait, CTA end spread ~2.3)
+    n2u + bnd    -> 85.1      8.6 MB  1.33        excess 3.7
+- v1 sliding (148.8 us; 341 MB -> floor 109.4; excess 39.4):
+    qkv g14 0->14.8 28.6+0.6 MB 1.97 TB/s exc 5.5 | vtk + o g12 ->28.8 17.4 MB 1.24 exc 8.4 | bnd + pr8 ->55.3 60.2 MB 2.29 exc 7.1
+    (bnd ends 4.0 us after o) | rms + tk2f ->141.1 226.7 MB (8 experts) 2.64 exc 13.1 | nu8 + bnd ->148.8 9.0 MB 1.17 exc 4.8.
+- H200 (35dd53d0 profile, one input): d1 sl kernel durations tk2f 20.2, pr1 17.5, qkv 10.9 (29.7 MB = 2.7 TB/s), bnd 2x3.1,
+  o 6.1, n2u 5.0, csl 3.9, rms 1.4; board 67.4 vs ~40 floor (lead). Same shape as the H100 table.
+- So the summed sub-peak time is >= 8 us (d1 22, v1 39 H100), BUT what a persistent post-attention chain kernel
+  (o -> bnd -> pr1 -> rms -> tk2f -> n2u -> bnd) could remove is much smaller; per segment, from measurements already on record:
+  * front qkv + csl/o (8.8 d1 / 13.9 v1): OUTSIDE the chain; qkv's ~3.8 us is the GEMV's own ramp+drain (also as 2nd call);
+    the csl window is already used by o's W prefetch (layer s74/s78: pre-wait pooler prefetch there made o/csl slower).
+  * o -> bnd -> pr1 (2.3 d1 / 7.1 v1): pr1/pr8 already PDL-prefetch W during bnd; one launch saved minus a grid barrier:
+    <= ~1 us (layer s78). v1's bnd ending 4 us after o is a layer item (T=8 boundary), not a chain-kernel item.
+  * pr1 -> routing -> tk2f (in tk2f's 7.6 / 13.1): routing 1.5 + first-copy DRAM latency 2.1 are data dependencies (experts
+    unknown until routing): a chain kernel keeps them; TK2FX already starts tk2f 0.4-0.5 us after pr1. Ring absorbs ph1->ph2.
+    Drain spread ~2.3 us: the next op needs the full expert sum (norm2 over all hidden rows): grid barrier either way.
+  * tail n2u + bnd (3.7 / 4.8 excess, 6.5 / 7.7 us after tk2f end): the only part with real room. n2u already loads its W
+    into registers + L2 before griddepcontrol.wait, but its blocks become resident only as tk2f CTAs exit; the warm-W oracle
+    (layer s16) gave -1.4 us; a fused tail with the unpool slice staged in tk2f's spare smem (156 KB x 132 = 20 MB >= 8.5 MB)
+    during the routing gap would leave ~flag + Y read + reduce + boundary ~= 4 us -> bound ~-2.5 us d1 H100, but every
+    in-kernel barrier version so far lost (N2U_BOUNDARY +2.8, BND_SPIN +2, UPF/UPF2/UPF3 tie..+7.8).
+  => addressable bound ~3-4.5 us d1 (front <=1 + tail ~2.5 + routing <=1), realistically 1-3 after barrier costs (~0.3-0.6%
+     overall): BELOW the lead's 8 us step-2 threshold. Stopped at step 1 as instructed; no persistent kernel built.
+- The biggest sub-peak items are per-kernel ramp+drain (~3-4 us per HBM-streaming kernel: qkv m1, g30 fit 3.9 us fixed) and
+  data-dependency latency (routing -> first expert byte), not launch gaps between kernels.

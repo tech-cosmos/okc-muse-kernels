@@ -1,5 +1,10 @@
 # STATE-moe
 
+## n5s9 (23:55Z): lead 22:45Z step 1 DONE (batch-1 ramp/tail audit, H100 v144, NOTES n5s9, tools/n5s9): excess over 3.12 TB/s
+d1 sl 22.3 us (qkv 3.9, csl+o 4.9, bnd+pr1 2.3, tk2f 7.6, n2u+bnd 3.7), v1 sl 39.4 (5.5/8.4/7.1/13.1/4.8). Addressable by a
+post-attention persistent chain kernel ~3-4.5 us d1 upper bound (tail ~2.5, front <=1, routing <=1), 1-3 realistic: < 8 us,
+so step 2 NOT built. Open: nothing queued; attention lane budget resets 00:00Z.
+
 ## n5s8 (23:25Z): BUILT pr32 at T=8 with an FP32 router (PR_F32, tools/n5s8) to replace pr8: exact (FP32-class logits), standalone
 H100 21.0 us, but IN-LAYER H100 DEAD (v1 sl +1.8..2.3, full +3.8..4.3 us vs pr8; no-PDL worse). Not handed off. NOTES n5s8.
 Next: still the 00:00Z v144 H200 'layer tune T=16/32' pr32 lines (n5s5 recipe); no other open moe item.
