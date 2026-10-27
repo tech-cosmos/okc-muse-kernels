@@ -2,7 +2,9 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-s88: **main = v131** = v130 + pr8 template generalized (light 512-thr / x-ring configs, none compiled). Light pr8 and
+s89: **main = v132** = v131 + moe s33 verify-1 full attention spec=True (H200 standalone -0.65 us, H100 in-layer ~-0.4; validate
+--quick ALL OK, cold 118.9 s). proj/attn31 stack = H100 tie, left out (NOTES s89). First check after 00:00Z: main v132.
+s88: main was v131 = v130 + pr8 template generalized (light 512-thr / x-ring configs, none compiled). Light pr8 and
 OB8+light pr8 measured DEAD on H100 (NOTES s88): pr8 ends at the same time whatever precedes it; boundary already hidden.
 pr8's stream rate (H200 ~17 us after bnd vs 13.7 floor) was already worked by proj s36-s38/s80 (PF, bulk/2nd-wave prefetch,
 RGI, stealing bound ~2 us): no lever > ~1 us. First check after 00:00Z: main v131 + any handoff bundle. validate --quick ALL OK, cold 116.8 s. 0 judge runs.

@@ -1853,3 +1853,17 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   of pr8 variants (PF 6/8, WG, bulk prefetch depth) inside a layer check once budget is back.
 - main v131: generalized pr8 template + PR8L_ALTS = [] (nothing extra compiled), no TUNE option. validate --quick ALL OK
   (13/13, scored 0/12, opt 0/296, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256, cold prepare 116.8 s). 0 judge runs.
+
+## s89 (2026-10-27 12:34Z-, night4 session 38): moe s33 handoff ported (v132); proj/attn31 stack = H100 tie, left out
+- v132 = v131 + moe s33 `spec=True` on the verify-1 full attention plan (attn_src _plan, splits 127 / pf / pre 2 / fix 1): seq from
+  the page-table width, redo if the real length differs. The layer's batch-1 table width is always longest + q_len = seq + 8
+  (reference.py:259), so the redo never runs here (moe tested it standalone: tools/s33/spec_redo.py). H200 standalone (moe DIAG,
+  4/4 pairs) -0.63/-0.70 us. H100 in-layer ab_files v1 full, 6 rounds: AB 155.41 -> 154.86, BA 155.81 -> 155.53 (mean ~-0.4).
+  attn_probe verify 1 8 passes PASS; validate --quick ALL OK (13/13, scored 0/12, opt 0/296, tk2f 0/300, replay 0/240,
+  route 0/240 gap 0.0256, cold prepare 118.9 s).
+- proj/attn31 (c71dbb6: moe s31 csl/vtk owner-merge __fdividef, nds page-table L2 prefetch + K-early readyv) applied on v132:
+  attn_probe 29/29 PASS; H100 ab_files sliding 4 rounds AB/BA: d1 +0.1/+0.1, d16 -1.0/+0.8, d32 -0.8/+1.5, v1 -0.7/0,
+  v16 -0.3/+0.1, v32 -0.1/-0.4 (second slot faster in both orders = proj's position artefact) = TIE. Not on main (no evidence,
+  changes nds sync); patch = `git diff fa3f107 origin/proj/attn31 -- muse_decode_layer/attn_src.py`.
+- pr8 tuner variants for the next check: skipped (proj s36-s38/s80: no pr8 lever > ~1 us, H200 incl.).
+- 0 judge runs (layer checks 20/20 for 10-27). First check after 00:00Z: main v132.
