@@ -71,6 +71,9 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 30 (09:36-09:45Z): no build, no checks (0 left). Lead has not answered the s29 lane-close request (last Human
+  decision 09:28Z); layer (s81) and proj (s76) also wait for lanes. Paper check (NOTES s30): N8 twm items are consumer-limited too
+  (~1020 cyc/17 KB stage = ~33 GB/s/SM = the HBM share), smem byte-LUT dq = same ALU op count. NEXT: the lead's lane decision.
 ## Night4 session 29 (09:30-10:00Z): no build, no checks. Big-M lane bound (NOTES s29): v16 twm = bytes 127 + consumer ~9 + drain ~17;
   v32 = 156 bytes + ~30 N16-N32 consumer (ALU+tensor at floor) + ~20 drain/hot; every listed drain/overlap lever already DEAD.
   Asked lead to close the lane or reassign (COORD Requests). NEXT: whatever the lead assigns.

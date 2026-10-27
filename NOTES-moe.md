@@ -1552,3 +1552,12 @@
   per-block scaled PRMT LUT (LUT built per 4 weights per thread: dead, as s27); exponent-add scale fold (breaks zeros);
   unpool started on finished tokens (64 MB W > L2: streams W twice).
 - Asked the lead (COORD Requests) to close moe's big-M lane or name a new one.
+
+## Night4 session 30 (2026-10-27 09:36Z - 09:45Z; moe checks 20/20 used on 10-27, no judge runs) -- waiting for a lane; no build
+- No lead answer yet to the s29 Requests line (close big-M lane / reassign); last Human decision 09:28Z. layer s81 closed tk2f
+  and also asks for a lane; proj s76 is idle in lane (b). No new work was started, so the shared GPU stayed free.
+- Paper checks only: (1) twm N8 items are near consumer-bound too: ~792 cyc dq+MMA + ~230 overhead per ~17 KB stage
+  = ~33 GB/s per SM at 1.98 GHz, = the 4.0 TB/s / 132 share, so slowing N16+ items does not leave HBM time for N8 items.
+  (2) smem byte-LUT dequant (PRMT byte -> LEA addr -> LDS bf16x2 pair) = 2 ALU ops per 2 weights = today's 8/8: no gain, plus MIO load.
+  (3) cvt e2m1x2 is sm_100+ only.
+- NEXT: whatever the lead assigns (see COORD Requests moe n4s29).
