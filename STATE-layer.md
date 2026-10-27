@@ -2,7 +2,7 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-s104: **main = v136** = v135 + proj g30_sort + G30_PRE (proj/g30pre 88ba088); validate --quick ALL OK, cold 117.8 s; H100 v16 tie (bitwise equal). Lead 16:45Z (2) qkv/FR-pooler g30 = s101/s102 DEAD; only one-launch pooler+router g30 left (<= -4 us H100, queued). **First check after 00:00Z = v136.** 0 runs.
+s104: **main = v136** = v135 + proj g30_sort + G30_PRE (proj/g30pre 88ba088); validate --quick ALL OK, cold 117.8 s; H100 v16 tie (bitwise equal). Lead 16:45Z (2) qkv/FR-pooler g30 = s101/s102 DEAD; only one-launch pooler+router g30 left (<= -4 us H100; router lo rows do not 12-bit compress: 18 esc/row, needs raw BF16 stages; queued). **First check after 00:00Z = v136.** 0 runs.
 s103: no build (SMEM-resident T=1 pooler preload dead on paper: csl latency contention, NOTES s103). Board #30. 0 runs.
 s102: T=128 pooler on split-K g30 slabs (summed in the rmsnorm) + separate router: H100 v16 +7..17 us, DEAD (NOTES s102; dev/s102_g30sp.patch). Lead item (2) closed. main = v135 unchanged. 0 runs.
 s101: qkv on g30 at T=128 (uneven split-K S3 + ticket reduce, dev/s101_g30split.cu, bit-exact) standalone 21.4 vs cuBLAS 20.0 us, in-layer v16 +0.1..4.1 us: DEAD (reduce chain ~5 us; NOTES s101). main unchanged = v135. 0 runs.

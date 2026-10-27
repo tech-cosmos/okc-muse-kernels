@@ -2091,3 +2091,8 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   (proj's tuner-off ab: sl 0..-1.6, full -0.3..-2.2). Kept: bitwise equal, no cost. ab_files filter is the full shape name
   ("verify 16"), "v16" matches nothing and silently times no shape.
 - 00:00Z check = main v136 (read 'layer tune T=128': g30:unpool False must lose).
+- One-launch pooler+router g30 feasibility (judge weights, layer._compress): pooler [4096x8192] ok (<= 7 esc/row), router hi
+  [256x8192] ok (3 esc/row, emax 124 vs pooler 123), router lo (FP32 - BF16 hi residual) NOT compressible: 18 esc/row > G13_ESC 8
+  even in its own window (emax 116); concat [pooler; hi; lo] -> 1000 esc/row. So the fused form needs raw BF16 stages for the 256
+  lo rows (new producer/consumer path + FP32 epilogue) or 24+ escape slots (register cost in the consumers). Bound <= -4 us H100
+  v16 (~0.15%), H200 maybe x-ingest-bound: not started; next session's candidate if nothing better arrives.
