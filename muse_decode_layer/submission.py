@@ -15224,8 +15224,7 @@ def _g27_prepare(state, w, comp, g, packs):
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
-            {"rf_trig": False}, {"g13o": True}, {"pr1bnd": True}, {"pr1bnd": True, "g13o": True},
-            {"bspl1": 2}, {"bspl1": 8}, {"bspl2": 2}, {"bspl2": 8}),  # s74: pr1bnd = PR1_BND, never H200-timed
+            {"rf_trig": False}, {"g13o": True}),  # s74: pr1bnd / bspl1 / bspl2 options removed (H200 check 4bf626fa: pr1bnd +0.6..1.4 us, bspl noise)
         16: ({}, {"g24z": False}, {"g24x": False}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
@@ -15233,7 +15232,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24:pooler": False, "g24:unpool": False, "g24:o": False, "g24:qkv_gate": False}, {"g24:pooler": False, "g24:unpool": False},
              {"g24:o": False}, {"g24:qkv_gate": False},
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
-             {"g27:o": False}, {"bspl1": 2}, {"bspl1": 8}, {"bspl2": 2}, {"bspl2": 8}),
+             {"g27:o": False}),
         32: ({}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
@@ -15242,11 +15241,11 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
              {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True},
              {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True},
-             {"g27:o": True}, {"bspl1": 4}, {"bspl2": 4}, {"bspl1": 1}),  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
+             {"g27:o": True}),  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
-            {"pr1": False, "g19:pooler": True}, {"pr1": False, "g19:pooler": True, "g19:qkv_gate": True}, {"cslpw": True}, {"bspl1": 1}, {"bspl1": 4}, {"bspl2": 1}, {"bspl2": 4}),
+            {"pr1": False, "g19:pooler": True}, {"pr1": False, "g19:pooler": True, "g19:qkv_gate": True}, {"cslpw": True}),
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
               {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},

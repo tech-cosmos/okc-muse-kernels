@@ -1,32 +1,42 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
 BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
-s73: **main = v115 = v111 behavior** (+ proj G24P code, TUNE options removed: H200 check c755dcc3 v114 2.0578x, not submitted,
-tuner g24p +0.6..2 us at d32). Earlier in s73: v113 + moe n20 S6 ported (6-bit scale codes in tk2f/tk2h SQ stages, prepare round-trip assert,
-fallback) but OFF (`_moe_TK2F_S6 = 0`): H100 in-layer d16 -1..-2, d32 -2..-3 us, but moe's H200 diag 13b528a8 says tk2f d16 +0.7..1.0,
-d32 +2.9, tk2h d32 +1.6 us (H200 issue-bound, H100 DRAM-bound). Budget 10-27 left: 11 checks / 5 submits.
-s72: v111 = v109 behavior (QSS T=128 dead). Check 0f12113f v110 2.0766x (not submitted). moe_norm2 removal oracle dead.
-s71: **main = v109 = v108 + proj s59 G24X + moe n18 L2H mode 4** (H100 d16 -2.2/-5.7 us, rest tie; tests 13/13, replay 0/240). Check c3bab7fd 2.0822x (< board, not submitted; H200 tuner: G24X -1 us at T=16). Budget 10-27 left: 13 checks / 5 submits. Submit only after stacking another win onto v109 and a check > 2.0860.
+s74: **main = v117 = v111 behavior** (+ `_opt` hooks pr1bnd / bspl1 / bspl2, no TUNE entries). Check 4bf626fa v116 2.0841x (not
+submitted, < 2.0860): its H200 tuner says PR1_BND +0.6..1.4 us (dead on both GPUs), BND_SPLIT 1/2/4/8 noise. s73: G24P and moe S6
+H200-dead. Checks v109-v116 all 2.058-2.084 (= v108 within noise). Budget 10-27 left: 10 checks / 5 submits.
 
 Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
 Judge noise dominates: identical-ish code 2.04-2.12x across checks; per-shape T=32 moves 5-10%.
 
+## Per-load H200 us vs the s12 floor (board run 19ebde23 = v108; lead 05:07Z request; s74)
+Score %/us = gain in total score per us saved on that layer type (geomean of 6 loads x (46 sl + 16 full)).
+| load | sliding us / floor / gap | %/us sl | full us / floor / gap | %/us full | gap x weight (sl + full) |
+| d1  |  67.7 /  40 /  27.7 | 0.177 |  75.8 /  44 /  31.8 | 0.062 | 4.9 + 2.0 % |
+| d16 | 127.9 /  77 /  50.9 | 0.083 | 208.9 / 137 /  71.9 | 0.029 | 4.2 + 2.1 % |
+| d32 | 173.3 /  85 /  88.3 | 0.058 | 326.8 / 208 / 118.8 | 0.020 | 5.1 + 2.4 % |
+| v1  | 106.8 /  62 /  44.8 | 0.112 | 121.8 /  66 /  55.8 | 0.039 | 5.0 + 2.2 % |
+| v16 | 274.6 / 127 / 147.6 | 0.041 | 368.5 / 189 / 179.5 | 0.014 | 6.1 + 2.6 % |
+| v32 | 335.7 / 144 / 191.7 | 0.033 | 500.0 / 267 / 233.0 | 0.011 | 6.3 + 2.7 % |
+Biggest H200 items (check c755dcc3 profiles): experts = 29-53% of every load (tk2f d1 20-28, d16 62-79, d32 70-103,
+v1 54-64; twq/twm+hot v16 169-186, v32 217+114 us); full attention _gd_full d16 87.5 / d32 167.6 (at its ~4.0 TB/s gather
+floor per ~/attn STATE); g24 pooler+unpool d16 35, d32 48; pr1 17.3 (d1). Layer glue (bnd, routing, norms) <= ~10%.
+Judge noise: one shape moves up to 10% between runs of the same code (v108: d32 full 291 vs 327 us).
+
 ## NEXT
-0. (s73) Nothing queued for a check: v113 = v111 (checked 2.0766/2.0822 < board 2.0860). Next check needs a NEW win stacked.
-   Only unbuilt layer item: T=1 o+bnd+pr1 megakernel (bound ~-3 us d1 = ~+0.5%, multi-session, NOTES s45/s61).
+0. (s74) Nothing queued for a check: main v117 = v111 behavior. Next check needs a NEW win stacked (H200-gated: moe proxy/diag).
+   Only unbuilt layer item: T=1 o+bnd+pr1 megakernel (bound ~-3 us d1 = ~+0.5%, multi-session, NOTES s45/s61/s74).
 1. Integrate new moe/proj Handoffs on top of main (v111) (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
    cold compile < ~5.5 min), then check; submit only if the check beats 2.0860x.
 2. Weakest ratios on the board run: d32 sl 1.589, v16 sl 1.923, d16 sl 1.976: experts (tk2f/twm) are moe's lane; ask moe.
 3. okc check can exceed a 600 s tool timeout: run it in the background, poll `okc jobs`, read with `okc status <job> --json`.
 
-Mains since the board best (v70), all H100-validated (bench test 13/13, replay_test + route_judge 0 fails), details in
+Mains v71-v88 (older), all H100-validated (bench test 13/13, replay_test + route_judge 0 fails), details in
 NOTES s32-s44: v71 BND_SPLIT | v72 O_PF (d32/v16 sl) | v73 moe TK2F_L2H | v74 pr1_npf 0 at T=1 | v75 TUNE_BASE (H200-agreed
 per-(T, sliding) defaults) | v76 moe TWM_L2H | v77 fused pooler+router GEMM at T=256 | v78-v80 g19 M=8 + T=8 candidates +
 proj evict_last on all L2 prefetches | v81-v83 PDL edges in the routing glue | v84 proj g13o (T=1 o 12-bit, TUNE) | v85 proj
 DEC4 | v86 proj DEC3 (12-bit decode 3 instr/pair) | v87 moe_hot at T=256 (TUNE_BASE hot 32; H100 v32 -14 sl / -11 full) |
 v88 proj s36 pr8 bulk L2 prefetch after the wait (PR8_CFG npf 212; H100 ABBA 6 rounds v1 -1.9 sl / -1.6 full).
-
 
 s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
 option sets on synthetic inputs (shapes only) and keeps the fastest in state["tune"]; `_opt()` reads it at trace time.
@@ -34,9 +44,7 @@ Options: g19:<key>, lt:<key>, ltalt:<key>, g10alt/g13alt/g14alt:<key> (1-based `
 pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Defaults = v45 (checked 1.9634x).
 
 ## Board
-- **Best scored: 703d3a7e = v70 (909010f), 1.9954x (s32 14:00Z).** Previous: 371a17ee = v42 (cfd3bc5), 1.9558x, 11,566 us/step, overall #49** at 07:10Z 10-26 (#1 2.368x, #10 2.176x,
-  #50 ~1.953x). Per shape (H200 us): d1 71.4/82.3, d16 145.1/223.9, d32 185.9/334.2, v1 120.5/132.4, v16 264.9/368.3,
-  v32 368.0/544.3. Its check 9db0d4eb 1.9545x. (Old best e5512e00 1.9459 had moe's tk2f race; now superseded.)
+- Best scored = see top (19ebde23 v108 2.0860x). Older bests: 703d3a7e v70 1.9954x, 371a17ee v42 1.9558x (NOTES s32/s27).
 - Judge noise: SGLang's own per-shape times move 2-6% between runs; identical code's per-shape ratios spread ~+-1.5%,
   total ~+-1%: one check cannot resolve <2% changes. Decide on H100 interleaved A/Bs (tools/ab_flag.py), check to confirm.
 - SGLang per shape (H200 us sliding/full): d1 171/183, d16 262-271/431-444, d32 261-268/614-634, v1 259-261/271-280,
@@ -73,17 +81,6 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
   (sub_v15/v16 ...): regenerate from git. Flags kept OFF (dead, s5): TW_TOKENS, TK2_PDL13/2, ROUTER_AFTER_POOLER,
   POOLER_HI_PRIORITY, ROUTER_L2_PF_TOKENS.
 
-## Where the time goes (judge check 58f0ef6f profile, v15, H200 us)
-- decode 1 sliding (81): gemv10 qkv+pooler 30.6, tk2 13.9+8.5 (3 local experts: floor ~17), boundaries 8.4, o 6.4,
-  unpool 4.4, router 4.3 (side; delays the pooler start), csl 4.2, norm2 3.8, routing 3.7, rmsnorm 1.5.
-- decode 32 sliding (190): tk2 64.4+36.4 (9-11 experts: floor ~56; tk2 is ~83% of HBM peak on H100 but ~58% on
-  H200: issue-bound, moe's lane), cuBLAS qkv 12.6 / o+unpool 26.5 / pooler 20.5 + 2 splitK reduces 4 (floor ~40;
-  cuBLAS is ~at the practical limit, see dead ends), attention 12, boundaries 7.5, norm2 5.8, routing 4.1.
-- verify 1 sliding (136): tk2 41.7+23.3, g12 GEMVs 46, router_fma 9.8 (issue-bound; delays pooler start ~8 us on
-  H100), boundaries 8.8.
-- verify 16/32 sliding (298/382): moe_tw 122+71 / 152+78, cuBLAS ~70-90, boundaries 9.5/16, router_split 11.
-  Full layers add attention (_gd_full/_gw_verify 100-190 us, ~83% of KV floor; frozen lane).
-
 ## Next (ranked)
 -4. (s64) d32 sliding attention: CLOSED. csl NC 2 (one wave at B32) loses to nds+combine (18.1 vs 17.4 us); real-input gather
    floor 12.3 (tools/gather_real.py) but nds is 14.0 us even fully L2-warm (pipeline-latency-bound): K/V L2 prefetch <= ~2 us,
@@ -110,6 +107,7 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
    program); qkv/o g19 at T=32; csl overlapped with g13; T=8 norm3+unpool cluster fusion.
 
 ## Dead ends (details in NOTES)
+- s74: PR1_BND (boundary fused into pr1 at T=1) H100 +1.3..1.8, H200 tuner +0.6..1.4 us; BND_SPLIT 1/2/4/8 per T: noise on both.
 - s72: QSS (2-slab split-K qkv bmm, slabs summed at load) at verify sliding T=128/256 (nvs FP32 loads +1.6 us; H200 tie);
   moe_norm2 -> unpool prologue fusion (oracle: norm2 is free, it hosts the unpool's PDL window).
 - s62: csl PW at d1 (+1.3..1.7 us: csl CTAs crowd g13 / lose KV_PF's warm rows); g19 full smem carveout so csl co-resides

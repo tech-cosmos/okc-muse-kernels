@@ -1531,3 +1531,22 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   v1 111.4/122.1, v16 268.2/359.6, v32 352.6/517.8. H200 tuner T=32: sl g24p 168.6 | +tk2h4 166.4 | +lt:o 166.8 vs tk2h4
   165.2 / +lt:o 165.1 (picked {tk2h 4, lt:o}); full g24p 336.0 x3 vs default 334.1, bal 333.1 (picked bal). G24P DEAD on
   H200 too -> v115 drops the g24p TUNE options (code kept, off).
+
+## s74 (2026-10-27 05:19Z-05:50Z, night4 session 23): PR1_BND + BND_SPLIT as H200 tuner diag -> both dead; main v117 = v111 behavior
+- Lead 05:07Z: per-load H200 us vs floor table now in STATE (gap x score weight is 4-6% sliding / 2-2.7% full on every load;
+  experts are 29-53% of each load's time; _gd_full d16 87.5 / d32 167.6 us is at its ~4.0 TB/s gather floor per ~/attn STATE).
+- Noted: v108's check 56d4f73b had d32 full 291 us vs 317-327 in every other run of v108-v116 (the judge's inputs/routing
+  vary per run; synthetic tuner d32 full ~331 in all): single-shape noise up to ~10%.
+- PR1_BND (s11, the first boundary fused into pr1 at T=1, never H200-timed) as TUNE[1] option pr1bnd (+ with g13o).
+  H100 ab_flag real inputs 4 rounds x seeds 99,7,13: d1 sl +1.8, full +1.3 us; + pr1_npf 2/4/8: +4..8 us (pre-wait L2
+  prefetch fights the o GEMV's stream). H100 timeline: separate path o end -> pr1 end 21.4 us (bnd 4.3 + pr1 17.1),
+  fused 22.5 (the per-block prologue = br L2 hot-spot read by 132 blocks + 2 block reductions, not overlapped with W).
+- BND_SPLIT (s33, H100-picked) as TUNE options bspl1 / bspl2 at T=1/8/16/32: H100 d1 1/2/4/8 all within +-0.4 us.
+  Tests: forced bnd 13/13, forced SPL 8 13/13 (files_eq vs main: d1 sl bitwise, T>=8 the usual atomics noise, ids same),
+  replay d1/d16 bnd 2 seeds x 40 0 fails; cold prepare 122.6 s.
+- CHECK 4bf626fa v116 (a9d8cb2) 2.0841x (not submitted, < 2.0860): d1 67.2/76.3, d16 131.4/207.0, d32 166.3/318.7,
+  v1 113.9/124.7, v16 278.5/368.6, v32 362.5/527.7. H200 tuner: pr1bnd +0.6/+0.6, with g13o +1.4/+0.5 us (DEAD on H200
+  too); bspl all within -1.0..+1.2 except T=16 full bspl1 8 +9.4 (noise; T=8 full picked bspl2 4 at -0.3 confirm).
+- v117: TUNE entries removed again (the `_opt` hooks stay: pr1bnd / bspl1 / bspl2), = v111 behavior. Tests 13/13.
+- Remaining layer-own idea with a nonzero bound: T=1 o+bnd+pr1 megakernel (~-3 us d1). The boundary itself is at its
+  latency floor (PDL release + 2 reductions; 4 programs already), so a cluster/DSMEM boundary would save little.
