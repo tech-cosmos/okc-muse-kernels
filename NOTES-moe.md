@@ -1775,3 +1775,28 @@
   * Upper bound on the attention score from all four full kernels at perfect overlap: ~ -4% (d32 -9, d16 -7, v32 -31,
     v16 -21 us). The #1 team's 16% lead cannot come from the full kernels alone; per-shape unknown.
 - Attention budget 10-27: checks 13/20, scored 2/10. Tool commit 14e41ff.
+
+## Night4 session 41 (2026-10-27 14:30Z - ~15:45Z) -- lead 13:30Z item (2) prototype: T=128 GEMM with RESIDENT x slice (dev/s41); 0 checks
+- Attention lane: nothing open (s36-s40). Per lead 13:30Z ("a session that finds nothing to build takes the next item below"),
+  took item (2) (layer's T=128/256 cuBLAS GEMMs; layer s95-s97 idle on it). proj already killed the obvious forms: g22 (12-bit
+  swap-AB wgmma, per-stage x box) and g23 (BF16 SS wgmma, tile split-K, cluster DSMEM sum) died on per-SM ingest (x/W 1.33).
+- New structure "xr" (dev/s41/xr_src.cu + xr.py): CTA (g, s) = n-group of NG rows x k-slice KC=512; the x slice (128 tok x
+  512 k = 128 KB, 8 SW128 boxes) is loaded ONCE and stays resident; W streams as 64x64 boxes through a 10-stage TMA ring; SS
+  wgmma m64n64k16 swap-AB (A = W box, B = x box; WG w = tokens 64w..); after each 64-row tile the WG red.adds its FP32 tile
+  into out[N][128] (pre-zeroed). Grid pool (8 x 16), unp (16 x 8) = 128 CTAs. Ingest per SM = W + 0.25 W (x), out = 0.5 W.
+  Correct (rel err 6e-7 vs FP32 matmul). XR_LIN = W pre-packed tile-contiguous + 1-D bulk copies (same speed).
+- H100, cold L2 (read-flush; NOTE harness overhead = 4.9 us empty-graph replay, subtract it), us incl. that overhead:
+  | variant | pooler m128 (4096x8192) | unpool m128 (8192x4096) |
+  | cuBLAS torch.mm BF16 | 29.5 | 29.3 |
+  | xr red.v2 | 44.2 | 44.8 |  | xr red.v4 (lane-pair shfl) | 42.3 | 42.0 |
+  | xr no flush (diag) | 27.4 | 27.7 |  | xr no MMA no flush (stream only) | 27.5 | 27.4 |
+  Net of overhead: stream-only 22.5 us = 2.98 TB/s (= H100 bare HBM rate; MMA fully hidden), cuBLAS 24.6 (2.73 TB/s).
+  The FP32 red traffic (S x N x M x 4 = 33.5 MB) costs +15..17 us (~2.2 TB/s of L2 atomics) and does NOT overlap the
+  stream; v4 vs v2 = same -> byte-bound, not op-bound.
+- Verdict: the resident-x stream is at the HBM rate (BF16 -2.1 us vs cuBLAS on H100; on the H200 cuBLAS is 2.2-3.2 TB/s vs
+  4.06 stream, and 12-bit W would cut the stream 0.75x), but ONLY if the k-split reduction is nearly free. Not usable yet.
+- Next (unbuilt, est. 1-2 sessions): cluster = all k-splits of one n-group (pool 16 non-portable, unp 8), reduce-scatter each
+  64x128 FP32 tile through DSMEM (st.async of 1/C slices to owner CTAs + mbarrier complete_tx; 30 KB DSMEM per CTA per tile,
+  ~31 MB total), owner writes BF16/FP32 out with plain stores (no zeroing, no reds). Gate: H100 xr+DSMEM <= ~24 us (beats
+  cuBLAS 29.5 incl. overhead) -> then 12-bit W (proj DEC3 decode into RS A fragments: m128 has 64 clk MMA per 64x16 box vs
+  ~100 clk stream, dequant cheap at N=128) -> layer TUNE option at T=128. T=256 (v32): x slice 256 KB does not fit; skip.

@@ -97,6 +97,9 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   Decode full at 92-95% of it (headroom d32<=9, d16<=7 us). Verify full consumer-bound (all-L2 v32 170 / v16 93 vs main 188/102,
   floors 157/80): headroom only via a faster _gw_verify consumer. Full kernels at perfect overlap = ~-4% attention score max.
 - Checks used 2026-10-27: 13/20, scored 2/10.
+- s41 (lead 13:30Z item 2, dev/s41 xr): T=128 GEMM with resident x K-slice per CTA, W streamed, FP32 red out. H100: W stream at
+  2.98 TB/s with MMA hidden (net 22.5 vs cuBLAS 24.6 us pooler/unpool m128), but 33.5 MB of FP32 reds add +15..17 us (v4 = v2).
+  NEXT: cluster-of-k-splits DSMEM reduce-scatter (no reds/zeroing), then 12-bit W. NOTES s41. 0 checks.
 ## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)
 - Floors (pt trip + 20.5 MB random 128-B rows, all in flight, incl. launch): ~8.0 us d1 and v1; dense 7.4.
 - Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.
