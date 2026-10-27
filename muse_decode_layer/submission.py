@@ -15322,7 +15322,7 @@ _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate
 TUNE_BASE = {(8, True): {"nu8": True}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1}, (16, True): {"g19:o": True, "bal": True, **_G24_ALL},
              (16, False): dict(_G24_ALL), (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True},
              (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True},
-             (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
+             (256, True): {"hot": 32}, (256, False): {"hot": 32}, (128, True): {"twq": 73988}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
 # proj s54: T=32 pooler+unpool on stream-K g24 (g24sk): H100 ab_flag 5 rounds x 2 seeds d32 sl -1.3/-1.9, full -1.5/-1.1 us;
 # g24sk at T=16 +0.4..0.9 and qkv at T=32 +1..1.5 on the H100 (W-bound): TUNE candidates only.
 # H100 ab_flag 4 rounds x 3 seeds, TUNE {}: d16 sl/full -2.9/-3.0 us, d32 sl/full -1.5/-1.8 (o on g24 at T=32 sl +2.3; qkv tie/-1)
