@@ -259,7 +259,8 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
 def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr,
                   TRIG: tl.constexpr, XS: tl.constexpr = 0, ROUND: tl.constexpr = False, NS: tl.constexpr = 1,
                   SS: tl.constexpr = 0, z_ptr=None, ZN: tl.constexpr = 0, TRIG2: tl.constexpr = False,
-                  zl_ptr=None, ids_ptr=None, ZL: tl.constexpr = 0, ZW: tl.constexpr = 1024):
+                  zl_ptr=None, ids_ptr=None, ZL: tl.constexpr = 0, ZW: tl.constexpr = 1024,
+                  zr_ptr=None, ZR: tl.constexpr = 0, ZRP: tl.constexpr = 1):
     """One row: rmsnorm(x) (1 + w), BF16 in and out. ZN > 0: program 0 also zeroes z_ptr[:ZN] after its wait (nu8's
     sums of squares, accumulated by the following moe_tk2f). TRIG: let the dependent (moe_tk2 gemm13) launch now.
     XS: x row stride (0: N). ROUND: x is FP32, rounded to BF16 first (the pooler's output dtype).
@@ -276,6 +277,9 @@ def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, 
     if ZN > 0:
         if tl.program_id(0) == 0:
             tl.store(z_ptr + tl.arange(0, ZN), tl.zeros((ZN,), tl.float32))
+    if ZR > 0:  # n5s2: zero row `row` of G24X's persistent qkv out (ZR wide) when unpool is not g24 (no trailing zero_)
+        zc = tl.arange(0, ZRP)
+        tl.store(zr_ptr + row * ZR + zc, tl.zeros((ZRP,), tl.float32), mask=zc < ZR)
     if ZL > 0:  # s59 NU8D: zero this token's local slots' rows of nu8 D's red.add output (ids: the routing, complete)
         sl8 = row * 8 + tl.arange(0, 8)
         e8 = tl.load(ids_ptr + sl8)
@@ -854,6 +858,7 @@ _G24_ZN = {}  # (key, m) -> zeroed out for that call; cleared at every kernel_fn
 # T=32 (only when the tuner picks g24:qkv_gate, a TUNE[32] option): g24 qkv -0.5/-0.9 us vs without G24X (6 rounds).
 G24X_TOKENS = {16, 32}
 _G24X = []  # the pending buffer of this call (unpool's ZN target)
+ZR_ON = True  # n5s2: g30n unpool -> the pre-expert rmsnorm zeroes the G24X buffer (see _kernel_fn)
 # proj s63 G24P (TUNE option "g24p", T in G24P_TOKENS): the same cross-call EZ for the POOLER's FP32 out (persistent
 # state["g24p"][T], zero between calls): the pooler g24 runs EZ on it (no zero + fence + grid epoch barrier; H200 diag61
 # EZ bound pool m32 G108 -1.0..-1.5 us), and the call's g24 unpool zeroes it again as its ZN (pooled is dead after
@@ -2693,9 +2698,9 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24:o": False}, {"g24:qkv_gate": False},
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
              {"g27:o": False},  # s84: attention plan (full layers only)
-             {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True},  # night5 s1: g30n at T=16 (H100 tie: H200 decides)
+             {"g30n:unpool": True},  # night5 s1: g30n at T=16 (H100 tie: H200 decides); n5s2: qkv_gate g30n options dropped (S=3: 8192 % 384, never built)
              ),
-        32: ({}, {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
+        32: ({}, {"g30n:unpool": True}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
@@ -3448,13 +3453,22 @@ def _kernel_fn(data, state):
     y32 = torch.empty((81 if nu8d else 65, D_EXPERT), dtype=torch.float32, device=dev) if nu8 else None
     gnorm = (not pr1 and not nu8 and tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and pooled.dim() == 2
              and pooled.is_contiguous() and _opt(state, tokens, "gnorm", GNORM_DEFAULT))
+    # n5s2 ZR: if unpool runs g30n (it does not zero G24X's qkv out as g24's ZN), the rmsnorm zeroes it (qkv's out is dead
+    # after o) instead of a trailing zero_ kernel at the end of kernel_fn (H100 d32: 1.2 us + gap on the critical path).
+    zr = None
+    if (ZR_ON and not gnorm and _G24X and _G24X[0].shape[0] == tokens and _G24X[0].shape[1] <= D_EXPERT
+            and state.get("g30n", {}).get(("unpool", tokens)) is not None
+            and _opt(state, tokens, "g30n:unpool", ("unpool", tokens) in G30N_DEFAULT_ON)):
+        zr = _G24X.pop()
     if gnorm:
         p = pooled  # s27 GNORM: the rmsnorm runs inside the experts' gather
     else:
       _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=rpdl,
                              TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
                              launch_pdl=rpdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 and not nu8d else 0, TRIG2=tk2fx or tk2fj,
-                             zl_ptr=y32[65] if nu8d else None, ids_ptr=local_ids if nu8d else None, ZL=LOCAL_EXPERTS if nu8d else 0)
+                             zl_ptr=y32[65] if nu8d else None, ids_ptr=local_ids if nu8d else None, ZL=LOCAL_EXPERTS if nu8d else 0,
+                             zr_ptr=zr, ZR=zr.shape[1] if zr is not None else 0,
+                             ZRP=triton.next_power_of_2(zr.shape[1]) if zr is not None else 1)
     if tk2fx or tk2fj:
         state["moe"]["lib"].moe_set_tk2fpdl(1)  # the next moe_tk2f launch (one-shot) is this rmsnorm's PDL secondary
     if not pr1:

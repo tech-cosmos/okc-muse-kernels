@@ -2142,3 +2142,20 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   cold prepare 144.3 s. H100 tuner lines (prep step): T=16 sl default 219.7, g30n unp 219.5 / qkv 219.4 / both 219.5 (tie; picked g24:o False);
   T=32 sl default 222.0, unp 220.1, qkv 221.5, unp+qkv 220.0 -> picked unp+qkv; T=32 full default 440.7, g30n 439.7-440.5 (tie).
 - **main = v138.** 00:00Z check 1 = v138 (covers v136 + g30n): grep 'layer tune T=16' / 'T=32' g30n entries in the check log.
+
+## night5 s2 (2026-10-27 19:31Z-, okc-night5 session 2): v139 = v138 + ZR (G24X zero moved into the pre-expert rmsnorm); 0 judge runs
+- Layer checks 20/20 used for 10-27 (resets 00:00Z). Board #31 at 2.1339x; #1 pjmullin3 2.399x, #10 2.240x, #20 2.172x.
+- Per-load speedups of the board run (load = 46 sl + 16 full): d1 2.53, d16 2.08, **d32 1.78** (weakest), v1 2.32, v16 2.02, v32 2.16.
+- H100 timeline d32 sl (v138, tuner picks g30n:unpool): the layer ENDED with a 1.2 us `vectorized_elementwise` = kernel_fn's trailing
+  `_G24X.pop().zero_()` (G24X invariant: qkv's persistent FP32 out must be zero between calls; g24 unpool zeroes it as its ZN, g30n
+  unpool does not, so the fallback zero_ ran on the critical path after the last boundary). This also biased the tuner against g30n:unpool by ~1.3 us.
+- v139 ZR (ZR_ON, layer.py): when unpool will run g30n, `_rmsnorm_gain` (pre-expert, grid = T rows) zeroes row `row` of the G24X buffer
+  after its gdc_wait (qkv's out is dead after o; the wait is transitive over the earlier kernels). Trailing kernel gone (timeline).
+  H100 ab_flag "decode 32" 6 rounds SEEDS 99,7, ZR off vs on: sl 194.58 -> 193.24 (s99), 199.75 -> 198.52 (s7); full 419.96 -> 419.03, 428.57 -> 429.17 (noise).
+- Also: v138's TUNE {g30n:qkv_gate} options were NO-OPS (G30N_CFG qkv S=3 needs K % 384 == 0; 8192 % 384 != 0, so _g30n_prepare skips it
+  silently): removed from TUNE[16]/TUNE[32] (less tuner time; qkv at T=16/32 is still g24).
+- Observation to re-check on an idle GPU (validate was running beside it): H100 d16 FULL timeline showed router_split+routing (153-163 us)
+  BEFORE the pooler g24 (163-186), i.e. serialized, while d16 sliding overlaps them (pooler first, router beside it). If real, ~10 us at d16 full.
+- v139 validate --quick ALL OK: test 13/13, scored 0/12, opt 0/320, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/471,
+  cold prepare 166.5 s (proj's prep_time + builds ran at the same time: load 17).
+- **main = v139.** 00:00Z check 1 = v139 (covers v136 g30 + v137/138 g30n unpool + ZR): read 'layer tune T=16/T=32' g30n:unpool lines.
