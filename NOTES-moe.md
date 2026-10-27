@@ -2023,3 +2023,9 @@
   HBM-bound M16 21.9/22.1 -> 21.8/21.6, M32 22.65/22.9 -> 22.6/22.4. Exactness: pr32.py RS=25 x 3 reps M16/M32: BAD 0.
 - r-moe 11d49b7. Layer diff: tools/n5s3/pr32_sa.diff (applies to r-layer muse_decode_layer/pr32_src.cu), or simply copy
   tools/n5s1/pr32_src.cu over it (superset: + PR_L2W/PR_TL debug paths, off by default).
+- DEAD (n5s3): PR_RT route_token with per-lane pre-sorted 64-bit (key, slot) heads (19-comparator network; pick = 2 redux +
+  shift; score re-derived from lg off the pick chain): exact, but finisher route step 2.8-3.1 vs 2.3-2.6 us (L2W timeline).
+- In-layer validate (copy of r-layer v141 + this pr32_src.cu, PR32_DEFAULT forced True; validate --quick --skip=prep,tk2f):
+  test 0/13, scored 0/12, opt 0/354, replay 0/240, route 0/240 (worst gap 0.0256), fuzz 0/362: ALL OK. Handoff posted in COORD.
+- Next session (after 00:00Z): read the layer's H200 'layer tune T=16/32' pr32 lines (v141 check). If pr32 wins: make sure SA is
+  in, then try MTOK16 variants; if it loses, ask layer for a PR_TL timeline DIAG. moe checks reset at 00:00Z (20).

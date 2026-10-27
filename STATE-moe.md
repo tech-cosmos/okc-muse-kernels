@@ -1,7 +1,7 @@
 # STATE-moe
 
 ## NOW (night5 s3, 2026-10-27 22:00Z): pr32 in layer main v141 (TUNE option); PR_SA (r-moe 11d49b7) -0.5..0.7 us H200 proxy
-- n5s3: PR_SA 1 = pair handoffs by st.async + complete_tx (NOTES n5s3): L2W M16 16.8->16.2, M32 17.9->17.3; chain -1 us. Layer:
+- n5s3: PR_SA 1 (in-layer validate ALL OK) = st.async pair handoffs (NOTES n5s3): L2W M16 16.8->16.2, M32 17.9->17.3; chain -1 us. Layer:
   copy tools/n5s1/pr32_src.cu over r-layer pr32_src.cu (or tools/n5s3/pr32_sa.diff). Remaining chain costs (L2W M32): finisher
   ingest 128 KB 2.3 us, sum 1.0, route_token 2.3 (8 picks x 2 redux + shfl, 1 warp/token): next lever if the H200 chain is critical.
 - pr32 = T=16/32 pooler (g30n S2 12-bit) + router (hi/lo BF16 rows, first 8 stages of every streaming CTA) + routing, ONE launch:
