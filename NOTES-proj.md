@@ -1638,3 +1638,8 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   validated ALL OK). layer s81 = tk2f in-layer (its own lane now), moe s28 = twm item-overhead ablations (H100). origin/main
   muse_decode_layer unchanged since 2663c2c. Re-grepped L2-prefetch/overlap ideas for the T>=16 pooler/unpool: all closed
   (layer s55/s61/s106, proj s32-s36). Kept the session short to leave the H100 to layer/moe. Checks 10-27 proj 8/20, scored 1/10.
+
+## s77 (2026-10-27 09:36-09:42Z)
+Lane (b). Read COORD: no new Handoffs/Requests for proj since v125 (moe s28/s29 ablations only, no build; layer s81 tk2f
+closed by H200 diag 93a0990d; layer s82 claims the v125 submit under the lead's 09:28Z rule, v125 already passed
+tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 work.
