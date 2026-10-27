@@ -2076,3 +2076,11 @@
   bytes) already measured on the H200: DEAD (decode consumer latency-bound, n22). A 5-bit form needs more decode ops
   (5-bit fields or nibble + bitplane), so it is dead for the same reason. Added to STATE's Dead ends so it is not rebuilt.
 - Next: after 00:00Z read layer's v143 'layer tune T=16/32' pr32 lines (STATE n5s5 grep recipe); lane request still open.
+
+## Night5 session 7 (2026-10-27 22:22Z - 22:35Z) -- re-audit only; 0 checks, no GPU time
+- No lead decision since 20:00Z; lane request (n5s5) unanswered; moe checks 0/20 until 00:00Z; pr32 H200 verdict = layer's 00:00Z v143 check.
+- Re-read the board-run profile 35dd53d0 for the batch-1 loads: d1 sl tk2f 20.2 us (0..3 local experts; = the 14.1 + 6.97/expert
+  fit, the "fixed" part is mostly the PDL wait on pr1/rmsnorm), v1 sl tk2f 55.6 us (= fit at ~6 experts). tk2f is layer's (LANE 1).
+  Early weight streaming during pr1/pr8 = RFLAG s27 (zero-sum, HBM busy). v16/v32: twm/twq/HOTQ/single pass all built + measured
+  (s17-s30, n4s23). No unmeasured moe item found; did not rebuild a dead end.
+- Next: after 00:00Z read v143's 'layer tune T=16/32' pr32 lines (STATE n5s5 recipe) and act on them; else wait for a lane.

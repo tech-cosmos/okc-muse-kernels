@@ -1,5 +1,7 @@
 # STATE-moe
 
+## n5s7 (22:35Z): re-audit only (batch-1 tk2f = fit; all v16/v32 forms measured); no item. Same next step as n5s5.
+
 ## n5s6 (22:20Z): re-derived scale compression (5-bit per-row window fits 100% of this generator's rows, -4.2% bytes) before
 finding it is n20's S6 (6-bit lossless scales, -2.8% bytes): H200 DEAD (d32 +2.7, d16 +1 us; decode consumer is latency-bound,
 any added decode op loses). Listed under Dead ends now. Still no lane answer; waiting for layer's 00:00Z pr32 tune lines.
