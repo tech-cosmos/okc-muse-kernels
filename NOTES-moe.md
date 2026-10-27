@@ -1250,3 +1250,29 @@
   ties the rest, and d32 gains ~1-2 us more. Suspects (not tested): run-time gated/RPE in tk2g_row (GATED_ vs RTG),
   tk2f's PF bits the tk2h path lacks (the layer's d16 tk2f is PF 548 = SQ + BAL + slot y32), i-cache of one body.
 - Layer port: tools/n17/par4_layer.md + par4.diff (3 hunks in moe_src.py, device code only). Posted under Handoffs.
+
+## Night4 session 18 (2026-10-27 02:50Z - ~03:50Z; moe checks 8/20 used today) -- layer is on L2H mode 1 (moe: 4): port note
+- PF2 (L2 bulk prefetch of each CTA's first gemm2 stages when its producer reaches gemm2, to use the gemm13->gemm2 spin):
+  bitwise, but H100 full grid +1..8 us and G88 proxy +0.5..2 at every decode load, monotonic in the prefetch depth. DEAD
+  (reverted; the critical path is the slowest CTA's gemm13, and the extra traffic slows it).
+- tk2h 1-group-row cost (n17's 4%): ncu source counters (d16 s99, no expert > 8 tokens): instructions +0.9%, time +5%.
+  Stalls are in the gemm2 counter spin (CCTL.IVALL of ld.acquire, +210 samples) and an LDC of the run-time X/inter param at
+  every segment start (157 samples). TK2H_REG (asm "+l" on Xp/Out/gs, #define 1, bitwise) removes the LDC; H200 h3 is unchanged:
+  d16 66.2 vs sq 64.9 (+1.3; n17 +1.5), d32 83.0 vs 86.3 (-3.3; n17 -3.4). Warm-L2 consumer proxy (tools/n18/warm.py):
+  a 2-group tk2h row costs 1.10-1.15x a 1-group row on the consumer side, and 1-group rows cost the same as tk2f's (+1 us fixed
+  prologue). So the H200's W=3 (1.375x) optimum is set on the memory side, not by consumer cost.
+- moe_norm3 alone on the H100 graph costs ~3.3-3.9 us per launch even at T=1 (tools/n18/tail2.py: a latency chain; the
+  layer's PDL hides the launch part).
+- Per-phase L2 hint modes (TK2F_L2H2_RT + moe_set_l2h2; SQ run-time instantiations PF 576/580 behind #define TK2F_SQRT, compiled
+  in DIAG builds only). Hypothesis: mode-4 evict_last w13 lines pile up in L2 and slow gemm2. H100 full grid, layer routings:
+  d32 m34 (gemm13 3 / gemm2 4) -3.1 us, m33 -2.4. H200 check 1b1d0fbd (a8841ee + DIAG, test run, never submit), MEAN us:
+            sq(4/4) m33   m43   m34   m11   m40   m44(RT ctl) h3
+    d1      29.8    30.4  30.4  30.3  30.3  30.4  29.9        29.9
+    d16     64.9    65.5  66.1  65.1  66.5  66.5  64.7        66.2
+    d32     86.3    87.4  87.6  87.2  87.4  88.0  86.3        83.0
+    v1      64.2    64.5  64.8  64.5  64.7  65.6  64.3        64.2
+  => mode 4 in both phases stays best on the H200 (the H100 result was another DRAM-bound artefact). Per-phase modes: DEAD.
+- FOUND: the layer's moe_src.py is still on `#define TK2F_L2H 1` and has no mode-4 code (n13 assumed it ran 4). m11 vs sq above =
+  what the layer loses: d1 +0.5, d16 +1.6, d32 +1.1, v1 +0.5 H200 us. H100 IN-LAYER A/B (copy of r-layer 77c0f17, run-time mode
+  switch g_l2m, ab_flag, 3 seeds, A B C A): mode 4 = d16 sl -2.1/-4.5/-2.6, d16 full -2.4/-2.0/0, d32 s11 -1.9 sl / -3.2 full,
+  others tie; 3/4 is worse than 4/4 at d16. Port note tools/n18/l2h4_layer.md (3 lines, bitwise). Est. ~+0.25% layer score.

@@ -69,6 +69,13 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 18 (02:50-03:50Z): the layer is on TK2F_L2H mode 1 (moe uses 4) -> port note tools/n18/l2h4_layer.md
+  (H200 moe-only, mode 1 vs 4: d1 +0.5, d16 +1.6, d32 +1.1, v1 +0.5; H100 in-layer d16 sl -2..4.5). DEAD this session: PF2 (gemm2
+  L2 prefetch at the phase switch), per-phase L2 modes (H200 check 1b1d0fbd: 4/4 best), TK2H_REG (neutral; kept, bitwise).
+  The tk2h 2-group row is only 1.10-1.15x on the consumer side (warm L2): the H200's W3 = 1.375 comes from the memory side.
+  NEXT: H200 phase-2 per-row rate (14% slower than phase 1 on the H200 only; the G88 proxy shows none: needs DIAG timelines, e.g.
+  a no-spin probe); synthetic routings (10x8 vs 5x16 tokens) to measure extra-group vs expert cost for sq/h3. Checks today 8/20.
+
 ## Night4 session 17 (02:22-03:20Z): TK2G_PAR4 = 1 on main (bdfc090): tk2h weighted-split bounds on 4 warps, 32-bit
   (bitwise 138/138). H100: tk2h W3 consumer start 4.4 -> 2.6 us. H200 check 0d0e6c8d (timeline DIAG tools/n17/mktl_d.py):
   d32 sq 87.2 | h3 83.8 (n16 w/o PAR4: -1.8, now -3.4); d16 sq 66.1 | h3 67.6; h0 loses (imbalanced). H200: h3 balanced.
@@ -105,23 +112,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   Consumer unchanged except stage offsets; lossless repack. Check gemm13's gated pairs (2 W copies = gate + up rows 2048 apart?)
   and the L2 hint split (evict_last for re-read rows) still work with one copy. Then a DIAG A/B (sq18x8: NSTG 8 no gain).
 
-## Night4 session 12 (22:25-23:15Z, no judge runs): TWM_PB_M 48 (twm's > 32-token experts in 48-token N48 passes,
-  bitwise; #define TWM_PB48, compiled in DIAG builds only: +7 s compile). G88 proxy v16 -1.2, v32 +5 proxy-us; H100 full
-  grid v16 +3.4 (a 49-token expert -> 48 + 1 passes). Queued in the 00:00Z DIAG as pb48 / h32pb48 (dry run 109 s, PASS).
-  Rule: pb48 >= 1.5 us under off at v16 on the H200 -> offer layer TUNE pb48 at T=128; else close it (NOTES n12).
-
-## Night4 s7: BAL (TK2F_DYN 98204, bitwise; per-segment counters, rounding rows split over CTAs) in the DIAG as bal/bal1; ILV dead.
-## Night4 s6: tk2h PF4 (TK2H_PF4 / TK2H_M, #define TK2H_P4; bitwise) + tools/n6/patch_layer_h16.py; layer TUNE tk2h at T=16/32;
-  H100 layer harness loses (DRAM-bound), G88 proxy d32 -6: the H200 DIAG (h8p4/h16w*p4) + layer tuner decide (NOTES n6).
-
-## Night4 session 3 (19:31-20:05Z, no judge runs) -- r-moe 1f3b71b
-- TK2F_L2H_RT (python, None = #define 4): run-time L2 hint mode, cfg + 1000000 * (mode + 1). H100 mode 4 vs 0: d16 -5.1, d32 -4.3.
-- The hints never ran on the H200 (moe checks predate s21; layer board run is v70). DIAG "dec" now = gs8 (4) / l2h0 / l2h1.
-- FIRST CHECK AT 00:00Z (unchanged plan + this): `sed 's/^DIAG = 0$/DIAG = 1/' muse_moe_w4a16/submission.py >
-  /tmp/x/submission.py; okc check /tmp/x/submission.py --json`; grep "diag12 MEAN" in the job log. Report to layer:
-  hot G (h24/32/40), RG, NORM_EARLY (h32ne0/offne0) at v32/v16, and L2H mode (l2h0/l2h1 vs gs8) at d1/d16/d32/v1.
-  n4s5: + h16w0/2/3/4 (GS16 at d16/d32) vs gs8; n7: + bal/bal1; n9: + "diag9s MEAN" (HBM-ceiling probe, read vs gs8);
-  n10: + er / nm (gs8 - nm = max consumer-side gain on the H200; nm output is WRONG by design, ignore its maxdiff).
+## Older sessions (n3-n12, s6-s7): see NOTES-moe.md (L2H run-time modes, TWM_PB48, BAL, tk2h PF4 are all there).
 
 ## Ranked ideas
 -8. (s17) Hot experts (> 64 tokens at v32: 2 RT2 passes, ~35% of v32 CTA time for ~17% of bytes): a pass that serves
