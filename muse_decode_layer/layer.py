@@ -872,6 +872,9 @@ G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, w
 PR1_TOKENS = (1, 8)  # 8: proj pr8 (r-proj dev/pr8.cu@3be546b): gemv14 pooler blocks also take a router item, an extra
 # finisher block sums the K slices + routes. H100 v1 158.1/172.4 -> 157.0/171.0 us (proj). cfg (kcu, wg, pf, bk, xp, npf)
 PR8_CFG = {8: (8, 8, 4, 128, 1, 212)}
+# s88: light pr8 (TUNE pr8l): 2 row groups per block = 512 thr, 256 blocks, 2/SM (~107 KB smem: x as a 2-of-4-piece ring,
+# xp = XP | XR << 4), so blocks co-reside with the o GEMM's tail and start their W ramp earlier.
+PR8L_ALTS = []  # s88 DEAD (H100): light/ring alts, e.g. (8, 8, 4, 256, 4 | 1 << 4, 212) = 512 thr 2/SM (v1 sl tie, +0.6..0.9 us), (8, 8, 4, 128, 4 | 2 << 4, 212) heavy ring +1.3; with OB8 +1.1..1.6. TUNE pr8l: 1-based index
 PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 0)}  # s35: npf 4 -> 0 (H200 tuner picked npf 0 at T=1 sliding in both logged checks: -0.8/-2.3 us)
 PR1_PF_ALT = (2,)  # s23: pr1 pooler PF (rows in flight per virtual block) alternatives, TUNE option "pr1_pf" (H200 GEMVs ~2.5 TB/s)
 OB8_LATE = False  # s86: ob8 triggers pr8 after its W loop (else at start)
@@ -1108,7 +1111,7 @@ def _g10_lib():
             if _GPR1_SRC is not None:
                 src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
                 if _GPR8_SRC is not None:
-                    src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4]) for c in sorted(set(PR8_CFG.values()))))
+                    src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
             else:
                 src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
             if _GOB8_SRC is not None and OB8:  # s86: dead (H100), built only when forced on
@@ -3220,7 +3223,7 @@ def _kernel_fn(data, state):
             part = torch.empty(8 * tokens * N_EXPERTS, dtype=torch.float32, device=dev)
             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
-                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR8_CFG[tokens], 1)
+                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *(PR8L_ALTS[_opt(state, tokens, "pr8l", 0) - 1] if _opt(state, tokens, "pr8l", 0) else PR8_CFG[tokens]), 1)
     else:
         side_stream.wait_stream(main_stream)
         with torch.cuda.stream(side_stream):

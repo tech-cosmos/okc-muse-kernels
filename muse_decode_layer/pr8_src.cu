@@ -68,7 +68,7 @@ __device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
-constexpr int E = 256, TOPK = 8, MT = 8, RROWS = 16, RSL = 8, RK = 8192 / RSL;
+constexpr int E = 256, TOPK = 8, MT = 8, RSL = 8, RK = 8192 / RSL;  // s88: router rows per item = 4 x row groups per block
 struct Args {
     const uint2* WS; const unsigned* WN; const float2* H; float scale; const __nv_bfloat16* x; __nv_bfloat16* out;
     int n, nrg_all, bk;
@@ -125,8 +125,8 @@ __device__ __forceinline__ void finish(const Args& a) {
         int v;
         do {
             asm volatile("ld.acquire.gpu.global.s32 %0, [%1];" : "=r"(v) : "l"(a.cnt) : "memory");
-            if (v < (E / RROWS) * RSL) __nanosleep(256);
-        } while (v < (E / RROWS) * RSL);
+            if (v < a.bk) __nanosleep(256);
+        } while (v < a.bk);
         done = 1;
     }
     __syncthreads();
@@ -142,12 +142,15 @@ __device__ __forceinline__ void finish(const Args& a) {
     if (t == 0) a.cnt[0] = 0;
 }
 
-template <int KCU, int WG, int PF, int XP>
-__global__ void __launch_bounds__(1024, 1) fused(const Args a) {
-    constexpr int M = MT, XR = XP, KC = 1024 * KCU, TT = 1;
+// s88: NGT row groups per block (4: 1024 thr, 1 block/SM; 2: 512 thr, 2 blocks/SM = 'light', co-resides with o), x staged
+// as an XR-piece ring of XP pieces (XR0 0 = all XP pieces); escape fixups then read x from global (L2).
+template <int KCU, int WG, int PF, int XP, int XR0, int NGT>
+__global__ void __launch_bounds__(NGT * WG * 32, NGT == 4 ? 1 : 2) fused(const Args a) {
+    constexpr int M = MT, XR = XR0 ? XR0 : XP, KC = 1024 * KCU, TT = 1, RROWS = NGT * 4;
+    static_assert(NGT * WG == 32 || NGT * WG == 16, "pr8: 64 threads per router row");
     static_assert(KC == 8192, "pr8: S = 1 (whole-K rows)");
     constexpr int NT = 8, NA = KC / 32 / WG;
-    static_assert(NA % (PF * XP) == 0 && XP <= 4, "x pieces: fully staged");
+    static_assert(NA % (PF * XP) == 0 && XR <= 4 && XR <= XP && XP <= 8, "x pieces");
     constexpr int PA = NA / XP, PB = KC / XP * 2;
     constexpr int XS = XR * PB + 64;
     extern __shared__ __align__(16) unsigned char smem[];
@@ -287,7 +290,12 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
     for (int at = 0; at < NA; at += PF) {
         if (at % PA == 0) {
             const int pc = at / PA;
-            const int left = XP - 1 - pc;
+            if (XR < XP && pc > 0) {  // ring: piece pc - 1 is consumed by every warp; refill its slot with piece pc - 1 + XR
+                __syncthreads();
+                if (pc - 1 + XR < XP) stage(pc - 1 + XR);
+                asm volatile("cp.async.commit_group;");  // (possibly empty: keeps the group count uniform)
+            }
+            const int left = XR < XP ? (XR - 1 < XP - 1 - pc ? XR - 1 : XP - 1 - pc) : XP - 1 - pc;
             if (left >= 3) asm volatile("cp.async.wait_group 3;");
             else if (left == 2) asm volatile("cp.async.wait_group 2;");
             else if (left == 1) asm volatile("cp.async.wait_group 1;");
@@ -335,7 +343,8 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
         for (int e2 = 0; e2 < ESC; ++e2) {
             const int col = __float_as_int(he[e2].x);
             if (col >= 0 && col < KC) {
-                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2));
+                const float xv = XR < XP ? __bfloat162float(__ldcg(a.x + (long)tok * KC + col))
+                                         : __bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2));
                 s = fmaf(xv, he[e2].y, fmaf(xv, -0x1p-15f, s));
             }
         }
@@ -367,9 +376,10 @@ void pr8_launch(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double sca
                 int64_t npf, int64_t pdl) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const int ng = n / 8 / bk, threads = ng * wg * 32;
-    const int sm = m * (1024 * kcu * 2 + 64) + threads / 32 * 512 + ng * 8 * pr8::ESC * 8 + 8 * pr8::RK * 4;
-    TORCH_CHECK(m == 8 && k == 8192 && kcu == 8 && bk == 128 && threads == 1024 && n / 8 % bk == 0 && sm <= 227 * 1024
-                && rw.size(0) == 256, "pr8: shape");
+    const int xp_ = xp & 15, xr_ = (xp >> 4) ? (xp >> 4) : xp_;  // s88: xp = XP | XR << 4 (XR 0 = all pieces staged)
+    const int sm = m * (1024 * kcu * 2 / xp_ * xr_ + 64) + threads / 32 * 512 + ng * 8 * pr8::ESC * 8 + 8 * pr8::RK * 4;
+    TORCH_CHECK(m == 8 && k == 8192 && kcu == 8 && (bk == 128 && threads == 1024 || bk == 256 && threads == 512)
+                && n / 8 % bk == 0 && 512 / ng == bk && sm <= 227 * 1024 && rw.size(0) == 256, "pr8: shape");
     pr8::Args a{(const uint2*)ws_.data_ptr(), (const unsigned*)wn.data_ptr(), (const float2*)h.data_ptr(), (float)scale,
                 (const __nv_bfloat16*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, n / 8, (int)bk,
                 (const float4*)rw.data_ptr(), x32.data_ptr<float>(), part.data_ptr<float>(), logits.data_ptr<float>(),
@@ -379,10 +389,10 @@ void pr8_launch(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double sca
     lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
     la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0;
-#define PR8_CASE(U_, G_, P_, X_) \
-    if (kcu == U_ && wg == G_ && pf == P_ && xp == X_) { \
-        C10_CUDA_CHECK(cudaFuncSetAttribute(pr8::fused<U_, G_, P_, X_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm)); \
-        C10_CUDA_CHECK(cudaLaunchKernelEx(&lc, pr8::fused<U_, G_, P_, X_>, a)); return; }
+#define PR8_CASE(U_, G_, P_, X_, R_, N_) \
+    if (kcu == U_ && wg == G_ && pf == P_ && xp == (X_ | R_ << 4) && ng == N_) { \
+        C10_CUDA_CHECK(cudaFuncSetAttribute(pr8::fused<U_, G_, P_, X_, R_, N_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm)); \
+        C10_CUDA_CHECK(cudaLaunchKernelEx(&lc, pr8::fused<U_, G_, P_, X_, R_, N_>, a)); return; }
     PR8_CONFIGS
     TORCH_CHECK(false, "pr8: no config");
 }

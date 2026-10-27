@@ -13487,7 +13487,7 @@ __device__ __forceinline__ void mma(float* c, unsigned a0, unsigned a1, unsigned
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
                  : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 }
-constexpr int E = 256, TOPK = 8, MT = 8, RROWS = 16, RSL = 8, RK = 8192 / RSL;
+constexpr int E = 256, TOPK = 8, MT = 8, RSL = 8, RK = 8192 / RSL;  // s88: router rows per item = 4 x row groups per block
 struct Args {
     const uint2* WS; const unsigned* WN; const float2* H; float scale; const __nv_bfloat16* x; __nv_bfloat16* out;
     int n, nrg_all, bk;
@@ -13544,8 +13544,8 @@ __device__ __forceinline__ void finish(const Args& a) {
         int v;
         do {
             asm volatile("ld.acquire.gpu.global.s32 %0, [%1];" : "=r"(v) : "l"(a.cnt) : "memory");
-            if (v < (E / RROWS) * RSL) __nanosleep(256);
-        } while (v < (E / RROWS) * RSL);
+            if (v < a.bk) __nanosleep(256);
+        } while (v < a.bk);
         done = 1;
     }
     __syncthreads();
@@ -13561,12 +13561,15 @@ __device__ __forceinline__ void finish(const Args& a) {
     if (t == 0) a.cnt[0] = 0;
 }
 
-template <int KCU, int WG, int PF, int XP>
-__global__ void __launch_bounds__(1024, 1) fused(const Args a) {
-    constexpr int M = MT, XR = XP, KC = 1024 * KCU, TT = 1;
+// s88: NGT row groups per block (4: 1024 thr, 1 block/SM; 2: 512 thr, 2 blocks/SM = 'light', co-resides with o), x staged
+// as an XR-piece ring of XP pieces (XR0 0 = all XP pieces); escape fixups then read x from global (L2).
+template <int KCU, int WG, int PF, int XP, int XR0, int NGT>
+__global__ void __launch_bounds__(NGT * WG * 32, NGT == 4 ? 1 : 2) fused(const Args a) {
+    constexpr int M = MT, XR = XR0 ? XR0 : XP, KC = 1024 * KCU, TT = 1, RROWS = NGT * 4;
+    static_assert(NGT * WG == 32 || NGT * WG == 16, "pr8: 64 threads per router row");
     static_assert(KC == 8192, "pr8: S = 1 (whole-K rows)");
     constexpr int NT = 8, NA = KC / 32 / WG;
-    static_assert(NA % (PF * XP) == 0 && XP <= 4, "x pieces: fully staged");
+    static_assert(NA % (PF * XP) == 0 && XR <= 4 && XR <= XP && XP <= 8, "x pieces");
     constexpr int PA = NA / XP, PB = KC / XP * 2;
     constexpr int XS = XR * PB + 64;
     extern __shared__ __align__(16) unsigned char smem[];
@@ -13706,7 +13709,12 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
     for (int at = 0; at < NA; at += PF) {
         if (at % PA == 0) {
             const int pc = at / PA;
-            const int left = XP - 1 - pc;
+            if (XR < XP && pc > 0) {  // ring: piece pc - 1 is consumed by every warp; refill its slot with piece pc - 1 + XR
+                __syncthreads();
+                if (pc - 1 + XR < XP) stage(pc - 1 + XR);
+                asm volatile("cp.async.commit_group;");  // (possibly empty: keeps the group count uniform)
+            }
+            const int left = XR < XP ? (XR - 1 < XP - 1 - pc ? XR - 1 : XP - 1 - pc) : XP - 1 - pc;
             if (left >= 3) asm volatile("cp.async.wait_group 3;");
             else if (left == 2) asm volatile("cp.async.wait_group 2;");
             else if (left == 1) asm volatile("cp.async.wait_group 1;");
@@ -13754,7 +13762,8 @@ __global__ void __launch_bounds__(1024, 1) fused(const Args a) {
         for (int e2 = 0; e2 < ESC; ++e2) {
             const int col = __float_as_int(he[e2].x);
             if (col >= 0 && col < KC) {
-                const float xv = __bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2));
+                const float xv = XR < XP ? __bfloat162float(__ldcg(a.x + (long)tok * KC + col))
+                                         : __bfloat162float(*(const __nv_bfloat16*)(xs + tok * XS + col * 2));
                 s = fmaf(xv, he[e2].y, fmaf(xv, -0x1p-15f, s));
             }
         }
@@ -13786,9 +13795,10 @@ void pr8_launch(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double sca
                 int64_t npf, int64_t pdl) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const int ng = n / 8 / bk, threads = ng * wg * 32;
-    const int sm = m * (1024 * kcu * 2 + 64) + threads / 32 * 512 + ng * 8 * pr8::ESC * 8 + 8 * pr8::RK * 4;
-    TORCH_CHECK(m == 8 && k == 8192 && kcu == 8 && bk == 128 && threads == 1024 && n / 8 % bk == 0 && sm <= 227 * 1024
-                && rw.size(0) == 256, "pr8: shape");
+    const int xp_ = xp & 15, xr_ = (xp >> 4) ? (xp >> 4) : xp_;  // s88: xp = XP | XR << 4 (XR 0 = all pieces staged)
+    const int sm = m * (1024 * kcu * 2 / xp_ * xr_ + 64) + threads / 32 * 512 + ng * 8 * pr8::ESC * 8 + 8 * pr8::RK * 4;
+    TORCH_CHECK(m == 8 && k == 8192 && kcu == 8 && (bk == 128 && threads == 1024 || bk == 256 && threads == 512)
+                && n / 8 % bk == 0 && 512 / ng == bk && sm <= 227 * 1024 && rw.size(0) == 256, "pr8: shape");
     pr8::Args a{(const uint2*)ws_.data_ptr(), (const unsigned*)wn.data_ptr(), (const float2*)h.data_ptr(), (float)scale,
                 (const __nv_bfloat16*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, n / 8, (int)bk,
                 (const float4*)rw.data_ptr(), x32.data_ptr<float>(), part.data_ptr<float>(), logits.data_ptr<float>(),
@@ -13798,10 +13808,10 @@ void pr8_launch(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double sca
     lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
     la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
     la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0;
-#define PR8_CASE(U_, G_, P_, X_) \
-    if (kcu == U_ && wg == G_ && pf == P_ && xp == X_) { \
-        C10_CUDA_CHECK(cudaFuncSetAttribute(pr8::fused<U_, G_, P_, X_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm)); \
-        C10_CUDA_CHECK(cudaLaunchKernelEx(&lc, pr8::fused<U_, G_, P_, X_>, a)); return; }
+#define PR8_CASE(U_, G_, P_, X_, R_, N_) \
+    if (kcu == U_ && wg == G_ && pf == P_ && xp == (X_ | R_ << 4) && ng == N_) { \
+        C10_CUDA_CHECK(cudaFuncSetAttribute(pr8::fused<U_, G_, P_, X_, R_, N_>, cudaFuncAttributeMaxDynamicSharedMemorySize, sm)); \
+        C10_CUDA_CHECK(cudaLaunchKernelEx(&lc, pr8::fused<U_, G_, P_, X_, R_, N_>, a)); return; }
     PR8_CONFIGS
     TORCH_CHECK(false, "pr8: no config");
 }
@@ -14228,6 +14238,9 @@ G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, w
 PR1_TOKENS = (1, 8)  # 8: proj pr8 (r-proj dev/pr8.cu@3be546b): gemv14 pooler blocks also take a router item, an extra
 # finisher block sums the K slices + routes. H100 v1 158.1/172.4 -> 157.0/171.0 us (proj). cfg (kcu, wg, pf, bk, xp, npf)
 PR8_CFG = {8: (8, 8, 4, 128, 1, 212)}
+# s88: light pr8 (TUNE pr8l): 2 row groups per block = 512 thr, 256 blocks, 2/SM (~107 KB smem: x as a 2-of-4-piece ring,
+# xp = XP | XR << 4), so blocks co-reside with the o GEMM's tail and start their W ramp earlier.
+PR8L_ALTS = []  # s88 DEAD (H100): light/ring alts, e.g. (8, 8, 4, 256, 4 | 1 << 4, 212) = 512 thr 2/SM (v1 sl tie, +0.6..0.9 us), (8, 8, 4, 128, 4 | 2 << 4, 212) heavy ring +1.3; with OB8 +1.1..1.6. TUNE pr8l: 1-based index
 PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 0)}  # s35: npf 4 -> 0 (H200 tuner picked npf 0 at T=1 sliding in both logged checks: -0.8/-2.3 us)
 PR1_PF_ALT = (2,)  # s23: pr1 pooler PF (rows in flight per virtual block) alternatives, TUNE option "pr1_pf" (H200 GEMVs ~2.5 TB/s)
 OB8_LATE = False  # s86: ob8 triggers pr8 after its W loop (else at start)
@@ -14464,7 +14477,7 @@ def _g10_lib():
             if _GPR1_SRC is not None:
                 src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
                 if _GPR8_SRC is not None:
-                    src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4]) for c in sorted(set(PR8_CFG.values()))))
+                    src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
             else:
                 src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
             if _GOB8_SRC is not None and OB8:  # s86: dead (H100), built only when forced on
@@ -16324,11 +16337,11 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24sk2:pooler": True}, {"g24sk2:unpool": True}, {"g24sk2:pooler": True, "g24sk2:unpool": True},
              {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
              {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}, {"tk2h": 0, "g24:qkv_gate": False},),  # s84: aplan  # s76: old base  # proj s69: g24sk2 = SK (4,3,12)  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
-        8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
+        8: ({}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
-            {"pr1": False, "g19:pooler": True}, {"pr1": False, "g19:pooler": True, "g19:qkv_gate": True}, {"cslpw": True},
-            {"cslpw": True, "g14alt:qkv_gate": 3}, {"cslpw": True, "g14alt:qkv_gate": 2}),  # s77: sliding base g14alt 3
+            {"cslpw": True},
+            {"cslpw": True, "g14alt:qkv_gate": 3}, {"cslpw": True, "g14alt:qkv_gate": 2}),  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": False},
               {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
@@ -16996,7 +17009,7 @@ def _kernel_fn(data, state):
             part = torch.empty(8 * tokens * N_EXPERTS, dtype=torch.float32, device=dev)
             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
-                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR8_CFG[tokens], 1)
+                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *(PR8L_ALTS[_opt(state, tokens, "pr8l", 0) - 1] if _opt(state, tokens, "pr8l", 0) else PR8_CFG[tokens]), 1)
     else:
         side_stream.wait_stream(main_stream)
         with torch.cuda.stream(side_stream):

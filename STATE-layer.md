@@ -2,7 +2,11 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-s87: **main = v130** = v129 minus all {pr1: False} TUNE[8] options (lead 11:50Z: never picked on 22 H200 logs incl. board run
+s88: **main = v131** = v130 + pr8 template generalized (light 512-thr / x-ring configs, none compiled). Light pr8 and
+OB8+light pr8 measured DEAD on H100 (NOTES s88): pr8 ends at the same time whatever precedes it; boundary already hidden.
+Open there: pr8's STREAM RATE on the H200 (21.3 us vs pr1 17.5 us for ~the same bytes): H200 diag of PF/WG/prefetch variants
+in the first check after 00:00Z. validate --quick ALL OK, cold 116.8 s. 0 judge runs.
+s87: main = v130 = v129 minus all {pr1: False} TUNE[8] options (lead 11:50Z: never picked on 22 H200 logs incl. board run
 35dd53d0, +1.7..5.8 us; board run clean, no withdraw). validate --quick ALL OK, nu8_race 0/180, cold prepare 147.8 s. 0 judge runs.
 First check after 00:00Z: main v130 + any proj bundle (light pr1/pr8 asked, COORD Requests s87).
 s86: main = v129 = v128 + fix of a latent race in the non-default T=8 {pr1: False} path (nu8d rmsnorm read side-stream
@@ -16,7 +20,7 @@ H100 v32 sl -1.1, H200 tuner -0.9 us). Check 940a4fca 2.0943x (noise; not submit
 Lane question to the lead still open (Requests s84). tools/attn_probe.py (proj) now on main: run --only=<shape> --passes=0 after attention changes.
 
 CLOSED lanes (measured): tk2f (s81 H200 diag, <= 0.9% unreachable), full attention in-layer (s84, ~0.15%), T<=8 glue/tail
-(s78), o+bnd+pr fusion T=1/T=8 (s86). Remaining open: moe/proj handoffs (attention csl/vtk/nvs ports), lighter pr1/pr8.
+(s78), o+bnd+pr fusion T=1/T=8 (s86), light pr8 (s88). Remaining open: moe/proj handoffs (attention csl/vtk/nvs ports), lighter pr1/pr8.
 
 Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).

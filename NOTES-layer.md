@@ -1833,3 +1833,23 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   options forced via state['tune']: {} 0/60, {pr1 False} 0/60, {pr1 False, g19:pooler} 0/60.
 - Request to proj (COORD s87): a lighter pr1/pr8 (<= 512 thr x 64 regs) as a TUNE option = the last open form of the o+bnd+pr
   fusion. 0 judge runs (layer checks 20/20 for 10-27; 4 submits left but nothing beats the board).
+
+## s88 (2026-10-27 12:12Z-, night4 session 37): light pr8 (last open form of o+bnd+pr8) built -> DEAD on H100
+- Took my own s87 request to proj (COORD claim). pr8_src.cu template generalized: fused<KCU, WG, PF, XP, XR0, NGT>: NGT row
+  groups per block (4 = old 1024 thr; 2 = 512 thr, 256 blocks, router items of 8 rows, finisher waits for a.bk items), x staged
+  as an XR-piece ring of XP pieces (cfg xp = XP | XR << 4; escape fixups then read x from global). Old config = <8,8,4,1,0,4>,
+  same code path (ring/light branches compile out). Correct: opt_test 0/128 at T=8 with the alts forced (4 seeds).
+- Pitfall: finish()'s static smem (~10.9 KB, inlined) made the first light config (XP4 XR2, ~117 KB) 1 block/SM = 2 waves (+6 us).
+  Configs that really fit 2/SM: XP4 XR1 (~85 KB) and XP8 XR2. g12 o = 512 thr x 56 regs, 1.3 KB static: co-residence possible.
+- H100 tlavg (/tmp/s88/tlavg.py = s86's, 15 cold replays, v1 sl seed 7), pr8 end - boundary end / layer end:
+  base 20.5 / 114.0-115.0; light XP4R1 20.8 / 114.9; light XP8R2 21.0 / 115.5; heavy ring XP4R2 21.8 (ring + global escapes
+  cost ~1.3); light PF2 30.9 (in-flight bound). ab_flag v1 full (first light cfg, 2 waves) +5.0..5.4.
+- OB8 (s86) + light pr8 (the combination s86 lacked): pr8 end - ob8 end 23.5-23.8 vs 20.5 after the separate boundary; layer
+  end 116.1-116.6 vs 115.0 (OB8 alone 116.3). Pre-loaded light pr8 blocks beside ob8 do not shorten pr8: pr8 ends at ~51-53 us
+  whatever precedes it = the separate boundary is ALREADY hidden; pr8's own stream rate is the cost, not its ramp. CLOSED.
+  (Test pitfall: OB8 must be set in the file text (sed), not appended: _g10_lib prebuilds at import with the stub ob8_gemm.)
+- What is left there: pr8 STREAM RATE. H200 board profile 35dd53d0: pr8 21.3 us (kernel duration incl. PDL wait) vs pr1 17.5 at
+  d1 for ~the same 56 MB (pooler 12-bit 48 MB + FP32 router 8 MB). H100 cannot judge it (2.7 TB/s there). Worth an H200 diag
+  of pr8 variants (PF 6/8, WG, bulk prefetch depth) inside a layer check once budget is back.
+- main v131: generalized pr8 template + PR8L_ALTS = [] (nothing extra compiled), no TUNE option. validate --quick ALL OK
+  (13/13, scored 0/12, opt 0/296, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256, cold prepare 116.8 s). 0 judge runs.
