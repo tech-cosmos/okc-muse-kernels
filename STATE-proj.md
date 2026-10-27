@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 13:40 UTC (s84). Full validate of layer main v133 (02120df): ALL OK (13/13, 0/24, 0/302, 0/1200, 0/480, 0/240,
+fuzz 0/1476, cold 116.8 s): clear for the 00:00Z layer check. muse_prefill_layer exists but doesn't count overall. NOTES s84.
 Updated 2026-10-27 12:30 UTC (s83). Layer v129 (6621403) took its own nu8d fix. NEW tools/stream_fuzz.py (r-layer branch proj/fuzz
 19b5ba1 + validate.py step 'fuzz'): torch.cuda._sleep injected at every side/hi-stream fork (side late / main late, eager + graph),
 every TUNE set: unfixed v128 caught (12/204 eager, 10/156 graph); v129 all T 0/1492 eager, 0/1216 graph. Static audit: no other
@@ -16,7 +18,7 @@ Older session headers (s46-s80): see NOTES-proj.md (sessions are logged there in
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-27 used (s72): checks 8/20, scored 1/10. (0cfca9f had broken cpp decls -> fixed c2b541b: grep prepare output for 'build failed'.) prepare() limit is 300 s: diags must stay small (s56 fail).
+- Budget 10-27 used (s84): checks 8/20, scored 1/10. (0cfca9f had broken cpp decls -> fixed c2b541b: grep prepare output for 'build failed'.) prepare() limit is 300 s: diags must stay small (s56 fail).
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
 ## m256 11.18 (cuBLAS splitK GEMM 6.4 + splitKreduce 2.0 + hi+lo add 1.6). SGLang: 10.5/26.4/15.0/15.5/16.8/17.7.
 ## router3 (dev/router3.cu, sweep dev/r3.py): split-K mma GEMM, hi+lo into one accumulator, partials -> float4 atomics

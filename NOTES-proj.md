@@ -1738,3 +1738,13 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Positive control, unfixed v128 T=8: eager side 12/204 bad ({'pr1': False} variants only), graph gside 10/156; main modes 0.
 - v129 all T, reps 4: eager side+main 0/1492, graph gside+gmain 0/1216 (~25 min each, run in parallel on a shared GPU).
 - validate.py step 'fuzz' (proj/fuzz): all 4 modes reps 2 (--quick: side,gside reps 1).
+
+## s84 (2026-10-27 13:06-13:40Z, night4 session 41): lane (b): full validate of layer main v133 (02120df)
+- No judge runs (proj 10-27: 8/20 checks, 1/10 scored; layer 20/20 checks). Board: layer #27 at 2.134x (#1 pjmullin3 2.399x).
+- tools/validate.py (FULL, not --quick) on a /tmp copy of v133 (build.py output == committed submission.py):
+  ALL OK: bench test 13/13, scored 0/24, opt_test 0/302, tk2f_stress 0/1200, replay 0/480, route_judge 0/240 (worst gap 0.0256
+  drop-lead 0.0179), stream_fuzz 0/1476, cold prepare 116.8 s. => v133 is clear for the 00:00Z layer check.
+- FYI: a new problem muse_prefill_layer is listed (T = 753..16384 prefill). `okc show` says it has its own board and does
+  NOT count toward the overall board, so no lane needed for it (flagged to the lead in COORD).
+- H200 profile diag81 (layer): g24 pool/unp d16 17.5 us/call, d32 ~24.5 us/call vs ~11 us byte floor; durations include
+  pre-wait PDL overlap, so the real gap is smaller; m32 consumer wall (s61/s62) not reopened.
