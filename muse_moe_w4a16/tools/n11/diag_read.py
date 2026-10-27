@@ -16,6 +16,8 @@ for load, n, t in re.findall(r"diag12 MEAN (\w+ \d+) (\S+): ([\d.]+) us", txt):
     order[load].append(n)
 for load, s, n, t in re.findall(r"diag12 (\w+ \d+) s(\d+) (\S+): ([\d.]+) us", txt):
     seeds[(load, n)].append(float(t))
+for load, n, sv in re.findall(r"diag12 MEAN (\w+ \d+) (\S+): [\d.]+ us \| seeds ([\d. ]+)", txt):  # n13 compact lines
+    seeds[(load, n)] = [float(x) for x in sv.split()]
 for load, ns in order.items():
     b = mean[(load, ns[0])]
     print(f"== {load} (base {ns[0]} {b:.1f} us)")

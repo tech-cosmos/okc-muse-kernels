@@ -4947,7 +4947,9 @@ DIAG_VARIANTS = {  # s30 queued: H200 A/B of moe_hot (HOT_M) on the layer's v32 
            # n10: er = early ring release (fence.proxy.async after the stage LDS; bitwise = main; H100 tie); nm = NO MATH
            # (timing probe, WRONG output): gs8 - nm = the most any consumer-side change (GS16, cheaper dq) can win on the
            # H200 (H100: d1 1.0, d16 3.1, d32 3.7, v1 2.8 us)
-           + [("er", {"TK2F_DYN": 94204, "TK2F": 91204}), ("nm", {"TK2F_DYN": 91214, "TK2F": 91214})],
+           + [("er", {"TK2F_DYN": 94204, "TK2F": 91204}), ("nm", {"TK2F_DYN": 91214, "TK2F": 91214})]
+           # n13: H200 stream probe (4a591c7d): 36 KB stages stream 7-12 us faster than 18 KB at d16/d32: KPS 4 + ER
+           + [("er402", {"TK2F_DYN": 94402, "TK2F": 91402}), ("er403", {"TK2F_DYN": 94403, "TK2F": 91403})],
     "big": [("off", {"HOT_M": {}, "TWM_ORDER_M": {}})]
            + [(f"h{g_}", {"HOT_M": {256: g_}, "TWM_ORDER_M": {}}) for g_ in (24, 32, 40)]
            + [("h32o76", {"HOT_M": {256: 32}, "TWM_ORDER_M": {256: 76}}), ("o76", {"HOT_M": {}, "TWM_ORDER_M": {256: 76}}),
@@ -5006,11 +5008,12 @@ def _diag(st):
         for n, _, o in graphs:
             t = sorted(ts[n])[len(ts[n]) // 2]
             err = (o.float() - base).abs().max().item()
-            res.setdefault((load, n), []).append(t)
-            print(f"diag12 {load} s{seed} {n}: {t:.1f} us (maxdiff vs {graphs[0][0]} {err:.3g})", flush=True)
+            res.setdefault((load, n), []).append((t, err))
         del graphs
+    # n13: one line per (load, variant): the judge keeps only the last ~200 log lines (log_tail)
     for (load, n), v in res.items():
-        print(f"diag12 MEAN {load} {n}: {sum(v) / len(v):.1f} us", flush=True)
+        print(f"diag12 MEAN {load} {n}: {sum(x[0] for x in v) / len(v):.1f} us | seeds "
+              + " ".join(f"{x[0]:.1f}" for x in v) + f" | maxdiff {max(x[1] for x in v):.3g}", flush=True)
     if DIAG_STREAM:
         _diag_stream(st, routes, flush, sink)
     if DIAG_TL:
@@ -5022,7 +5025,7 @@ def _diag(st):
     torch.cuda.synchronize()
 
 
-DIAG_STREAM = True  # n9: H200 HBM-ceiling probe (moe_stream) on the same routings, after the variants
+DIAG_STREAM = False  # n9: H200 HBM-ceiling probe (moe_stream) on the same routings, after the variants (n13: ran in 4a591c7d)
 
 
 def _diag_stream(st, routes, flush, sink):
