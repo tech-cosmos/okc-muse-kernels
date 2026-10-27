@@ -10,6 +10,9 @@ TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline b
 Judge noise dominates: identical-ish code 2.04-2.12x across checks; per-shape T=32 moves 5-10%.
 
 ## NEXT
+0. FIRST: moe n20 S6 (6-bit block-scale codes in tk2f/tk2h SQ stages, lossless w/ fallback; r-moe 4a87466; H100 moe-only
+   d16 -1.7, d32 -2.4, v1 -2.0 us) awaits moe's H200 diag (13b528a8, queued 04:46Z). Port it once it's under Handoffs, stack
+   with anything else new, test (incl. tools/tk2f_stress.py), cold prepare, check; submit only if > 2.0860x.
 1. Integrate new moe/proj Handoffs on top of main (v111) (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
    cold compile < ~5.5 min), then check; submit only if the check beats 2.0860x.
 2. Weakest ratios on the board run: d32 sl 1.589, v16 sl 1.923, d16 sl 1.976: experts (tk2f/twm) are moe's lane; ask moe.
