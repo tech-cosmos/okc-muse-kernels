@@ -2242,3 +2242,14 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   route 0/240 (gap 0.0256), fuzz 0/530, cold prepare 155.6 s. H100 tuner T=8 sl: default 145.9 | {g30n:o} 146.8 (picked nu8d/nu8x off);
   T=8 full: default 159.2 | {g30n:o} 158.9 (picked cslpw + pr8_npf 220). H200 decides at 00:00Z.
 - **main = v144.** 00:00Z check 1 = v144 (= v143 + this option; nothing else changed). Read 'layer tune T=8' {g30n:o} lines too.
+
+## night5 s6 (2026-10-27 22:28Z-, okc-night5 session 6): T=8 pooler on g30k MTOK 8 (no pr8) measured DEAD; v144 check at 00:00Z
+- Layer checks 20/20 for 10-27 at session start. Board #33 at 2.1339x; #1 pjmullin3 2.399x, #10 2.249x, #20 2.180x.
+- DEAD (H100 in-layer, TUNE {}, variants/n5s6_*.py, seeds 99/7, 4 rounds): v1 = {pr1: False} + T=8 pooler on g30k (stream-K,
+  G30K_CFG ("pooler", 8) G 88/104/120, NW16/NS16, MTOK 8 builds and passes the prepare check) beside the side-stream r3 router.
+  v1 sl s99: pr8 144.4 | pr1 False (g14 pooler) 149.3 | g30k G104 149.8 | G88 150.1 | G120 149.8; full s99 155.1 | 160.0 | 161.9 | 162.9 | 162.1.
+  Timelines (v1 sl): pr8 ends 23.5 us after the boundary; g30k pooler also ~24 us after it (its 104 CTAs share HBM/SMs with the
+  router, which stretches 6.6 -> 27 us beside it); routing ends 6 us after pr8 would. Alone the r3 router is 6.6 us and the g14
+  pooler 23 us: serial = no better either. pr8's fusion (router items inside the pooler blocks) is worth ~5 us at T=8;
+  a g30 pooler would need the router fused like pr32 (FP32 router at T=8: hi/lo x hi/lo products, a new port) to have a chance,
+  and even standalone it is ~17 us vs pr8's 23.5 for 56 MB: <= ~3 us H100, ~0.3% v1. Not queued. Change reverted (prepare time).
