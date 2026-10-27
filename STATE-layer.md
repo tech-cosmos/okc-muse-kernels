@@ -9,7 +9,7 @@ Budget 2026-10-27: 18 checks / 8 submits left after s67 (resets 00:00Z).
 
 s68: **main = v105 = v103 + v104 (all JIT builds concurrent: cold import+prepare 314 s -> 111 s on the H100, lead 00:48Z
 done) + moe n14 TK2F_SQ at T>1** (bitwise; H100 tie at T>1, +0.7 at d1 so off there). Check 18504372 = v105 (see NOTES s68).
-Prepare-time rule: the judge fails prepare > 300 s. Measure cold with /tmp/s68/prep_time.py logic (fresh TORCH_EXTENSIONS_DIR +
+Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
 
 ## NEXT
