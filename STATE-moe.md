@@ -69,6 +69,13 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 25 (07:01-08:00Z): DIAGNOSIS: twq NEVER beat twm (lead 06:41Z question). H200 same check b14b8be4: v16 twm 171.6/169.4 |
+  twq q4 214.5 | HOTQ s66h32ne 191.9 | twm+split66 169.9; v32 twm 218 | q4 278 | s66h32ne 270. n21's split-combine block in tq_item
+  made every twq item slower (H200 q4 186.8 -> 210; H100 bisect 201 -> 220, block alone ~15 us); s21-s24 compared only twq variants
+  to that regressed q4. Layer told to drop twq at T=128 (COORD 07:25Z). twq line DEAD (template-split fix hits ptxas C7512).
+  RULE: every big-M DIAG keeps a twm control (DIAG_VARIANTS has one now). Checks today 18/20.
+  NEXT: twm at v16/v32 = the real big-M path: drain ~22 us (items 36-50 us, 3.5 waves) + first wave ~2.7 TB/s (n15 timeline).
+
 ## Night4 session 24 (06:27-06:55Z): TWQ_NE = NORM_EARLY for moe_twq (moe_norme in twq's drain; twq flags | 1 << 21 or TWQ_NE = 1).
   Bitwise (tools/s24/ne_t.py 0/78). H200 check 11f0161e: v16 s66h32 192.4 -> 191.1 (every seed), s33h -2.1, twq v32 -6.5 us.
   Layer port tools/s24/patch_layer_ne.py, TUNE[128] {"twq": 539050500}; Handoffs/Requests 06:50Z. Checks today 16/20.

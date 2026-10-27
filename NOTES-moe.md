@@ -1432,3 +1432,28 @@
   branch. 16 warps -> 664 issue-clk per stage per SM vs H200 measured ~1330 clk (43 us / 64 stages @ ~1.98 GHz) = ~50% issue
   efficiency (same as tk2f, ncu s22). Stream rate needs ~1170 clk/stage. Levers: 2 k-chunks per stage (KPS 2, as tk2f: -3..4% there)
   to halve the per-stage ~50 instr, and for N16-N32 the HGMMA cost itself (N32 items +45%).
+
+## Night4 session 25 (2026-10-27 07:01Z - ; moe checks 18/20 after this session) -- DIAGNOSIS: twq never beat twm; n21 regressed twq
+- Lead 06:41Z asked why the n21 K-split (moe-only H200 v16 209.9 -> 199.3) made the layer's v16 sliding SLOWER (tuner 298 vs
+  287, forced scored 282.2). Answer: it never won. Every twq DIAG since s17 was compared to a twq baseline (q4), never to twm,
+  the layer's T=128 default. Same H200 diag on the layer's v16 routings across checks (decode controls stable to 0.4 us):
+  twm 172 (x13/x14) | q4 177.9 (n13) -> 186.8 (n19) -> 210.1 (n21). n21's split code made EVERY twq item slower.
+- Same-check H200 confirmation, check b14b8be4 (9c4808e + DIAG, test run): v16 twm 171.6/169.4 (repeat) | q4 214.5/214.3 |
+  s66h32ne (HOTQ+split+NE, the s24 "best") 191.9 | twm + TWF_SPLIT 66 169.9 (tie); v32 twm 218.5/217.7 | q4 278.1 | s66h32ne 269.9.
+  H100 dry run of the same DIAG agrees (twm 193.8, q4 223.1, s66h32ne 208.8, twms66 191.7).
+- Layer scored data (16 judge profiles in r-layer/profiles, v16 sliding by tuner pick): twm-picked runs 272.3 mean (268-276,
+  n=9), twq-picked 277.0 (268-285, n=6). The layer tuner's synthetic routing is realistic (SYNTH_P); its twm/twq picks are
+  within its noise. The judge profiles' per-kernel times are single runs and too noisy to compare (twm 147..199 us).
+- Regression bisect (H100 moe-only proxy, layer v16 routings, tools/s22/proxy.py with SUB=<module> from /tmp/s25):
+  pre-n21 4c4cd4e q4 200.4/202.3, twm 194; n21 18dfa4c q4 216.0/218.7; main q4 219.4/221.5; main with tq_item's
+  `if (part)` split-combine block compiled out: 204.6/206.3. So ~15 of ~19 us = that block (SASS: moe_twq<8,1> 4.3k -> 17k
+  instructions, LDL 9 -> 57; the k-loops themselves only 164 -> 166 instr, still pipelined).
+- Fix attempt (NOT kept, /tmp/s25/sub_spl_attempt.py): split as a template flag tq_item<..., SPL> (constant nkc 32/64, offsets
+  from kernel params after the loop, gemm2-only epilogue): code back to 7.8k instr, q4 207.5, s33h 202.9 (H100) BUT ptxas C7512
+  "wgmma serialized due to insufficient register resources" for moe_twq (every loop: DEPBAR 0x0 after each HGMMA). Tools:
+  tools/s25/ptx_c7512.sh (rebuilds the lib, prints C7512 count + loop shapes), tools/s25/sass_loops.py (HGMMA loop sizes).
+  Not pursued: twq is ~40 us behind twm even pre-n21 at v32 and ~15 at v16; HOTQ's best case after a full fix ~tie with twm.
+- Posted the diagnosis to layer (COORD Requests 07:25Z): drop the twq options at T=128 (incl. s76 HOTQ 536953348/536870916);
+  my HOTQ / NE requests withdrawn. DIAG_VARIANTS now always carry a twm control (+ repeat).
+- LESSON: every DIAG must contain the layer's default path as a control; any kernel change must be re-timed against an
+  older build of the same variant (proxy SUB=<old module>), not only against sibling variants in the same build.
