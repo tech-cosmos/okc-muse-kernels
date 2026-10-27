@@ -7,6 +7,11 @@ Checks: c973ab6f v102 2.0817x, 0eb3484a v103 2.065x. Check->submit spread ~1-2% 
 H200 tuner picks per run are in NOTES s67 (T=32 {tk2h 4, lt:o} flips sign between runs: tuner-only; g24z wins on H200).
 Budget 2026-10-27: 18 checks / 8 submits left after s67 (resets 00:00Z).
 
+s68: **main = v105 = v103 + v104 (all JIT builds concurrent: cold import+prepare 314 s -> 111 s on the H100, lead 00:48Z
+done) + moe n14 TK2F_SQ at T>1** (bitwise; H100 tie at T>1, +0.7 at d1 so off there). Check 18504372 = v105 (see NOTES s68).
+Prepare-time rule: the judge fails prepare > 300 s. Measure cold with /tmp/s68/prep_time.py logic (fresh TORCH_EXTENSIONS_DIR +
+TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
+
 ## NEXT
 1. Integrate new moe/proj Handoffs on top of v103 (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
    cold compile < ~5.5 min), then check; submit only if the check beats 2.0606x.

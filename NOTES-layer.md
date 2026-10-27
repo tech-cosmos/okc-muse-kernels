@@ -1402,3 +1402,22 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - 01:01Z **submit b9685e03 = v103: 2.0606x [2.030, 2.092], 10,977 us/step: NEW BOARD BEST, layer board #30** (01:27Z; #1 2.380x).
   d1 70.3/77.0, d16 133.4/216.1, d32 164.7/320.7, v1 114.0/122.9, v16 271.3/360.5, v32 352.9/520.7.
 - Budget 10-27 used: 2 checks, 2 submits (18 / 8 left).
+
+## s68 (2026-10-27 01:28Z-, sandbox okc-night4, session 17): cold prepare 314 -> 111 s (lead 00:48Z); v105 = + moe n14 TK2F_SQ
+- Cold timing (/tmp/s68/prep_time.py, fresh TORCH_EXTENSIONS_DIR + TRITON_CACHE_DIR, H100, 128 cores) of v103: import 96.8 s
+  (attention csl/nvs/nds load_inline at import, serial) + prepare 217.3 s (moe lib 84.4, g10 37.7, g24 34.8, lt 34.6, tuner 25.3).
+- v104: every JIT build on one ThreadPoolExecutor(8) (`_BUILD_POOL`, layer.py top): attention's `_load_inline` is replaced in
+  build.py by a submit that returns `_LazyBuild`; the layer's builds (_moe__lib, _g10_lib, and the new _lt_build/_g22_build/
+  _g24_build split out of their prepare functions) are submitted at module end (`_PREBUILD`); prepare() first calls
+  `_join_builds()` (waits, resolves _CSL/_NVS/_NDS to modules or None = Triton fallback, pops failed layer libs so they are
+  retried serially: seen working when a build error hit the pool). Cold: import 1.2 s, prepare 111.5 s (join 87 = the moe
+  build; tuner 24), wall 114 s. Kernels/sources unchanged (same extension hashes). test 13/13, replay 0/96, all 4 libs + csl/nvs/nds real modules.
+  NOTE the judge's core count is unknown: with few cores the parallel builds still overlap (each is ~1 nvcc + 1 g++).
+- moe n15's twm K-split clamp fix: NOT ported (our twf_split 1022 runs as the fixed 66 split, which moe found faster than real AUTO).
+- v105 = v104 + moe n14 TK2F_SQ (r-moe 01326b4 recipe tools/n14/sq_layer.md, hand-ported to our older moe_src: tk2f_produce SQ
+  template, PF | 512, cfg + 10000000 for SA 84204 and BAL (PF 36|512) only, `_sq_pack` in prepare, `_tk2f_w` helper at the moe
+  kernel_fn launch; T=1 n2u site behind TK2F_SQ_T1 = False). Bitwise vs off at the expert level (/tmp/s68/sq_eq2.py, M 1/8/16/32,
+  BAL on/off, 8 skewed routings): 0/192 (whole-layer outputs are NOT bitwise run-to-run anyway: split-K atomics).
+  H100 ab_flag 4 rounds x SEEDS 7,11,99, SQ on vs off: d1 sl +0.7/+0.9/+0.7, full +0.9/+0.5/+0.6 (=> off at T=1);
+  d16 +0.4/+0.1/+0.6 sl, +0.6/+0.2/-1.5 full; d32 +-0.5 (H100 DRAM-bound; moe's H200 diag: d32 -1.5, d16 -0.55).
+  tk2f_stress 0/600, test 13/13, replay decode seeds 11,23 0/96, cold prepare 111.4 s.
