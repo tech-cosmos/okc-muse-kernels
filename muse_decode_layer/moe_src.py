@@ -90,6 +90,9 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
 #define TK2F_L2H 1       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
 #define NORM_EARLY 1     // n4s1 (layer s53: set here, layer has its own _lib): twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them
+#ifndef TK2G_PAR4
+#define TK2G_PAR4 1      // n17: tk2g_bound's 4 calls on 4 warps + 32-bit p (bitwise: same bounds)
+#endif
 #ifndef TK2G_PAR
 #define TK2G_PAR 1       // n4s5: GS16 weighted split bounds by warp 0 (tk2g_bound) instead of every thread (tk2g_split)
 #endif
@@ -3937,7 +3940,11 @@ __device__ __forceinline__ int tk2g_bound(int b, int nact, int wt, int rps, cons
     if (lane >= o) { incl += v; rows += r; }
   }
   const int W = __shfl_sync(0xffffffffu, incl, 31);
+#if TK2G_PAR4
+  const int p = (int)((unsigned)W * (unsigned)b / gridDim.x);  // n17: 32-bit (W * b < 2^28)
+#else
   const int p = (int)((long long)W * b / gridDim.x);
+#endif
   int cum = incl - w * rps, row = rows - ng * rps;
   int res = 0x7fffffff;
   if (ng && p >= cum && p < incl) {
@@ -4113,11 +4120,18 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   if (GS == 16 && D > 8) {  // GS16: 2-group rows cost D/8 of a 1-group row: split the rows by weight, not count
     __shared__ int s_gb[4];
     if (TK2G_PAR) {  // n4s5: warp 0, lane-parallel (tk2g_bound)
+#if TK2G_PAR4
+      if (warp < 4) {  // n17: the 4 bounds on 4 warps
+        const int v = tk2g_bound(blockIdx.x + (warp & 1), nact, D, (warp & 2) ? 128 : 256, s_e, s_off);
+        if (lane == 0) s_gb[warp] = v;
+      }
+#else
       if (warp == 0) {
         const int v0 = tk2g_bound(blockIdx.x, nact, D, 256, s_e, s_off), v1 = tk2g_bound(blockIdx.x + 1, nact, D, 256, s_e, s_off);
         const int v2 = tk2g_bound(blockIdx.x, nact, D, 128, s_e, s_off), v3 = tk2g_bound(blockIdx.x + 1, nact, D, 128, s_e, s_off);
         if (lane == 0) { s_gb[0] = v0; s_gb[1] = v1; s_gb[2] = v2; s_gb[3] = v3; }
       }
+#endif
       __syncthreads();
       a0 = s_gb[0]; a1 = s_gb[1]; b0 = s_gb[2]; b1 = s_gb[3];
     } else {

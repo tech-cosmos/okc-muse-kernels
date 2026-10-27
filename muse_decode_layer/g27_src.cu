@@ -56,6 +56,30 @@ __device__ __forceinline__ void bulk(unsigned dst, const void* src, int bytes, u
                  :: "r"(dst), "l"(src), "r"(bytes), "r"(b) : "memory");
 }
 
+#ifndef G27_MC
+#define G27_MC 1  // s58: 1 = x by bulk copies, one per (row, k slice), spread over threads (layer d16 -1.8 sl); 0 = cp.async xload; >1 cluster multicast
+#endif
+// s58 MC: x rows multicast into all G27_MC CTAs of the cluster (same smem offsets / barrier offset in each CTA)
+__device__ __forceinline__ void bulk_mc(unsigned dst, const void* src, int bytes, unsigned b) {
+#if G27_MC > 1
+    asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1], %2, [%3], %4;"
+                 :: "r"(dst), "l"(src), "r"(bytes), "r"(b), "h"((unsigned short)((1u << G27_MC) - 1)) : "memory");
+#else
+    bulk(dst, src, bytes, b);
+#endif
+}
+__device__ __forceinline__ unsigned cl_rank() {
+#if G27_MC > 1
+    unsigned r; asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(r)); return r;
+#else
+    return 0;
+#endif
+}
+__device__ __forceinline__ void cl_sync() {
+#if G27_MC > 1
+    asm volatile("barrier.cluster.arrive.release.aligned;\nbarrier.cluster.wait.acquire.aligned;" ::: "memory");
+#endif
+}
 // x [m, k] -> smem rows of XS bytes by all threads: 16 B cp.async (L2, .cg), then wait + block barrier
 __device__ __forceinline__ void xload(unsigned xs, const __nv_bfloat16* x, int m, int k, int XS, int t, int nt) {
     const int r16 = k / 8;
@@ -100,10 +124,22 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm(const unsigned char* __
         if (w == 0) bar_init(xfb, 1);
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
         for (; jn < SPK && jn < npre && jn < NS; ++jn) issue(jn);  // W only, before the predecessor is done
+#if G27_MC
+        if (w == 0) bar_expect(xfb, M * k * 2);
+#endif
     }
     __syncthreads();
+#if G27_MC
+    cl_sync();  // peers' x barriers initialized + armed before any multicast lands
+#endif
     asm volatile("griddepcontrol.wait;" ::: "memory");
     TR(1)
+#if G27_MC
+    {
+        const int cs = G27_MC > 1 ? G27_MC : 1, rk = cl_rank();
+        for (int qq = rk + cs * t; qq < M; qq += cs * WPB * 32) bulk_mc(xs + qq * XS, x + (long)qq * k, k * 2, xfb);
+    }
+#endif
 #ifdef G27_XBULK
     if (t == 0) {
         bar_expect(xfb, M * k * 2);
@@ -124,7 +160,7 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm(const unsigned char* __
 #pragma unroll
         for (int e = 0; e < 4; ++e) acc[jj][e] = acc2[jj][e] = 0.f;
     const unsigned xbase = xs + xrow + kq * (KW / 32) * 64;
-#ifdef G27_XBULK
+#if defined(G27_XBULK) || G27_MC
     bar_wait(xfb, 0);
 #else
 #ifdef G27_XREP
@@ -261,13 +297,20 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm_pd(const unsigned char*
             bar_expect(fb + 8 * j, SB);
             bulk(ring + j * SB, wsrc + (long)j * SB, SB, fb + 8 * j);
         }
+#if G27_MC
+        if (w == 0) for (int q = 0; q < KQ; ++q) bar_expect(xfb + 8 * q, M * KW * 2);
+#endif
     }
 #ifndef G27_NOFIX
     float4 hd[2];
 #pragma unroll
     for (int h = 0; h < 2; ++h) hd[h] = __ldg((const float4*)(H + (long)(rg * 16 + g + 8 * h) * ESC) + c);
 #endif
+#if G27_MC
+    cl_sync();  // early: peers' x barriers armed; hidden under the W stream
+#else
     __syncthreads();
+#endif
     uint4 af[NAW][2];
 #pragma unroll
     for (int st = 0; st < NS; ++st) {
@@ -284,7 +327,15 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm_pd(const unsigned char*
     }
     asm volatile("griddepcontrol.wait;" ::: "memory");
     TR(1)
-#ifdef G27_XBULK
+#if G27_MC
+    {  // slice q of row qq by thread i = q * M + qq of rank qq % cs
+        const int cs = G27_MC > 1 ? G27_MC : 1, rk = cl_rank();
+        for (int i = t; i < KQ * M; i += WPB * 32) {
+            const int q = i / M, qq = i % M;
+            if (qq % cs == rk) bulk_mc(xs + qq * XS + q * KW * 2, x + (long)qq * k + q * KW, KW * 2, xfb + 8 * q);
+        }
+    }
+#elif defined(G27_XBULK)
     if (t == 0) {
         for (int q = 0; q < KQ; ++q) {
             bar_expect(xfb + 8 * q, M * KW * 2);
@@ -305,7 +356,7 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm_pd(const unsigned char*
 #pragma unroll
         for (int e = 0; e < 4; ++e) acc[jj][e] = acc2[jj][e] = 0.f;
     const unsigned xbase = xs + xrow + kq * NAW * 64;
-#ifdef G27_XBULK
+#if defined(G27_XBULK) || G27_MC
     bar_wait(xfb + 8 * kq, 0);
 #endif
     TRW(2)
@@ -408,9 +459,14 @@ static void launch27(torch::Tensor& wp, torch::Tensor& h, double scale, torch::T
     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm);
     cudaLaunchConfig_t cfg = {};
     cfg.gridDim = dim3(n / (16 * RGB_)); cfg.blockDim = dim3(RGB_ * KQ_ * 32); cfg.dynamicSmemBytes = sm; cfg.stream = stream;
-    cudaLaunchAttribute attr[1];
+    cudaLaunchAttribute attr[2];
     attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1;
     cfg.attrs = attr; cfg.numAttrs = 1;
+#if G27_MC > 1
+    attr[1].id = cudaLaunchAttributeClusterDimension; attr[1].val.clusterDim.x = G27_MC; attr[1].val.clusterDim.y = 1; attr[1].val.clusterDim.z = 1;
+    cfg.numAttrs = 2;
+    TORCH_CHECK((n / (16 * RGB_)) % G27_MC == 0, "g27 mc: grid");
+#endif
     cudaLaunchKernelEx(&cfg, kern, (const unsigned char*)wp.data_ptr(), (const float2*)h.data_ptr(), (float)scale, (const __nv_bfloat16*)x.data_ptr(),
                        out.data_ptr(), n, k, (int)npre, zo.numel() ? zo.data_ptr<float>() : nullptr, (int)(zo.numel() / 4));
     C10_CUDA_KERNEL_LAUNCH_CHECK();

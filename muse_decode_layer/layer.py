@@ -763,7 +763,10 @@ _G27_SRC = None  # @@G27@@
 # H200 (proj check c7b58683, after a 3 us PDL pred): o m16 PD 5.25 vs g24 6.43 vs cuBLAS 6.75 vs lt 7.20; m32 6.69 vs
 # cuBLAS 6.43 (and H100 layer d32 +1.1..1.8): T=16 only. H100 layer ab_flag (TUNE {}, 4 rounds x seeds 7,11,99): d16 sl
 # -0.6..-0.9, full -0.1..-0.3 us vs g24 o.
-G27_CFG = {("o", 16): (16, 4, 4, 108, 4, 0)}
+# proj s58: g27_src.cu = r-proj dev/s58/gemv27.cu, G27_MC 1 (x by spread bulk copies): H100 layer d16 sl -1.8 full -1.05 us
+# vs s57; H200 (proj check a4962d70): o m16 4.42 (s57 5.28, g24 6.59); m32 6.27 vs g24 7.33 / lt 6.72 / cuBLAS 6.98 ->
+# T=32 as TUNE option g27:o (H100 tie).
+G27_CFG = {("o", 16): (16, 4, 4, 108, 4, 0), ("o", 32): (32, 4, 4, 108, 4, 0)}
 G27_ON = {("o", 16)}
 _G27 = {}
 _GPR1_SRC = None  # @@GPR1@@
@@ -2503,7 +2506,8 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
              {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
              {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True},
-             {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True}),
+             {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True},
+             {"g27:o": True}),
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
