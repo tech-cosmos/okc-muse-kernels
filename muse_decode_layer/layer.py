@@ -2525,7 +2525,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
              {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True},
              {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True},
-             {"g27:o": True}),  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
+             {"g27:o": True}, {"tk2h": 4, "g24:qkv_gate": True}, {"tk2h": 4, "lt:o": True, "g24:qkv_gate": True}),  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
@@ -2533,7 +2533,8 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
               {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
-              {"fr": True, "twf_split": 66}),  # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
+              {"fr": True, "twf_split": 66}, {"twq": 536953348}, {"twq": 536870916}, {"twq": 536953348, "fr": True}),  # s76: moe s23 HOTQ (twq | 66<<8 | 1<<16 | 32<<24 = split66 + moe_hot<64> on 32 CTAs; 536870916 = hot without split)
+              # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},

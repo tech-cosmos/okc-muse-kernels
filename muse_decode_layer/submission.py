@@ -7082,7 +7082,8 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
 // serializes the HGMMAs (s28). moe_twm runs as its PDL secondary (hx) on the SMs this grid leaves free and skips these
 // experts. Items: all gemm13 items, then all gemm2 items (they wait on done[e] as in twm; deadlock-free the same way).
 // Stage = x 128-row box (16 KB, SW128) + weights 8 KB + scales 1 KB.
-template <int NSTG, bool SA>
+// s23 NH 64: the experts with 33..64 tokens in one N 64 pass (layer T = 128), with moe_twq (flags bit 20) skipping them.
+template <int NSTG, bool SA, int NH = 128>
 __global__ void __launch_bounds__(384, 1) moe_hot(
     const char* __restrict__ W13, const char* __restrict__ S13, const float* __restrict__ gs13,
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
@@ -7091,7 +7092,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     __nv_bfloat16* __restrict__ Y) {
   using HG = TWC<2, true, 8>;
   using HN = TWC<2, false, 8>;
-  constexpr int XB = 128 * 128, STRIDE = XB + HG::WB + HG::SB;
+  constexpr int XB = NH * 128, STRIDE = XB + HG::WB + HG::SB;
   static_assert(STRIDE % 1024 == 0 && HG::WB == HN::WB && HG::SB == HN::SB, "stage layout");
   extern __shared__ __align__(1024) uint4 smem_tw[];
   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
@@ -7113,7 +7114,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int nact = meta[0];
     const int e = tid < nact ? meta[1 + tid] : 0;
     const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0;
-    const bool h = nt > 64 && nt <= 128;
+    const bool h = nt > NH / 2 && nt <= NH;
     const unsigned b = __ballot_sync(0xffffffffu, h);
     if (h) s_e[__popc(b & ((1u << tid) - 1))] = e;
     if (tid == 0) s_nh = __popc(b);
@@ -7138,7 +7139,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
       const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e];
       const char* wsrc = (g2 ? W2 : W13) + ((size_t)e * nrb + rb) * 64 * HG::WB;
       const char* ssrc = (g2 ? S2 : S13) + ((size_t)e * nrb + rb) * 64 * HG::SB;
-      const CUtensorMap* map = g2 ? &maps2.m[5] : &maps13.m[5];
+      const CUtensorMap* map = g2 ? &maps2.m[NH == 128 ? 5 : 3] : &maps13.m[NH == 128 ? 5 : 3];
       if (g2) {
         int v;
         for (;;) {
@@ -7170,7 +7171,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int g2 = item >= n13, it = g2 ? item - n13 : item, nrb = g2 ? HN::NRB : HG::NRB;
     const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e], nv = s_off[e + 1] - off;
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
-    tw_item<2, 1, 128, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb,
+    tw_item<2, 1, NH, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb,
                                                            gsc, sroutes, g2 ? Y : Inter, g2);
     if (!g2) {
       asm volatile("fence.proxy.async.global;" ::: "memory");
@@ -7195,21 +7196,21 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   if (tid == 0) atomicAdd(meta + 67, 1 << 20);
 #endif
 }
-template <bool SA>
+template <bool SA, int NH>
 static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
   constexpr int NSTG = 8;
-  constexpr int SMEM = NSTG * (128 * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024;
+  constexpr int SMEM = NSTG * (NH * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024;
   static bool init = false;
   if (!init) {
-    cudaFuncSetAttribute(moe_hot<NSTG, SA>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+    cudaFuncSetAttribute(moe_hot<NSTG, SA, NH>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     init = true;
   }
   TMaps m13, m2;
   tw_maps(m13, xg_.data_ptr(), xg_.size(0));
   tw_maps(m2, inter_.data_ptr(), inter_.size(0));
-  return launch_k(moe_hot<NSTG, SA>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+  return launch_k(moe_hot<NSTG, SA, NH>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
       (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr());
@@ -7218,7 +7219,8 @@ int64_t moe_hot_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
                        torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                        torch::Tensor inter_, torch::Tensor y_, int64_t grid) {
 #define HOTA w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, (int)grid
-  return (g_sa & 1) ? hot_go<true>(HOTA) : hot_go<false>(HOTA);
+  if (g_hot & 4) return (g_sa & 1) ? hot_go<true, 64>(HOTA) : hot_go<false, 64>(HOTA);  // s23: 33..64-token experts
+  return (g_sa & 1) ? hot_go<true, 128>(HOTA) : hot_go<false, 128>(HOTA);
 #undef HOTA
 }
 template <bool SA>
@@ -7383,7 +7385,10 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
   const int kq = (flags >> 16) & 3, npt = 1 << kq;
   int nsplit = kq ? (flags >> 8) & 255 : 0;
   for (int i = tid; i < 256; i += 640) slut[i] = lut[i];
-  asm volatile("griddepcontrol.wait;" ::: "memory");
+  // s23 hx (flags bit 20): moe_hot<NH 64> (the PDL primary) runs the experts with 33..64 tokens: skip them, no wait at
+  // entry (moe_hot triggers after its own wait: the gather is complete), wait at the end (moe_norm sees moe_hot's Y)
+  const int hx = (flags >> 20) & 1;
+  if (!hx) asm volatile("griddepcontrol.wait;" ::: "memory");
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (tid < 33) s_off[tid] = meta[33 + tid];
   if (tid == 0) {
@@ -7395,7 +7400,9 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     const int nact = meta[0];
     const int e = tid < nact ? meta[1 + tid] : 0;
     s_e[tid] = e;
-    const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0, big = 0;  // s17: 64-token passes do not fit (registers)
+    int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0;
+    if (hx && nt > 32 && nt <= 64) nt = 0;
+    const int big = 0;  // s17: 64-token passes do not fit (registers)
     const int npass = big ? (nt + 63) / 64 : (nt + 31) / 32;
     s_big[tid] = big;
 #pragma unroll
@@ -7533,6 +7540,7 @@ __global__ void __launch_bounds__(640, 1) moe_twq(
     ++ntl;
 #endif
   }
+  if (hx && tid == 0) asm volatile("griddepcontrol.wait;" ::: "memory");
 }
 
 // n21: clamp the K-split item count to the partial buffer (16384 floats per part) and the ticket words
@@ -9418,6 +9426,13 @@ def _moe_kernel_fn(data, st):
                 if qs and qk and not _moe_DIAG_TL:
                     part = torch.empty((qs << qk) * 16384, dtype=torch.float32, device=dev)
                 if _moe_DIAG_TL and _moe_TWM_ORDER_M.get(M, _moe_TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
+                hq = (q >> 24) & 127  # moe s23: q | grid << 24 = moe_hot<NH 64> on grid CTAs first; moe_twq skips its experts
+                q &= (1 << 24) - 1
+                if hq:
+                    lib.moe_set_hot(4)
+                    lib.moe_hot_launch(st["w13b2"], st["w13sb2"], st["gs13"], st["w2b2"], st["w2sb2"], st["gs2"], st["lut"],
+                                       xg, meta, sroutes, inter, y, hq)
+                    q |= 1 << 20
                 lib.moe_twq_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["lut"], xg,
                                    meta, sroutes, inter, y, part, st["tk"], q)
             elif _moe_TWF_MIX and "w2b2" in st:
@@ -15297,7 +15312,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
              {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True},
              {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True},
-             {"g27:o": True}),  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
+             {"g27:o": True}, {"tk2h": 4, "g24:qkv_gate": True}, {"tk2h": 4, "lt:o": True, "g24:qkv_gate": True}),  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
         8: ({}, {"pr1": False}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
@@ -15305,7 +15320,8 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
         128: ({}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"twq": 4}, {"twq": 12}, {"bkt": False}, {"bkt": False, "twq": 4}, {"gnorm": False},
               {"gnorm": False, "twq": 4}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": True},
-              {"fr": True, "twf_split": 66}),  # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
+              {"fr": True, "twf_split": 66}, {"twq": 536953348}, {"twq": 536870916}, {"twq": 536953348, "fr": True}),  # s76: moe s23 HOTQ (twq | 66<<8 | 1<<16 | 32<<24 = split66 + moe_hot<64> on 32 CTAs; 536870916 = hot without split)
+              # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
         256: ({}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
