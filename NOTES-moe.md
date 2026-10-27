@@ -1924,3 +1924,17 @@
 - Integration (for layer/proj): `g34_gemm(x[MT,K] bf16, wp=_pack30, hdr, out fp32 [MT,N], scale, S, pdl)`; pooler S2 needs a
   zeroed out (the g24 EZ/ZN chain already provides one: o's ZN zeroes the pooler's out), unpool S1 needs none. Build flags
   -DMT=32 (one build per MT). PDL like g30: W streams before griddepcontrol.wait, x + out after.
+
+## Night4 session 48 (2026-10-27 17:26Z - ~17:45Z) -- g34 superseded by proj g30n; closed; 0 checks
+- Before starting the in-layer d32 A/B I found that proj had built the same g30-at-T=16/32 kernel in parallel (proj s95 16:50-17:40Z,
+  r-layer branch proj/g30n 453790c, NOTES-proj s95/s96): G30_MTOK 32/16 + K split over a (1,S,1) cluster with a DSMEM push (mine: S2
+  atomicAdd into a zeroed FP32 out). Same measuring method (3 us PDL pred, cold L2, H100):
+  | shape | proj g30n | g34 (s47) | g24 |
+  | unp m32 | 17.3-17.4 | 18.9 | 20.3-20.5 |
+  | pool m32 | 18.8-18.9 | 18.9 | 21.0-22.1 |
+  | unp m16 | 17.1-17.2 | 18.1 | 18.7-19.0 |
+  | pool m16 | 18.4 | 18.4 | 18.5-18.75 |
+  proj's version is faster or tied on every shape and writes BF16 like cuBLAS. proj s96 in-layer: g30n:unpool at T=32 is a TUNE option
+  (-1.2..-2.1 us d32 with the TUNE off, the tuner picks it at sl -1.0..-1.4 and rejects it at full); the pooler loses +9..14 us at sl
+  because it competes with the router for SMs. g34's pooler also fills the GPU (128 CTAs), so it would hit the same problem.
+  => g34 CLOSED, not handed off. The tools/s47 files stay for reference. 0 checks, no GPU time used.
