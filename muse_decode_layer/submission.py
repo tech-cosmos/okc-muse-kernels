@@ -16877,6 +16877,11 @@ def _kernel_fn(data, state):
         main_stream.wait_stream(side_stream)
     rpdl = pdl and not tk2_pdl and not tk2fj
     nu8d = nu8 and _nu8_d(state, tokens) and local_ids.is_contiguous()
+    if nu8d and not pr1 and not tk2_pdl and not tk2fj:
+        # proj s82: the rmsnorm reads local_ids (ZL), which the side-stream routing writes when pr1 is off (TUNE
+        # {'pr1': False} at T=8): join first (without it: 16/60 wrong outputs under GPU contention, tools/nu8_race.py)
+        main_stream.wait_stream(side_stream)
+        rpdl = False
     y32 = torch.empty((81 if nu8d else 65, D_EXPERT), dtype=torch.float32, device=dev) if nu8 else None
     gnorm = (not pr1 and not nu8 and tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and pooled.dim() == 2
              and pooled.is_contiguous() and _opt(state, tokens, "gnorm", GNORM_DEFAULT))
