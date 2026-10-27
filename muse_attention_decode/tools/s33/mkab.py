@@ -10,7 +10,8 @@ j = src.index("\n}\n", i) + 3
 src = src[:i] + '''_DIAG = {
     ("verify", 1, "full"): [("v1spec", {}), ("v1nospec", {"spec": False}), ("v1spec2", {}),
                             ("v1nospec2", {"spec": False})],
-    ("decode", 1, "full"): [("d1a", {}), ("d1nospec", {"spec": False})],
+    ("decode", 1, "full"): [("d1a", {}), ("d1nospec", {"spec": False}), ("d1a2", {}), ("d1nospec2", {"spec": False}),
+                            ("d1a3", {}), ("d1nospec3", {"spec": False})],
 }
 ''' + src[j:]
 open(sys.argv[2], "w").write(src)

@@ -1654,3 +1654,13 @@
   hand-pipelined FPIPE (s113), FA3 ping-pong (s101), FP8 PV (s90), more programs (s32 here). Verify 1 full is closed for me.
 - Not tried / left: an intra-tile stamp breakdown (QK wait / exp / V convert+bar / PV wait) to say WHICH link of the 0.66 us
   single-program chain dominates; the merge's 1.47 us L2 load of 4 MB FP32 partials (BF16 partials are banned).
+- **spec at verify 1 full** (seq = table width - 8, loop-form redo if the real length differs; the plan flag existed,
+  off since s86's +0.35 before fix 1): H100 bench sweep 16.85-16.90 vs 17.44-17.50 (3/3); tests 16/16; redo path
+  tools/s33/spec_redo.py (table padded by 5/64/300, fill -1/0) PASS; scored output bitwise = before.
+  **H200 DIAG check 4fe17fa9** (tools/s33/mkab.py, round-robin cold): v1spec 16.22/16.24 vs nospec 16.83/16.90 = **-0.63 us**.
+  Its timed shapes (= main with spec): 2.6136x. Same check, d1 full (Gluon _gd_full, spec on in main): d1a 13.14 vs
+  d1nospec 12.58 (one pair; H100 3 pairs: spec -0.1..-0.36) -> second DIAG check with 3 pairs.
+- **DIAG check 28658e59** (3 d1 pairs + 2 v1 pairs): d1 full spec 13.07/13.23/13.18 vs nospec 14.16/13.25/13.12 = tie
+  (4fe17fa9's d1 pair was noise; d1 keeps spec). v1 full spec 16.34/16.45 vs 17.10/17.14: -0.7 us again (4/4 H200 pairs).
+  Timed shapes 2.5809x (node). Handoff to layer: one line in attn_src.py's verify-1-full plan (spec=True).
+- **Submit 957cabd7** (main ac5b67e + mkab tool only = spec at v1 full): **2.5962x** (1450.7 us), NEW attention board best (was 2.566x 06456b7e). v1 full 15.98 us (board run 16.60). Budget 10-27 attention: checks 9/20, scored 2/10.

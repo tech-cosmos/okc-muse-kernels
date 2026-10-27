@@ -4,7 +4,7 @@
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
 first; layer owns the full kernels (_gd_full d16/d32, _gw_verify v16/v32): don't work on those. Winners -> COORD Handoffs
 (layer ports into r-layer attn_src.py). Precision: FP8 KV, Q >= E4M3, FP32 partials. ~/attn STATE.md dead-ends index = 126
-sessions of history: read it before any idea. Board: #24 2.566x (1468.0 us); #1 pjmullin3 3.032x (1242.3 us).
+sessions of history: read it before any idea. Board: 2.5962x (1450.7 us, submit 957cabd7 s33; was 2.566x); #1 pjmullin3 3.032x (1242.3 us).
 Per-us value (overall attention score): d1 sl 1.94 %/us, v1 sl 1.48, d1 full 0.67, v1 full 0.51, d16 sl 0.44, v16 sl 0.35,
 d32 sl 0.24, v32 sl 0.2. (Score = geomean over 6 loads; load = 46 x sliding + 16 x full.)
 H200 per shape (us), 06456b7e (= seed 410dcb6 code, 2.570x): d1 4.34/12.25, d16 7.68/87.03, d32 12.29/167.67,
@@ -88,7 +88,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - = 410dcb6 + agent2 halfpfkr (v32 sl cl, csl/nds pt prefetch, nds K-early) + verify 16 on the pre-cl nvs build (_NVS0) +
   csl/vtk owner fast divides. SUBMITTED s32: 90b7ce85 2.5653x (tie with board 2.566x). The same code timed 2.619 / 2.639 /
   2.589x inside s32's DIAG checks (node noise +-3% whole-run): board best stays 2.566x (06456b7e).
-- Checks used 2026-10-27: 7/20 (s32: 5 DIAGs). Scored 1/10.
+- Checks used 2026-10-27: 9/20 (s32: 5 DIAGs, s33: 2 DIAGs). Scored 2/10 (s33 submit: see NOTES).
 ## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)
 - Floors (pt trip + 20.5 MB random 128-B rows, all in flight, incl. launch): ~8.0 us d1 and v1; dense 7.4.
 - Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.
@@ -97,6 +97,7 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 ## Attention: v1 full (s33, H100 timeline tools/s33/mktl.py; NOTES s33)
 - Loop = flat 0.94 us per 64-key tile, same all-L2; per-SM saturation (1/2/4 programs per SM: 0.66/0.92/~1.67 us/tile);
   q phase 2.0, FIX tile 1.1, merge tail 2.0 us. H100 = valid proxy here (matches s32 H200 diag). peel/mif dead. CLOSED.
+- s33 ON MAIN: spec=True in the v1-full plan: H200 DIAG -0.63/-0.7 us (4/4 pairs, checks 4fe17fa9, 28658e59). d1 spec stays (tie).
 ## Attention: ranked ideas / bounds (s31)
 - csl (d1 sl) post-gather tail is ~1.5 us cold H100: compute 0.45, premerge+cluster 0.2, push/slowest-CTA 0.37, owner 0.33.
   The slowest CTA's 12 random gathers per thread set the push time; owner merge is now ~0.33. No >0.2 us lever seen in the
