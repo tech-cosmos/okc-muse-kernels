@@ -1925,3 +1925,26 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   => medians 0..-2.2 us, mins mixed: near noise, never worse by median. Outputs bitwise equal on all 6 inputs.
 - Pitfall: ab2.py filter matches "verify 16", not "v16" (lost one 10-min run). Don't `pkill -f` a pattern that occurs in
   your own command line (it kills the calling shell).
+
+## s95 (2026-10-27 16:50-17:40Z, night4 session 52): g30 at T=32/16 (lead 16:45Z item 1 helper) BUILT: standalone H100 wins, bit-exact; 0 checks
+- dev/s95/g30_src.cu = layer main g30_src.cu (v136, 1772608; unchanged since 1c856f1) + G30_MTOK 128/32/16 (wgmma m64n{128,32,16}k16 RS,
+  d[MTOK/2], x box 64 k x MTOK tok, epilogue loops scaled) + G30_S 1/2 (K split over a (1,S,1) cluster: rank y streams stages
+  [y KS/S, (y+1) KS/S), escapes before i0 popped at start; rank 1's WG-summed partial pushed into rank 0's smem (st.shared::cluster,
+  one remote mbarrier arrive), rank 0 adds + writes BF16; cluster barrier after mbarrier init). Diff vs layer: dev/s95/g30n_layer.diff.
+  Escape path unchanged (it lives in the W A-fragment, N-independent). Harness dev/s95/s95_g30n.py (M, KEYS, DEFS, PRED ns = 3 us PDL
+  pred like dev/s61/g24.py, PDL), exactness dev/s95/s95_exact.py (layer s100 one-hot test + KEY/M/DEFS). Run both from a copy of
+  r-layer muse_decode_layer/ with g30_src.cu replaced and the scripts in its dev/.
+- PITFALL: at MTOK 32/16 the default rings (NS10 x 4 KB + NW10 x 6 KB = 101 KB) allow 2 CTAs/SM: with PDL the 128 CTAs pack onto ~64
+  SMs: unp m32 23.7 us vs 19.6 without PDL. Deeper rings (NW 16-20 -> 1 CTA/SM) fix it: 17.4 us.
+- Exact: one-hot over every escape column, seeds 0/7, M16/M32 x S1/S2 x unpooler/pooler: 0 bit mismatches. Random x: rel err == cuBLAS (1.66e-3).
+- H100 cold L2, us over a 3 us PDL pred (same pred kernel/subtraction as dev/s61/g24.py), 2 reps each:
+  | shape | g30 best | cfg | g24 layer cfg (same harness, s95) | cuBLAS |
+  | unp m32 8192x4096 | 17.3-17.4 | S1 NW20 NS8 / NW16 NS16 | 20.30 (r1) / 20.74 (SK) | 24.4-24.8 |
+  | pool m32 4096x8192 | 18.8-18.9 | S2 NW20 NS16 | 22.08 (r1) / 21.50 (SK) | 26.4-26.9 |
+  | unp m16 | 17.1-17.2 | S1 NW16 NS16 | 18.72 / 19.15 | 24.1-24.2 |
+  | pool m16 | 18.9-19.0 | S2 NW16 NS16 | 18.75 / 19.10 | 26.6 |
+  S1 pool (64 CTAs) 26 us; S2 unp (256 CTAs, 2 waves) 21.7-22.7: lose. No pred, no PDL: unp m32 20.3 vs cuBLAS 25.3.
+  => d32: pool -2.6..-3.2, unp -2.9..-3.4 us per call (x46 layers if it holds in-layer); d16: unp -1.5, pool tie.
+- Not done (handed to moe/layer): in-layer wiring. g30 writes BF16 [m][N] (cuBLAS-like), g24 writes FP32 and carries the
+  zero-ahead chain (unpool's ZN/G24X/G24P zeroes the next call's qkv/pooler out): replacing unpool g24 needs the kernel_fn zero_()
+  fallback (s59) or EZ off for those. No H200 numbers yet (moe s43: H200 per-CTA x ingest may bind at T=128; at T<=32 x is 4x smaller).

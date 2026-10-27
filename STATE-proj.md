@@ -1,4 +1,7 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 17:40 UTC (s95). g30 at T=32/16 BUILT (dev/s95: G30_MTOK 32/16 + G30_S 2 cluster split-K with DSMEM reduce):
+bit-exact; H100 after a 3 us PDL pred: unp m32 17.4 vs g24 20.3, pool m32 (S2) 18.9 vs g24 21.5, unp m16 17.2 vs 18.7, pool m16 tie.
+Needs NW>=16 (1 CTA/SM) under PDL. Handed to moe/layer for in-layer A/B (Handoffs proj s95). NOTES s95.
 Updated 2026-10-27 (s94). G30_PRE (escape header read before the PDL wait) on r-layer branch proj/g30pre (88ba088, on g30sort):
 in-layer H100 v16 medians sl 0/-1.6/-0.9, full -1.5/-2.2/-0.3 us, bitwise equal: small likely-win, handed to layer. NOTES s94.
 Updated 2026-10-27 16:55 UTC (s93). g30_sort in-layer = TIE (r-layer branch proj/g30sort ad581f9, bitwise same). g30 split-K with
@@ -8,15 +11,6 @@ on layer f7a1cdc g30_src.cu): H100 unp T=128 -0.33..0.4 us natural, -1.5 adversa
 Updated 2026-10-27 16:10 UTC (s91). g30 ESCAPES (layer s99 T=128 12-bit wgmma GEMM): escape value patched into the owning
 thread's register A fragment (exact; H100 +0.4..0.9 us; still -3.5..4.5 us vs cuBLAS). Patch muse_bf16_proj/dev/s91/g30_esc_layer.patch
 on layer 857a9cb s99_g30.cu, test dev/s91/g30e.py (ESCW=1 adversarial). Handoffs proj s91. NOTES s91.
-Updated 2026-10-27 15:45 UTC (s90). Paper bound for own T=128 GEMM (wrong for g30: W never goes through smem). NOTES s90.
-Updated 2026-10-27 15:45 UTC (s89). xrm (dev/s89: moe's T=128 xr with tokens split over a 2/4-CTA cluster, W multicast, S/C reds) DEAD:
-C=2 MMA hidden at stream rate (29.4 us) but 16.8 MB of reds still +17 us (red warps/TMA bulk reduce no help); C=4 round-trip-bound. NOTES s89.
-Updated 2026-10-27 15:00 UTC (s88). Lead 13:30Z item (1) g24 m16/m32 REOPENED + DEAD again: more warps/SM (WPB 20-32) and R=2 ILP
-(8-14 warps) lose vs layer cfgs on NOW/G108/G88 proxy; slab split-K bounded dead by bytes; ncu per-instr split (dev/s88). NOTES s88.
-Updated 2026-10-27 14:40 UTC (s87). FULL validate of layer main v134 (f70b84e): ALL OK (13/13, 0/24, 0/308, 0/1200, 0/480, 0/240,
-fuzz 0/1490, cold 117.4 s): clear for the 00:00Z layer check. NOTES s87.
-Updated 2026-10-27 14:15 UTC (s86). g28 PING-PONG (dev/s86, s64 item 3b) built + DEAD: H100 NOW pool m32 16.2-17.4 vs g24 15.84,
-m16 17.3 vs 11.8; skeleton alone ~0.13-0.19 us/stage (mbarrier round trips), gate < 0.1 failed; BN 256 no gain. NOTES s86.
 s82/s83 (nu8d race found+fixed in layer; tools/stream_fuzz.py): see NOTES.
 Older session headers (s46-s80): see NOTES-proj.md (sessions are logged there in order).
 ## Board
@@ -139,6 +133,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s88: WPB 20-32 / R=2 ILP dead; NOW profile: loop ~47% of warp time, setup ~29%, task ends ~19% (dev/s88 ncu tools).
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
 ## Next (ranked):
+0000. (s95) g30 T=16/32: if moe/layer want it, port into r-layer as TUNE option g30:pooler/g30:unpool at T=16/32 on a branch
+   (BF16 out; unpool g24 zero-ahead chain must fall back), in-layer ab2 + validate. Try G30_S 2 for qkv m16/m32 too (2304 rows = 36 CTAs!).
 000. (s94) layer: watch for g30_sort + G30_PRE (branch proj/g30pre) port; validate the bundle if asked.
    (s91) g30 escapes handed to layer: help layer integrate g30 at T=128 (qkv shape, T=256, PDL, TUNE option) if asked;
    validate its bundle (tools/validate.py on proj/validate) before its check.
