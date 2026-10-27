@@ -1394,3 +1394,21 @@
 - H100 does NOT track this (per seed s66h32 vs s33h: 7 -9.5, 11 -1, 13 +12, 17 -7, 99 -6): use the H200 diag only.
 - NEXT ideas: a 16-warp hot pass (twq structure, RT 1 x N 64) if the 8-warp hot items limit seeds 7/11/13; hot64 at v32 would
   need hx in moe_hot as well (twm single-passes 33..64 already, so little to gain there).
+
+## Night4 session 24 (2026-10-27 06:27Z - ; moe checks 16/20 after this session's DIAG) -- TWQ_NE: NORM_EARLY for moe_twq
+- On paper first (routings decoded from _DIAG_R): a v32 "hot chain" (moe_hot<128> -> moe_hot<64> -> twq) saves NOTHING: twm + hot128
+  already does exactly 1 dequant pass per expert on every layer v32 seed (passes: twq 24-27, twm 20-23, twm+h128 = chain = #experts).
+  v16 twq + HOTQ is also 1 pass/expert. Remaining big-M gap = per-pass consumer efficiency + fixed/drain, not extra passes.
+- Layer profile 2f7349ee (v16 sliding): moe_twq 183.4 + moe_norm 32.3 us (norm = twq's PDL secondary, waits for ALL of twq);
+  twm already runs NORM_EARLY (moe_norme: per-token waits on per-expert gemm2 flags meta[100 + e]). Built the same for twq:
+  s_nd2[a] = gemm2 item ends of slot a (K-split items count once per part: + (npt - 1) * split items), after each gemm2 item
+  bar.sync 1, 512 + threadfence + atomicAdd(done + 32 + e); the one reaching s_nd2 adds 1 << 20. A split's last part writes Y in
+  tq_item before the count. HOTQ's moe_hot<64> already flags its experts. Python TWQ_NE = 1 or twq flags | 1 << 21 -> moe_norme.
+  (The count always runs in NORM_EARLY builds; TWQ_NE only picks moe_norme.)
+- Correctness: tools/s24/ne_t.py 0/78 bad, BITWISE equal to TWQ_NE 0 (q4 / s33h / s66h32, random + skewed bs33-257 + layer
+  v16/v32, eager + 3 replays); flag form == TWQ_NE form (5/5 bitwise); bench test pass.
+- H100 (tools/s22/proxy.py, 3 rounds): v16 s66h32 210.3 -> 208.7, s33h 213.6 -> 209.5.
+- H200 check 11f0161e (bdde3b7 + DIAG, test run, never submit), MEAN 5 seeds: v16 s66h32 192.6/192.1 -> ne 191.3/190.9 (every
+  seed -0.4..-1.8); s33h 200.6 -> 198.5; v32 (twq, not the layer's v32 path) 276.7/275.9 -> 269.7/269.6 (-6.5).
+  => layer TUNE[128] {"twq": 539050500} (= 536953348 | 1 << 21): ~-1.3 us at v16 vs the s23 candidate. Port tools/s24/patch_layer_ne.py
+  (applies to r-layer moe_src.py @ a90cadb, with or without tools/s23/patch_layer_hotq.py; layer's halves-only n21 copy handled).

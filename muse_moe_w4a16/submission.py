@@ -5187,7 +5187,7 @@ TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if 
 #   bit 3 = pass-minor item order; use 4 for plain on)
 TWQ_M = {}  # s17: per-M override, e.g. {128: 4} (proxy: v16 -6.5 proxy-us, v32 +4.6)
 TWQ_SPLIT = (0, 0)  # n21: moe_twq K-split tail (items, log2 parts): the last ~items gemm2 items (from an expert boundary)
-TWQ_NE = 0  # s24: NORM_EARLY for moe_twq (twq counts gemm2 item ends per expert in meta[100 + e]; moe_norme after it)
+TWQ_NE = 0  # s24: NORM_EARLY for moe_twq (twq counts gemm2 item ends per expert in meta[100 + e]; moe_norme after it); = twq flags | 1 << 21
 HOTQ_M = {}  # s23: {M: grid}: moe_hot<NH 64> (33..64-token experts, one N 64 pass) on that many CTAs before moe_twq (skips them)
 TWQ_SPLIT_M = {}  #   run as 2^parts K slices, FP32 partials summed in part order by the last one (per-M override)
 TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
@@ -5580,7 +5580,8 @@ def kernel_fn(data, st):
                     part = torch.empty((qs << qk) * 16384, dtype=torch.float32, device=dev)
                 if DIAG_TL and TWM_ORDER_M.get(M, TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
                 hq = HOTQ_M.get(M, 0) or (q >> 24) & 127  # also settable in the flags: q | grid << 24 (layer "twq" value)
-                q &= (1 << 24) - 1
+                ne = TWQ_NE or (q >> 21) & 1  # s24: or q | 1 << 21
+                q &= (1 << 21) - 1
                 if hq:  # s23: 33..64-token experts in one N 64 pass on hq CTAs; moe_twq (PDL secondary) skips them
                     lib.moe_set_hot(4)
                     lib.moe_hot_launch(st["w13b2"], st["w13sb2"], st["gs13"], st["w2b2"], st["w2sb2"], st["gs2"], st["lut"],
@@ -5588,7 +5589,7 @@ def kernel_fn(data, st):
                     q |= 1 << 20
                 lib.moe_twq_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["lut"], xg,
                                    meta, sroutes, inter, y, part, st["tk"], q)
-                if NORM_EARLY and TWQ_NE:  # s24: moe_norm waits per token on twq's (and moe_hot's) expert flags
+                if NORM_EARLY and ne:  # s24: moe_norm waits per token on twq's (and moe_hot's) expert flags
                     lib.moe_norme_launch(y, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out, meta)
                     return out
             elif TWF_MIX and "w2b2" in st:
