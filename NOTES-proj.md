@@ -1471,3 +1471,23 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
 - Also re-checked before building: expert-weight L2 prefetch beside the T=16/32 pooler is dead (layer s55: prefetch blocks
   delay the router; tk2f uses 10-25% of prefetched bytes) and at d1 (layer s38). Nothing new >= 1% in proj's lane.
 - No judge runs this session.
+
+## s68 (2026-10-27 06:38-07:05Z, sandbox okc-night4, session 25): H200 full cuBLASLt config screen (_diag_lte)
+- Why: lead 05:07Z/06:41Z = biggest weighted layer gaps are v16/v32 sliding; there the layer's T=128/256 GEMMs are cuBLASLt
+  (judge a0bcbbf4 v16 sl: 4 nvjet calls ~70 us, v32 ~88 us vs ~47 us of bytes at 4 TB/s). Our lt_cfg.txt came from an
+  H100 sweep (dev/lte.py), and only its top 5 per shape were ever timed on the H200. All own m128/256 kernels are dead
+  (g22 s16, g23 s28, DeepGEMM s25), so the cheap remaining question was: does the H200 rank cuBLASLt configs differently?
+- _diag_lte (sub_template, print only; lt.cu += lt_cands = every valid algo-66 cfg: tiles x cluster {0,2,3,4,5,6,8} x
+  split {1,2,3,4,6,8}, custom 0, ws <= 32 MB): per shape an untimed warm-up launch of every cfg (lazy module load costs
+  ms on a kernel's first call: without it the screen is garbage), eager screen after a 256 MB read flush in batches of 48
+  behind a 55 ms torch.cuda._sleep (the per-call plan setup ~0.3 ms host would otherwise be timed), top 12 x custom 0..7,
+  then the 8 best distinct (tile, split, cluster) + lt_cfg.txt's as graph replays (_graph_medians, 25 reps, like _tune).
+  H100: 64 s for 10 shapes, agrees with the H100 sweep (ties). dev/s68/lte_read.py <log> = readout.
+- CHECK f45aa794 (35e72c2, 1.3247x; behavior = board code, not submitted). H200 graph us (incl. ~4.2 graph cost), best new
+  vs best lt_cfg.txt / F.linear: pooler m128 **(66,124,35,1,0,0,0,4) 24.06** vs 25.22 (66,15,..,2,5) / F 28.83 [the
+  layer's LT_CFG (66,143,..,0,2) = 26.75 here]; unp m128 23.14 vs 23.33; qkv m128 18.98 vs 18.91; o m128 10.62 vs 10.56;
+  pooler m256 29.15 vs 28.61; unp m256 27.55 vs 27.58; qkv m256 22.62 vs 20.86; o m256 12.32 vs 12.29; qkv m32 16.96 vs
+  16.86; o m32 10.18 vs 10.08. => the H100 sweep was right everywhere but pooler m128. cuBLASLt algo 66 has no hidden
+  H200 config: the T=128/256 gap to the bytes floor is not a config problem.
+- lt_cfg.txt pooler m128: (66,15,..,0,3) (28.80 on H200) -> (66,124,35,1,0,0,0,4). DIAG_LTE = [] and DIAG61 = [] (s61 diag
+  done). Tests 39/39. Handoff to layer: LT_ALT ("pooler",128) + TUNE[128] {"ltalt:pooler": 1/2} (COORD Handoffs proj s68).

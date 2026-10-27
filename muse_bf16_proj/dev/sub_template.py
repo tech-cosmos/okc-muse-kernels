@@ -1114,6 +1114,7 @@ def _diag_ext(st):
 # this shape's lt_cfg.txt candidates. The H100 sweep (dev/lte.py) chose lt_cfg.txt; the H200 ranks configs differently.
 DIAG_LTE = [("pooler", 128), ("unpooler", 128), ("qkv_gate", 128), ("o", 128), ("pooler", 256), ("unpooler", 256),
             ("qkv_gate", 256), ("o", 256), ("qkv_gate", 32), ("o", 32)]
+DIAG_LTE = []  # s68 diag done (check f45aa794, NOTES s68: only pooler m128 (66, 124, .., 4) -1.2 us; rest +-0.2)
 DIAG_LTE_TOP = 12
 DIAG_LTE_CAP = 110.0  # s
 
