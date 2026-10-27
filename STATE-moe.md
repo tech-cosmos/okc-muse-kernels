@@ -12,18 +12,7 @@
   rows' partial store on a non-streaming path earlier (stage order), cut warp 10's fence wait (4.6 us at NW 8).
 - moe checks 20/20 used on 10-27 (reset 00:00Z); moe board best febfcb1f 2.2469x; attention board best 957cabd7 2.5962x.
 
-## LANE since 2026-10-27 16:45Z (lead LANE DECISION 5): g30 structure at m16/m32 for the d16/d32 pooler + unpool
-- s47 built **g34** (muse_moe_w4a16/tools/s47/g34.cu, harness g34.py, exactness g34exact.py; NOTES s47). Bit-exact, same pack as
-  layer g30. H100 vs g24 layer cfgs (full / consumer-only NOW, us): m32 pool 18.9/12.2 vs 21.0/16.2, unp 18.9/12.3 vs 20.5/15.7;
-  m16 tie. Default NWG 4, NS/NW 20, pool S2 (atomicAdd into zeroed FP32 out, deterministic), unp S1.
-- **s48: g34 SUPERSEDED / CLOSED.** proj built the same kernel at the same time (proj s95/s96, r-layer branch proj/g30n: G30_MTOK 32/16 +
-  cluster split-K G30_S). Same harness method, H100 over 3 us PDL pred: proj unp m32 17.3 (g34 18.9), pool m32 18.8 (g34 18.9), unp m16
-  17.1 (g34 18.1), pool m16 18.4 (g34 18.4). proj in-layer (s96): g30n:unpool T=32 -1.2..-2.1 us d32 (TUNE option), pooler +9..14 sl
-  (router SM contention: any pooler form that fills the GPU hits the same thing; g34 S2 has 128 CTAs too). Nothing left for g34 to add.
-  Not handed to layer. Idea only if the pooler is reopened: a pooler form that leaves SMs for the router (fewer CTAs, deeper rings).
-- **s49 (17:42Z, 13 min before the sandbox move): NEXT for s50 on the new machine** = no open moe item from LANE DECISION 5. Pick
-  (a) if lead agrees: g30n pooler that leaves SMs for the router (<= ~100 CTAs, deeper rings; in-layer d32 sl A/B vs g24 is the only gate),
-  else (b) attention lane: H200 per-program timeline of _attn_split v1 / _gd_full d1 via the diag hook (line 'Next' below). Read COORD first.
+## g34 (s47-s49): g30 at m16/m32 built, superseded by proj g30n (on layer main as TUNE[32] g30n:unpool). Closed.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
