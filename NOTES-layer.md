@@ -1387,3 +1387,7 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   replay_test d16 seeds 11,23 0/80; route_judge d16 0/40. (A first warm-cache run printed "ninja: build stopped" yet
   passed 13/13 with g24 built: most likely a race with another agent's build in the shared default TORCH_EXTENSIONS_DIR;
   not reproducible cold.)
+- v16/v32 sliding vs 703d3a7e (+4.7/+4.8 us in c973ab6f; the H200 tuner defaults also moved 269.6 -> 274.4 / 336.6 -> 342.3
+  across runs): NOT NORM_EARLY: H100 ab_flag 4 rounds x SEEDS 7,11, NE on vs off: v16 sl 307.0/306.3 vs 308.2/307.3,
+  v32 sl 346.3/337.8 vs 349.6/342.0 (NE wins 1..4 us); other sliding shapes tie. Most likely judge noise (1.8% per shape).
+- 00:37Z check 0eb3484a = v103 (174a655) queued; submit 129ad449 (v102) queued.
