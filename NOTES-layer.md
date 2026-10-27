@@ -2159,3 +2159,19 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - v139 validate --quick ALL OK: test 13/13, scored 0/12, opt 0/320, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/471,
   cold prepare 166.5 s (proj's prep_time + builds ran at the same time: load 17).
 - **main = v139.** 00:00Z check 1 = v139 (covers v136 g30 + v137/138 g30n unpool + ZR): read 'layer tune T=16/T=32' g30n:unpool lines.
+- **STREAM-POOL COLLISION (found n5s2, fixed in v140).** The d16 serialization above is NOT an option effect: the FIRST graph capture
+  after prepare() (any shape) runs the side branch in line (profiler: 1 stream; router_split -> routing -> pooler g24 serial), later
+  captures overlap (2 streams). Cause: torch.cuda.Stream() hands out 32 pooled streams per priority round-robin; state["side_stream"]
+  was a pool stream, and bench.capture's `torch.cuda.Stream()` right after prepare() got EXACTLY that stream (tools: /tmp/cap_var4.py
+  printed [True, False x31, True, ...] for the next 40 pool streams == side). Capture stream == side stream => side_stream.wait_stream
+  is a no-op and the "parallel" router/routing/tk2f/... are captured in line. Cost H100 d16 sl: first capture 201.6 vs 192.2 us
+  (no profiler, time_graph). Any harness that captures on a pool stream (torch.cuda.Stream() or torch.cuda.graph()'s default
+  capture stream, both from the same pool) hits it on every 32nd capture: on the judge some shape(s) per run, depending on how many
+  pool streams the harness made before; our own tuner hit it on every 32nd candidate (layer.py makes one pool stream per
+  candidate), i.e. random ~10 us penalties on single options at side-stream shapes (T=16/32/128/256).
+- v140 fix: `_own_stream()` = cudaStreamCreateWithPriority(NonBlocking) via ctypes libcudart.so.13 (the runtime torch already
+  loaded) wrapped in torch.cuda.ExternalStream, for side_stream and hi_stream (fallback: pool stream + print). After: next 40 pool
+  streams never equal side; first capture d16 sl 191.9 us (= later captures 191.3-191.9).
+- v140 validate --quick ALL OK: test 13/13, scored 0/12, opt 0/320, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/466, cold prepare 151.4 s.
+- **main = v140.** 00:00Z check 1 = v140. What to read: per-shape d16/d32/v16/v32 vs the board run (a judge shape that used to land on
+  a colliding capture should drop ~5%); tuner lines should no longer show single ~+10 us outliers at T=16/32.

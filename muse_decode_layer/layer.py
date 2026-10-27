@@ -660,6 +660,24 @@ def _join_builds():
             g[n] = g[n].get()
 
 
+def _own_stream(dev, priority=0):
+    """n5s2: a CUDA stream outside PyTorch's stream pool. torch.cuda.Stream() hands out 32 pooled streams per priority
+    round-robin, so a harness's capture stream (torch.cuda.Stream() / torch.cuda.graph's own pool stream) can be the SAME
+    stream as our side stream: the side branch (router || pooler, ...) is then captured in line and serializes (H100: the
+    first capture after prepare() got exactly our side stream, d16 sl 201.6 vs 192.2 us). Own stream: never collides."""
+    try:
+        import ctypes
+        rt = ctypes.CDLL("libcudart.so.13")
+        with torch.cuda.device(dev):
+            torch.cuda.init()
+            h = ctypes.c_void_p()
+            if rt.cudaStreamCreateWithPriority(ctypes.byref(h), ctypes.c_uint(1), ctypes.c_int(priority)) == 0 and h.value:
+                return torch.cuda.ExternalStream(h.value, device=dev)
+    except Exception as ex:  # noqa: BLE001
+        print("layer own stream failed (pool stream instead):", ex)
+    return torch.cuda.Stream(dev, priority=priority)
+
+
 def prepare(weights):
     router = weights["router"].contiguous()
     hi = router.to(torch.bfloat16)
@@ -679,8 +697,8 @@ def prepare(weights):
         "pre_expert": gain("pre_expert_norm"),
         # MuseSpark1xFp4Experts binds the post-expert norm's effective (1 + w) weight in BF16.
         "post_expert_w": (1.0 + weights["post_expert_norm"].float()).to(torch.bfloat16),
-        "side_stream": torch.cuda.Stream(weights["qkv_gate"].device),
-        "hi_stream": torch.cuda.Stream(weights["qkv_gate"].device, priority=-1),
+        "side_stream": _own_stream(weights["qkv_gate"].device),
+        "hi_stream": _own_stream(weights["qkv_gate"].device, priority=-1),
     }
     _join_builds()
     state["moe"] = _moe_prepare({"w13": weights["w13"], "w13_sf": weights["w13_sf"], "w13_gs": weights["w13_gs"],

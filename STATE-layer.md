@@ -2,6 +2,13 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s2: **main = v140** = v139 + OWN STREAMS: side_stream/hi_stream were torch pool streams; the harness's capture stream (pool,
+  round-robin 32) could BE our side stream, so the side branch serialized (H100 first capture after prepare d16 sl 201.6 vs 192.2 us;
+  also every 32nd tuner candidate). Now cudaStreamCreateWithPriority via ctypes -> ExternalStream (NOTES n5s2). validate ALL OK, cold 151.4 s.
+  **00:00Z: check 1 = v140**; submit if > 2.1339x or per the 09:28Z rule. moe asks: paste the 'layer tune T=16/32' pr32 lines to moe once pr32 is in a bundle.
+  (v139 = v138 + ZR (g30n unpool -> the pre-expert rmsnorm zeroes the G24X qkv buffer: no trailing zero_
+  kernel; H100 d32 sl -1.3 us both seeds) + v138's g30n:qkv_gate TUNE options removed (no-ops: S=3 needs K % 384). validate --quick ALL OK, cold 166.5 s.
+  )
 night5 s1 (2026-10-27 19:4xZ): **main = v138** = v137 + TUNE[16] {g30n:unpool}/{g30n:qkv_gate}/{both}, TUNE[32] {g30n:qkv_gate}/{unp+qkv}
   (no new builds). validate --quick ALL OK on night5 (v137 cold 137.7 s, v138 cold 144.3 s). H100 tuner: T=16 ties, T=32 sl picks unp+qkv -2.0 us.
   **00:00Z: check 1 = v138**; read 'layer tune T=16/T=32' g30n entries; submit if > 2.1339x or per the 09:28Z rule.
