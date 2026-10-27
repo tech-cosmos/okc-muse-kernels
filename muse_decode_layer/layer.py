@@ -767,6 +767,13 @@ G30_TOKENS = 128
 G30_PDL = 1  # launch g30 as a PDL secondary (W streams before griddepcontrol.wait)
 G30_TRIG = True  # the second boundary is g30's PDL secondary (g30 triggers at start)
 _G30 = {}
+# proj s96 g30n (proj s95, r-proj dev/s95: G30_MTOK 32/16 + G30_S cluster split-K, DSMEM reduce in rank 0, BF16 out): T=16/32
+# unpool/pooler/qkv on g30. One build per (MTOK, S, NW, NS); NW >= 16 keeps 1 CTA/SM (2 CTAs/SM under PDL +5 us). H100 standalone
+# after a 3 us PDL pred vs g24: d32 unp 17.3 vs 20.3, pool 18.9 vs 21.5, qkv 12.3 vs 13.4; d16 unp 17.2 vs 18.7, pool 18.4 vs 18.75.
+G30N_CFG = {("unpool", 32): (1, 20, 8), ("pooler", 32): (2, 20, 16), ("qkv_gate", 32): (3, 16, 16),
+            ("unpool", 16): (1, 16, 16), ("pooler", 16): (2, 16, 8), ("qkv_gate", 16): (3, 16, 16)}  # (S, NW, NS)
+G30N_DEFAULT_ON = set()  # (key, T) on without TUNE; otherwise TUNE option "g30n:<key>"
+_G30N = {}
 # proj s57 gemv27 (g27_src.cu = r-proj muse_bf16_proj/dev/s57/gemv27.cu): o at T=16/32 without cross-block split-K: a
 # block owns RGB whole 16-row groups, its warps split k (KQ), partials summed in smem, plain FP32 stores (no out zeroing,
 # fence, epoch barrier or atomics; deterministic); ns >= 100 = PD: each warp's whole W slice (ns - 100 atoms) is streamed
@@ -2407,6 +2414,7 @@ def _g19_prepare(state):
             print("layer gemv19 config dropped:", key, m, c)
     _g24_prepare(state, w, comp, g)
     _g30_prepare(state, w, comp, g)
+    _g30n_prepare(state, w, comp, g)
     del comp
 
 
@@ -2501,6 +2509,30 @@ def _g30_build():
             _G30["lib"] = None
 
 
+def _g30n_build(c):
+    """c = (MTOK, S, NW, NS) -> the g30 lib built with those defines (None on failure)."""
+    if c not in _G30N:
+        try:
+            import hashlib
+            from torch.utils.cpp_extension import load_inline
+            dfs = [f"-DG30_MTOK={c[0]}", f"-DG30_S={c[1]}", f"-DG30_NW={c[2]}", f"-DG30_NS={c[3]}"]
+            _G30N[c] = load_inline(
+                name="layer_g30n_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
+                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
+                cuda_sources=_G30_SRC, functions=["g30_gemm"],
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
+        except Exception as ex:  # noqa: BLE001
+            print("layer g30n build failed:", c, ex)
+            _G30N[c] = None
+    return _G30N[c]
+
+
+def _g30n_builds():
+    if _G30_SRC is None:
+        return []
+    return [(lambda c=c: _g30n_build(c)) for c in sorted({(m, *v) for (k, m), v in G30N_CFG.items()})]
+
+
 def _pack30(code, sm):
     """[N, K] codes / sign|mantissa bytes -> [N/64][K/64][6144 B] stages: DEC3 bytes [2][128 thr][16], words [128][4]
     (thread = (w, gq, q) of the wgmma A fragment; layer s99 dev/s99_g30.py pack30)."""
@@ -2548,6 +2580,41 @@ def _g30_prepare(state, w, comp, g):
             state["g30"][key] = e
         else:
             print("layer g30 dropped:", key)
+
+
+def _g30n_prepare(state, w, comp, g):
+    state["g30n"] = {}
+    packs = dict(state.get("g30", {}))
+    for (key, m), (S, NW, NS) in G30N_CFG.items():
+        lib = _g30n_build((m, S, NW, NS))
+        if lib is None or key not in w:
+            continue
+        if key not in packs:
+            if key not in comp:
+                comp[key] = _compress(w[key])
+            if comp[key] is None or w[key].shape[0] % 64 or w[key].shape[1] % (128 * S):
+                continue
+            code, sm, hdr, scale = comp[key]
+            v = hdr[:, :, 1]
+            if not torch.equal(v.bfloat16().float(), v) or bool(((v != 0) & (v.abs() < 2.0 ** -126)).any()):
+                print("layer g30n dropped (escape value not exact in BF16):", key)
+                continue
+            packs[key] = (_pack30(code, sm), hdr.contiguous(), scale)
+        e = packs[key]
+        x = torch.randn((m, w[key].shape[1]), generator=g, device=w[key].device).to(torch.bfloat16)
+        out = torch.full((m, w[key].shape[0]), float("nan"), dtype=torch.bfloat16, device=x.device)
+        try:
+            lib.g30_gemm(x, e[0], e[1], out, e[2], 0)
+            torch.cuda.synchronize()
+            ref = F.linear(x, w[key]).float()
+            ok = ((out.float() - ref).norm() / ref.norm()).item() < 1e-2
+        except Exception as ex:  # noqa: BLE001
+            print("layer g30n failed:", key, m, ex)
+            ok = False
+        if ok:
+            state["g30n"][(key, m)] = (lib, e, w[key].shape[0])
+        else:
+            print("layer g30n dropped:", key, m)
 
 
 def _g27_build():
@@ -2873,6 +2940,12 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
         c = e[3]
         out = torch.empty((m, e[2]), dtype=torch.float32, device=x.device)
         _G22["lib"].g22_gemm(e[0], e[1], x.contiguous(), out, c[1], c[2], c[3], _G19_SMS, 0, c[2])
+        return out
+    e = state.get("g30n", {}).get((key, m))
+    if e is not None and _opt(state, m, "g30n:" + key, (key, m) in G30N_DEFAULT_ON):  # proj s96: g30 at T=16/32 (BF16 out)
+        _G24_ZN.pop((key, m), None)
+        out = torch.empty((m, e[2]), dtype=torch.bfloat16, device=x.device)
+        e[0].g30_gemm(x.contiguous(), e[1][0], e[1][1], out, e[1][2], G30_PDL)
         return out
     e = _g27_sel(state, key, m)
     if e is not None:  # proj s57: gemv27 (no zeroed out needed; ZN for the next g24 like g24)
@@ -3409,4 +3482,4 @@ def _kernel_fn(data, state):
     return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
 
 
-_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build)]
+_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds())]
