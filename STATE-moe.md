@@ -69,6 +69,15 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 24 (06:27-06:55Z): TWQ_NE = NORM_EARLY for moe_twq (moe_norme in twq's drain; twq flags | 1 << 21 or TWQ_NE = 1).
+  Bitwise (tools/s24/ne_t.py 0/78). H200 check 11f0161e: v16 s66h32 192.4 -> 191.1 (every seed), s33h -2.1, twq v32 -6.5 us.
+  Layer port tools/s24/patch_layer_ne.py, TUNE[128] {"twq": 539050500}; Handoffs/Requests 06:50Z. Checks today 16/20.
+  Paper result: v32 hot chain (hot128 -> hot64 -> twq) saves 0 passes (twm + hot128 = 1 pass/expert on every layer seed): not built.
+  v16 per seed is linear in #experts (17: 187, 18: 193, 19: 202 us = ~7.5 us/expert + ~60 us fixed vs tk2f's 14 us fixed):
+  seed 13 is just 19 experts. The big-M gap is that ~45 us of extra fixed/drain/consumer cost, not passes.
+  NEXT: H200 twq+hot timeline (tools/mktl_diag.py style, DIAG_TL with twq flags | 2) to split the ~60 us fixed part at v16
+  (first-wave ramp, gemm13->gemm2 waits, drain, norm) before building anything else big-M.
+
 ## Night4 session 23 (05:45Z-): HOTQ = moe_hot<NH 64> (33..64-token experts, ONE N 64 pass) beside moe_twq at v16 (twq flags
   bit 20 skips them; hot grid in twq flags bits 24..30 or HOTQ_M). Bitwise = twq (tools/s23/hq_t.py 0/26). H200 moe-only v16:
   s33h (n21) 201.5 -> s33h32 194.8..196.5 -> **s66h32 191.8** (check 3187c4e7; twq 536953348 = 4|66<<8|1<<16|32<<24).
