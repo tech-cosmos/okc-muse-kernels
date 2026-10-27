@@ -2053,3 +2053,17 @@
   contention (O_PF lessons: prefetch at nds start is zero-sum). Not built; revisit only if the H200 tuner picks pr32 AND a
   layer DIAG shows pr32 HBM-bound there.
 - Next: after 00:00Z read layer's v141 check 'layer tune T=16/32' pr32 lines (and make sure layer took PR_SA, 11d49b7).
+
+## Night5 session 5 (2026-10-27 21:46Z - 22:05Z) -- paper bounds only; 0 checks, no GPU time
+- Read COORD (no new lead decision since 20:00Z, nothing addressed to moe). pr32 (with PR_SA) is in layer main v143 as a TUNE
+  option; the H200 verdict comes from layer's 00:00Z check 1 (v143).
+- DEAD on paper: L2 prefetch of the pooler W issued by pr32 itself before griddepcontrol.wait. In-layer pr32 is a PDL secondary
+  of _boundary (triggers at its start, ~3-4 us at T=32), so the pre-wait window is the boundary only, and the W ring (8 stages x
+  8 KB x 128 CTAs = 8 MB) already takes ~2.4 us of H100 HBM (~1.7 us H200) of that window; a prefetch issued after the window
+  just reorders the same HBM traffic. The only non-zero-sum form is a prefetch during attention/o (layer code; n5s4 bound <= ~1 us
+  H200 = ~0.14%): not worth a request.
+- MTOK 16 S1 at T=16: 64 groups x 1 CTA = 64 CTAs (wgmma M = 64 W rows fixed): does not fill the GPU: dead on paper.
+- Reading the H200 verdict (next session): `grep -h "layer tune T=\(16\|32\)" ~/r-layer/muse_decode_layer/profiles/<job>.log |
+  tr '|' '\n' | grep -E "layer tune|default|pr32|->"` (profiles are not in git: `okc status <16-hex job> --json` from that dir
+  restores them; ask layer if absent). pr32 wins if its line beats default by > ~1 us at T=16 or T=32 (sl or full).
+- Lane request posted to lead (COORD Requests): moe's items are all at measured bounds pending that verdict.
