@@ -1234,3 +1234,30 @@ item is pr8 dynamic K-half stealing (<= ~0.1% layer, low priority).
   speedups: m1 qkv 1.41 o 1.08 pool 1.45 unp 1.84 router 2.92; m8 1.24/1.02/1.29/1.37/5.11; m16 1.11/1.07/1.15/1.09/2.77;
   m32 1.10/1.04/1.15/0.99/2.49; m128 1.14/1.04/1.23/1.01/1.84; m256 qkv 1.08 o 1.05 pool 1.12 unp 1.04.
 - Submit 1ff4721e87c844c2 (ca7e557, same code as ed67748e): 1.3233x (3650.7 us), NEW BOARD BEST (was 1.3110), proj board #252. Budget 10-27: checks 2/20, scored 1/10.
+
+## s57 (2026-10-27 01:15-02:25Z, sandbox okc-night4, session 14): gemv27 = no cross-block split-K o GEMM for the layer's T=16
+- Standalone first-op qkv m32 g24 (H100, no pred; dev/s53/g24.py now takes PRED=-1): (4,3,12) r1 20.0-20.5 vs cuBLAS
+  20.7-20.9 graph-us; NOW (no W) 15.5: consumer-bound as first op. The layer already has g24:qkv_gate T=32 (4,3,12) as an
+  option (tuner never picked it): nothing new there.
+- dev/s57/gemv27.cu + harness dev/s57/g27.py ("M,KQ,AP,NS,RGB[,OBF]"; env PRED (<0 = none), ESCW, G24=<g24 cfgs>, DEFS
+  G27_TRACE / G27_XBULK / G27_XHALF / G27_XREP (probes), NOCHK). Block = RGB whole 16-row groups (all of k), WPB = RGB*KQ
+  warps each own (row group, k/KQ slice) with a per-warp TMA ring (pack24 with kc = k/KQ, r 1); partials -> smem (aliasing
+  the warp's ring) -> fixed-order block sum -> plain FP32/BF16 stores. No out zeroing, no fence, no epoch barrier, no
+  atomics; deterministic; subnormal products kept (g24's red.add flushes them: the spike test accepts either).
+  ns >= 100 = PD (gemm_pd): the warp's whole slice (ns-100 atoms) streamed AND decoded into registers before
+  griddepcontrol.wait; after the wait only x (cp.async 16 B by all threads) + ldmatrix/mma + sum. ZN arg (zo) like g24.
+- H100 after a 3 us PDL pred (us): o m16 PD 4.8-5.4 | non-PD 4,4,2,4 5.2-5.5 | g24 layer cfg 6.2-6.9 | cuBLAS 7.8;
+  m32 PD 6.2-7.0 | g24 6.9-7.2 | cuBLAS 8.2-8.4. PRED 6000 same as 3000 (not W-bound); no pred: g27 loses to cuBLAS.
+  unpool m16 (k 3072, non-PD): 20.1 vs g24 18.6: dead. KQ 8 / RGB 2 / NS 1 / AP 2 variants worse.
+- Trace (o m16, H100, 0.256 us timer): x arrival after the wait ~1.8 us (m32 2.3-2.8), then ldsm+mma ~0.5-1, store 0.5.
+  x arrival is NOT the bulk-copy issue (cp.async by all threads = same) but bytes: XHALF probe 1.8 -> 1.3 (m16), 2.8 -> 1.8
+  (m32): ~1 us fixed + ~0.5 us per 16 KB/block with 128 blocks reading the same x. Untried: cluster TMA multicast of x.
+- Check c7b586838394472b (fbec9e1, print-only _diag27; picks = ca7e557): 1.3190x (not a beat: board 1.3233). H200 diag27
+  (us over the 3 us pred): o m16 cuBLAS 6.75 | lt pick 7.20 | g24 (512,2,4,16,2,1) 6.43 | g27 PD 5.25 | g27 non-PD 5.82;
+  m32 cuBLAS 6.91 | F pick 6.43 | g24 (512,4,3,12,2,1) 7.17 | PD 6.69 | non-PD 7.30.
+- Layer copy (/tmp/pj57/L = r-layer 66fda6e): G27_CFG {("o",16): (16,4,4,108,4,0)}, G27_ON, _g27_prepare (own load_inline,
+  checked vs F.linear), _g27_sel (_g24_sel returns None for a g27 key, so qkv's ZN skips o), _g19 runs g27 first (pops any
+  _G24_ZN for o, zeroes pooler's out as ZN), O_PF prefetches the g27 pack, TUNE[16] += {"g27:o": False}.
+  Tests 13/13; replay_test d16 + d32 (g27 forced at T=32 too) seeds 11,23 0/160. ab_flag TUNE {} 4 rounds x seeds 7,11,99
+  (A B A): d16 sl 157.24/152.34/189.93 vs g24 158.06/153.20/190.94 (-0.8/-0.9/-1.0), full -0.1/0/-0.2. T=32 o g27 +1.1..1.8
+  (3 rounds x 7,11): T=32 left out. Handoff: dev/s57/g27_layer.patch (git apply on origin/main v105 f9b702a/66fda6e: clean).

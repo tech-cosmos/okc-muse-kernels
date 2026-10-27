@@ -1,6 +1,7 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
 
-Updated 2026-10-26 ~23:15 UTC (s55: g24 tail balancing / KC1024 / XPAR / lazy zero all dead. s54: gemv24 SK = stream-K over ring stages (template r|256): H100 layer d32 pool+unp
+Updated 2026-10-27 02:25 UTC (s57: gemv27 o T=16 for the layer: H200 o m16 5.25 vs g24 6.43 us after pred; handoff
+dev/s57/g27_layer.patch, H100 layer d16 sl -0.8..-1.0. Older: s55: g24 tail balancing / KC1024 / XPAR / lazy zero all dead. s54: gemv24 SK = stream-K over ring stages (template r|256): H100 layer d32 pool+unp
 -1.1..-1.9 us/shape, handoff dev/s54/g24sk_layer.patch; DIAG24 carries SK twins. s53: gemv24 (per-warp TMA rings, no producer warp) = H100 layer WIN at T=16/32 (-0.5..-3.5 us/layer, tuner options); handoff dev/s53/g24_layer.patch; print-only _diag24 queued for the 00:00Z check. Checks 20/20 until 00:00Z).
 
 ## Board
@@ -8,7 +9,7 @@ Updated 2026-10-26 ~23:15 UTC (s55: g24 tail balancing / KC1024 / XPAR / lazy ze
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
-- Budget 10-27 used (s56): checks 2/20, scored 1/10. prepare() limit is 300 s: diags must stay small (s56 fail).
+- Budget 10-27 used (s57): checks 3/20, scored 1/10. prepare() limit is 300 s: diags must stay small (s56 fail).
 
 ## Router H200 now (check a478daea, a1f0af7): m1 3.79, m8 4.72 (router2), m16 5.55, m32 6.36, m128 9.00 (router3),
 ## m256 11.18 (cuBLAS splitK GEMM 6.4 + splitKreduce 2.0 + hi+lo add 1.6). SGLang: 10.5/26.4/15.0/15.5/16.8/17.7.
@@ -138,23 +139,12 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## = readout for the 00:00Z log. NOTES s56. 00:00Z check 636c89fc FAILED setup: prepare() 325.6 s > 300 s (diag24 SK twins):
 ## KEEP DIAGS SMALL (prepare limit 300 s). Diag read: H200 pooler T=16 (4,3,12) -3.0 us vs layer cfg -> handoff
 ## dev/s56/g24cfg_h200_layer.patch (H100 d16 -0.9/-0.4); TAG2 dead; pooler T=32 SK (4,3,12) H200 -1.15 but H100 +1.2..1.7.
-## Next (00:00Z check, ranked):
-## -2. (s54) In the same log: diag24 r257 lines vs r1 (H200 SK vs static per op/m/grid): post which g24sk:<key> to default
-##    ON (layer TUNE_BASE) per T; check pool/unp m16 G108 (16,1024,4,3,12) vs (16,1024,2,4,16) (H100 layer: sl -0.6..0.8).
-## -1. (s53) The 00:00Z proj check log: 'diag24' lines (H200 g24 per op/m/cfg, G132/G108) vs 'diag19d ... main' and
-##    'diag19' pick: post per-op wins for layer (which g24:<key> TUNE options to default ON in TUNE_BASE). If g24 m16 pool
-##    loses on H200 (G72 proxy did), keep it a tuner option. Next build: dynamic task tail for g24 (per-SM HBM variance),
-##    m32 with KC 1024 (x in 2 halves), BF16-out variant for qkv. NOTES s53.
-## 0. In the 00:00Z check log: diag19d 'NOTM' vs 'NOTM TAG2' (H200): >= 0.3 us win at m16/m32 -> TAG2 patch for layer's
-##    g19_src.cu: patch READY dev/s51/tag2_layer.patch (handoff posted 21:50Z; layer H100 tie, tests 13/13): post the H200
-##    numbers under Handoffs/Requests. diag19 'o m16' g19 vs pick: if g19 wins now -> layer TUNE option at T=16 o.
-## a. First proj check after 00:00Z = main (carries _diag19d): read 'diag19d' lines. main-NOW = W-stream share on H200;
-##    NOW-NOMMA = decode+mma; NOMMA = skeleton. Copy into NOTES. Submit only if > 1.3110 (diag adds nothing to timing).
-## Next sandbox (ranked; sandbox okc-night3 expired ~19:10Z 10-26 with proj checks 20/20, scored 5/10)
-1. proj's first check = main as is (DEC3 in g13/g14 m1/m8 picks; tg2 unpooler m8 candidate): read the 'tune' lines in the
-   judge log (profiles/*.log); submit if > 1.3110. Layer's first check = its main v88 (carries DEC3, pr8 npf 212, g19 s15).
-2. Ask layer for a fresh H200 idle budget from v88's profile; take the proj-owned rows (T<=8 GEMV ramps, T>=16 cuBLAS
-   gaps without PDL triggers). (npre 2 vs 3: dead s45; T=1 pooler pre-fill beside csl/o/bnd: dead s46.)
-   (s49) fewer bytes at m=1 CLOSED: floor 10.54 bits (exp entropy 2.54), fixed-rate < 12 bits escapes 3.5%+, VL 11.2 bits
-   ~ -1.3 us d1 at best (dev/s49_entropy.py, NOTES s49). All proj items now <= ~0.3% layer: asked lead for a new lane.
-3. Below the line: pr8 K-split tail (~0.1%), 11-bit (~0.2-0.3%), g22/g23/DeepGEMM m128/256 (dead).
+## s57: gemv27 (dev/s57/gemv27.cu, g27.py): block owns whole row groups, warps split k, smem sum, plain stores (no zero/
+## barrier/atomics); PD = W decoded into registers before griddepcontrol.wait. H200 o m16 5.25 vs g24 6.43 (layer default),
+## m32 loses to cuBLAS. Handoff dev/s57/g27_layer.patch (T=16 o). Left: x arrival ~1.8 us/2.6 us (m16/m32) = bytes from L2
+## with all 128 blocks reading the same x: try cluster TMA multicast of x (g27 and g24), and PD for qkv/pool T=16 slices.
+## Next (ranked):
+1. Layer: watch for g27 (Handoffs proj s57) in a layer check; read its "layer tune T=16" g27:o line.
+2. x multicast (cluster 2/4 TMA .multicast::cluster) in g27 and g24: x arrival is ~1 us + bytes; est. -0.5..1 us per call.
+3. PD (pre-wait decode into registers) for other T=16 g24 calls where a warp slice fits (qkv/pool need split-K: g24 PD).
+4. Below the line: pr8 K-split tail (~0.1%), 11-bit (~0.2-0.3%), g22/g23/DeepGEMM m128/256 (dead).

@@ -17,13 +17,13 @@ DEFS = [d_ for d_ in os.environ.get("DEFS", "").split(",") if d_]
 src = "".join("#define %s\n" % d_.replace("=", " ") for d_ in DEFS) + open(os.path.join(D, "gemv27.cu")).read()
 src = src.replace("G27_CONFIGS", " ".join("G27_CASE(%d,%d,%d,%d,%d,%s)" % (c[:5] + ("true" if c[5] else "false",)) for c in sorted(set(cfgs))))
 mod = load_inline(name="pj_g27_" + hashlib.md5(src.encode()).hexdigest()[:10],
-                  cpp_sources="torch::Tensor g27_trace(); void g27_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t); void g27_pred(torch::Tensor, torch::Tensor, int64_t);",
+                  cpp_sources="torch::Tensor g27_trace(); void g27_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor); void g27_pred(torch::Tensor, torch::Tensor, int64_t);",
                   cuda_sources=src, functions=["g27_gemm", "g27_pred", "g27_trace"],
                   extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"] + (["-Xptxas", "-v"] if os.environ.get("PTXV") else []))
 if g24c:
     s24 = open(os.path.join(os.path.dirname(D), "s53", "gemv24.cu")).read().replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(g24c))))
     m24 = load_inline(name="pj_g24c_" + hashlib.md5(s24.encode()).hexdigest()[:10],
-                      cpp_sources="torch::Tensor g24_trace(); void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g24_pred(torch::Tensor, torch::Tensor, int64_t);",
+                      cpp_sources="torch::Tensor g24_trace(); void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor); void g24_pred(torch::Tensor, torch::Tensor, int64_t);",
                       cuda_sources=s24, functions=["g24_gemm"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
 
 
@@ -56,6 +56,7 @@ if ESCW:
             cols = CE[name][torch.randint(0, 32, (len(rows),), device="cuda", generator=g_)]
             t[rows, cols] = vals[torch.randint(0, len(vals), (len(rows),), device="cuda", generator=g_)]
 ctr = torch.zeros(4, dtype=torch.int32, device="cuda")
+NOZ = torch.empty(0, device="cuda")
 for nm, layer, n in SH:
     if only and nm not in only.split(","): continue
     W = Wr[layer][:n].contiguous()
@@ -92,11 +93,11 @@ for nm, layer, n in SH:
             if "G27_XREP" in DEFS:  # timing probe: x replicated per block (written by the pred too: L2-resident)
                 xr = x.repeat(n // (16 * rgb), 1).contiguous(); xrs = xr.clone()
                 pre = (lambda: mod.g27_pred(xrs, xr, PRED)); e = bench.time_graph(pre)
-                dt = bench.time_graph(lambda: (pre(), mod.g27_gemm(P, hdr, scale, xr[:M], out, *cf))) - e
+                dt = bench.time_graph(lambda: (pre(), mod.g27_gemm(P, hdr, scale, xr[:M], out, *cf, NOZ))) - e
                 line += f" | {tag} XREP {dt:6.2f}"; continue
             try:
                 for rep in range(0 if os.environ.get("NOCHK") else 10 if ESCW else 2):
-                    out.fill_(1.0); mod.g27_gemm(P, hdr, scale, x, out, *cf); torch.cuda.synchronize()
+                    out.fill_(1.0); mod.g27_gemm(P, hdr, scale, x, out, *cf, NOZ); torch.cuda.synchronize()
                     if obf:
                         assert torch.equal(out, ref.float().bfloat16()) or ((out.double() - ref).norm() / ref.norm()).item() < 4e-3, tag
                     else:
@@ -112,13 +113,13 @@ for nm, layer, n in SH:
                                 raise AssertionError("spike")
             except (RuntimeError, AssertionError) as ex:
                 line += f" | {tag} ERR {str(ex).splitlines()[0][:70]}"; continue
-            dt = bench.time_graph(lambda: (pre(), mod.g27_gemm(P, hdr, scale, x, out, *cf))) - e
+            dt = bench.time_graph(lambda: (pre(), mod.g27_gemm(P, hdr, scale, x, out, *cf, NOZ))) - e
             line += f" | {tag} {dt:6.2f}"
             if "G27_TRACE" in DEFS:
                 nb = n // (16 * rgb)
                 for rep in range(3):
                     torch.sum(bench._FLUSH.view(torch.int64), 0, out=bench._SINK)
-                    pre(); mod.g27_gemm(P, hdr, scale, x, out, *cf); torch.cuda.synchronize()
+                    pre(); mod.g27_gemm(P, hdr, scale, x, out, *cf, NOZ); torch.cuda.synchronize()
                     tr = mod.g27_trace().view(-1, 6)[:nb].cpu().double()
                     t0 = tr[:, 1].min()
                     q = lambda col: "/".join(f"{v:.2f}" for v in torch.quantile((tr[:, col] - t0) / 1000, torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)).tolist())

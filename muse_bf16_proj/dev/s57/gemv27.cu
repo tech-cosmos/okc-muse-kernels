@@ -76,7 +76,7 @@ __device__ __forceinline__ void xload(unsigned xs, const __nv_bfloat16* x, int m
 // x [M, k] whole per block (after griddepcontrol.wait); W stages issued before the wait (npre, PDL secondary).
 template <int M, int KQ, int AP, int NS, int RGB, bool OBF>
 __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H, float scale, const __nv_bfloat16* __restrict__ x,
-                                                         void* __restrict__ outp, int n, int k, int npre) {
+                                                         void* __restrict__ outp, int n, int k, int npre, float* __restrict__ zo, int zn4) {
     constexpr int WPB = RGB * KQ, NT = M / 8, SB = AP * WB, STR = 16 + 4;
     static_assert(NT % 2 == 0 && M <= 32 && NS * SB >= M * STR * 4, "config");
     extern __shared__ __align__(128) unsigned char smem[];
@@ -228,7 +228,11 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm(const unsigned char* __
         if (OBF) ((__nv_bfloat16*)outp)[o] = __float2bfloat16_rn(s);
         else ((float*)outp)[o] = s;
     }
+    // ZN (as g24's, layer proj s56): zero the next g24's FP32 out (zo, zn4 float4s); plain stores, no fence
+    for (int i = blockIdx.x * WPB * 32 + t; i < zn4; i += gridDim.x * WPB * 32) ((float4*)zo)[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+#ifdef G27_TRACE
     __syncthreads();
+#endif
     TR(5)
 }
 // s57 PD variant: NAW = k / KQ / 32 atoms per warp, all held in registers: every W stage is waited for and DECODED
@@ -236,7 +240,7 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm(const unsigned char* __
 // Needs NS >= NAW / AP (whole slice in the ring, issued pre-wait). XQ: x arrives in KQ slices (one barrier each).
 template <int M, int KQ, int AP, int NAW, int RGB, bool OBF>
 __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm_pd(const unsigned char* __restrict__ WP, const float2* __restrict__ H, float scale, const __nv_bfloat16* __restrict__ x,
-                                                            void* __restrict__ outp, int n, int k, int npre) {
+                                                            void* __restrict__ outp, int n, int k, int npre, float* __restrict__ zo, int zn4) {
     constexpr int WPB = RGB * KQ, NT = M / 8, SB = AP * WB, STR = 16 + 4, NS = NAW / AP, KW = NAW * 32;
     static_assert(NT % 2 == 0 && M <= 32 && NS * SB >= M * STR * 4 && NAW % AP == 0, "config");
     extern __shared__ __align__(128) unsigned char smem[];
@@ -371,7 +375,11 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm_pd(const unsigned char*
         if (OBF) ((__nv_bfloat16*)outp)[o] = __float2bfloat16_rn(s);
         else ((float*)outp)[o] = s;
     }
+    // ZN (as g24's, layer proj s56): zero the next g24's FP32 out (zo, zn4 float4s); plain stores, no fence
+    for (int i = blockIdx.x * WPB * 32 + t; i < zn4; i += gridDim.x * WPB * 32) ((float4*)zo)[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+#ifdef G27_TRACE
     __syncthreads();
+#endif
     TR(5)
 }
 __global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int n8, int ns_) {
@@ -395,7 +403,7 @@ void g27_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
     g27::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_);
 }
 template <int M_, int KQ_, int AP_, int NS_, int RGB_, bool OBF_>
-static void launch27(torch::Tensor& wp, torch::Tensor& h, double scale, torch::Tensor& x, torch::Tensor& out, int sm, int n, int k, int64_t npre, cudaStream_t stream) {
+static void launch27(torch::Tensor& wp, torch::Tensor& h, double scale, torch::Tensor& x, torch::Tensor& out, int sm, int n, int k, int64_t npre, torch::Tensor& zo, cudaStream_t stream) {
     auto kern = [] { if constexpr (NS_ >= 100) return g27::gemm_pd<M_, KQ_, AP_, NS_ - 100, RGB_, OBF_>; else return g27::gemm<M_, KQ_, AP_, NS_, RGB_, OBF_>; }();
     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm);
     cudaLaunchConfig_t cfg = {};
@@ -404,11 +412,12 @@ static void launch27(torch::Tensor& wp, torch::Tensor& h, double scale, torch::T
     attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1;
     cfg.attrs = attr; cfg.numAttrs = 1;
     cudaLaunchKernelEx(&cfg, kern, (const unsigned char*)wp.data_ptr(), (const float2*)h.data_ptr(), (float)scale, (const __nv_bfloat16*)x.data_ptr(),
-                       out.data_ptr(), n, k, (int)npre);
+                       out.data_ptr(), n, k, (int)npre, zo.numel() ? zo.data_ptr<float>() : nullptr, (int)(zo.numel() / 4));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void g27_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out,
-              int64_t kq, int64_t ap, int64_t ns, int64_t rgb, int64_t npre) {
+              int64_t kq, int64_t ap, int64_t ns, int64_t rgb, int64_t npre, torch::Tensor zo) {
+    TORCH_CHECK(zo.numel() % 4 == 0 && (!zo.numel() || (zo.is_contiguous() && zo.scalar_type() == torch::kFloat32)), "g27: zo");
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const bool obf = out.scalar_type() == torch::kBFloat16;
     const bool pd = ns >= 100;  // PD variant: ns = 100 + NAW (atoms per warp); ring = NAW / AP slots
@@ -419,7 +428,7 @@ void g27_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
     auto stream = c10::cuda::getCurrentCUDAStream();
 #define G27_CASE(M_, KQ_, AP_, NS_, RGB_, OBF_) \
     if (m == M_ && kq == KQ_ && ap == AP_ && ns == NS_ && rgb == RGB_ && obf == OBF_) { \
-        launch27<M_, KQ_, AP_, NS_, RGB_, OBF_>(wp, h, scale, x, out, sm, n, k, npre, stream); return; }
+        launch27<M_, KQ_, AP_, NS_, RGB_, OBF_>(wp, h, scale, x, out, sm, n, k, npre, zo, stream); return; }
     G27_CONFIGS
     TORCH_CHECK(false, "g27: no config");
 }

@@ -2982,7 +2982,7 @@ __device__ __forceinline__ void xload(unsigned xs, const __nv_bfloat16* x, int m
 // x [M, k] whole per block (after griddepcontrol.wait); W stages issued before the wait (npre, PDL secondary).
 template <int M, int KQ, int AP, int NS, int RGB, bool OBF>
 __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm(const unsigned char* __restrict__ WP, const float2* __restrict__ H, float scale, const __nv_bfloat16* __restrict__ x,
-                                                         void* __restrict__ outp, int n, int k, int npre) {
+                                                         void* __restrict__ outp, int n, int k, int npre, float* __restrict__ zo, int zn4) {
     constexpr int WPB = RGB * KQ, NT = M / 8, SB = AP * WB, STR = 16 + 4;
     static_assert(NT % 2 == 0 && M <= 32 && NS * SB >= M * STR * 4, "config");
     extern __shared__ __align__(128) unsigned char smem[];
@@ -3134,7 +3134,11 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm(const unsigned char* __
         if (OBF) ((__nv_bfloat16*)outp)[o] = __float2bfloat16_rn(s);
         else ((float*)outp)[o] = s;
     }
+    // ZN (as g24's, layer proj s56): zero the next g24's FP32 out (zo, zn4 float4s); plain stores, no fence
+    for (int i = blockIdx.x * WPB * 32 + t; i < zn4; i += gridDim.x * WPB * 32) ((float4*)zo)[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+#ifdef G27_TRACE
     __syncthreads();
+#endif
     TR(5)
 }
 // s57 PD variant: NAW = k / KQ / 32 atoms per warp, all held in registers: every W stage is waited for and DECODED
@@ -3142,7 +3146,7 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm(const unsigned char* __
 // Needs NS >= NAW / AP (whole slice in the ring, issued pre-wait). XQ: x arrives in KQ slices (one barrier each).
 template <int M, int KQ, int AP, int NAW, int RGB, bool OBF>
 __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm_pd(const unsigned char* __restrict__ WP, const float2* __restrict__ H, float scale, const __nv_bfloat16* __restrict__ x,
-                                                            void* __restrict__ outp, int n, int k, int npre) {
+                                                            void* __restrict__ outp, int n, int k, int npre, float* __restrict__ zo, int zn4) {
     constexpr int WPB = RGB * KQ, NT = M / 8, SB = AP * WB, STR = 16 + 4, NS = NAW / AP, KW = NAW * 32;
     static_assert(NT % 2 == 0 && M <= 32 && NS * SB >= M * STR * 4 && NAW % AP == 0, "config");
     extern __shared__ __align__(128) unsigned char smem[];
@@ -3277,7 +3281,11 @@ __global__ void __launch_bounds__(RGB * KQ * 32, 1) gemm_pd(const unsigned char*
         if (OBF) ((__nv_bfloat16*)outp)[o] = __float2bfloat16_rn(s);
         else ((float*)outp)[o] = s;
     }
+    // ZN (as g24's, layer proj s56): zero the next g24's FP32 out (zo, zn4 float4s); plain stores, no fence
+    for (int i = blockIdx.x * WPB * 32 + t; i < zn4; i += gridDim.x * WPB * 32) ((float4*)zo)[i] = make_float4(0.f, 0.f, 0.f, 0.f);
+#ifdef G27_TRACE
     __syncthreads();
+#endif
     TR(5)
 }
 __global__ void pred(const uint4* __restrict__ src, uint4* __restrict__ dst, int n8, int ns_) {
@@ -3301,7 +3309,7 @@ void g27_pred(torch::Tensor src, torch::Tensor dst, int64_t ns_) {
     g27::pred<<<32, 256, 0, c10::cuda::getCurrentCUDAStream()>>>((const uint4*)src.data_ptr(), (uint4*)dst.data_ptr(), src.numel() * src.element_size() / 16, ns_);
 }
 template <int M_, int KQ_, int AP_, int NS_, int RGB_, bool OBF_>
-static void launch27(torch::Tensor& wp, torch::Tensor& h, double scale, torch::Tensor& x, torch::Tensor& out, int sm, int n, int k, int64_t npre, cudaStream_t stream) {
+static void launch27(torch::Tensor& wp, torch::Tensor& h, double scale, torch::Tensor& x, torch::Tensor& out, int sm, int n, int k, int64_t npre, torch::Tensor& zo, cudaStream_t stream) {
     auto kern = [] { if constexpr (NS_ >= 100) return g27::gemm_pd<M_, KQ_, AP_, NS_ - 100, RGB_, OBF_>; else return g27::gemm<M_, KQ_, AP_, NS_, RGB_, OBF_>; }();
     cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, sm);
     cudaLaunchConfig_t cfg = {};
@@ -3310,11 +3318,12 @@ static void launch27(torch::Tensor& wp, torch::Tensor& h, double scale, torch::T
     attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1;
     cfg.attrs = attr; cfg.numAttrs = 1;
     cudaLaunchKernelEx(&cfg, kern, (const unsigned char*)wp.data_ptr(), (const float2*)h.data_ptr(), (float)scale, (const __nv_bfloat16*)x.data_ptr(),
-                       out.data_ptr(), n, k, (int)npre);
+                       out.data_ptr(), n, k, (int)npre, zo.numel() ? zo.data_ptr<float>() : nullptr, (int)(zo.numel() / 4));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void g27_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, torch::Tensor out,
-              int64_t kq, int64_t ap, int64_t ns, int64_t rgb, int64_t npre) {
+              int64_t kq, int64_t ap, int64_t ns, int64_t rgb, int64_t npre, torch::Tensor zo) {
+    TORCH_CHECK(zo.numel() % 4 == 0 && (!zo.numel() || (zo.is_contiguous() && zo.scalar_type() == torch::kFloat32)), "g27: zo");
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const bool obf = out.scalar_type() == torch::kBFloat16;
     const bool pd = ns >= 100;  // PD variant: ns = 100 + NAW (atoms per warp); ring = NAW / AP slots
@@ -3325,7 +3334,7 @@ void g27_gemm(torch::Tensor wp, torch::Tensor h, double scale, torch::Tensor x, 
     auto stream = c10::cuda::getCurrentCUDAStream();
 #define G27_CASE(M_, KQ_, AP_, NS_, RGB_, OBF_) \
     if (m == M_ && kq == KQ_ && ap == AP_ && ns == NS_ && rgb == RGB_ && obf == OBF_) { \
-        launch27<M_, KQ_, AP_, NS_, RGB_, OBF_>(wp, h, scale, x, out, sm, n, k, npre, stream); return; }
+        launch27<M_, KQ_, AP_, NS_, RGB_, OBF_>(wp, h, scale, x, out, sm, n, k, npre, zo, stream); return; }
     G27_CONFIGS
     TORCH_CHECK(false, "g27: no config");
 }
@@ -5611,6 +5620,9 @@ DIAG24 = {}
 # H100 (us over pred): o m16 PD 5.1-5.4 | g24 6.7 | cuBLAS 7.9; m32 PD 7.0 | g24 7.2 | cuBLAS 8.4.
 DIAG27 = {"o": [(16, 4, 4, 108, 4, 0), (16, 4, 4, 2, 4, 0), (32, 4, 4, 108, 4, 0), (32, 4, 4, 2, 4, 0)]}
 DIAG27_G24 = {("o", 16): (16, 512, 2, 4, 16, 2, 1), ("o", 32): (32, 512, 4, 3, 12, 2, 1)}
+# H200 check c7b58683: o m16 PD +5.25 | non-PD +5.82 | g24 +6.43 | cuBLAS +6.75 | lt +7.20; m32 PD +6.69 | non-PD +7.30 |
+# g24 +7.17 | cuBLAS +6.43 us. -> layer handoff dev/s57/g27_layer.patch (T=16 o). Diag off now.
+DIAG27 = {}
 DIAG19_STREAM = []  # s17 H200: 50 MB 13.89, 28 MB 8.51 us at (24576, 4) (1-kernel graph 4.6 us subtracted); was [(24576, 4), (12288, 8)]  # (stage bytes, stages): 50 MB and 28 MB bare streams
 # gemv22 (dev/gemv22.cu, dev/g22.py): m = 128/256 swap-AB wgmma GEMM over the 12-bit weights, tile-major stream-K (one
 # run per block), escapes packed per stage (E entries), FP32 out (zero kernel + red.add), then a BF16 copy.
@@ -5667,17 +5679,17 @@ try:
         cpp_sources="void pj_router2(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
-                    "void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                    "void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);\n"
                     "void g12_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);\n"
                     "void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);\n"
                     "void g14_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
-                    "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                    "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);\n"
                     "void g15_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);\n"
                     "void g16_gemm(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);\n"
                     "void g17_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
                     "void g21_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
                     "int64_t, int64_t, int64_t, torch::Tensor, int64_t, torch::Tensor);\n"
@@ -5694,9 +5706,9 @@ try:
     _g19 = load_inline(
         name="muse_proj_g19a",
         cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); void g19_cvt(torch::Tensor, torch::Tensor); "
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor); void g19_cvt(torch::Tensor, torch::Tensor); "
                     "void g19_gemm_bf16(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); "
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor); "
                     "void g19_pred(torch::Tensor, torch::Tensor, int64_t); void g19_stream(torch::Tensor, int64_t, int64_t, torch::Tensor);",
         cuda_sources=("#define G19_ONLY23\n" if DIAG19Q else "#define G19_ONLY2\n") + _G19_SRC.replace("G19_CONFIGS", " ".join(
             "G19_CASE(%d,%d,%d,%d,1,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in list(BF16_G19.values()) + list(DIAG19.values()) + list(DIAG19Q.values()) for c in v}))),
@@ -5709,7 +5721,7 @@ try:
     _g13c = load_inline(
         name="muse_proj_g13c",
         cpp_sources="void g13_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
-                    "int64_t, int64_t, int64_t, int64_t, int64_t);",
+                    "int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
         cuda_sources="#define G13_CPA\n" + _G13_SRC.replace("G13_CONFIGS", " ".join("G13_CASE(%d,%d,%d,%d,%d,%d)" % (c[1:6] + c[7:8]) for c in sorted({c for v in BF16_G13C.values() for c in v}))),
         functions=["g13_gemv"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"]) if BF16_G13C else None
 except Exception as _e:  # noqa: BLE001
@@ -5719,7 +5731,7 @@ except Exception as _e:  # noqa: BLE001
 try:
     _g22 = load_inline(
         name="muse_proj_g22a",
-        cpp_sources="void g22_gemm(torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+        cpp_sources="void g22_gemm(torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
         cuda_sources=_G22_SRC.replace("G22_CONFIGS", " ".join("G22_CASE(%d,%d,%d,%d)" % c for c in sorted({c for v in BF16_G22.values() for c in v}))),
         functions=["g22_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"]) if BF16_G22 else None
 except Exception as _e:  # noqa: BLE001
@@ -5733,7 +5745,7 @@ for _v, _defs in [v for v in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_
             _g20[_v] = load_inline(
                 name="muse_proj_g19c",
                 cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
-                            "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                            "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
                 cuda_sources="#define G19_ONLY2\n#define G19_MINB 2\n#define G19_NPB 1\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
                     "G19_CASE(%d,%d,%d,%d,1,1,1,8,1)" % c for c in sorted(set(DIAG20[_v])))),
                 functions=["g19_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
@@ -5742,7 +5754,7 @@ for _v, _defs in [v for v in (("a", ""), ("b", "#define G20_MINB 2\n#define G20_
         _g20[_v] = load_inline(
             name="muse_proj_g20" + _v,
             cpp_sources="void g20_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, "
-                        "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                        "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
             cuda_sources="#define G20_ONLY2\n" + _defs + _G20_SRC.replace("G20_CONFIGS", " ".join(
                 "G20_CASE(%d,%d,%d,%d,1,1,1,8,1)" % c for c in sorted(set(DIAG20[_v])))),
             functions=["g20_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
@@ -6200,7 +6212,7 @@ def _diag19d(st):
         try:
             mods.append(load_inline(
                 name="muse_proj_g19d%d" % i, cpp_sources="void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, "
-                "torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                "torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
                 cuda_sources="".join("#define %s\n" % d for d in defs.split()) + "#define G19_ONLY2\n" + _G19_SRC.replace("G19_CONFIGS", " ".join(
                     "G19_CASE(%d,%d,%d,%d,1,%d,%d,%d,%d)" % (c[:4] + c[5:]) for c in sorted({c for v in DIAG19D.values() for c in v}))),
                 functions=["g19_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"]))
@@ -6242,7 +6254,7 @@ def _diag24(st):
         return
     try:
         mod = load_inline(name="muse_proj_g24", cpp_sources="void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, "
-                          "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                          "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
                           cuda_sources=_G24_SRC.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(
                               {c for v in DIAG24.values() for c in v}))),
                           functions=["g24_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
@@ -6289,8 +6301,8 @@ def _diag27(st):
     try:
         c24 = sorted(set(DIAG27_G24.values()))
         mod = load_inline(name="muse_proj_g27", cpp_sources="void g24_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, "
-                          "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t); "
-                          "void g27_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t);",
+                          "torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor); "
+                          "void g27_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
                           cuda_sources=_G24_SRC.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in c24)) + "\n" +
                           _G27_SRC.replace("G27_CONFIGS", " ".join("G27_CASE(%d,%d,%d,%d,%d,%s)" % (c[:5] + ("true" if c[5] else "false",)) for c in sorted(
                               {c for v in DIAG27.values() for c in v}))),
@@ -6334,10 +6346,10 @@ def _diag27(st):
                     P, hdr, scale = _pack19(c_, k // kq, ap, 1)
                     o27 = torch.empty(m, n, dtype=torch.bfloat16 if obf else torch.float32, device="cuda")
                     a27 = (kq, ap, ns, rgb, ns if ns < 100 else 99)
-                    mod.g27_gemm(P, hdr, scale, x, o27, *a27)
+                    mod.g27_gemm(P, hdr, scale, x, o27, *a27, torch.empty(0, device="cuda"))
                     torch.cuda.synchronize()
                     errs.append(f"{((o27.float() - ref).norm() / ref.norm()).item():.1e}")
-                    fns.append(lambda P=P, hdr=hdr, scale=scale, o27=o27, a27=a27: (_g19.g19_pred(xs, x, 3000), mod.g27_gemm(P, hdr, scale, x, o27, *a27)))
+                    fns.append(lambda P=P, hdr=hdr, scale=scale, o27=o27, a27=a27: (_g19.g19_pred(xs, x, 3000), mod.g27_gemm(P, hdr, scale, x, o27, *a27, torch.empty(0, device="cuda"))))
                     names.append(f"g27 {c[1:]}")
                 med = _graph_medians(fns)
             except Exception as e:  # noqa: BLE001
