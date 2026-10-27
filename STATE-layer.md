@@ -1,11 +1,11 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
 BOARD BEST = submit 19ebde23 = v108, 2.0860x (s70; d1 67.7/75.8, d16 127.9/208.9, d32 173.3/326.8, v1 106.8/121.8, v16 274.6/368.5, v32 335.7/500.0). Best check 56d4f73b v108 2.1190x.
-s76: **main = v122** = v120 - every twq option at T=128 (moe 07:25Z: the layer's T=128 default is moe_twm; twq is ~+5 us in-layer;
-HOTQ check baae0e41 2.0772x: hot32 = twq 4, split +6) + proj s66 T=32 combos (H200 tuner PICKED {tk2h 4, lt:o, g24:qkv_gate} on both
-types in baae0e41 AND 1b9a63fb: -1..-5 us d32; v123 puts it in TUNE_BASE[32]) + proj s69 g24sk2 T=32 options (tie on H200).
-Checks s76: baae0e41 v121 2.0772x, 1b9a63fb v122 2.081x (d32 160.5/308.0 best yet); not submitted (< 2.0860). Budget 10-27 left: 6 checks /
-5 submits. **main = v123, unchecked**: check it once more wins are stacked; submit if a check beats 2.0860x.
+s77: **main = v124** (701bf12) = v123 + TUNE_BASE stacking of the options the H200 tuner won on >= 9/10 logs (T=1 {g13o, pr1_rb 32},
+T=8 sl g14alt:qkv_gate 3, T=16 sl tk2fj False, T=128 fr) + stack combos (T=8 cslpw, T=128 twf_split66+lt, T=256 rg+split+lt).
+Check 08d10234 v124 2.0832x (tie; not submitted). tools/opt_test.py = every TUNE option forced on the base (0/300 bad).
+Budget 10-27 left: 5 checks (4 reserved for moe in-layer DIAG bundles, lead 06:41Z) / 5 submits. Tuner-level stacking is
+below judge noise: no more tuner-option work; the gap to #1 (2.380x) is the experts (d32 sl tk2f 95 us = 46%, v16/v32 twm).
 
 Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
 TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
@@ -26,7 +26,7 @@ floor per ~/attn STATE); g24 pooler+unpool d16 35, d32 48; pr1 17.3 (d1). Layer 
 Judge noise: one shape moves up to 10% between runs of the same code (v108: d32 full 291 vs 327 us).
 
 ## NEXT
-0. (s76) Lead 06:41Z: up to 4 of the 10-27 checks go to moe as in-layer DIAG bundles (watch Handoffs for "moe DIAG for layer"; run on main, copy the tuner lines to moe). main v123 is unchecked: next check = v123 + any new win.
+0. (s77) Lead 06:41Z: up to 4 of the 10-27 checks go to moe as in-layer DIAG bundles (watch Handoffs for "moe DIAG for layer"; run on main v124, copy the tuner lines to moe). Don't spend checks on tuner-option ties.
    Only unbuilt layer item: T=1 o+bnd+pr1 megakernel (bound ~-3 us d1 = ~+0.5%, multi-session, NOTES s45/s61/s74).
 1. Integrate new moe/proj Handoffs on top of main (v111) (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
    cold compile < ~5.5 min), then check; submit only if the check beats 2.0860x.

@@ -1616,3 +1616,9 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Tests (base forced, variants/v124_fbase.py = tune {} everywhere): scored_test all 12 shapes x 2 seeds 0 bad; replay_test seeds 11,23 x 20
   inputs 0/480; bench test 13/13. tools/opt_test.py (new: every TUNE option set forced on top of the base, eager, 1 seed per shape):
   0 bad of 300 (all 12 shapes). Cold prepare 120.5 s (join 96.6, tune 23.1). H100 tuner T=256 picked the new rg+twf_split stacks (sl 392.8 vs 403.6 confirm).
+- 08:01Z CHECK 08d10234 v124 (701bf12) 2.0832x [2.052, 2.114], 10,858 us (not submitted, < 2.0860; tie = noise): d1 68.4/77.0,
+  d16 132.0/207.9, d32 162.5/321.6, v1 110.7/123.4, v16 285.8/360.3 (SGLang 555 sl: slow run), v32 345.1/518.6.
+  H200 tuner picks (on the new base): T=1 sl ~default, full kv_pf False; T=8 sl cslpw (-1.4), full cslpw+g14alt 3 (-0.4);
+  T=16 sl default, full bal; T=32 sl tk2fj False, full bal+lt:o; T=128 sl twm_order 76 (-2.7), full {twf_split 66, lt:o, lt:unpool}
+  (-8.3 confirm); T=256 sl rg, full rg+split1022+all lt (-12 confirm). Stacking makes the picks move but the total is flat:
+  the tuner-level gains (1-3 us per layer type) stay below judge noise (+-1%).
