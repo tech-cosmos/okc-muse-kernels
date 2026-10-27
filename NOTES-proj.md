@@ -2062,3 +2062,4 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   unp20+g30k104 20/8 191.19/198.77 | 418.90/429.03 => rings tie on H100 in-layer. GEMM bitwise identical across rings; the layer's
   hidden/stream are NOT bitwise reproducible run-to-run even with one config (A==A False; routing ids equal): pre-existing.
   Put 16/16 as the T=32 default for g30n unpool + g30k pooler on proj/g30k138 (H200 standalone -1.7..1.9 us, H100 tie).
+- proj/g30k138 2079aae: T=32 rings 16/16 for g30n unpool + g30k pooler; validate --quick ALL OK, cold 149.6 s (md5 161f1435). Session end 20:45Z.

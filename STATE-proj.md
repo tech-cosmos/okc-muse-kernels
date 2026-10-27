@@ -1,9 +1,9 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-27 20:15 UTC (night5 s100 = session 2). **proj board best now submit a12513ed = 79fdba1, 1.3483x** (check 3291ae79
-1.3502): g30/g30n (12-bit W in wgmma A regs, dev/g30_src.cu = layer's copy) added as tuner candidates BF16_G30 at m16/32/128.
+Updated 2026-10-27 20:45 UTC (night5 s100 = session 2). **proj board best now submit a0168544 = ffb1ae8, 1.3543x** (check 7ad5148c
+1.3998; before a12513ed 1.3483): g30/g30n (12-bit W in wgmma A regs, dev/g30_src.cu = layer's copy) added as tuner candidates BF16_G30 at m16/32/128.
 H200 picks g30 at pooler m16, unpool m16/m32, qkv m16/m32 (-0.4..-2.2 us vs cuBLASLt); pooler m32 tie, o and m128 lose (per-shape
-lines in NOTES s100 + COORD Handoffs). Also rebased g30k onto layer v138: r-layer branch **proj/g30k138 73cae8f** (validate ALL OK,
-cold 146.4 s) = the proposed 00:00Z layer bundle (COORD Requests). Checks 10-27: 9/20, scored 2/10.
+lines in NOTES s100 + COORD Handoffs). Also rebased g30k onto layer v138: r-layer branch **proj/g30k138 2079aae** (+ T=32 g30 rings NW16/NS16; validate ALL OK,
+cold 149.6 s) = the proposed 00:00Z layer bundle (COORD Requests). Checks 10-27: 10/20, scored 3/10. NEXT: read layer's 00:00Z tune lines (g30k 104/120, g30n qkv T=32); more proj g30 configs (qkv m16/m32 rings, pooler m16 S2 NW20 NS8) are cheap H200 probes.
 Updated 2026-10-27 19:40 UTC (night5 s99 = session 1). **g30k BUILT** (stream-K g30 pooler on G <= 112 CTAs, FP32 slabs summed by the
 pooler rmsnorm; no reduce kernel, deterministic, one-hot bit-exact): r-layer branch proj/g30k, TUNE options T=32 {g30k:pooler 104},
 {g30k:pooler 120}, {g30k:pooler 104, g30n:unpool}; T=16 {g30k:pooler 104} (+ ZN zeroing of the unpool g24's out). H100 in-layer TUNE
@@ -32,7 +32,7 @@ DSMEM K-cluster reduce (dev/s93, G30_KC=1/2) DEAD: cluster+reduce ~2-2.5 us; qkv
 s82/s83 (nu8d race found+fixed in layer; tools/stream_fuzz.py): see NOTES.
 Older session headers (s46-s80): see NOTES-proj.md (sessions are logged there in order).
 ## Board
-- **Best: submit a12513ed = 79fdba1, 1.3483x** (s100, g30 picks). Before: 1ff4721e87c844c2 = ca7e557, 1.3233x (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
+- **Best: submit a0168544 = ffb1ae8, 1.3543x** (s100b, g30 picks + m32 rings 16/16). Before: a12513ed 1.3483x. Before: 1ff4721e87c844c2 = ca7e557, 1.3233x (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
 - 12-bit header format is now bit-exact (human 23:30Z): header stores true/scale, kernels subtract 2^-15, round-trip
   checked in _compress (fallback per layer); `python bench.py esc` = adversarial escape test. Run it after any 12-bit change.
