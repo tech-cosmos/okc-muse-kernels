@@ -2124,3 +2124,4 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   Pooler g30n dead in-layer (router SM contention), T=16 tie. proj validate --quick ALL OK, cold 122.3 s.
 - build.py regenerates submission.py identically to proj's commit (git status clean after build).
 - 00:00Z: check 1 = v137 (covers v136 + g30n; read 'layer tune T=32' g30n lines; if the H200 picks it at full too, consider TUNE_BASE).
+- My re-validate of v137 (validate --quick, 17:35-17:43Z): ALL OK: bench test 13/13, scored 0/12, opt_test 0/318, tk2f_stress 0/300, replay 0/240, route_judge 0/240 (worst gap 0.0256), stream_fuzz 0/467, cold prepare 125.3 s (<= 200 s rule). Ready for the 00:00Z check.

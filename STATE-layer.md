@@ -3,7 +3,7 @@
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
 s107: **main = v137** = v136 + proj/g30n 453790c (TUNE[32] option {g30n:unpool: True}, off by default; proj H100 d32 unpool -1.2..-2.1 us, tuner picks it at sl;
-  proj validate ALL OK cold 122.3 s; my re-validate: see NOTES s107). **00:00Z: check 1 = v137** (one check covers v136 + g30n: read 'layer tune T=32' g30n lines;
+  proj validate ALL OK cold 122.3 s; my re-validate ALL OK, cold 125.3 s). **00:00Z: check 1 = v137** (one check covers v136 + g30n: read 'layer tune T=32' g30n lines;
   if the H200 tuner picks g30n:unpool at full too, consider moving it into TUNE_BASE[(32,*)]). Submit if > 2.1339x or per the 09:28Z rule.
 s106: no build (sandbox moves ~18:00Z; checks 20/20; proj claimed the g30 T=16/32 port, branch proj/g30n: qkv/pool/unp/o, H100 per call d32 -1.1/-2.6/-2.9/-1.3, d16 -0.5/-0.4/-1.5 us vs g24).
   **00:00Z plan:** check 1 = main v136 (submit if > 2.1339x, or per the 09:28Z rule). check 2 = v136 + proj/g30n once proj's validate is ALL OK
