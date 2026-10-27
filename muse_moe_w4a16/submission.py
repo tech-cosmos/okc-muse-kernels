@@ -3367,12 +3367,13 @@ int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 // n14 SQ: Wq = the single-copy repack (prepare _sq_pack: [E][RPE][NQ][SB bytes] = {tile lr chunks, tile lr + RPE chunks,
 // scales}, exactly the stage's smem image): ONE bulk copy per stage instead of 3 (S2 unused). H200 stream probe: uq -> sq18
 // d32 -4.5, d16 -3.5, v1 -3.5, d1 -1.1 us.
-template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false>
+template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false, bool S6P = false>
 __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
                                              int r1, const int* s_rs, const int* s_e, uint4* smem, uint64_t* full,
                                              uint64_t* empty, int& st, int& ph, int& i, uint64_t* xrdy = nullptr,
                                              int early = 0, int l2h = TK2F_L2H) {
   constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * (S6 ? 1120 : 1152), KB = NC * KPS;
+  constexpr int SG = S6P ? NC * KPS * 1152 : SB;  // n20 S6P: S6 images at the 8-bit stage stride in global memory
   static_assert(!S6 || (SQ && KPS == 2), "S6: SQ stages, KPS 2");
   int a = 0;
 #if TK2F_L2H
@@ -3388,7 +3389,7 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
     const int lr = (R - s_rs[a]) & (RPE - 1);
     const uint4* src = Wq + ((size_t)e * NRT * 64 + lr * 64) * 32;
     const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
-    const char* qsrc = reinterpret_cast<const char*>(Wq) + ((size_t)e * RPE + lr) * NQ * SB;  // SQ
+    const char* qsrc = reinterpret_cast<const char*>(Wq) + ((size_t)e * RPE + lr) * NQ * SG;  // SQ
 #if TK2F_L2H
     // mode 1-3: nfin = a later group of this expert re-reads this row; mode 4: any group of a multi-group expert
     // (the other group's CTA may read the same row first)
@@ -3404,15 +3405,15 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
       mbar_expect_tx(&full[st], SB);
 #if TK2F_L2H
       if (SQ) {
-        if (hk) bulk_g2s_h(sbase, qsrc + q * SB, SB, &full[st], pol);
-        else bulk_g2s(sbase, qsrc + q * SB, SB, &full[st]);
+        if (hk) bulk_g2s_h(sbase, qsrc + q * SG, SB, &full[st], pol);
+        else bulk_g2s(sbase, qsrc + q * SG, SB, &full[st]);
       } else if (hk) {
         bulk_g2s_h(sbase, src + q * KB * 32, KB * 512, &full[st], pol);
         bulk_g2s_h(sbase + KB * 512, src + NRT * 32 * 32 + q * KB * 32, KB * 512, &full[st], pol);
         bulk_g2s_h(sbase + KB * 1024, ssrc + q * KB * 32, KB * 128, &full[st], pol);
       } else
 #else
-      if (SQ) bulk_g2s(sbase, qsrc + q * SB, SB, &full[st]);
+      if (SQ) bulk_g2s(sbase, qsrc + q * SG, SB, &full[st]);
       else
 #endif
       {
@@ -4477,8 +4478,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       int i = 0;
       constexpr bool SQ = (PF & 512) != 0;  // n14: single-copy stages (Wq13 / Wq2 = the _sq_pack buffers)
       constexpr bool S6 = (PF & 1024) != 0;  // n20: 6-bit scale codes (the _s6_pack buffers)
-      tk2f_produce<512, NC, NSTG, KPS, SQ, S6>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv);
-      tk2f_produce<256, NC, NSTG, KPS, SQ, S6>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2);
+      constexpr bool S6P = (PF & 2048) != 0;  // n20 S6P (DIAG): padded S6 images (_s6_pack pad)
+      tk2f_produce<512, NC, NSTG, KPS, SQ, S6, S6P>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv);
+      tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2);
     }
     return;
   }
@@ -4570,6 +4572,17 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
     (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
     cnt_.data_ptr()
+#if TK2H_P4
+  if (cfg >= 40000000) {  // n20 S6P (DIAG builds): S6 stages read from 18432-byte-strided images (aligned starts)
+    cfg -= 40000000;
+    g_tk2f_l2h = TK2F_L2H;
+    const int c5 = (int)(cfg % 100000);
+    if (c5 == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 3584>(0, TK2F_ARGS0);
+    if (c5 == 84204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 3588>(0, TK2F_ARGS0);
+    TORCH_CHECK(c5 >= 40000 && c5 < 50000 && c5 % 1000 == 4, "moe_tk2f S6P: cfg ", cfg);
+    return tk2f_go<8, 4, 2, false, false, true, 16, 1, 3588>(8 + (int)(c5 / 1000) % 10, TK2F_ARGS0);
+  }
+#endif
   const bool s6 = cfg >= 20000000;  // n20 S6 (+ 20000000: 6-bit scale-code SQ stages, w13_ / w2_ = _s6_pack buffers)
   const bool sq = cfg >= 10000000;  // n14 SQ
   cfg %= 10000000;
@@ -4922,7 +4935,7 @@ def _sq_pack(wq, s2, nq=4):
     return torch.cat((w[:, 0], w[:, 1], sc), dim=-1).contiguous()
 
 
-def _s6_pack(wq, s2, nq=4):
+def _s6_pack(wq, s2, nq=4, pad=False):
     """n20 S6: as _sq_pack, but the stage's scales as 6-bit codes c = e4m3 byte - 80 (caller checked 80 <= byte < 144):
     per (lr, q) {tile lr, tile lr + NRT/2, nibbles int32 [8 warps][32 lanes], high bits int16 [8][32]}; lane word bits
     4k / 2k hold code k = 4 h + r (h = k chunk of the stage, r = byte of the old per-lane scale word). 17920 B/stage."""
@@ -4935,7 +4948,8 @@ def _s6_pack(wq, s2, nq=4):
     hi = ((c >> 4) << (2 * k)).sum(-1)
     nib = (nib - ((nib >> 31) << 32)).to(torch.int32).reshape(E, nrt // 2, nq, 256)
     hi = (hi - ((hi >> 15) << 16)).to(torch.int16).reshape(E, nrt // 2, nq, 256).view(torch.int32)
-    return torch.cat((w[:, 0], w[:, 1], nib, hi), dim=-1).contiguous()
+    parts = (w[:, 0], w[:, 1], nib, hi) + ((torch.zeros_like(hi),) if pad else ())  # pad: 18432 B per stage (S6P)
+    return torch.cat(parts, dim=-1).contiguous()
 
 
 def _pair_scales(ps):
@@ -5001,6 +5015,9 @@ def prepare(weights):
     if TK2F_SQ and s6:  # n20: 6-bit scale codes (lossless; 17920 instead of 18432 B per stage)
         st["w13s6"] = _s6_pack(st["w13q"], st["w13s2"])
         st["w2s6"] = _s6_pack(st["w2q"], st["w2s2"])
+    if TK2F_SQ and s6 and DIAG and TK2F_S6P_DIAG:  # n20 S6P A/B images
+        st["w13s6p"] = _s6_pack(st["w13q"], st["w13s2"], pad=True)
+        st["w2s6p"] = _s6_pack(st["w2q"], st["w2s2"], pad=True)
     if TK2F_SQ and (not s6 or DIAG):  # n14: tk2f single-copy stage images (lossless repack of w13q/w2q + w13s2/w2s2)
         st["w13sq"] = _sq_pack(st["w13q"], st["w13s2"])
         st["w2sq"] = _sq_pack(st["w2q"], st["w2s2"])
@@ -5092,6 +5109,8 @@ TK2F_L2H = 4  # s21: tk2f L2 cache hints on the weight copies (see #define TK2F_
 TK2F_L2H2_RT = None  # n18: run-time L2 hint mode of tk2f's gemm2 rows (None = as gemm13); SQ needs a DIAG build (TK2F_SQRT)
 TK2F_L2H_RT = None  # n4s3: run-time tk2f L2 hint mode 0..4 (None = TK2F_L2H); passed as cfg + 1000000 * (mode + 1), so the H200 diag / the layer's tuner can pick it
 TK2F_S6 = 1  # n20: build the 6-bit scale-code SQ stage images when every scale byte is in [80, 0x7E] (lossless)
+TK2F_S6P = False  # n20 DIAG: run the padded S6 images (S6P: aligned stage starts, same copy bytes as S6)
+TK2F_S6P_DIAG = True  # n20: build the S6P images in DIAG builds
 TK2F_S6_ON = True  # n20: run tk2f / tk2h on them (DIAG A/B: False = the 8-bit SQ stages)
 TK2F_SQ = 1  # n14: tk2f single-copy 18 KB stages (prepare _sq_pack; cfg + 10000000; bitwise = off)
 TK2F = 204  # s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
@@ -5104,10 +5123,10 @@ SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 DIAG = 0
 _DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('decode 1', 17, 1), ('decode 1', 99, 1), ('decode 16', 7, 16), ('decode 16', 11, 16), ('decode 16', 13, 16), ('decode 16', 17, 16), ('decode 16', 99, 16), ('decode 32', 7, 32), ('decode 32', 11, 32), ('decode 32', 13, 32), ('decode 32', 17, 32), ('decode 32', 99, 32), ('verify 1', 7, 8), ('verify 1', 11, 8), ('verify 1', 13, 8), ('verify 1', 17, 8), ('verify 1', 99, 8), ('verify 16', 7, 128), ('verify 16', 11, 128), ('verify 16', 13, 128), ('verify 16', 17, 128), ('verify 16', 99, 128), ('verify 32', 7, 256), ('verify 32', 11, 256), ('verify 32', 13, 256), ('verify 32', 17, 256), ('verify 32', 99, 256)]
 _DIAG_R = "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"
-DIAG_VARIANTS = {  # n20: S6 (6-bit scale codes) vs the 8-bit SQ stages, tk2f and tk2h W3 at T=32 (the layer's d32); b = repeat
-    "dec": [("sq", {"TK2F_S6_ON": False}), ("s6", {"TK2F_S6_ON": True}),
-            ("hsq", {"TK2F_S6_ON": False, "TK2H_M": {32: 3}}), ("h6", {"TK2F_S6_ON": True, "TK2H_M": {32: 3}}),
-            ("sqb", {"TK2F_S6_ON": False}), ("s6b", {"TK2F_S6_ON": True})],
+DIAG_VARIANTS = {  # n20: S6 (6-bit scale codes) vs 8-bit SQ vs S6P (S6 at the SQ stride: aligned starts); h = tk2h W3 at T=32
+    "dec": [("sq", {"TK2F_S6_ON": False}), ("s6", {"TK2F_S6_ON": True}), ("s6p", {"TK2F_S6P": True}),
+            ("hsq", {"TK2F_S6_ON": False, "TK2H_M": {32: 3}}), ("h6p", {"TK2F_S6P": True, "TK2H_M": {32: 3}}),
+            ("sqb", {"TK2F_S6_ON": False}), ("s6pb", {"TK2F_S6P": True})],
     "big": [("q4", {"RG": 0, "TWQ_M": {128: 4, 256: 4}})],
 }
 
@@ -5351,6 +5370,8 @@ def _tk2f_cfg(M, st):
             TK2H_SQ and 140000 <= c < 150000 and c % 1000 == 4) or (
             "w13sq4" in st and c in (100402, 100403, 184402, 184403))):  # n14 SQ (SA, default configs; KPS 4 in DIAG)
         c += 20000000 if "w13s6" in st and TK2F_S6_ON and c % 1000 != 402 and c % 1000 != 403 else 10000000  # n20 S6
+        if c >= 20000000 and TK2F_S6P and "w13s6p" in st:
+            c += 20000000  # n20 S6P (DIAG)
     return c + (1000000 * (TK2F_L2H_RT + 1) if TK2F_L2H and TK2F_L2H_RT is not None else 0)
 
 
@@ -5391,7 +5412,7 @@ def kernel_fn(data, st):
             c = _tk2f_cfg(M, st)
             lib.moe_set_l2h2(-1 if TK2F_L2H2_RT is None else TK2F_L2H2_RT)
             if c >= 10000000:  # n14 SQ
-                k = "s6" if c >= 20000000 else "sq4" if c % 1000 in (402, 403) else "sq"
+                k = "s6p" if c >= 40000000 else "s6" if c >= 20000000 else "sq4" if c % 1000 in (402, 403) else "sq"
                 lib.moe_tk2f_launch(st["w13" + k], st["w13s2"], st["w2" + k], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x,
                                     ids, st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
             else:
