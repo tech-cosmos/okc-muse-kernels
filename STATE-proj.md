@@ -1,4 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 12:30 UTC (s83). Layer v129 (6621403) took its own nu8d fix. NEW tools/stream_fuzz.py (r-layer branch proj/fuzz
+19b5ba1 + validate.py step 'fuzz'): torch.cuda._sleep injected at every side/hi-stream fork (side late / main late, eager + graph),
+every TUNE set: unfixed v128 caught (12/204 eager, 10/156 graph); v129 all T 0/1492 eager, 0/1216 graph. Static audit: no other
+cross-stream shared scratch. Next: run validate (incl. fuzz) on every new layer bundle. NOTES s83.
 Updated 2026-10-27 12:10 UTC (s82). FOUND+FIXED a T=8 race in layer (v128 and earlier): TUNE {'pr1': False} + nu8d -> rmsnorm reads
 side-stream local_ids before the join (14-20/60 wrong under GPU contention; H200 tuner never picks pr1 False: +1.7..2.6 us).
 Fix + tools/nu8_race.py on r-layer branch proj/nu8fix 357859d; bundle proj/b82 d4b2aba = attn31 + fix: validate ALL OK,
@@ -6,34 +10,7 @@ opt 0/906 + replay 0/480 under a GPU hog. Lesson: run opt/replay under contentio
 Updated 2026-10-27 11:55 UTC (s81). Ported moe s31 attention deltas layer lacked (csl/vtk fast divides, nds pt L2 prefetch +
 K-early) -> branch proj/attn31 c71dbb6: tests 13/13, attn_probe 29/29, H100 TIE (ABA d32 -1.9 was a middle-slot artefact of
 tools/ab_files.py: reverses in BAB; always run both orders). Stackable, not check-worthy alone. NOTES s81.
-Updated 2026-10-27 10:58 UTC (s80). No bundle since v128. pr8 (T=8 chain) probes: in-loop 2nd L2 prefetch wave DEAD (+0.4..2.2 us
-H100); tail med->max ~2 us = stealing bound (below the line). H200 pr8 ~17 us after bnd vs 13.7 floor. NOTES s80.
-Updated 2026-10-27 10:58 UTC (s79). Validated layer v128 (536adfd, nvscl): full validate ALL OK (cold 121.3 s), attn_probe
-29/29, H100 v32 sl -1.4..-1.5 us (NOTES s79, COORD Requests). Next: same for every new layer/moe attention bundle.
-Updated 2026-10-27 10:25 UTC (s78). Lead 09:45Z: attention reopened (layer: _gd_full/_gw_verify; moe: attention board);
-proj stays (b). S78: branch proj/attnprobe (6e8d0bb): tools/attn_probe.py = attention KEY-COVERAGE oracle (K=0, k/v=0
--> uniform softmax, V one-hot probes; dropped/extra key -> 0.14-0.49 vs noise 2e-3) + validate.py step 'attn'. v125:
-29/29 at 8 passes, exhaustive 12/12 scored. Next: run it (and validate.py) on every layer attention change / moe handoff.
-Updated 2026-10-27 09:40 UTC (s77). S77: still nothing to port (moe s29 no build; layer s81 closed tk2f; layer submitting v125 = validated s75). No runs.
-Prev update 09:30 UTC (s76): same, no bundles.
-Prev update 09:50 UTC (s75). LANE (lead 08:55Z): (b) = integration/testing for layer: port Handoffs into the layer on a
-proj/<name> branch (never main of muse_decode_layer), run H100 A/B + tools/validate.py, hand layer a ready-to-check commit.
-S75: branch proj/validate (f625289): muse_decode_layer/tools/validate.py (7 steps, ~6 min; NOTES s75). v125 ALL OK, cold 120.4 s.
-All Handoffs up to moe s27 SCB are already in layer v125. Watch COORD Handoffs/Requests for bundles; moe twm byte_perm next.
-S74: no build; lane ask re-posted (3rd); no proj item >0.3% (NOTES s74).
-S73: re-tested moe's 'dq ALU || RS wgmma never overlap' (H100, 5 controls): it STANDS (per-HGMMA cost ~12+0.33N cyc to the
-co-resident warp; NOTES s73). No expert item left for a second builder. (Lane Request answered 08:55Z: (b).) Per-session details s53-s71 are in NOTES-proj.md (grep '## s<N>').
-S72: a GUEST carrier (other lanes' builds timed inside proj checks) was BANNED by the lead (08:13Z) and REMOVED; never
-revive it. Proj checks run only proj's own code. Re-read COORD Human decisions right before EVERY check. NOTES s72.
-LANE STATUS (s71): proj's own items are exhausted to <= ~0.2-0.3% layer each; Request to lead (COORD s71) for a new lane.
-s71 DEAD: pr1 SPF (pooler W into smem before the wait, d1): H100 +0.8/+1.5/+2.5 us for 1/2/3 rounds; g13t (TMA-ring
-g13 for d1 qkv): 14.8+ vs 13.0 us (ring alone no faster). dev/s71, NOTES s71.
-Bounds measured (H100 unless said): d1 qkv g13 = bare stream + ~0.9 us (H200 s17) / +1.1 us (H100 s71: 13.0 vs best ldg/TMA
-reader 11.9-12.0; no row-quantum tail: 2112 rows 12.22 vs 2304 13.06 = pure slope). T=16/32 g24 = consumer latency-bound
-(s60-s64). T=128/256: per-SM L2->smem ingest ~50 GB/s (s16) makes x+W+partials traffic the limit for any own GEMM (g22
-dead); cuBLASLt configs H200-screened (s68). T>=16 nvjet cannot be a PDL secondary (s70). d1 overlap ideas closed (s46).
-Handoff results (layer s76): s66 TUNE[32] combo {tk2h 4, g24:qkv_gate} WON both H200 tuners (-1..-5 us d32) -> layer
-TUNE_BASE[32] v123; g24sk2 (s69) tie (dropped). Still unjudged: ltalt:pooler@128 (s68).
+Older session headers (s46-s80): see NOTES-proj.md (sessions are logged there in order).
 ## Board
 - **Best: submit 1ff4721e87c844c2 = ca7e557, 1.3233x** (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).

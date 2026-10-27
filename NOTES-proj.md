@@ -1723,3 +1723,18 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   opt/replay ALL OK (13/13, 0/24, 0/302, 0/480), nu8_race 0/180.
 - LESSON: cross-stream races hide in quiet-GPU tests. Run opt_test/replay under a GPU hog too (validate step idea).
 - Under the same GPU hog on proj/b82: opt_test 3 seeds 0/906, replay 0/480, route 0/240 (no other contention race found).
+
+## s83 (2026-10-27 11:53-12:30Z, night4 session 40): lane (b): deterministic cross-stream race fuzzer; layer v129 clean
+- No judge runs. Layer pushed v129 (6621403) meanwhile with its own nu8d fix (nu8d only when pr1 or tk2fj; mine was a join).
+- Static audit (layer.py on b82): every side/hi-stream fork (fp32-router branch, pr1-off _route + _moe_bucket, POOLER_HI_PRIORITY
+  pooler) shares no scratch (ws/cnt) with main-stream kernels before the join; only __device__ globals are trace probes. The s82
+  local_ids read was the only crossing.
+- NEW r-layer branch proj/fuzz 19b5ba1 (on v129): tools/stream_fuzz.py monkeypatches torch.cuda.stream: entering the side/hi
+  stream context injects torch.cuda._sleep(400k cyc) on that stream (mode side: side work late) or on main right after the
+  fork (mode main: main late); g-modes capture the same into a CUDA graph and replay fresh inputs. Runs every TUNE set (opt_test
+  loop) per scored shape; sets that fork get reps runs. The sleep only adds slack, never removes an edge: no false positives.
+  GOTCHA: with one fixed input seed the stale buffer holds the right values from the previous run and hides the race (first
+  try: 0/72 on unfixed v128): seeds rotate 2000-2002. Even then detection ~1/3 per run (seed-dependent) -> reps.
+- Positive control, unfixed v128 T=8: eager side 12/204 bad ({'pr1': False} variants only), graph gside 10/156; main modes 0.
+- v129 all T, reps 4: eager side+main 0/1492, graph gside+gmain 0/1216 (~25 min each, run in parallel on a shared GPU).
+- validate.py step 'fuzz' (proj/fuzz): all 4 modes reps 2 (--quick: side,gside reps 1).
