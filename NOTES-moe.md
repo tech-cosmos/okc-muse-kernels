@@ -1739,3 +1739,13 @@
   proj s50-s62: consumer/latency-bound at 30% issue, BF16 no-decode rows cost the same, g23/cuBLASLt lose: proj-closed).
   Neither has a new design I can put forward: no build, so the shared GPU stays free for layer/proj.
 - Attention budget 10-27 unchanged: checks 12/20, scored 2/10 (no tie checks).
+
+## Night4 session 39 (2026-10-27 14:00Z - ~14:15Z) -- no lane answer; per-shape attention gap re-read; no build; 0 checks
+- Newest Human decision for moe is still 09:45Z (lead 10:50Z/11:50Z are layer-only); s34 lane request unanswered.
+- Board re-read: layer #1 pjmullin3 2.399x (we 2.134x); attention #1 pjmullin3 3.032x (we 2.596x, 1450.6 vs 1242.3 us).
+- Lowest per-shape speedups in our last attention check (76983f6b): verify 16 full 1.96x (104.8 vs floor 63.4 us), verify 32
+  full 2.00x (194.7 vs 126.8), decode 16/32 full 2.30x (87.4/167.8 vs 63.2/126.4). The verify-full extra over decode
+  full (+17/+27 us) is the gw_verify consumer (issue-bound ~45%, ~/attn s12-s125: FP8 PV, poly exp2, f16 ex2, WS variants,
+  native nvf all dead) and layer s84 closed full attention in-layer on the H200. Even verify full at decode-full speed is
+  only ~-4% of the attention geomean, so #1's 16% lead is not in a single shape we know how to attack.
+- No new design; left the shared GPU to layer/proj. Attention budget 10-27: checks 12/20, scored 2/10 (no tie checks).
