@@ -1584,3 +1584,28 @@
 - DEAD: W4 owner merge (4 warps x 4 partials + bar.sync; stamps -0.08) whole-kernel d1 sl -0.03 5/9, v1 sl +0.13 0/9
   (vtk is 2 CTAs/SM); csl new-token reciprocal instead of / kscale, / vscale: +0.03 (1/9).
 - Handoff: v32 sliding cl (+ the separate pre-cl nvs build for S 4) to layer (r-layer attn_src.py has neither).
+
+## Night4 session 32 (2026-10-27 10:24Z - ) -- attention lane: H200 DIAG of batch-1 full (d1/v1 full)
+- Reasoning: d1 full 12.07 / v1 full 16.75 us (floor 4.3) are not in layer's claim (layer = d16/d32/v16/v32 full) and are
+  worth 0.67 / 0.51 %/us. ~/attn exp/hdiag5 (H200 batch-1 random/dense gather floors + plan variants) was queued for 2 days
+  and never run. Ported it onto main as tools/s32/mkdiag.py (writes a DIAG copy; NEVER submit): d1 full variants d1a/s3/s4/
+  p1023/p255/b16s4/b(repeat) + hfloor R2/R4/R8/dense; v1 full a/s10/s12/p255/p255s5/p191/b128s4/b32s12/b(repeat). Each
+  variant runs after the real output with an L2 flush (512 MB read), kernels renamed by variant for the judge profile.
+- Check 7df7c251 (DIAG v1, renamed kernels in the judge profile): useless, the profile lists only the top 12 kernels.
+  Tool v2+: on the first EAGER kernel_fn call of a diag shape, each variant is graph-captured and replayed 40x round-robin
+  after a 512 MB read (cold L2); prints `diag32 <shape> <variant> med/p25/min` minus an empty graph (grep the run log).
+  Timed calls are main's code (diag runs once, before timing), so such a check's per-shape times = main's on that node.
+- **Check 4fd8b5d5 (DIAG v2), H200 us (median, cold, graph replay - empty):**
+    d1 full: main 12.77 | stages 3 13.76, 4 14.45 | splits 1023 13.36, 255 16.08 | BN16 s4 14.99 | floors: random
+             gather all-in-flight (hfloor R2/R4/R8) 8.29/8.34/8.70, dense rows 7.74
+    v1 full: main 17.09 | stages 10 17.58, 12 18.40 | splits 255 20.58, 255 s5 19.97, 191 19.07 | BN128 s4 19.38,
+             BN32 s12 19.65 | floors R2/R4 7.89/7.94, dense 7.42
+  => the H200 batch-1 full floor is ~8 us for both (pt trip + 20.5 MB random 128-B rows incl. launch). Headroom: d1 ~4.5,
+  v1 ~9 us (v1 full on the H100 ~= its floor + consumer: the H100 hid this; s97's "<= 1 us H200 ceiling" was an estimate).
+  Every plan knob loses on the H200 too.
+- **Check 6b5011ed (DIAG v3)**: v1 full main 17.34 | Gluon gw (s94 _GW1, 127 splits) 17.82 | gw gfuse 127/255/263
+  52.7/188/197 (the in-grid merge spins: dead at batch 1) | warps 8 23.8 | pre 0 17.68 | pf off 17.50 | fix 0 17.82 |
+  splits 63 20.96 | stages 6 17.73 | qk FP16 19.10. (Locally gw255 stages 4 deadlocks: gfuse assumes 2 CTAs/SM.)
+  Its timed shapes are main's code: **2.6193x** (fast node; d16/d32/v32 full 84.6/160.8/192.4, v32 sl 14.03).
+- Submit **90b7ce85** = main (s31 code, never submitted; its timed code had just checked 2.619x): **2.5653x** (1468.1 us)
+  = tie with board 2.566x (node noise). Scored 1/10 today.
