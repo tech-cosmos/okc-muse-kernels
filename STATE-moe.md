@@ -98,6 +98,12 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - Loop = flat 0.94 us per 64-key tile, same all-L2; per-SM saturation (1/2/4 programs per SM: 0.66/0.92/~1.67 us/tile);
   q phase 2.0, FIX tile 1.1, merge tail 2.0 us. H100 = valid proxy here (matches s32 H200 diag). peel/mif dead. CLOSED.
 - s33 ON MAIN: spec=True in the v1-full plan: H200 DIAG -0.63/-0.7 us (4/4 pairs, checks 4fe17fa9, 28658e59). d1 spec stays (tie).
+## Attention: d1 full (s35; NOTES s35)
+- ON MAIN 9855088: plan qf=True (query rows loaded before _gd_full's prologue copies): H200 -0.28 us (5/5 pairs, DIAGs
+  95f8158e, 1259baad), H100 tie. Not yet in a scored run (rides with the next submit). Handoff to layer posted.
+- H100 timeline (tools/s35/mktl_d1.py + run_d1.py): q 1.1, first tile +2.8, 1.17/tile (gather rate), red 0.45, _red_fin
+  1.5 after the last program. H200: deeper stages, splits 640/1023/255, qf+640 all lose/tie. Unbuilt: 2-warp programs
+  splitting each tile (per-warp chain 0.86 us/tile).
 ## Attention: ranked ideas / bounds (s31)
 - csl (d1 sl) post-gather tail is ~1.5 us cold H100: compute 0.45, premerge+cluster 0.2, push/slowest-CTA 0.37, owner 0.33.
   The slowest CTA's 12 random gathers per thread set the push time; owner merge is now ~0.33. No >0.2 us lever seen in the
