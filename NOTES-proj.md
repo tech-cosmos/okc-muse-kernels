@@ -1762,3 +1762,22 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   cuBLASLt config). opt_test T=128 2 seeds 0/72; H100 tuner picks the ltalt-1 combo at T=128 sl (333.8 vs 336.3 us), full default.
   validate --quick on the combined bundle ALL OK (opt 0/308, fuzz 0/456, cold 116.5 s).
 - Ask: layer, merge proj/qf35 (ac340f7) into main for the 00:00Z check; read 'layer tune T=128' ltalt lines in its log.
+
+## s86 (2026-10-27 13:43-14:15Z, night4 session 43): g28 ping-pong (s64's last open m32-consumer form) = DEAD; no judge runs
+- No open Requests/Handoffs for proj (layer v134 = proj/qf35 merged). Built s64's deferred variant: dev/s86/gemv28pp.cu +
+  g28pp.py (same args as s64/g28.py; G28SRC=../s64/gemv28.cu runs the old kernel). 384 thr: WG0/WG1 each own alternate
+  stages, decode their raw 12-bit stage into their own SW128 dec slots, fence.proxy.async + named barrier, async wgmma
+  m64nBNk16 SS (A = x box, B = dec slot), <= 1 group in flight; WG2 = producers. Correct in full mode (rel err < 1e-5) for
+  BN 128 at m16/m32 (pool, unp); BN 256 (NDW 2 + extra named barrier) gives 'unspecified launch failure' in full mode (not chased).
+- Steps (H100 pool m32, us over a 3 us PDL pred, G132; NOW = no W loads = consumer-only, g24 layer cfg NOW = 15.84, s64 g28 19.5-20.3):
+  (a) W+x in one raw slot freed after the wgmma: NOW 17.54; trace: both WGs in lockstep 0.5 us/stage pair even w/o decode = ring-bound.
+  (b) split rings (W slots freed right after decode, x ring of 4 KB 32-row boxes freed after the wgmma, separate W / x producer
+      warps): NOW 16.21 (NS 8 ND 6) / 16.26 (4,16); full 20.51 (g24 20.74; H100 is W-bound there). m16 NOW 17.30 vs g24 11.81.
+  (c) one elected arrive per barrier (count 1, deferred to the next named barrier): NOW 16.48-16.80 = noise; full m32 20.08.
+  (d) BN 256: NOW pool 17.38 (vs BN128 17.39), unp 16.77 (16.83): no gain.
+- Skeleton ablations (trace per own stage, block 0): no decode 0.25 us/stage pair; + no MMA 0.185; + no x TMA 0.185;
+  + no wgmma fence/commit/wait 0.145; + no proxy fence 0.13; + no named barrier 0.125 us per stage pair (~230 cyc per stage
+  of mbarrier round trips through the producer threads alone). Decode adds ~0.23 us per stage per WG and the 2 WGs do NOT
+  hide each other's decode (lockstep). s64's gate (< 0.1 us/stage skeleton) fails, and NOW m32 >= g24's on every variant.
+- Verdict: x-as-A wgmma with smem-decoded W is dead in both forms (s64 3-role, s86 ping-pong); m16 always loses (m64 padding).
+  g24 (mma.sync, W in registers) stays the T=16/32 engine. No judge runs (proj 10-27: 8/20 checks, 1/10 scored).

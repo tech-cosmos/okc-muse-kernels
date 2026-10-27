@@ -1,4 +1,6 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
+Updated 2026-10-27 14:15 UTC (s86). g28 PING-PONG (dev/s86, s64 item 3b) built + DEAD: H100 NOW pool m32 16.2-17.4 vs g24 15.84,
+m16 17.3 vs 11.8; skeleton alone ~0.13-0.19 us/stage (mbarrier round trips), gate < 0.1 failed; BN 256 no gain. NOTES s86.
 Updated 2026-10-27 14:00 UTC (s85). Layer bundle branch proj/qf35 ac340f7 (v133 + moe s35 qf on d1-full plan + proj s68 ltalt:pooler
 T=128 TUNE): validate ALL OK (full for qf, --quick combined), cold 116.5 s; Request to layer to merge for 00:00Z. NOTES s85.
 Updated 2026-10-27 13:40 UTC (s84). Full validate of layer main v133 (02120df): ALL OK (13/13, 0/24, 0/302, 0/1200, 0/480, 0/240,
@@ -11,9 +13,6 @@ Updated 2026-10-27 12:10 UTC (s82). FOUND+FIXED a T=8 race in layer (v128 and ea
 side-stream local_ids before the join (14-20/60 wrong under GPU contention; H200 tuner never picks pr1 False: +1.7..2.6 us).
 Fix + tools/nu8_race.py on r-layer branch proj/nu8fix 357859d; bundle proj/b82 d4b2aba = attn31 + fix: validate ALL OK,
 opt 0/906 + replay 0/480 under a GPU hog. Lesson: run opt/replay under contention. NOTES s82.
-Updated 2026-10-27 11:55 UTC (s81). Ported moe s31 attention deltas layer lacked (csl/vtk fast divides, nds pt L2 prefetch +
-K-early) -> branch proj/attn31 c71dbb6: tests 13/13, attn_probe 29/29, H100 TIE (ABA d32 -1.9 was a middle-slot artefact of
-tools/ab_files.py: reverses in BAB; always run both orders). Stackable, not check-worthy alone. NOTES s81.
 Older session headers (s46-s80): see NOTES-proj.md (sessions are logged there in order).
 ## Board
 - **Best: submit 1ff4721e87c844c2 = ca7e557, 1.3233x** (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
@@ -142,7 +141,7 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
    2 CTAs/SM g27 with fewer regs that keeps x reads per SM low (x is read by every block: +4 MB = +3 us at m16).
 2b. m32 consumer: decode-overlap / split-role ideas are moot (s62: no-decode BF16 rows cost the same consumer time).
 3. PD (pre-wait decode into registers) for other T=16 g24 calls where a warp slice fits (qkv/pool need split-K: g24 PD).
-3b. (s64) g28 ping-pong variant (MMA WGs decode their own B tiles, no cross-WG handoff per stage, KA>=2, BN 256 at 384 thr):
+3b. DEAD s86 (built: dev/s86/gemv28pp.cu). (s64) g28 ping-pong variant (MMA WGs decode their own B tiles, no cross-WG handoff per stage, KA>=2, BN 256 at 384 thr):
    only if a NOW skeleton shows < ~0.1 us/stage on the H100 first (NOTES s64).
 3d. (s70) T>=16 cuBLAS no-PDL gaps: nvjet cannot be a PDL secondary; only an own GDC-enabled CUTLASS GEMM could (<=1 us/GEMM).
 3c. (s65) Dead too: g27 PD at T=8 for o. Remaining v1 item: none cheap (pr8 tail balancing ~0.1-0.2%, NOTES s37/38).
