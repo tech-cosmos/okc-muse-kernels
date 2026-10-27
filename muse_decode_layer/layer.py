@@ -2732,6 +2732,9 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
     return F.linear(x, w)
 
 
+TK2F_SQ_T1 = False
+
+
 def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     """T = 1: moe_tk2f (as moe_src's kernel_fn) -> n2u (moe_norm2 + unpool slice): the unpool slice output."""
     st = state["moe"]
@@ -2744,9 +2747,11 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     y32 = torch.empty((TOP_K, D_EXPERT), dtype=torch.float32, device=dev)
     ids = local_ids.contiguous()
     slot = N2U_SLOT and _moe_TK2F == 204 and N2U_CFG[0] == 8
-    lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"],
-                        x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"],
-                        (84204 if slot else _moe_TK2F) + (100000 if _moe_TK2SA and st["sa"] else 0))
+    c = (84204 if slot else _moe_TK2F) + (100000 if _moe_TK2SA and st["sa"] else 0)
+    # s68: moe n14 SQ off here (H100 ab_flag 4 rounds x 3 seeds d1 +0.4..0.9 us; H200 moe diag d1 0)
+    c, w13_, w2_ = _moe__tk2f_w(c, st) if TK2F_SQ_T1 else (c, st["w13q"], st["w2q"])
+    lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"],
+                        x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"], c)
     f = torch.empty((1, UNPOOL_SLICE), dtype=torch.bfloat16, device=dev)
     _G10["lib"].n2u_launch(y32, inv, ids, topk_weights.float().contiguous(), st["w1"], st["gs2"], 0, LOCAL_EXPERTS,
                            POST_NORM_EPS, state["unpool_slice"], f, st["cnt"], N2U_CFG[0] + (1000 + 2000 * N2U_PFW) * slot, N2U_CFG[1], list(bnd), POST_NORM_EPS, RMS_EPS)

@@ -3166,7 +3166,9 @@ int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 // cnt[a * 4 + gi] (bar + threadfence + atomicAdd); a phase-2 segment waits (ld.acquire) for cnt == 256 before it
 // loads its x (= inter) fragments. Deadlock-free: phase 1 never waits, and every CTA (grid = #SMs) becomes resident
 // once earlier kernels free their SMs. cnt lives in the state, zero between calls: moe_norm2 (after this kernel) zeroes it again (a memset node cost ~2.5 us).
-template <int NRT, int NC, int NSTG, int KPS>
+// layer s68 (moe n14 TK2F_SQ, r-moe 01326b4): SQ = Wq is the single-copy repack (prepare _sq_pack: [E][RPE][NQ][SB bytes]
+// = {tile lr chunks, tile lr + RPE chunks, scales}, exactly the stage's smem image): ONE bulk copy per stage instead of 3.
+template <int NRT, int NC, int NSTG, int KPS, bool SQ = false>
 __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
                                              int r1, const int* s_rs, const int* s_e, uint4* smem, uint64_t* full,
                                              uint64_t* empty, int& st, int& ph, int& i) {
@@ -3185,6 +3187,7 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
     const int lr = (R - s_rs[a]) & (RPE - 1);
     const uint4* src = Wq + ((size_t)e * NRT * 64 + lr * 64) * 32;
     const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
+    const char* qsrc = reinterpret_cast<const char*>(Wq) + ((size_t)e * RPE + lr) * NQ * SB;  // SQ
 #if TK2F_L2H
     const bool nfin = R + RPE < s_rs[a + 1];  // a later group of this expert re-reads this row
     const int hk = nfin ? (TK2F_L2H == 3 ? 0 : 1) : (TK2F_L2H == 2 ? 0 : 2);  // 0 none, 1 evict_last, 2 evict_first
@@ -3195,11 +3198,17 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
       char* sbase = reinterpret_cast<char*>(smem) + st * SB;
       mbar_expect_tx(&full[st], SB);
 #if TK2F_L2H
-      if (hk) {
+      if (SQ) {
+        if (hk) bulk_g2s_h(sbase, qsrc + q * SB, SB, &full[st], pol);
+        else bulk_g2s(sbase, qsrc + q * SB, SB, &full[st]);
+      } else if (hk) {
         bulk_g2s_h(sbase, src + q * KB * 32, KB * 512, &full[st], pol);
         bulk_g2s_h(sbase + KB * 512, src + NRT * 32 * 32 + q * KB * 32, KB * 512, &full[st], pol);
         bulk_g2s_h(sbase + KB * 1024, ssrc + q * KB * 32, KB * 128, &full[st], pol);
       } else
+#else
+      if (SQ) bulk_g2s(sbase, qsrc + q * SB, SB, &full[st]);
+      else
 #endif
       {
         bulk_g2s(sbase, src + q * KB * 32, KB * 512, &full[st]);
@@ -4127,8 +4136,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   if (warp == NC) {
     if (lane == 0) {
       int i = 0;
-      tk2f_produce<512, NC, NSTG, KPS>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i);
-      tk2f_produce<256, NC, NSTG, KPS>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i);
+      constexpr bool SQ = (PF & 512) != 0;  // layer s68 (moe n14): single-copy stages (Wq13 / Wq2 = the _sq_pack buffers)
+      tk2f_produce<512, NC, NSTG, KPS, SQ>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i);
+      tk2f_produce<256, NC, NSTG, KPS, SQ>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i);
     }
     return;
   }
@@ -4215,8 +4225,15 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
     (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \
     cnt_.data_ptr()
+  const bool sq = cfg >= 10000000;  // layer s68 (moe n14 SQ): + 10000000 = single-copy stages (w13_ / w2_ = _sq_pack buffers)
+  cfg %= 10000000;
   const bool bal = cfg >= 1000000;  // moe n8: + 1000000 = BAL (PF | 32; SA pf 4 / 5 only)
   cfg %= 1000000;
+  if (sq) {  // SA 84204 only (+ BAL): d1 slot, T = 16 / 32
+    TORCH_CHECK(cfg == 184204, "moe_tk2f SQ: cfg ", cfg);
+    if (bal) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 36 | 512>(0, TK2F_ARGS0);
+    return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512>(0, TK2F_ARGS0);
+  }
   const bool sa = cfg >= 100000;  // + 100000: SA (arithmetic scale decode; prepare() checked the scales)
   cfg %= 100000;
   if (cfg > 80000 && cfg < 100000 && cfg % 1000 == 204) {  // s13 PF = cfg / 1000 % 10: 1 = L1 prefetch of the next segment's
@@ -4492,6 +4509,15 @@ def _pack_scales(sf):
     return b.reshape(N // 16, K // 512, 32, 16).contiguous()
 
 
+def _sq_pack(wq, s2, nq=4):
+    """layer s68 (moe n14 SQ): wq int32 [E, NRT, 64, 32, 4] + s2 int32 [E, NRT/2, 64, 32] -> int32 [E, NRT/2, nq, 2 * W + S]: per
+    (row-tile pair lr, k quarter q) the tk2f stage image {tile lr kc q*16.., tile lr + NRT/2 same kc, scales}."""
+    E, nrt = wq.shape[0], wq.shape[1]
+    w = wq.reshape(E, 2, nrt // 2, nq, -1)
+    sc = s2.reshape(E, nrt // 2, nq, -1)
+    return torch.cat((w[:, 0], w[:, 1], sc), dim=-1).contiguous()
+
+
 def _pair_scales(ps):
     """_pack_scales output [NRT, K/512, 32, 16] -> uint8 [NRT/2, K/64, 32 lanes, 4]: per (row-tile pair rp, k chunk)
     each lane's 4 bytes (tile rp rows g, g+8, tile rp + NRT/2 rows g, g+8)."""
@@ -4549,6 +4575,9 @@ def prepare(weights):
     st["w2q"] = torch.stack(w2q)
     st["w2s"] = torch.stack(w2s)
     del w13q, w13s, w2q, w2s
+    if TK2F_SQ:  # layer s68 (moe n14): tk2f single-copy stage images (lossless repack of w13q/w2q + w13s2/w2s2)
+        st["w13sq"] = _sq_pack(st["w13q"], st["w13s2"])
+        st["w2sq"] = _sq_pack(st["w2q"], st["w2s2"])
     if TW_CFG:
         rt = 2 if TW_CFG >= 1000 else TW_CFG // 100
         if rt not in TB_PACK:
@@ -4790,6 +4819,16 @@ def _tk2f_cfg(M, st):
     return _tk2f_cfg0(M, st) + (1000000 if M in TK2F_BAL_M and TK2SA and st["sa"] else 0)
 
 
+TK2F_SQ = 1  # layer s68 (moe n14, H200 d32 -1.5, d16 -0.55 us, bitwise = off): 184204 (+ BAL) on the _sq_pack buffers
+
+
+def _tk2f_w(c, st):
+    """(cfg, w13, w2) for moe_tk2f_launch: SA 84204 (+ BAL) -> + 10000000 on the single-copy buffers (SQ)."""
+    if TK2F_SQ and "w13sq" in st and c % 1000000 == 184204:
+        return c + 10000000, st["w13sq"], st["w2sq"]
+    return c, st["w13q"], st["w2q"]
+
+
 def _tk2f_cfg0(M, st):
     sa = 100000 if TK2SA and st["sa"] else 0
     if TK2H_M.get(M) and sa:
@@ -4824,8 +4863,8 @@ def kernel_fn(data, st):
                                  st["w1"], out, POST_NORM_EPS)
             return out
         if TK2F:
-            c = _tk2f_cfg(M, st)
-            lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
+            c, w13_, w2_ = _tk2f_w(_tk2f_cfg(M, st), st)
+            lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
             c5 = c % 1000000 % 100000
             if (80000 < c5 < 100000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
