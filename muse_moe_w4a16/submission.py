@@ -5561,7 +5561,8 @@ def kernel_fn(data, st):
                 if qs and qk and not DIAG_TL:
                     part = torch.empty((qs << qk) * 16384, dtype=torch.float32, device=dev)
                 if DIAG_TL and TWM_ORDER_M.get(M, TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
-                hq = HOTQ_M.get(M, 0)
+                hq = HOTQ_M.get(M, 0) or (q >> 24) & 127  # also settable in the flags: q | grid << 24 (layer "twq" value)
+                q &= (1 << 24) - 1
                 if hq:  # s23: 33..64-token experts in one N 64 pass on hq CTAs; moe_twq (PDL secondary) skips them
                     lib.moe_set_hot(4)
                     lib.moe_hot_launch(st["w13b2"], st["w13sb2"], st["gs13"], st["w2b2"], st["w2sb2"], st["gs2"], st["lut"],
