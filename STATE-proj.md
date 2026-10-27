@@ -100,11 +100,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 - **H200 proxy for g19** (NOTES s16): H100 `GRID=88 MODE=2 PRED=3000 python dev/g19.py ...`, times x 0.73 = judge g19
   after-pred numbers for pooler/unpool (qkv off by ~3 us); GRID 72 ~ the layer's 108 blocks. Use it before H200 diags.
 
-## 0.7.0, deep_gemm 0.2.1+muse, sgl_kernel 0.4.9); tinygemm2 port = proj tuner candidate at unpooler m8 (not judge-checked).
 ## bitwise same; in layer v80+, dev/s32/evl_all_layer.patch). Dead: evict_first on W streams, O_PF/boundary/pr8 hints. NOTES s31/s32.
 ## s33: g13o (12-bit T=1 o, PDL secondary) handoff as TUNE option g13o (dev/s33/g13o_layer.patch on v82). After the wait a GEMV is ISSUE-bound (~2.3 us decode+FMA);
-## pre-decoding before the wait works (g13p) but loading all W beside csl slows csl as much: dead. NOTES s33.
-## Session 34: DEC4 (4 instr/pair, superseded by DEC3; NOTES s34). ab_files has a ~1.5 us file-position bias at d16/d32 sliding: use A B B A.
 ## Session 35: DEC3 (dev/s35/dec3.py layout + dec3_src.py transform; on main in ALL 12-bit kernels + packers via _dec3):
 ## same 12 bits re-arranged (code bit 0 in the byte, sign + c1..c3 in the word at shift-friendly bits; prmt injects 0x38):
 ## 3 instr per BF16 pair (dec8 11 vs 16). H200 proxy g19 B-A: m16 -0.4..-1.65, pool m32 -0.48 us; layer H100 tie, tests
@@ -116,7 +113,6 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## g19's own few-stage pre-wait prologue (npre 1-2) beside a memory-touching pred: dead (keep deep npre).
 ## s46: T=1 pooler W pre-fill into L2/SMEM beside csl/o/bnd (side-stream throttled TMA filler, dev/s46): DEAD, +2..6 us d1:
 ## csl's window already carries o's pre-wait W stream; a side kernel alone costs ~2-3 us; bnd window = pr1's prologue.
-## only pr1 non-bnd x/x32 __ldg fragile (Request to layer). unpool T=32 G19_GRID 96-132 tie.
 ## s50: _diag19d (print only) in submission: g19 pool m32/m16, unp m32 x {main, NOW, NOW+NOMMA, NOW+NOX, NOFIX} x G132/108
 ## after a 3 us PDL pred (+~1-2 min compile). gemv23 at m16/m32 (BF16, no decode) = W-stream-bound, ties/loses cuBLAS: DEAD.
 ## H100 G19_TR2 trace: per consumer stage ~0.35 us outside the atom loop (loop top tag/int math 0.23, arrive->got 0.13).
