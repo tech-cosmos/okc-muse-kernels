@@ -69,6 +69,10 @@ Per-kernel timing: /tmp/moe_k.py <bs> '[cfg,...]' (gemm13/gemm2 alone, cold L2);
 Routing at seed 7: bs1 3 experts x1 token; bs16 13 experts (max 4 tok); bs32 18 (max 7);
 bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 
+## Night4 session 26 (07:34-08:05Z): no build, no checks (18/20 used). PDL load-order audit of all moe kernels: clean (pre-wait
+  loads = LUT / norm weight only; NOTES s26). Idea -9 was dead since s19. Expert kernels sit at their fits in the layer profile
+  baae0e41; open levers: big-M drain (~20 us/call) and tk2f's fixed part. NEXT session: pick ONE of them with a fresh design.
+
 ## Night4 session 25 (07:01-08:00Z): DIAGNOSIS: twq NEVER beat twm (lead 06:41Z question). H200 same check b14b8be4: v16 twm 171.6/169.4 |
   twq q4 214.5 | HOTQ s66h32ne 191.9 | twm+split66 169.9; v32 twm 218 | q4 278 | s66h32ne 270. n21's split-combine block in tq_item
   made every twq item slower (H200 q4 186.8 -> 210; H100 bisect 201 -> 220, block alone ~15 us); s21-s24 compared only twq variants
