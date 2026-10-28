@@ -2461,3 +2461,18 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   norm2 10.2, router_split 7.2 + routing 4.1 beside the pooler. GEMM excess vs 4 TB/s there is ~20-30 us but is proj's
   closed g19/g24/g30 consumer-bound line (and pr32 = router fused into the pooler lost on H200).
 - 0 judge runs. Asked the lead for a lane (COORD Requests).
+
+## night5 s14 (2026-10-28 05:28Z-05:55Z, okc-night5 session 14): no build; 0 judge runs
+- No lead answer to the n5s13 lane request yet. Board: #36 at 2.1580x (#1 pjmullin3 2.399x, #10 2.261x). 10-28 budget: 11 checks / 8 submits.
+- Option (a) of the request (d32 pooler||router phase) re-read against the record: expert-weight L2 prefetch beside the pooler
+  = s55 DEAD (prefetch blocks starve router_split, routing ends 12-16 us later; tk2f gains only 10-25% of prefetched bytes);
+  pooler grid / router SM split / pr32 / router3 at T=32 all measured (s9, s10, s60, n5s10). Nothing new to build there.
+- New idea checked: start csl (d1 sliding attention) inside qkv g13's drain (q rows first in every qkv CTA, csl spins on
+  per-head flags instead of griddepcontrol.wait). H100 timeline v157 d1 sl: qkv 0-13.5, csl 14.0-19.3, o g13 15.0-23.3 (PDL W
+  prologue), bnd 22.1-27.5, pr1 23.0-45.9, rms 31.8-47.0, tk2f 46.4-81.1, n2u 77.6-85.9, bnd 81.7-87.7. Bound <= csl's H200 3.9 us
+  minus ~1 us of current-token work = ~0.4-0.5% d1-weighted, but s62's CSL_PW (csl CTAs resident during g13) already lost
+  +1.3..1.7 us at d1 to SM crowding + lost KV_PF warmth; flag-spin forms lost in s14 (BND_SPIN). Not built.
+- moe n5s9 audit (H100, v144) already sums the d1/v1 chain sub-peak time (d1 22, v1 39 us) and bounds what a chain kernel can
+  remove at ~1-3 us d1: no persistent megakernel item >= 1% on layer's side.
+- Gap to #1 stays in the expert kernels (moe board #1 2.685x vs ours 2.25x; proj bs128 / moe bs256 lanes) and attention
+  (#1 3.03x vs 2.60x; moe s40 bounds the four full kernels at ~-4% of the attention geomean).
