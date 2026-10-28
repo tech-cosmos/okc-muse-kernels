@@ -3049,46 +3049,17 @@ def _g27_prepare(state, w, comp, g, packs):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
 # kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); rg (bool) RG (s52); tk2h (int) moe n6 tk2h GS16+PF4 at T=16/32, 2-group weight W + 1 (s58); nu8d (bool) NU8_D (s59); pr1bnd (bool) PR1_BND at T=1 (s74); bspl1 / bspl2 (int) BND_SPLIT of the first / second boundary (s74); bal (bool) moe n8 BAL tk2f (s61); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
-TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
-            {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32},
-            {"rf_trig": False}, {"g13o": False}, {"g13o": False, "pr1_rb": 20}, {"g13o": False, "kv_pf": False}),  # s77: base {g13o, pr1_rb 32}  # s74: pr1bnd / bspl1 / bspl2 options removed (H200 check 4bf626fa: pr1bnd +0.6..1.4 us, bspl noise)
-        16: ({}, {"g30k:pooler": 104}, {"g24z": False}, {"g24x": False}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
-             {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
-             {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
-             {"bal": True}, {"bal": False}, {"cslpw": False}, {"cslcarve": True},
-             {"g24:pooler": False, "g24:unpool": False, "g24:o": False, "g24:qkv_gate": False}, {"g24:pooler": False, "g24:unpool": False},
-             {"g24:o": False}, {"g24:qkv_gate": False},
-             {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
-             {"g27:o": False},  # s84: attention plan (full layers only)
-             {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True},
-             {"g30n:o": True, "g30gx:o": True},  # proj n5s6 G30_GX
-             {"g30n:o": True}, {"g30n:o": False}, {"g30n:o": False, "g27:o": False},  # n5s4 g30n o (base at 16 full); n5s3: moe pr32; night5 s1: g30n at T=16 (H100 tie: H200 decides); n5s3: qkv S3 built again (uneven K split)
-             ),
-        32: ({}, {"g30gx:unpool": True}, {"g30gx:o": True}, {"g30gx:unpool": True, "g30gx:o": True}, {"g30kgx:pooler": True},
-             {"g30kgx:pooler": True, "g30gx:unpool": True, "g30gx:o": True},  # proj n5s6/n5s7 G30_GX {"g30n:o": False}, {"g30n:o": False, "lt:o": True}, {"g30n:qkv_gate": False}, {"g30n:unpool": False}, {"g30k:pooler": 0}, {"g30k:pooler": 120}, {"g30k:pooler": 0, "g30n:unpool": False, "g30n:qkv_gate": False}, {"pr32": True, "g30k:pooler": 0}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
-             {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
-             {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
-             {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
-             {"ltalt:qkv_gate": 1, "lt:o": True, "tk2fj": False}, {"qss": False}, {"qss": False, "lt:qkv_gate": True},
-             {"o_pf": 0}, {"g19trig": False}, {"tk2h": 3}, {"tk2h": 4}, {"tk2h": 4, "lt:o": True}, {"bal": True}, {"bal": True, "lt:o": True},
-             {"g24:pooler": False, "g24:unpool": False}, {"g24:pooler": False}, {"g24:unpool": False}, {"g24:qkv_gate": True}, {"g24:o": True},
-             {"g24sk:pooler": False, "g24sk:unpool": False}, {"g24sk:pooler": False}, {"g24sk:unpool": False}, {"g24sk:qkv_gate": True},
-             {"g27:o": True}, {"tk2h": 4, "g24:qkv_gate": True}, {"tk2h": 4, "lt:o": True, "g24:qkv_gate": True},
-             {"g24sk2:pooler": True}, {"g24sk2:unpool": True}, {"g24sk2:pooler": True, "g24sk2:unpool": True},
-             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
-             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}, {"tk2h": 0, "g24:qkv_gate": False},),  # s84: aplan  # s76: old base  # proj s69: g24sk2 = SK (4,3,12)  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
-        8: ({}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
-            {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0},
-            {"g19:qkv_gate": True}, {"cslpw": False}, {"cslpw": False, "pr8_npf": 212},
-            {"pr8_npf": 206}, {"pr8_npf": 212}, {"pr8_npf": 112},
-            {"g30n:o": True}, {"g30n:o": False}),  # n5s10: T=8 sl base += g30n:o (H200 tuner picked it in bb8ea548 + 60f02748; H100 -0.3..-0.8); {g30n:o True} = the full-layer option  # n5s9: base += {nu8d/nu8x off, cslpw, pr8_npf 220}; tk2fx off dropped (real routings +0.5..1.7 us at T=1/8)  # n5s5: g30n MTOK 8 o: H100 ab_flag v1 sl -0.3..-0.8, full +1.0..1.6 us (pr8 is the long pole): H200 decides  # s91: pr8 bulk PF depth on the H200 (H100 can't judge it)  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
-        128: ({}, {"g30:o": True}, {"lt:pooler": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
-              {"twm_order": 76}, {"fr": False}, {"ltalt:pooler": 1}, {"ltalt:pooler": 2}),  # n5s8: H100 real routings (seeds 99/7/13):
-              # twf_split 66/1022 flips sign per routing (-9/+11/-1 us sl), bkt/gnorm/g30:unpool off, lt:qkv_gate off, o_pf 0 lose: dropped  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
-              # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
-        256: ({}, {"twf_split": 1022}, {"nvscl": False, "sl": True},
-              {"lt:o": True}, {"lt:unpool": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76},
-              {"twm_tail": 32}, {"lt:qkv_gate": False})}  # n5s8: hot 40 dropped (real routings sl +9/+5/+2; H200 picked it at full in 73c50eea)  # s84: aplan  # s77 stacks
+TUNE = {1: ({}, {"g10alt:o": 1}),
+        16: ({}, {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}),
+        32: ({}, {"g30kgx:pooler": False}, {"g19:o": True}, {"tk2h": 3},
+             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}),
+        8: ({}, {"g30n:o": True}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}),
+        128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}),
+        256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
+# n5s10 (lead 03:25Z: judge prepare_s <= 220 s; drop options the H200 tuner hasn't picked in the last 3 checks): TUNE lists
+# cut to the picks of checks bb8ea548 / 60f02748 / submit 3e3b9fd3 (+ escapes back to the old base); the full old lists are in
+# git (r-layer 51acdef layer.py). T=32 base += g30kgx:pooler (picked sl 60f02748 + 3e3b9fd3, full 3e3b9fd3); T=8 full base
+# g14alt 1 -> 3 (picked 60f02748 + 3e3b9fd3).  # n5s8: hot 40 dropped (real routings sl +9/+5/+2; H200 picked it at full in 73c50eea)  # s84: aplan  # s77 stacks
 # n5s8: T=16 full bal in the base: H100 real routings (seeds 99/7/13) -2.5/-4.0/-1.5 us; H200 tuner picked it in 4937830f+133068b8.
 # n5s8: T=256 base {rg, twf_split 66}: H100 real routings (seeds 99/7/13, 3 rounds, all 36 old options) sl -6.6, full -10.8 us vs
 # {hot 32} alone (every seed); options losing there dropped (hot 0/24 sl +12/+17: the f824b925 H200 tuner picked hot 24 on its
@@ -3101,11 +3072,11 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 _T8N = {"cslpw": True, "pr8_npf": 220}  # n5s9 v152: nu8d/nu8x off back to a tuner option: H200 tuner (check bb8ea548) -1.1 sl / -1.6 full us with them ON
 _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
 TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True, "pr1_rb": 32},
-             (8, True): {"nu8": True, "g14alt:qkv_gate": 3, "g30n:o": True, **_T8N}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1, **_T8N},
+             (8, True): {"nu8": True, "g14alt:qkv_gate": 3, "g30n:o": True, **_T8N}, (8, False): {"nu8": True, "g14alt:qkv_gate": 3, **_T8N},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
              (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
-             (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
-             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
+             (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
+             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
              (256, True): {"hot": 32, "rg": True, "twf_split": 66}, (256, False): {"hot": 32, "rg": True, "twf_split": 66}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
 # n5s4: g30n o (T=32 sl+full, T=16 full; 12-bit o, W ring filled under PDL before the attention ends): H100 ab_flag TUNE {}, 4 rounds
 # x seeds 99/7 (3 runs): d32 sl -1.6/-1.5, -1.9/-1.8, full -2.2/-1.8; d16 full -2.4/-2.4, d16 sl +0.8/+0.7 (vs g27: option only).
