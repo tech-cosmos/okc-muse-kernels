@@ -1,26 +1,19 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log (sessions in order, newest last)
-Updated 2026-10-28 03:50 UTC (night5 n5s9 = session 9). Lane: the layer's T>=16 GEMMs (proj board = test bed only).
-**n5s9: layer main v155 full validate ALL OK** (test 13/13, scored 0/24, opt 0/42, tk2f 0/1200, replay 0/480, route 0/240, fuzz 0/192,
-cold 170.5 s on a shared GPU). proj GEMM lane exhausted (H200 tuner: all T=128 GEMM options +-2 us; T=16 g30 ties): **lane request to
-lead pending** (COORD Requests n5s9: twm big-M v16/v32 or muse_attention_decode). Next session: read the lead answer first.
-v16 sl H100 timeline (NOTES n5s9): moe_norm's 37 us is NORM_EARLY waiting, not a tail (ends 2.5 us after twm).
-**n5s8: branch proj/v155kgx d9822c4 for layer** = v154 + g30kgx:pooler pinned in TUNE_BASE[32] (H200 tuner won all 4 T=32 runs in
-60f02748/3e3b9fd3, -1.0..-1.3 us) + g30gx builds/options dropped (never won, +-0.2): validate --quick ALL OK, cold prepare 141.3 vs 153.3 s.
-g30n GX is DEAD on the H200 in-layer (only g30k GX pays). Remaining NEXT (2) GX at T=8 o: dropped with it (same g30n GX path).
-**n5s7: G30_GX handed to layer as r-layer branch proj/g30gx152 5b39450** (= layer main v152 + g30_src.cu + 5 TUNE[32] options:
-{g30gx:unpool}, {g30gx:o}, both, {g30kgx:pooler}, all three). NEW: GX inside g30k (layer T=32 pooler, stream-K FP32 slabs): one
-record per CTA (layer.py _g30k_gx_tables = dev/n5s7/gxk.py: header 24 words [ncols, nseg, 5 list starts per segment], cols at 24,
-entries at 24 + GXC), escape warps build segment s's corr while consumers stream, WG1 bar.sync 3 -> red = d + corr -> bar.arrive 5
-(corr free). One-hot bit-exact (dev/n5s7/gxkm.py). **GX g30k must build with x ring NS 8**: NS 16 = 221 KB smem -> side-stream
-router can't co-reside on the pooler SMs: in-layer +1.3 us (NS 12 +0.5..1.0), NS 8 (190 KB) sl -0.8..-1.0, full -0.6..-0.7 us.
-H100 in-layer (tools/ab_flag.py, TUNE {}, seeds 99/7): g30n GX unpool+o d32 sl -0.3..-0.6, full -0.2..-0.6. d16 tie -> T=16 GX
-dropped (each g30 variant = one ~39 s JIT; cold prepare 150.1 s vs v152 148.4). validate --quick ALL OK.
-Pitfall found: an edit leaving "# comment" mid-line in TUNE swallowed 13 layer options; diff TUNE dicts by AST after edits.
+Updated 2026-10-28 05:00 UTC (night5 n5s10 = session 10). **LANE (lead 03:50Z LANE DECISION 7): twm = moe big-M bs128/256**
+(v16/v32 in the layer). Work on branch **proj/twm** (muse_bf16_proj/twm/ = copy of r-moe muse_moe_w4a16 @182ec67; never moe's dir);
+moe reviews before layer integrates. Budget: muse_moe_w4a16 checks 8 proj / 12 moe per UTC day (`okc check muse_moe_w4a16 <file>`),
+scored runs on that board are moe's; log checks with the problem name. 11-bit qkv/pooler format (~0.3%) parked behind this.
+**n5s10: tw3 (3 independent consumer WGs, each its own ring of half-items, shared producer thread) DEAD**: bitwise = twm, H100
+bs128 +25..43%, bs256 +40%; 2-WG control loses the same -> per-WG x tiles/rings are the cost. 13-16 warps/CTA cap regs at 128
+(a higher __maxnreg__ fails the launch and NORM_EARLY's moe_norme then HANGS: tw3_go TORCH_CHECKs). NOTES n5s10.
+H100 twm baseline (t3.py, seeds 7/8/9): bs128 259/237/213, bs256 279/272/270 us. Board routings: bs128 19-26 experts (max 23-45
+tok), bs256 24-27 (max 42-149).
+NEXT (twm): (1) spend 1 moe-board check on an H200 per-CTA twm timeline of the BOARD routings (moe's DIAG/DIAG_TLV tool,
+tools/n15/an.py) to size drain / first wave / consumer excess per shape before building; (2) by that: drain (items 35-50 us,
+~3.3 waves) or the lockstep 3-WG form (shared x, groups of 3 halves of one (e, pass), <= 128 regs; rank low: moe s28 says
+4 warps/SMSP buy 3-6%). Read NOTES-moe s15/s19/s20/s27-s29 dead list first.
 **proj board best: submit eb166fc0 (34b7483) 1.3574x.** Checks 10-28: 1/20, scored 0/10.
-NEXT: (1) watch the layer's next check tune lines for g30gx/g30kgx at T=32 (H200 decides; on H200 GX was -1.1 us/call).
-(2) GX at T=8 (o g30n MTOK 8) and T=128 (smem: gbuf too big; GXC 16-32 or smaller rings). (3) g30k GX at T=16 only if the H200
-tuner picks g30k:pooler at T=16. proj dev/g30_src.cu lacks layer's MTOK-8 hunk and g30k GX: the branch's g30_src.cu is the superset.
-Older session headers (n5s1-n5s5, s46-s100): NOTES-proj.md.
+Older session headers (n5s1-n5s9, s46-s100; last GEMM-lane state: layer main v155 validated, g30kgx pinned at T=32): NOTES-proj.md.
 ## Board
 - **Best: submit eb166fc0 = 34b7483, 1.3574x** (n5s5, G30_PL). Before: a0168544 = ffb1ae8, 1.3543x (s100b, g30 picks + m32 rings 16/16). Before: a12513ed 1.3483x. Before: 1ff4721e87c844c2 = ca7e557, 1.3233x (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).

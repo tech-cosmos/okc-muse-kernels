@@ -2231,3 +2231,28 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   bnd -311.6. Experts = 61% of the load; GEMMs ~86 us, every one of them already A/B'd against own kernels (s28/s101/s102/s105).
 - Lane request to lead (COORD Requests n5s9): (1) take twm big-M at v16/v32 beside moe's tk2f work, or (2) muse_attention_decode
   (orphan since lead 01:45Z, 20 checks/day unused).
+
+## n5s10 (2026-10-28 03:44Z-, night5 session 10): LANE DECISION 7 = twm (moe big-M bs128/256); tw3 prototype
+- Lead 03:50Z: proj takes twm (T=128/256), moe keeps tk2f; work on branch proj/twm in a copy (muse_bf16_proj/twm/ = r-moe
+  muse_moe_w4a16 @182ec67 + tw3); muse_moe_w4a16 checks: 8 proj / 12 moe per UTC day; scored runs stay moe's.
+- Board routings (reference.generate_input ep8): bs128 19-26 experts, max 23-45 tokens; bs256 24-27 experts, max 42-149.
+  H100 baseline (bench.run_shape, per seed 7/8/9): bs128 255.6/236.2/213.8, bs256 277.2/270.1/268.9 us.
+- moe_tw3 (muse_bf16_proj/twm/tw3.cu, inlined into the copy's CUDA_SRC; python TW3_M = {M: 1}): 3 INDEPENDENT consumer
+  warpgroups per CTA, each with its own ring streaming HALF-items (warps 4hf..4hf+3 of twm's w*b4/w*b2 packing are contiguous
+  per k chunk: no repack), one producer thread serving the rings round-robin with mbarrier.test_wait (never blocks; gemm2
+  done[e] polled once per round), done[] counts halves. Bitwise = twm on 8 big-M cases (bs 33/64/128/128 skewed/256 x3/257).
+- v1 (launch_bounds 416 -> ptxas cap 128 regs, STACK 16, NSTG 4/ring): H100 bs128 385.7/297.1/295.2 vs twm 256.6/235.3/212.4,
+  bs256 386.1/384.4/386.7 vs 278.3/272.5/270.3 = +25..43% SLOWER. Suspect: per-WG x tiles double the x/W smem traffic
+  (big class: x 8 KB per 4 KB of W vs twm 8 per 8; RT4 N32: 4 per 8 vs 4 per 16) and shallower rings (96 vs 128 KB in flight).
+- REGISTER CAP (hard): __maxnreg__(136..152) with 416 threads -> cudaFuncGetAttributes maxThreadsPerBlock = 384, the launch
+  FAILS, and moe_norme (NORM_EARLY) then spins forever on done flags = a silent HANG (cost me 25 min: always TORCH_CHECK the
+  attributes; tw3_go does now). 13-16 warps per CTA = <= 128 registers for EVERY thread; ptxas ignores setmaxnreg for allocation
+  (twm: launch_bounds 384 -> REG 168 although consumers setmaxnreg.inc 232). So any 3-consumer-WG twm runs its RT4 body at 128.
+- NWG 2 control (same independent rings + half-items, 2 consumer WGs, 168 regs, NSTG 6, 288 threads): H100 bs128
+  323.1/298.7/264.3 vs twm 259.0/236.8/212.6, bs256 363.6/379.8/380.8 vs 278.8/271.9/270.0 (2 rounds, identical).
+  => the INDEPENDENT-PIPELINE structure itself costs +24..40% (per-WG x tiles: x/W smem+L2 traffic x1.5-2, shallower rings);
+  the 3rd WG adds ~0 (bs256) to +20 us (bs128 s7). tw3 (independent half-item rings) DEAD. Shared x per stage is essential.
+- Open for the 3-WG idea: a LOCKSTEP form (one ring, stage = one x tile + 3 half-items of the same (expert, pass); groups of
+  3 halves, the last group of an (e, pass) has 1-2 halves = up to 1/3 idle) at <= 128 regs (RT4 N32 body: acc 64 + A 32 +
+  wv 16 regs: likely spills). moe's s28 microbench says 4 warps/SMSP buy only 3-6% even without overheads. Rank: low.
+- 0 judge runs. Branch proj/twm: muse_bf16_proj/twm/ (copy of r-moe submission @182ec67 + tw3, t3.py A/B harness).
