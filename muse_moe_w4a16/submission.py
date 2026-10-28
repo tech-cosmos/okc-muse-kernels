@@ -5743,7 +5743,7 @@ RG = 1  # s33: moe_routegather (route + gather fused, one CTA per token) for M >
 TWM_PB_M = {}  # n12: {M: 48}: moe_twm's > 32-token experts run 48-token passes at wgmma N48 (s18 mb: 632 vs 737 cyc/stage at N64)
 HOT_TWG = {}  # n15: {M: k}: with moe_hot on, moe_twm runs on SMs - k CTAs (k = hot grid: no late-starting twm CTAs)
 HOT_NXB = 0  # n5s21: probe bits (16: NH 104, 32: NH 80; HOT_NX builds only)
-HOT_M = {}  # s29: {M: grid}: moe_hot (65..128-token experts, one N 128 pass) on that many CTAs before moe_twm
+HOT_M = {256: 32}  # s29: {M: grid}: moe_hot (65..128-token experts, one N 128 pass) on that many CTAs before moe_twm
 TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
 TWM_HOT_M = {}  # s17: per-M override
 TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline,
@@ -5766,7 +5766,7 @@ TK2G_W = 0  # s10: GS16 2-group row weight = (8 + TK2G_W) / 8 in the static row 
 TK2G_MIN = 17  # s10: GS16 only from this M (H100: GS16 is slower on the layer routings; A/B on the judge)
 TK2G = 0  # s10: 1 = 16-token segments in moe_tk2f (2 token groups share each dequantized weight fragment): judge bs32 +7 us (check b25182e8), H100 layer routings +6..18 us: off
 TWF_DBG = 0
-TWF_SPLIT_M = {}  # s11 per-M override of TWF_SPLIT; judge c1659443 {128: 132, 256: 66}: tie (tail -12 us, twf +10 us)
+TWF_SPLIT_M = {256: 66}  # s11 per-M override of TWF_SPLIT; judge c1659443 {128: 132, 256: 66}: tie (tail -12 us, twf +10 us)
 TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K halves (FP32 partials, ticket): shorter tail
 TWM_L2H = 1  # s21: same hints in moe_twm's producer (compile time; evict_last if a later pass re-reads). Bitwise = 0. Layer harness H100 (tuner off): v16 -0.8..-2.6 / -2.4..-9, v32 0 us
 TK2F_ORACLE = 0  # n5s16: DIAG-only oracle (wrong output!): tk2f drops every expert's extra token groups (bounds their cost)
