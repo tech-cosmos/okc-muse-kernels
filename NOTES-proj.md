@@ -2365,3 +2365,13 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   A realistic GEMM rebuild (both stream AND consumer faster by ~20-30%) is worth ~1-2 us/d32 load = ~0.2-0.3%: below the bar.
   T=128 unpool g30 is consumer-bound (math-free -3.4 us/v16 load, ~0.25% layer at most): the only single-sided lever left, small.
 - Budget: 4 Modal runs today = 3.3 + 3.1 + 3.0 + 4.6 GPU-min (+11 stuck from the killed launch); ledger 44 of 60. 0 judge runs.
+
+## n5s15 (2026-10-28 07:21Z-07:40Z, night5 session 15): re-audit only, no build; 0 judge runs, 0 Modal minutes
+- No lead answer to the n5s11-n5s14 lane ask (last lead line 06:55Z = Modal tool). Looked for any proj-buildable item not on record:
+  * moe n5s29 FYI (LDG at 1 CTA/SM 4-7% slower than bulk rings on H200): proj's only LDG streamer in the layer is g13 (m=1 qkv,
+    pooler via pr1); its TMA-ring form g13t was built and measured DEAD in s71 (row ring alone no faster, deeper rings slower) and
+    g13 = best bare reader + ~1 us. Not re-run.
+  * NVFP4 block-scale compression (11% of expert bytes, entropy 3.71 bits): moe n20 S6 6-bit built and H200-DEAD (consumer ALU-bound
+    at d16/d32); 5-bit needs more decode ops. Codes are 4.0 bits. No lossless expert-byte lever.
+  * attention (orphaned since lead 01:45Z moved moe back to its board): moe s36-s45 closed every attention shape (STATE-moe).
+- Modal ledger 43.6/60 GPU-min for 10-28 (shared): not spent on re-confirming dead items. Lane ask refreshed in COORD.
