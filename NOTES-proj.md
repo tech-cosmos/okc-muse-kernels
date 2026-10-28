@@ -2397,3 +2397,36 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   _routing and in the gathern. DEAD, and not worth Modal minutes (a tie can't pass). Told layer (COORD Requests).
 - Side note for g30k at T=32 (layer's pooler G104): the lean RC form (no stg32 staging) is a free smem cut there too, but T=32
   isn't smem-bound (NS16 fits), so no expected gain; not pursued.
+
+## n5s17 (2026-10-28 07:59Z-10:05Z, okc-night5 session 17): BUILD twm work-stealing tail 'TWS' (branch proj/tws); 0 judge runs, 0 Modal
+- Lead 07:35Z: oracle -> biggest ceiling -> build. Ceiling (H200 a763ccaf timelines, moe_twm at T=128 on layer v16 routings):
+  drain loss (last exit - busy/G) 20.1 / 25.2 / 23.8 us (seeds 13/17/99), T=256 24.4 = ~8% of a v16 sliding layer. Static K
+  splits (s11 halves, n5s11 KQ) reached only -2.8 us because EVERY piece pays ~3 us. Idea: split only when a CTA is idle.
+- Built (muse_bf16_proj/tws/submission.py = r-moe muse_moe_w4a16/submission.py @866a04a + n5s17/tws.diff; python
+  TWM_STEAL_M {M: NV | MS << 10 | B << 16}, off by default; run tools from that dir after copying bench.py, reference.py,
+  nvfp4.py, checks.py from muse_moe_w4a16/): the last NV items, if light gemm2 (RT 4), are stealable. Owner publishes a u64
+  state word (lo | hi << 8 | pieces << 16 | done << 24) and claims K chunks in batches of B (pipelined atomicAdd: issued at a
+  batch's first chunk, used at its last); a CTA whose claim counter ran out scans the NV words, CASes hi = mid on the item
+  with the most unclaimed chunks (>= MS), runs [mid, hi) as a piece (TSL 4 pieces per CTA). Consumers run a dynamic K loop
+  (tw_item: s_last per stage: 1 last, 2 last + stolen-from, 3 last of a piece). Stolen items: every piece __stcg's its FP32
+  partial (slot v for the owner, NV + cta * 4 + k for thieves, at part + 67 * 32768), ticket on the word; the last finisher
+  (lo >= hi && done + 1 == pieces) sums slots in piece order, runs the epilogue, zeroes the word; unstolen owners zero it at
+  their last claim. No spin anywhere (thieves acquire done[e] themselves). NORM_EARLY counts only finishers (tw_item returns
+  bool; s11 halves keep counting both halves).
+- Tests (n5s17/t.py: 12 routings bs128/256/257/33/64/skewed x 4 configs x 4 reps): 0 bad, worst maxdiff 0.0039 (= KQ).
+  Bugs on the way: (1) MS 1 -> rem 1 -> empty piece -> pieces never complete -> moe_norme HANG at bs256 (MS >= 2 now);
+  (2) I made the s11 first half return false -> NORM_EARLY count short -> HANG at bs256 with twf_split (fixed: true).
+- H100 MEAN v16 (n5s17/b.py, layer routings, cold L2, us; twm control 206-208 each run, twmb within 0.5):
+  s160 +2.3..2.6 | s100 +2.6 | s250 +5..8 | B16 / MS 8 / MS 20 same as s160. Ablations: no steals possible (MS 63) +4.4..5.3;
+  no claims at all (debug bit 22, consumer dynamic loop only) +4.0..4.4; + consumer static loop (bit 23) +4.4; + no thief scan
+  (bit 24) +3.4; NV 32 with all of that off STILL +3.4..3.7; TWS-size part buffer with TWS off: 0. => steals themselves
+  recover ~2.5 us on the H100 (HBM-bound tail; H200 should show more), but SOMETHING per call costs ~3.5 us even when
+  almost nothing TWS-specific runs. Not the 64 KB code layout (loop64k: 0 crossings, no loop duplication), not the fence
+  (removed), not the claim atomics, not the part buffer. Only lead: moe_twm STACK 40 -> 48 (cuobjdump -res-usage; REG 168,
+  LOCAL 0): the producer (setmaxnreg 40) may now spill in its per-item path. Thief scan (160 serialized asm-volatile loads by
+  one lane) is another ~1.5 us.
+- NEXT (n5s18): (1) find the ~3.5 us: SASS diff of the producer's per-item path (twm vs TWS build), try the thief loop and
+  stl path as a noinline function / fewer live 64-bit values; (2) warp-parallel thief scan (keep warp 8's 32 lanes alive,
+  lane 0 issues, shfl broadcast) or a per-call candidate list; (3) only then an H200 A/B (Modal or 1 moe-board check:
+  verify 16 rows; proj has 6 of 8 moe checks left 10-28). Expected if overhead -> 0: H100 -2.5, H200 more (drain is the
+  H200's problem: a763ccaf loss 20-25 us).
