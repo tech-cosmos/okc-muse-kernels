@@ -5081,6 +5081,8 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
                                                 const int* rdy) {
   const int tok = blockIdx.x, tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
   __shared__ float ssum[16][8];
+  __shared__ int se[8];
+  __shared__ float stw[8];
   float wv[8];
   {
     const float4* wp = reinterpret_cast<const float4*>(w1 + tid * 8);
@@ -5092,6 +5094,8 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     // last gemm2 item of the expert): CTAs run on the SMs twm's drain frees. Y then read through L2 (ld.cg).
     if (tid < 8) {
       const int e = __ldcg(ids + tok * 8 + tid) - start;
+      se[tid] = e;  // n5s24 (moe 725f39a): ids + tw read once, before the spin (no serial L2 trips after it)
+      stw[tid] = __ldcg(tw + tok * 8 + tid);
       if (e >= 0 && e < count) {
         int fv;
         for (;;) {
@@ -5104,12 +5108,17 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     __syncthreads();
   } else {
     asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
+    if (tid < 8) {
+      se[tid] = __ldcg(ids + tok * 8 + tid) - start;
+      stw[tid] = __ldcg(tw + tok * 8 + tid);
+    }
+    __syncthreads();
   }
   float v[8][8], ss[8];
   bool loc[8];
 #pragma unroll
   for (int s = 0; s < 8; ++s) {
-    const int e = __ldcg(ids + tok * 8 + s) - start;
+    const int e = se[s];
     loc[s] = e >= 0 && e < count;
     ss[s] = 0.f;
     if (loc[s]) {
@@ -5145,7 +5154,7 @@ __global__ void __launch_bounds__(512) moe_norm(const __nv_bfloat16* __restrict_
     float tot = 0.f;
 #pragma unroll
     for (int w = 0; w < 16; ++w) tot += ssum[w][s];
-    const float f = __ldcg(tw + tok * 8 + s) * rsqrtf(tot / NOUT + eps);
+    const float f = stw[s] * rsqrtf(tot / NOUT + eps);
 #pragma unroll
     for (int k = 0; k < 8; ++k) acc[k] += f * v[s][k];
   }
@@ -5627,11 +5636,15 @@ __global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y, co
   }
   asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
   if (tok == 0 && tid < 128) zc[tid] = 0;  // moe_tk2f's segment counters: zero again for the next call
-  float v[8][8], ss[8];
+  float v[8][8], ss[8], twv[8];
   bool loc[8];
+  int eid[8];
+  // n5s24 (moe 725f39a): all ids and tw of the token in one batch (tw was loaded per local slot after the barrier)
+#pragma unroll
+  for (int s = 0; s < 8; ++s) { eid[s] = __ldcg(ids + tok * 8 + s); twv[s] = __ldcg(tw + tok * 8 + s); }
 #pragma unroll
   for (int s = 0; s < 8; ++s) {
-    const int e = __ldcg(ids + tok * 8 + s) - start;
+    const int e = eid[s] - start;
     loc[s] = e >= 0 && e < count;
     ss[s] = 0.f;
     if (loc[s]) {
@@ -5670,7 +5683,7 @@ __global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y, co
     float tot = 0.f;
 #pragma unroll
     for (int w = 0; w < 16; ++w) tot += ssum[w][s];
-    const float f = __ldcg(tw + tok * 8 + s) * rsqrtf(tot / NOUT + eps);
+    const float f = twv[s] * rsqrtf(tot / NOUT + eps);
 #pragma unroll
     for (int k = 0; k < 8; ++k) acc[k] += f * v[s][k];
   }
