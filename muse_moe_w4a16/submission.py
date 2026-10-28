@@ -2860,8 +2860,14 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
 #endif
   if (tid == 0) {
     int nbig = 0;
-#pragma unroll 1  // n6s4: was unrolled 32x (321 SASS on every CTA's start path; i-cache)
-    while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
+    // n6s4 LAYOUT: rolled (-321 SASS) only in the KS false build. tools/n5s17/loop64k.py: rolled in the KS true build (or
+    // unrolled in the KS false one) puts the RT 4 N16 MMA loop across the function's 64 KB boundary (n5s17: +4..12%)
+    if constexpr (KS) {
+      while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
+    } else {
+#pragma unroll 1
+      while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
+    }
     const int mrg = (order >> 3) & 3;
     s_ord[0] = nbig;
     s_ord[1] = mrg == 0 ? 0 : mrg == 1 ? 100 : mrg == 2 ? 85 : 70;
