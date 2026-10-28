@@ -120,3 +120,13 @@ measured on the H100 with the same SM as the H200), or they lose far less to ram
 dq, WG1 SS wgmma m64n128k16 with commit groups of 4 and wait<1>, no shared registers). If that overlaps
 >= 30% while tools/s27m/mb_x.py's pattern doesn't, the non-overlap is specific to our wgmma issue pattern and
 the dq/tensor serialization (~50 us at bs256) reopens.
+
+## 6c. n6s2 follow-up (H100, tools/n6s2/, NOTES n6s2): section 6b's "fresh-A penalty" lead is CLOSED
+- The DISTA "RS A reads ~3x" number was a ptxas-serialized kernel (DEPBAR 0x0 after every HGMMA). Pipelined RS wgmma with
+  distinct A quads runs at tensor peak.
+- In twm's real structure (ring.py: 384 threads, production dq, RT4) a stage costs 802/870/985 cyc at N8/N16/N32 against an
+  ALU-pipe floor of 488. A 4-deep A ring (now free of C7512) changes nothing. mma.sync instead of wgmma: -12% at N8 only.
+  dq at 7 ALU ops per 8 weights is minimal for every _POS (laysearch.py). So the ~+7% "stream-bound big-M" of 6b is not reachable
+  by overlap tricks within one warp's dq->MMA chain.
+- What's left in big-M: per-item fixed cost (H200 warm N8 item 34.4 us vs ~26 us of stage loop at 1.98 GHz: up to ~8 us per
+  item, ~5 items per CTA at bs256) and the drain (~20 us). Both are R1's targets (section 4); measure the per-item part first.

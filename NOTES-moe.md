@@ -2797,3 +2797,40 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   dq WG -> STS swizzled bf16 A -> MMA WG SS, RT4 N32 / RT2 N64 twm stage shapes, against twm's 1046 / 737 cyc/stage;
   (3) only then R1 (REDESIGN.md section 4) gate on the H200.
 - Session end ~20:05Z. 0 judge runs, 0 Modal. Commit has REDESIGN.md + tools/n6s1/ovl.py.
+
+## n6s2 (2026-10-28 19:53Z - 21:15Z): REDESIGN 6b follow-up: fresh-A / overlap mechanism on the H100 (tools/n6s2/); no build; 0 judge runs, 0 Modal
+- DISTA ANOMALY RESOLVED = codegen artifact: n6s1's ovl.py MODE 1 kernels are ptxas-serialized (WARPGROUP.DEPBAR gsb0 0x0
+  after EVERY HGMMA; MODE 2 isn't), so "RS-MMA alone 307" was a serialized chain. Pipelined, RS wgmma with 4 DISTINCT A quads
+  runs at tensor peak (rsa.py UPD0: N32 68 cyc per 4 = 16/wgmma, N64 130). The "RS A reads cost 3x" hypothesis is DEAD.
+  LESSON: every microbench variant needs its own SASS check (DEPBAR 0x0 count, loop instruction count): ptxas serializes,
+  CSEs and dead-code-eliminates variants differently (rsa UPD5/UPD6 and ring MODE 1 "dq only" lost most of their dq).
+- GH100 per-SMSP issue cost, clk per warp-instr at 4 warps/SMSP (pipes.py, inline PTX): LOP3 2.0, SHF 2.0, PRMT 2.0 (one ALU
+  pipe: LOP3+SHF mix 2.0), IMAD 2.0, LEA 2.0, HMUL2/HFMA2/FFMA 1.0; mixes SHF+IMAD 1.08, PRMT+IMAD 1.08, LOP3+HMUL2 1.2,
+  LOP3+IMAD 1.5 (!), IMAD+HMUL2 1.5 (IMAD and HMUL2 share the FMA pipe). ptxas turns some HMUL2 into HFMA2 and splits IADD3
+  into IADD3 + IMAD.IADD itself.
+- dq pipe check (dqv.py, bitwise = production on 2^20 words): production dq loop ncu ALU pipe 89%, IPC 0.68 (ALU-pipe-bound in
+  isolation: 7 ALU ops = 14 clk per 8 weights). V2 (both rotations as IMAD.WIDE + one LOP3 (lo|hi)&M, LUT 0xA8): ALU 70% but
+  dispatch stalls 0.21 -> 1.01 per issue, IPC 0.67 = no gain (n22 DQW: slower in the real kernel). laysearch.py: NO _POS layout
+  has two outputs at 1 ALU op each ({AND, IMAD.SHL+LOP3, SHF rot, MULK} x all shifts): 7 ALU ops / 8 weights is minimal. CLOSED.
+- RS wgmma latency (lat.py, wait<0> per group): 1 x m64nNk16 70/74/82/98 cyc (N8/16/32/64); group of 4 111/115/132/196.
+- twm stage microbench (ring.py: tw_item structure, 384 threads + setmaxnreg 232/40 like twm, production dq, RT4, KG1, 4 groups
+  per stage, cyc/stage, both WGs): RS wgmma + dq N8 802 / N16 870 / N32 985 (= s27 mb_x 792/900/1046).
+  * A ring depth 4 (slot = j0, wait<3>): compiles WITHOUT serialization with today's ptxas (dep0 1, no lmem; s4's C7512 is
+    gone) but gains nothing: 805 / 960 / 1002. wgmma latency is not the limit.
+  * mma.sync m16n8k16 (same dq output = A fragment, B by LDS.64): 705 (-12%) / 849 (-2%) / 1174 (+19%).
+  * ALU-pipe floor of that stage: 244 ALU instr/SMSP = 488 cyc. So ~40% of a twm stage is MMA-side time that does not overlap
+    the dq ALU work (wgmma and mma.sync alike), though the same ALU work DOES overlap wgmma issued by a warp that does no ALU
+    (n6s1 ovl MODE 2). Mechanism still unnamed (shared RF ports per SMSP is the best guess); the fix would need the MMA to be
+    issued by warps that do no dq, which only SS (smem A) allows, and SS is smem-bandwidth-dead (s19: 4.5 B/weight).
+- Real twm, H100 ncu: bs256 seed 7 288 us, DRAM 77%, issue 48%, ALU 45% (DRAM-bound locally, as on record). Consumer-bound
+  proxy tools/n6s2/twwarm.py 34 4 (34 tokens on 4 experts, RT4 N8/N16, 96 items = one wave, 1.854 GHz): max SM active cycles
+  160.7k / 128 stages = 1255 cyc/stage INCLUDING per-item fixed costs; SASS stall sampling: 27% of samples in code outside the
+  stage loop (item prologue/epilogue, gemm2 readiness poll), ~28% in an idle producer spin. So the in-loop stage ~= the
+  microbench, and the open number is the PER-ITEM FIXED COST: on record the H200 warm RT4 N8 item is 34.4 us vs 64 x 802 cyc =
+  25.9 us at 1.98 GHz => up to ~8 us per item (H200 clock under load unknown; at 1.65 GHz only ~3 us).
+- NEXT (ranked): (1) measure the per-item fixed cost directly: TWM_TL stamps (item start, first full stage, last stage, end) in
+  a gemm13-only consumer-bound proxy on the H100, then the same via a DIAG check on the H200 (4 moe checks left 10-28, Modal
+  resets 00:00Z). If >= 3 us per item (bs256 has ~5 items per CTA => >= 15 us/call), cut it: start the next item's stage loop
+  before the epilogue's stores/flags drain (epilogue overlapped with the next item's first dq), or R1's longer per-CTA ranges.
+  (2) mma.sync for the N8 items only (-12% stage; bs256 items are mostly N8/N16) as a twm variant, H200 A/B.
+- Tools: tools/n6s2/{rsa,pipes,dqv,laysearch,lat,ring,twwarm}.py (each prints its SASS checks). 0 judge runs, 0 Modal.

@@ -1,14 +1,14 @@
 # STATE-moe
 
-## NOW (n6s1, 2026-10-28 ~20:05Z): REDESIGN study (lead 18:50Z) -> REDESIGN.md; overlap premise partly REFUTED (NOTES n6s1)
-- Gap table (real routing bytes at 4.5 TB/s): ours/ideal bs1 1.60, bs8 1.32, bs16 1.23, bs32 1.21, bs128 1.42, bs256 1.53
-  => the gap to #1 is big-M (60 + 82 us excess) + bs1. Candidates: R1 cost-balanced striped big-M kernel (~+3% board),
-  R2 column-stationary gemm2 + in-register norm (~+2%).
-- tools/n6s1/ovl.py: ALU work in one WG DOES overlap wgmma in another WG (45-100%) when each WG has its own loop; the s27
-  "never overlaps" came from mb_x's shared-loop structure. twm's pattern (dq -> RS wgmma on fresh regs) still serializes;
-  leading hypothesis: RS A reads from distinct register quads are ~3x the MMA cost (DISTA test, anomaly open).
-- NEXT: settle the DISTA anomaly, then a separate-loop WS (dq WG -> STS -> SS MMA WG) microbench at twm stage shapes vs
-  1046/737 cyc/stage. If it wins: twm consumer redesign (bs256/bs128 toward stream-bound, ~+7% board). Then R1's H200 gate.
+## NOW (n6s2, 2026-10-28 21:15Z): REDESIGN follow-up on the H100 (NOTES n6s2); overlap lever CLOSED, per-item fixed cost OPEN
+- Gap table (n6s1, REDESIGN.md): ours/ideal bs1 1.60, bs8 1.32, bs16 1.23, bs32 1.21, bs128 1.42, bs256 1.53 => big-M + bs1.
+- n6s2: n6s1's DISTA "RS A reads 3x" = ptxas serialization artifact (RS wgmma with distinct A runs at peak). twm stage
+  microbench (tools/n6s2/ring.py, real dq, 384 thr): 802/870/985 cyc/stage N8/N16/N32; ALU floor 488; deeper A ring (wait<3>,
+  now compiles clean) = 0; mma.sync -12% at N8 only; 7 ALU ops/8 weights is minimal for any _POS (laysearch.py).
+- OPEN: per-item fixed cost. H200 warm N8 item 34.4 us vs 64 stages x 802 cyc = 25.9 us at 1.98 GHz => up to ~8 us/item.
+- NEXT: (1) TWM_TL stamps (start, first stage, last stage, end) in a gemm13-only consumer-bound H100 proxy, then a DIAG check
+  on the H200; if >= 3 us/item, overlap the epilogue with the next item's first stages (or R1, REDESIGN section 4).
+  (2) mma.sync for N8 items as a twm variant (H200 A/B). Modal resets 00:00Z; moe checks 4 left 10-28.
 
 ## WAS (n5s34-n5s40): tk2f consumer, twm dq cut, dq superoptimizer (8 int + 4 HMUL2 per 8 weights is minimal), dequant-once: all CLOSED (NOTES)
 
