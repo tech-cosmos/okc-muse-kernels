@@ -2348,3 +2348,20 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   not measured.
 - Ledger note: my first launch (overlay variant, killed after ~1 min when I saw the overlay was a no-op) kept its 11-min reservation in
   ~/.h200_ledger.json (pkill skipped the finally block). Not edited. Lesson: let h200.py runs finish or Ctrl-C them, never pkill.
+- **Second question: why do the d16/d32 pooler+unpool GEMMs (g30k/g30kgx pooler 104 CTAs, g30n unpool, both PDL secondaries) look ~2x
+  their bytes floor?** Three more Modal H200 oracles, all vs base0 = same main with TUNE = {} (TUNE_BASE defaults, no pick noise),
+  generator dev/n5s14/oracles.py (wrong output; prepare's g30 checks opened to 1e30; selects pooler (N 4096) + unpool (K 4096) calls
+  in g30_kernel, all g30k calls = pooler; qkv/o untouched so attention/routing are unchanged):
+  orw = W read from L2 (each CTA re-reads its first 8 W stages), orc = no decode + no wgmma (barriers kept, W still from HBM), both.
+  Modal H200 us (sl, full), base0 | cand per run:
+  orw:  d32 150.3/306.3 | 149.6/305.6; d16 146.3/219.6 | 146.3/219.7; v16 252.8/358.9 | 252.7/357.4; geomean 2.072 -> 2.075
+  orc:  d32 149.8/307.1 | 149.6/306.9; d16 146.2/220.6 | 146.0/220.7; v16 252.2/356.7 | 248.6/353.3; geomean 2.075 -> 2.078
+  both: d32 149.9/306.5 | 143.7/300.5; d16 145.9/220.2 | 145.7/220.2; v16 252.2/356.3 | 245.5/349.0; geomean 2.077 -> 2.098
+  (d1/v1/v32 within +-0.6 everywhere: the oracles don't touch them; d16 defaults use g24 for pooler/unpool, so d16 is a control.)
+- Reading: at d32 W-free alone -0.7, math-free alone -0.2, both -6.0..-6.2 us; T=128 unpool (v16) math-free -3.4, both -6.7..-7.3.
+  => the T=32 pooler+unpool are CO-BOUND (W stream time ~= consumer time per call): improving either side alone buys ~nothing, and
+  even infinitely fast pooler+unpool buy only ~6 us per d32 load (+1.0% layer geomean incl. v16). The rest of their ~40 us of
+  timeline span is hidden under / waiting on neighbours (PDL pre-wait streaming, router||pooler, experts before unpool), not GEMM work.
+  A realistic GEMM rebuild (both stream AND consumer faster by ~20-30%) is worth ~1-2 us/d32 load = ~0.2-0.3%: below the bar.
+  T=128 unpool g30 is consumer-bound (math-free -3.4 us/v16 load, ~0.25% layer at most): the only single-sided lever left, small.
+- Budget: 4 Modal runs today = 3.3 + 3.1 + 3.0 + 4.6 GPU-min (+11 stuck from the killed launch); ledger 44 of 60. 0 judge runs.
