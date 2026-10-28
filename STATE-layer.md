@@ -2,6 +2,10 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s16: **main = v160** (9fa5164) = v158 + moe n5s24 norm ids/tw batch (v159, bitwise v16/v32) + NORME_TRIG (moe_norm's
+  NORM_EARLY path triggers PDL dependents at start: the T=128 g30 unpool's W prologue now runs under twm's drain; H100 v16 sl -1.9..-4.4,
+  full -2.1..-2.3 us, 3 seeds). check aba95f63 2.1033x (noise: d1/v1 slow) but v16 sl 260.7 = best H200 (prev 265-269); g30 starts
+  ~21 us earlier in the H200 profile. validate ALL OK, cold 69.7 s, judge prepare_s 89.6. Not submitted. 10-28: 9 checks / 8 submits.
 night5 s15: **main = v158** (76f4632) = v157 + moe n5s23 routegathern latency fix (bitwise = v157; H100 v32 sl -2, v16 sl -1 us;
   H200 routegathern 7.4 -> 5.2 us). check 1d0568ec 2.1100x (noise), prepare_s 89.4; not submitted. 10-28: 10 checks / 8 submits.
 night5 s14: no build (pooler||router option = s55 dead; csl-in-qkv-drain bounded ~0.4% and CSL_PW-like crowding: NOTES n5s14); 0 runs.
@@ -64,8 +68,7 @@ Plateau: every kernel-level lever in NOTES s45-n5s7 is measured or bounded (dead
 interleaved A/Bs (tools/ab_flag.py), confirm on a check. Submit only > 2.1339x, or per the 09:28Z rule (>= 2.1126x +
 per-shape evidence). Open items, biggest first (none started):
 1. o+bnd+pr1 megakernel at T=1 (bound ~-3 us d1 = ~+0.5%; NOTES s45/s61/s74; moe n5s9 audit: post-attention chain <= 3-4.5 us).
-1b. moe n5s24 (r-moe 725f39a): moe_norm2/moe_norm ids+tw loaded up front (bitwise, H100 tie). Port once moe posts an H200 number
-   (layer patches moe_norm2 for PDL: re-check the anchors in layer.py/build.py when re-copying moe_src.py).
+1b. DONE n5s16 (v159). Look for more PDL secondaries whose primary never triggers early (NORME_TRIG pattern).
 2. Any new Handoff from moe (attention lane) / proj: port as a TUNE option, validate, bundle into one check.
 T=16: every g30 option ties on 3 H200 checks (f824b925, 133068b8, 4937830f): don't add more g30 work at T=16.
 

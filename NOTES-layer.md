@@ -2503,3 +2503,10 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - H100 timeline v16 sl (TUNE = {}): g30 starts 249.8 us (during the drain, twm ends 278.8) vs 278.7 without; unpool ends 22.1 us
   after moe_norm vs 24.5. ab_files (TUNE = {}, A B A B), off -> on: seed 99 (6 rounds) v16 sl 305.8 -> 301.2 (-4.4), full 450.7
   -> 448.5 (-2.1); seed 7 sl -1.9, full -2.2; seed 13 sl -1.9, full -2.3; v32 / v1 tie on all seeds.
+- check aba95f63 (v160 = 9fa5164) **2.1033x** [2.072, 2.135], judge prepare_s 89.6. us: d1 68.4/77.3, d16 128.8/207.5, d32 153.6/308.7,
+  v1 117.2/126.9, v16 **260.7**/357.4, v32 330.5/505.4. v16 sl = best H200 number so far (v158 269.1, af87d466 265.2, board 266.6);
+  v16 full tie; d1/v1 drew slow (paths untouched by v159/v160) = run noise. H200 profile v16 sl: g30 GPU time 43.9 us (1d0568ec 22.4):
+  it now launches ~21 us earlier, under twm's drain, as on the H100. Not submitted (< 2.1364x, the 09:28Z 1% rule). 10-28: 9 checks / 8 submits.
+- Next: v160 rides in every later check. Same pattern to look for: any PDL secondary with a pre-wait W prologue whose
+  primary never triggers early (grep launch_dependents per chain). At T=256 the unpool is lt (no prologue); a PDL-capable
+  m256 unpool would get the same ~20 us drain window (g30 MTOK 256 dead in s100: x ingest).
