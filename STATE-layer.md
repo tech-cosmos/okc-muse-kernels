@@ -2,6 +2,12 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s9: **main = v152** = v150 + T=8 TUNE_BASE {cslpw, pr8_npf 220} (H100 real routings + H200 tuner agree); TUNE[1]/[8] tk2fx-off
+  options dropped (real routings +0.5..1.7 us). check bb8ea548 (v151 = same + nu8d/nu8x off in the base) **2.1168x** (within 1%; v1
+  2.358/2.237 not a clear win: not submitted). H200 tuner: nu8d/nu8x ON wins -1.1/-1.6 us (H100 said off): reverted to options in v152.
+  v152 validate test/scored/opt/fuzz OK (v151 full ALL OK, cold 162.5 s). 10-28 budget: 15 checks / 10 submits. v152 not checked (tie).
+  H100 d32 sl timeline (195 us): qkv 15, attn 19, o 7, pooler g30k 28 || router 20.5 + routing (ends 71), tk2f 97 (72-170), norm2,
+  unpool ends 23 us after tk2f, bnd -> glue is back to back; experts are the gap (moe LANE 6).
 night5 s8: **main = v150** = v148 + T=256 base {rg, twf_split 66} + T=16 full base bal (H100 REAL-routing A/Bs, 3 seeds: v32 sl
   -1/-9/-10, full -13/-14/-5; d16 full -2.5/-4.0/-1.5 us) + TUNE[256] 36->9, TUNE[128] 22->10 (routing-sensitive options that lose or
   flip sign on real inputs dropped: f824b925's tuner picked hot 24 on synthetic routing = v32 sl 378 us). validate ALL OK, cold 146.7 s.

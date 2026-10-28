@@ -2352,3 +2352,9 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   half loses (~+1.1/+1.6 us) while cslpw+npf 220 holds: H100 and H200 disagree on nu8d (not routing: hardware).
 - v152 = v151 with _T8N = {cslpw, pr8_npf 220} only (nu8d/nu8x off -> TUNE[8] options again). validate test/scored/opt/fuzz ALL OK.
   Not checked alone (a tuner-option tie: lead 10:50Z); goes with the next real change.
+- H100 d32 sliding timeline (v152, seed 99, 195.1 us): g30 qkv 0-14.9, nds 15.6-32.1, combine 16.6-34.2, g30 o 34.3-41.3, bnd 35.5-44.4,
+  g30k pooler 41.2-69.3 || router_split 45.9-66.4 + routing 49.1-71.1, rmsnorm 71.4-74.0, tk2f 72.4-169.6 (97 us), norm2 157.6-174.0,
+  g30 unpool 163.5-192.7, bnd 174.0-195.1. No idle gap; the only big non-expert item left is unpool's 23 us after tk2f (48 MB at
+  H100 ~2.1 TB/s effective; earlier unpool-W L2 prefetch at tk2f end (UPF/UPF2/UPF3) all dead).
+- Next session: T=1/8 options all decided; open items unchanged (o+bnd+pr1 megakernel ~0.5% d1; moe/proj Handoffs: proj G30_GX
+  branch proj/g30gx when posted -> TUNE option at T=16/32 unpool/o, bundle into one check with v152).
