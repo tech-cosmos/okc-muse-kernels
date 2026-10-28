@@ -1,46 +1,16 @@
 # STATE-moe
 
-## NOW (n5s40, 11:55Z): idle, dq CLOSED per lead 11:20Z condition; asked lead to pause moe loop (COORD Results)
-## WAS (n5s39, 11:50Z): dq superoptimizer (lead 10:55Z) DONE: no 7-int-op dq() in any searched family; today = 8 int + 4 HMUL2 = 12/8 weights (NOTES n5s39, tools/n5s39)
-- z3 routing model rediscovers production at 8 ops; 30+ 7-op shapes (shift/mask/IMAD/IMAD-merge/PRMT/funnel/select) all UNSAT;
-  exhaustive shift family 0/129,766. Full-ISA BV CEGIS intractable at N>=6. proj n5s23: prmt-LUT >= 14 -> both halves closed.
-## WAS (n5s38, 10:45Z): idle, lane ask stands; proj H200 twm dq-free -23 us ceiling re-checked: every route to it dead on record (NOTES n5s38)
-## WAS (n5s37, 10:35Z): per-shape value table in NOTES n5s37 (bs1 fixed cost = 1.5 us per +1% board, all pieces dead)
-## WAS (n5s36, 2026-10-28 10:40Z): 'dequant once, mma many' (lead 10:20Z) = already built as moe_hot N128 (NOTES n5s36)
-- Layer v16/v32 routings: 0 repeated dq (v16 max 49 tok = one N64 pass; v32 hot 73-98 tok = one moe_hot N128 pass). Microbench
-  tools/n5s36/mb_dqonce.py: one A -> 2 N64 wgmma = N128 = 8.0 cyc/8KB/token (tensor peak). Only slack = hot N128 padding (exact-N, dead n5s21).
-## WAS (n5s35, 2026-10-28 10:15Z): twm dq instruction cut (lead 09:20Z/09:55Z) CLOSED in SASS (NOTES n5s35)
-- twm N8 loop: dq core = 96 instr / 64 weights = the s27 proven minimum (8 int + 4 HMUL2 per 8); extras 12/180 instr <= ~0.7 us.
-  All dq alternatives dead on record (n22 DQW, s27 LUT/tiling, s29 scale fold, s18 mma.sync N8, s22/s27 WS). Lane ask in COORD.
-## WAS (n5s34, 2026-10-28 09:40Z): consumer-instruction oracles (lead 08:50Z) -> tk2f decode consumer lane CLOSED (NOTES n5s34)
-- tools/n5s34/oracles3.py (orq dq free / ors scale free / orqs both / orm mma free), H100 in-layer us sliding: (a)+(b) d1 -0.4,
-  d16 -2.3, d32 -3.7, v1 -2.2; H200 n12 nm (all math free) <= 1.8/4.2/6.5/3.6. o3 IMAD is unavoidable (mask tiling proof in NOTES).
-  twm (v16/v32): dq free -9..-11 us sliding H100 = free ceiling only (twm dq cuts dead s18-s30). Lane request to lead in COORD.
-## WAS (n5s33, 2026-10-28 08:40Z): tk2f in-layer structure oracle (n5s32) decomposed and REFUTED as a lever (NOTES n5s33)
-- H100 in-layer: n5s32's ornc-orz "structure" (d1 9, d16 20, v1 18 us) is half per-row bar.sync+stores (d16/v1 ~10 us), barrier
-  <= 1.2, x loads <= 0.8. The REAL fix of the biggest piece (BRA: warps 4-7 arrive-only, tools/n5s33/bra.py) = TIE on all 12 shapes
-  -> the structure hides under the stream; not additive. BRA also racy (1-row ring): dead, not handed off. 00:00Z Modal oracle cancelled.
-- tk2f levers now all closed on measurement (stream at ring optimum n5s15/n5s29, extra groups n5s16-18, structure n5s33).
-  Lane request to lead posted (COORD Requests n5s33). Until answered: nothing in this lane >= 1% layer.
-- n5s16-n5s18: EVERY 16-token shared-dequant form on mma.sync tk2f is DEAD: inlined (i-cache), noinline (ABI), tk2h merged
-  (+4%/row), TK2S rolled smem-x (H200 +10%), n5s18 DT = pair rows in their own loop (built, bitwise, DIAG-only TK2DT):
-  H100 d16 +8..20, d32 +23..29 us. Pair row ~= 2 one-group rows (REG cap 168 -> spills; x group 0 needs 64 regs) and the
-  relocated gemm2 loop slows (+27% stall/instr). n5s17 code-layout rule: tools/n5s17/loop64k.py. NOTES n5s16-n5s18.
-- n5s21 (lead 04:50Z: moe = bs256): exact-N moe_hot (hot experts 65..128 tok padded to N128) H200 DIAG 43eb5326: N104 probe v32
-  -2.3 us mean (~half the SM-time model) -> full exact-N ~-3.7 us < 5 us bar: not built. Probe HOT_NX/HOT_NXB kept off. Untested: board-only
-  HOT_M {256: 32} + TWF_SPLIT_M {256: 66} at bs256 (layer already runs it). No other bs256 item >= 5 us on my model.
-- n5s22: main = board bs256 at the layer's config (HOT_M {256: 32} + TWF_SPLIT_M {256: 66}): check cefcc133 2.2632x, submit 951c17e0 2.2535x = board best.
-  bs256 lane: no untried lever >= 5 us on my model (NOTES n5s22 list). Next: only a new structural idea, or a lead reassignment.
-- n5s23: moe_routegather latency fix (x row + ids batched before the scan; bitwise): H200 bs128 4.4->3.2, bs256 6.3->4.4 us;
-  check d3761aa5 2.2641x, submit 4fb734c6 2.2703x = board best. Layer port tools/n5s23/patch_layer_rg.py (Handoff, untested in-layer).
-- n5s25: bs256 cost model (proj's H200 a763ccaf v32 timelines): HBM 156 + consumer excess ~21 (all per-weight levers dead) + drain 15-22
-  (proj's KQ K-split covers T=256) + route/norm ~7. No moe bs256 build >= 5 us; lane question to lead (COORD Requests n5s25). 0 runs.
-- n5s19/20/24/26 DEAD (NOTES): norm2 as PDL secondary of tk2f (H200 d1 +3.5); norm2/norm ids batching (noise); DT pair rows w/o
-  REG cap (168 = HW cap at 288 threads). Decode excess = fit's fixed 14.1 + 4.4/extra group, every piece measured dead.
-- n5s27: tk2f L2 row prefetch (PFL2, DIAG-only, off) DEAD on the H200 (979cb0ea: d1 +3..5, d16 +8..15, d32 +13..19, v1 +6..12 us;
-  18 KB form loses least => request size is no lever; any HBM traffic beyond the 72 KB/SM ring slows tk2f). NOTES n5s27.
-  LDG never beats them (1 CTA/SM LDG -4..7%); tk2f's 72 KB/SM of 18 KB copies is within 0.5-2.5% of the best: load-method lever DEAD.
-- n5s29 Modal HBM probe: bulk copies >= LDG, tk2f 4x18 KB ring within 0.5-2.5% of the stream ceiling. n5s28 TK2FN fused norm DEAD; n5s30 ring variants have no 64 KB crossing (ring verdict stands); n5s31 board #1 2.584x screened. Checks 10-28: moe 12 of its 12 used (+979cb0ea n5s27); 2 submits (951c17e0, 4fb734c6).
+## NOW (n6s1, 2026-10-28 ~20:05Z): REDESIGN study (lead 18:50Z) -> REDESIGN.md; overlap premise partly REFUTED (NOTES n6s1)
+- Gap table (real routing bytes at 4.5 TB/s): ours/ideal bs1 1.60, bs8 1.32, bs16 1.23, bs32 1.21, bs128 1.42, bs256 1.53
+  => the gap to #1 is big-M (60 + 82 us excess) + bs1. Candidates: R1 cost-balanced striped big-M kernel (~+3% board),
+  R2 column-stationary gemm2 + in-register norm (~+2%).
+- tools/n6s1/ovl.py: ALU work in one WG DOES overlap wgmma in another WG (45-100%) when each WG has its own loop; the s27
+  "never overlaps" came from mb_x's shared-loop structure. twm's pattern (dq -> RS wgmma on fresh regs) still serializes;
+  leading hypothesis: RS A reads from distinct register quads are ~3x the MMA cost (DISTA test, anomaly open).
+- NEXT: settle the DISTA anomaly, then a separate-loop WS (dq WG -> STS -> SS MMA WG) microbench at twm stage shapes vs
+  1046/737 cyc/stage. If it wins: twm consumer redesign (bs256/bs128 toward stream-bound, ~+7% board). Then R1's H200 gate.
+
+## WAS (n5s34-n5s40): tk2f consumer, twm dq cut, dq superoptimizer (8 int + 4 HMUL2 per 8 weights is minimal), dequant-once: all CLOSED (NOTES)
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding

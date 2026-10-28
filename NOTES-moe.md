@@ -2768,3 +2768,32 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   Re-checked the one remaining non-integer route (cvt.rn.f16x2.e4m3x2 dequant): already dead on paper (NOTES line ~919: >= 12 instr and
   needs FP16 x, which breaks the BF16 activation rule). dq lane CLOSED. Nothing in moe's lane reaches 1% of the layer score; asked the lead
   (COORD Results) to pause the moe loop (STOP-moe) like layer/proj until a build needs moe. Budget left today: moe board 4 checks, 8 submits.
+
+## n6s1 (2026-10-28 19:18Z - ): REDESIGN study (lead 18:50Z, human option 2); overlap premise re-tested on the H100; 0 judge runs, 0 Modal
+- REDESIGN.md written: no public write-up of any muse_moe entry (web search); vs Marlin/Machete the only structural
+  difference is the work partition (Marlin's striping = equal k-iterations per SM; ours = coarse 34-55 us items).
+- New per-shape gap table (real routing bytes, 100 seeds, 28.3 MB/expert at 4.5 TB/s): ours/ideal bs1 1.60, bs8 1.32,
+  bs16 1.23, bs32 1.21, bs128 1.42, bs256 1.53; excess us 9.9 / 16.5 / 16.6 / 21.2 / 59.7 / 82.0. => the gap to #1 sits in
+  bs128/bs256 (+ bs1). Big-M consumer floor (ALU 43.7 w/clk/SM + tensor at 77% peak, serial): bs256 ~160, bs128 ~125 us.
+- PREMISE RE-TEST (tools/n6s1/ovl.py; same SM as the H200): s18/s22/s27 "ALU work never overlaps wgmma, even in other
+  warps" is NOT a hardware fact. With SEPARATE per-WG loops (WG0 ALU only, WG1 wgmma only, 1 CTA, cycles/iteration):
+    FFMA || SS N32-256: 80-100% of the smaller hidden; INT LOP3/SHF || SS: 61-67%; exact twm dq() chains || RS N32/N64:
+    57-67%; LDS+INT || RS: 60-82%; LDS+INT || SS N32/64: 5-9% (smem contention), N128/256 53%. HGMMA N256 at 99.6% peak.
+  Same code with both WGs in ONE shared it-loop branching on wg (= mb_x.py's structure): ptxas serializes the wgmmas
+  (WARPGROUP.ARRIVE + DEPBAR gsb0 0x0 per HGMMA) and overlap turns negative. mb_x itself (shared loop) reproduces its
+  s27 numbers today (RT4 N32 829/743 vs 523 + 360).
+- twm pattern (each WG: dq -> RS wgmma on the freshly dq'd regs, double-buffered A, wait<1>; own loop): dq-only 102,
+  MMA-only 99 cyc, ONE WG dq+mma 388, TWO WGs 747-753 (= no overlap, matches the record). Not the operand values (NORM
+  normal-bf16 A: same), not pipeline distance (triple-buffered A: 743/850), not accumulator interleave (KG4 vs 4-acc: same).
+  A "constant-A" control (160/266) is INVALID: ptxas collapsed the 4 A sets into one register quad and DCE'd dq.
+- DISTA=1 (4 DISTINCT constant A quads per wgmma group, so ptxas can't collapse them): RS-MMA alone 307 (N32) / 383 (N64)
+  cyc vs 100/130 with one collapsed quad => reading the RS A operand from 4 different register quads is itself ~3x the
+  MMA cost. LEADING HYPOTHESIS for the twm "fresh A" penalty: RS A-register reads (one distinct quad per HGMMA, as twm
+  always has), not dq/tensor contention. ANOMALY to resolve first: in the same run the WG1 MMA took only 177/200 cyc
+  when WG0 ran dq at the same time (faster than alone). Re-measure with repeats and order swaps before trusting either.
+- If confirmed: (a) SS A (smem) may beat RS for twm at N >= 64 despite the STS traffic (s19 mb_ws used one loop for all
+  roles; redo it with separate per-WG loops); (b) the 4 A quads per k16 could share... (no: 4 row tiles need 4 quads).
+- Next session: (1) settle the DISTA anomaly (repeats, alone-first vs both-first); (2) clean separate-loop WS microbench:
+  dq WG -> STS swizzled bf16 A -> MMA WG SS, RT4 N32 / RT2 N64 twm stage shapes, against twm's 1046 / 737 cyc/stage;
+  (3) only then R1 (REDESIGN.md section 4) gate on the H200.
+- Session end ~20:05Z. 0 judge runs, 0 Modal. Commit has REDESIGN.md + tools/n6s1/ovl.py.
