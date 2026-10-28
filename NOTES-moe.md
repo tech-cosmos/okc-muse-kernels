@@ -2553,3 +2553,25 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   fence -> ticket atomic -> spin until all G CTAs ticked -> y32 reload -> reduce -> store), and replay loses the overlap
   of norm2's launch with tk2f's drain. Not layout. DEAD for good (with n5s19 norm2-as-PDL-secondary): keep moe_norm2.
 - Nothing to hand off.
+
+## n5s29 (2026-10-28 07:09Z - ~07:45Z): H200 HBM read-rate ceiling by load method (Modal probe): load-method lever DEAD; 0 judge runs
+- No lead answer to n5s25; moe checks 10-28 all used. New measurement for n5s27's open question (is tk2f's 4 x 18 KB ring
+  below the H200's stream ceiling, and would plain LDG or bigger copies stream faster?).
+- tools/n5s29/ov/bwprobe.py: cold streams over 6 distinct buffers per CUDA graph (us per kernel = replay / 6, median of 15),
+  LDG.128 (U 4/8/16 loads in flight per thread, 512 threads, 1/2/4 CTAs per SM, grid-stride or blocked per CTA, hints
+  nc+L2::256B / cg) vs cp.async.bulk rings (1 thread per CTA, S KB x NSTG stages). Modal H200, 0.8 GPU-min
+  (`python tools/h200.py muse_moe_w4a16 probe=muse_moe_w4a16/tools/n5s29/ov --cmd 'python bwprobe.py 85 280 560'`):
+            bulk64x3 bulk36x4 bulk18x8 bulk18x4 bulk18x4_g2 | ldgU8_g4 ldgU4_g2 ldgU8_g1 ldgU8blk_g1 ldgU8nc256_g2
+    85 MB    4.15     4.08     4.06     4.08     4.09       |  4.05     4.01     3.82     3.80       3.90   TB/s
+    280 MB   4.53     4.44     4.43     4.42     4.44       |  4.38     4.38     4.20     4.09       4.13
+    560 MB   4.57     4.54     4.52     4.50     4.52       |  4.48     4.47     4.29     4.28       4.18
+  H100 (local, same script): every method 2.9-3.1 TB/s (93% of peak), no method difference.
+- Readings: (1) cp.async.bulk is the fastest way to stream on the H200; LDG never beats it; LDG with 1 CTA/SM x 512
+  threads x 8 loads is 4-7% slower and the L2::256B hint hurts (-2..-7%). (2) At tk2f's 4 x 18 KB = 72 KB in flight per
+  SM a contiguous stream is already within 0.5-2.5% of the best (64 KB copies); 144 KB in flight (18x8, 2 CTAs/SM)
+  gains <= 0.4 us at 280 MB. So tk2f's ring is at the H200 stream ceiling; the d16/d32 gap to the stream probe is the
+  extra groups + routing + norm2 + barrier (n5s15/n5s20 decomposition), not the stream. (3) Fixed ramp+tail of a lone
+  stream kernel ~1.8 us (85 MB at 4.15 vs 4.53 TB/s asymptote). (4) Modal's contiguous 4.44 TB/s at 280 MB vs the judge
+  DIAG probe's ~4.0 TB/s (sq64, d32 266 MB) = the known Modal-vs-judge offset; compare only within a run.
+- Closes n5s27's open question for contiguous streams: no load-method / request-size / in-flight lever left in tk2f.
+  FYI to proj/layer (COORD): any LDG-streaming GEMV at 1 CTA/SM should try >= 2 CTAs/SM or a bulk-copy ring (H200 +4..7%).
