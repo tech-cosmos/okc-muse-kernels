@@ -2443,3 +2443,21 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   v32 336.8/510.2 = noise vs board. Not submitted (< 2.1580x).
 - Remaining torch-header libs (each ~45 CPU-s of header parse): g10 (one lib, many srcs), g24, g27 (use torch::empty inside),
   moe (30 launchers), attention csl/nds/nvs/nvscl. Not needed now (prepare_s 92 << 220 cap); convert if builds grow.
+
+## night5 s13 (2026-10-28 05:22Z-05:50Z, okc-night5 session 13): no build; lead's v157 scored run logged; lane request
+- Lead 05:20Z submitted v157 (job 35af50319e604b7b, r-layer 6b44d53 = check af87d466 code): **2.1420x** (CI 2.110-2.174),
+  passed, judge prepare_s 100.6 s. Board best stays 3e3b9fd3 2.1580x (#36 now). Tuner picks there: T=16 g30n:unpool (+qkv full),
+  T=32 full g24sk2 combo, T=256 lt all, rest default (ties within ~1 us). Don't resubmit v157.
+- 10-28 budget after it: 11 checks / 8 submits. No Handoffs or r-layer branches newer than v157 (moe 21deb8a = moe board
+  running the layer's bs256 config; moe HOT_NX exact-N probe is wrong for 105..128-token experts, probe only).
+- Re-checked candidate levers against the record (all already measured/bounded, nothing built):
+  * d1 full KV L2 prefetch during qkv (like KV_PF at sliding): moe s32-s35 H200 DIAG 'all-L2' only -1.2 us on 12.2; dead.
+  * hot-expert L2 prefetch predicted from weights: s55/s90 (skew comes from data, bound <= 1 us).
+  * router FP32 lossless compression: random FP32 mantissas, ~13% of 8 MB = ~0.25 us at T=1: not worth it.
+  * 11-bit qkv/pooler: a 3-bit exponent window leaves ~1.6% of Gaussian weights (~130/row) as escapes: net ~5% bytes, heavy
+    escape path; dead in this format.
+  * T=1 o+bnd+pr1 megakernel: every last-block/ticket epilogue form lost +1.4..2.8 us (s8, s14, s74, moe n5s13 OB8).
+- H200 af87d466 d32 sl (weakest shape, 1.687x): tk2f 91.7, g30 x3 43.6 + g30k pooler 21.2 (incl. PDL pre-wait time), nds 10.2,
+  norm2 10.2, router_split 7.2 + routing 4.1 beside the pooler. GEMM excess vs 4 TB/s there is ~20-30 us but is proj's
+  closed g19/g24/g30 consumer-bound line (and pr32 = router fused into the pooler lost on H200).
+- 0 judge runs. Asked the lead for a lane (COORD Requests).
