@@ -1,8 +1,12 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
+BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-night5 s9: **main = v152** = v150 + T=8 TUNE_BASE {cslpw, pr8_npf 220} (H100 real routings + H200 tuner agree); TUNE[1]/[8] tk2fx-off
+night5 s10: **main = v154** = v153 + T=8 sl base g30n:o (H200 tuner picked it twice; test/scored/opt OK; not checked).
+  v153 = v152 + proj G30_GX (branch proj/g30gx afc0c8b: TUNE options; H200 tuner: g30kgx:pooler T=32 sl -0.3..0.6 us picked,
+  rest tie) - pr32 builds (cold 220 -> 161.5 s). check 60f02748 2.1373x -> submit 3e3b9fd3 2.1580x (board best). 10-28 budget
+  after: 14 checks / 9 submits.
+night5 s9: main = v152 = v150 + T=8 TUNE_BASE {cslpw, pr8_npf 220} (H100 real routings + H200 tuner agree); TUNE[1]/[8] tk2fx-off
   options dropped (real routings +0.5..1.7 us). check bb8ea548 (v151 = same + nu8d/nu8x off in the base) **2.1168x** (within 1%; v1
   2.358/2.237 not a clear win: not submitted). H200 tuner: nu8d/nu8x ON wins -1.1/-1.6 us (H100 said off): reverted to options in v152.
   v152 validate test/scored/opt/fuzz OK (v151 full ALL OK, cold 162.5 s). 10-28 budget: 15 checks / 10 submits. v152 not checked (tie).

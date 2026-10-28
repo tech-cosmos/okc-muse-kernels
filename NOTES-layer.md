@@ -2373,3 +2373,9 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   H200 tuner GX: T=32 sl default 155.0 | g30kgx:pooler 154.7 (picked, confirm 154.9 vs 154.3) | g30gx unpool 155.2 / o 154.8 /
   both 155.5 | all three 155.2; T=32 full default 319.0 | g30kgx 318.0 | gx o/unp 318.8 (picked tk2h 3 at 317.9); T=16 sl/full
   g30n:o+g30gx:o 167.2/231.4 vs default 166.3/231.5 (tie). So GX in-layer on the H200 = g30kgx pooler -0.3..1.0 us, rest tie.
+- **submit 3e3b9fd3 (v153, 3ef3268) 2.1580x = new board best** (CI 2.126-2.190; was 2.1339x 35dd53d0), #35 (#1 2.399x). us:
+  d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4 (v16 SGLang drew slow: 541/725).
+- v154 (51acdef) = v153 + T=8 sliding TUNE_BASE g30n:o (picked by the H200 tuner in both bb8ea548 and 60f02748); T=8 options
+  {g30n:o True} (full) + {g30n:o False} (sliding escape). test 0/13, scored 0/12, opt 0/252. Not checked (tuner-pick pin: a tie).
+- Next: nothing new queued from moe/proj. Open item = T=1 o+bnd+pr1 megakernel (bound ~0.5% d1). T=32 base could take
+  g30kgx:pooler if the next H200 tuner picks it again (one pick so far, -0.6 us).
