@@ -1,53 +1,21 @@
-# STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log
-Updated 2026-10-28 00:05 UTC (night5 n5s5 = session 5). **G30_PL WIN**: g30's in-loop escape patch made cheaper (sorted keys in a
-per-thread smem list: pop = 1 LDS, fragment idx precomputed; MTOK <= 32 only, +17 KB smem). H200 diag b3ff96fb m32 -0.2..-0.5 us/call.
-**proj board best: submit eb166fc0 (34b7483) 1.3574x** (check 73b3e2e7 1.3771). Layer: branch proj/g30pl 19d3f19 (v144 + PL), validate ALL
-OK, cold 156.2 s, Handoff posted. Dead: fixup warp reading x from smem (G30_FXS, +0.8..1.4 us H100). Checks 10-27: 15/20, scored 4/10.
-NEXT: watch layer merge proj/g30pl; then the T=128 g30 (PL doesn't fit smem there: shrink rings or keep keys in fewer bytes).
-Updated 2026-10-28 00:00 UTC (night5 n5s4 = session 4). **FOUND: g30's escape path costs 1.5-2.0 us per call on the H200** (check 198e7084,
-_diag30e g30 vs -DG30_ESC=0, m32 after a 3 us pred: qkv 12.9 vs 11.35, pooler 16.6 vs 14.7, unpool 15.2 vs 13.1; standalone -0.6..1.2) =
-~4-5 us per d16/d32 load (~0.8% layer) if escapes were free. Cause (H100 bisection): in-loop patch events stall the warpgroup's wgmma.
-Exact off-loop variants built (dev/n5s4/g30e_src.cu: ESCM end-fixup, FXW fixup warp) but not yet faster: NEXT = timeline the FXW warp /
-x from the smem ring (NOTES n5s4). Dead: qkv stream-K on 132 CTAs (H200 -0.2 us, check 6d9063a1); ~11-bit format (3-bit exp window
-escapes 5-7%). H200 also says g30 S2 pooler beats layer's g30k G104 by 3.2 us in isolation (told layer). Checks 10-27: 13/20, scored 3/10.
-Updated 2026-10-27 20:55 UTC (night5 n5s3 = session 3). r-layer branch **proj/g30k139 deb4a62** = main v139 + g30k138 + g30n qkv_gate
-actually built (v139 skipped it: K % 384 guard; kernel splits K unevenly) + moe pr32 TUNE option (embedded, prebuilt). validate ALL OK,
-cold 162.2 s; H100 tuner T=32 picks g30k104+g30n unp+qkv (sl 214.8 vs 220.1, full 433.3 vs 438.0). Proposed as the 00:00Z layer bundle.
-proj check 7cbaa0fd 1.3387x: H200 says g30 rings 16/16 beat 20/8 on every m16/m32 shape (probe reverted). Checks 10-27: 11/20, scored 3/10.
-g30 ORACLE (n5s3): decode off saves only 0.8-1.2 us/call on H100 (g30 ~85% of HBM): decode is not the cap. NEXT: layer's H200 tune
-lines for this bundle; qkv g30k-style stream-K on 132 CTAs (qkv is the most latency-bound: 108 CTAs, 2.2 TB/s); ~11-bit format.
-Updated 2026-10-27 20:45 UTC (night5 s100 = session 2). **proj board best now submit a0168544 = ffb1ae8, 1.3543x** (check 7ad5148c
-1.3998; before a12513ed 1.3483): g30/g30n (12-bit W in wgmma A regs, dev/g30_src.cu = layer's copy) added as tuner candidates BF16_G30 at m16/32/128.
-H200 picks g30 at pooler m16, unpool m16/m32, qkv m16/m32 (-0.4..-2.2 us vs cuBLASLt); pooler m32 tie, o and m128 lose (per-shape
-lines in NOTES s100 + COORD Handoffs). Also rebased g30k onto layer v138: r-layer branch **proj/g30k138 2079aae** (+ T=32 g30 rings NW16/NS16; validate ALL OK,
-cold 149.6 s) = the proposed 00:00Z layer bundle (COORD Requests). Checks 10-27: 10/20, scored 3/10. NEXT: read layer's 00:00Z tune lines (g30k 104/120, g30n qkv T=32); more proj g30 configs (qkv m16/m32 rings, pooler m16 S2 NW20 NS8) are cheap H200 probes.
-Updated 2026-10-27 19:40 UTC (night5 s99 = session 1). **g30k BUILT** (stream-K g30 pooler on G <= 112 CTAs, FP32 slabs summed by the
-pooler rmsnorm; no reduce kernel, deterministic, one-hot bit-exact): r-layer branch proj/g30k, TUNE options T=32 {g30k:pooler 104},
-{g30k:pooler 120}, {g30k:pooler 104, g30n:unpool}; T=16 {g30k:pooler 104} (+ ZN zeroing of the unpool g24's out). H100 in-layer TUNE
-off: d32 G104 sl -1.1..-2.0, full -1.5..-1.7 us vs g24 pooler; G>=120 +14 (router starves on H100; H200 router ~3x faster).
-d16 G104 with ZN sl +1.1..1.5, full -1.6..-4.0. H100 tuner picks g30k 104 + g30n:unpool at T=32 (sl -2.6..-2.8, full -2.0..-2.3).
-validate --quick ALL OK, cold prepare 170.7 s; branch proj/g30k 69ec7cb (on v137), Handoff in COORD. NEXT: layer's H200 tune lines; g30k for qkv T=32 / unpool T=16. NOTES s99. moe is building a one-launch pooler+router (COORD claim 19:05Z): overlaps.
-Updated 2026-10-27 17:50 UTC (s98, wrap-up before the sandbox move). s97 A/B script saved to muse_bf16_proj/dev/s97/synab.py
-(+log; run from a layer clone dir with bench.py: `python synab.py <submission.py> <rounds>`). NEXT on the new sandbox: (1) check COORD
-for layer's verdict on proj/g30n (H200 'layer tune T=32' lines); (2) pooler g30n with fewer CTAs (S1 at <=100 CTAs so the side-stream
-router keeps SMs) only if lead agrees (moe s49 proposed the same: coordinate, one owner); (3) validate any new layer bundle. 0 checks.
-Updated 2026-10-27 17:35 UTC (s97). The s96 tuner '+9 us at T=32 full' for g30n:unpool is an artefact: same-process A/B on the
-tuner's synthetic input = tie at full, -1.4 sl; real d32 sl -2.1, full -0.4. Recommended to layer as sliding default (COORD). NOTES s97.
-Updated 2026-10-27 17:25 UTC (s96). g30n (s95 g30 at T=16/32) wired into the layer on r-layer branch proj/g30n (TUNE options
-"g30n:<key>", off by default). H100 in-layer (TUNE off): unpool T=32 -1.2..-2.1 us (2 runs, all 4 d32 rows) = WIN; pooler S2 +9..11
-(128 cluster CTAs fight the side-stream router), pooler S1 d16 full -0.8 / sl +2.5..3.3; T=16 unpool, qkv S3: tie. Options added:
-TUNE[32] {g30n:unpool} only (proj/g30n 453790c; validate ALL OK, cold 122.3 s; H100 tuner picks it at T=32 sl -1.0..-1.4,
-rejects at full: +9 us there, unexplained). Pooler g30n (S1/S2) and T=16 all dead in-layer. NOTES s96.
-Updated 2026-10-27 17:40 UTC (s95). g30 at T=32/16 BUILT (dev/s95: G30_MTOK 32/16 + G30_S 2 cluster split-K with DSMEM reduce):
-bit-exact; H100 after a 3 us PDL pred: unp m32 17.4 vs g24 20.3, pool m32 (S2) 18.9 vs g24 21.5, unp m16 17.2 vs 18.7, pool m16 tie.
-Needs NW>=16 (1 CTA/SM) under PDL. G30_S<=4: qkv S3 m32 12.3 vs g24 13.4; o 5.7/6.0 vs 6.8/7.3.
-Handed to moe/layer for in-layer A/B (Handoffs proj s95). NOTES s95.
-Updated 2026-10-27 (s94). G30_PRE (escape header read before the PDL wait) on r-layer branch proj/g30pre (88ba088, on g30sort):
-in-layer H100 v16 medians sl 0/-1.6/-0.9, full -1.5/-2.2/-0.3 us, bitwise equal: small likely-win, handed to layer. NOTES s94.
-Updated 2026-10-27 16:55 UTC (s93). g30_sort in-layer = TIE (r-layer branch proj/g30sort ad581f9, bitwise same). g30 split-K with
-DSMEM K-cluster reduce (dev/s93, G30_KC=1/2) DEAD: cluster+reduce ~2-2.5 us; qkv S3 18.9 vs cuBLAS 19.8, pool S2 loses. NOTES s93.
-s82/s83 (nu8d race found+fixed in layer; tools/stream_fuzz.py): see NOTES.
-Older session headers (s46-s80): see NOTES-proj.md (sessions are logged there in order).
+# STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log (sessions in order, newest last)
+Updated 2026-10-28 02:25 UTC (night5 n5s6 = session 6). Lane: the layer's T>=16 GEMMs (proj board = test bed only).
+**G30_GX BUILT (dev/g30_src.cu -DG30_GX=1, off by default; records = dev/n5s6/gx.py = sub_template _g30_gx_tables)**: g30 escapes
+taken OUT of the main loop. prepare() builds per (64-row tile, K split) an int32 record (sorted escape cols, (slot,row,last,col&7,v)
+list); 4 extra "escape warps" (warps 10-13) bulk-copy it before the PDL wait, TMA x boxes {8 cols, MTOK} at each escape col after
+it, build an FP32 corr tile (red layout) while the consumers stream; WG1 writes red = d + corr. Main loop = the no-escape loop.
+One-hot exact (dev/n5s6/gxm.py), bench test 39/39, esc PASS. **H200 check 53639fe3 (acae6b8) 1.3608x, _diag30e GX vs g30, m32:
+after a 3 us PDL pred qkv 12.0->10.9, pooler 15.6->14.5, unpool 14.7->13.1..14.1 (-1.1 us/call); standalone qkv tie, pooler +1.0,
+unp +0.6.** H100 m16 after pred qkv -1.2, pool -0.3, unp -0.8..-1.1. So GX = a win for PDL-secondary g30 calls only (layer:
+unpool g30n T=16/32, o g30n T=32; pooler is g30k there = needs a GX port; qkv first op = standalone = tie: leave qkv on PL).
+Under GX the 3rd g30_gemm arg is the record tensor (int32 [N/64*S, rlen]) instead of hdr; None from _g30_gx_tables = use non-GX.
+Dead this session (NOTES n5s6): x gathers by the x producer per stage (starved warp, +4 us), any LSU/cp.async/local-memory load
+during the W stream (starved behind TMA: +7..18 us), in-kernel escape setup (+5 us), walk on WG1 at the end (+1.5 us).
+**proj board best: submit eb166fc0 (34b7483) 1.3574x.** Checks 10-28: 1/20, scored 0/10.
+NEXT: (1) port GX to the layer: r-layer branch proj/g30gx = layer main + this g30_src.cu + records built next to pack30 for the
+g30n unpool/o calls as TUNE options {g30gx:unpool}/{g30gx:o} at T=16/32; H100 in-layer A/B + validate + cold prepare, Handoff.
+(2) GX in g30k (layer pooler at T=16/32). (3) GX at T=8 (MTOK 8 o) and T=128 (smem: gbuf 64 x 128 x 16 B too big; cap GXC 16?).
+Older session headers (n5s1-n5s5, s46-s100): NOTES-proj.md.
 ## Board
 - **Best: submit eb166fc0 = 34b7483, 1.3574x** (n5s5, G30_PL). Before: a0168544 = ffb1ae8, 1.3543x (s100b, g30 picks + m32 rings 16/16). Before: a12513ed 1.3483x. Before: 1ff4721e87c844c2 = ca7e557, 1.3233x (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
   Before: 71145e34 (a1f0af7) 1.307x (router3 at router m9-128).
@@ -167,25 +135,8 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## s89: xrm dead (above). Pitfall: remote mbarrier arrive with .release.cluster ~0.7 us each; use plain .shared::cluster form.
 ## s88: WPB 20-32 / R=2 ILP dead; NOW profile: loop ~47% of warp time, setup ~29%, task ends ~19% (dev/s88 ncu tools).
 ## s61: g24 m32: ncu NOW 30% issue / 22% tensor (latency-bound, loop already well scheduled: G24_G dead); XSP/DF/WPB16 dead on H200.
-## Next (ranked):
-0000. (s96) DONE as branch proj/g30n (see header); next: layer merges + H200 check; pooler g30n only with fewer CTAs (S1) or router moved.
-00000. (s95, old) g30 T=16/32 (dev/s95, exact): H100 per call d32 qkv -1.1 pool -2.6 unp -2.9 o -1.3; d16 qkv -0.5 pool -0.4 unp -1.5 us
-   vs g24. If moe/layer haven't, port on an r-layer branch: second g30 lib per (MTOK, S, NW, NS) (unp S1 NW20 NS8, pool S2 NW20 NS16,
-   qkv S3 NW16 NS16; layer.py _g30_build keyed by DEFS), TUNE options g30:<key> at T=16/32 in _g19's dispatch (BF16 out; _tail's
-   boundary takes BF16 via RB=dtype; unpool's g24 ZN/G24X/G24P zero-ahead then falls back to kernel_fn's zero_()), in-layer ab2
-   d16/d32 + validate. Then H200 via a layer check.
-000. (s94) layer: watch for g30_sort + G30_PRE (branch proj/g30pre) port; validate the bundle if asked.
-   (s91) g30 escapes handed to layer: help layer integrate g30 at T=128 (qkv shape, T=256, PDL, TUNE option) if asked;
-   validate its bundle (tools/validate.py on proj/validate) before its check.
-00. LANE (b) (lead 08:55Z): read COORD Requests for layer bundles; port + validate on proj/<name> branches (tools/validate.py on proj/validate).
-0a. Layer: watch for G24P (Handoffs proj s63) in a layer check; read 'layer tune T=32' {'g24p': True} vs default (sl/full).
-1. Layer: watch for g27 (Handoffs proj s57/s58) in a layer check; read its "layer tune T=16" g27:o line.
-2. g27-style (no cross-block split-K, PD) for other T=16/32 calls is limited by registers (PD 127 regs x 512 thr): look at
-   2 CTAs/SM g27 with fewer regs that keeps x reads per SM low (x is read by every block: +4 MB = +3 us at m16).
-2b. m32 consumer: decode-overlap / split-role ideas are moot (s62: no-decode BF16 rows cost the same consumer time).
-3. PD (pre-wait decode into registers) for other T=16 g24 calls where a warp slice fits (qkv/pool need split-K: g24 PD).
-3b. DEAD s86 (built: dev/s86/gemv28pp.cu). (s64) g28 ping-pong variant (MMA WGs decode their own B tiles, no cross-WG handoff per stage, KA>=2, BN 256 at 384 thr):
-   only if a NOW skeleton shows < ~0.1 us/stage on the H100 first (NOTES s64).
-3d. (s70) T>=16 cuBLAS no-PDL gaps: nvjet cannot be a PDL secondary; only an own GDC-enabled CUTLASS GEMM could (<=1 us/GEMM).
-3c. (s65) Dead too: g27 PD at T=8 for o. Remaining v1 item: none cheap (pr8 tail balancing ~0.1-0.2%, NOTES s37/38).
-4. Below the line: pr8 K-split tail, 11-bit, g22/g23/DeepGEMM m128/256, hybrid BF16 rows (s62): dead.
+## Next (ranked): see the header NEXT. Standing items:
+- LANE (b) (lead 08:55Z): port + validate layer bundles on r-layer proj/<name> branches when asked (tools/validate.py, cold prepare).
+- Watch layer merges of proj/g30pl (G30_PL) and the H200 'layer tune' lines for g30n/g30k/pr32 options.
+- Below the line / dead: pr8 K-split tail, 11-bit format, g22/g23/DeepGEMM m128/256, hybrid BF16 rows, qkv stream-K, off-loop
+  escape fixups from L2 or by a gating warp (n5s4/n5s5), d1 GEMV ramps (s70/s71: at reader + ~1 us).

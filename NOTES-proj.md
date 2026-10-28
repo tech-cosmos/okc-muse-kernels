@@ -2154,3 +2154,33 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   **submit eb166fc0 1.3574x = proj board best** (was 1.3543).
 - Layer port: r-layer branch proj/g30pl (worktree /tmp/pjpl off main 4b30a76 = v144): g30_src.cu patch only (g30n uses g30_kernel ->
   PL at T=8/16/32; g30k unchanged).
+
+## n5s6 (2026-10-28 00:00-02:25Z, night5 session 6): G30_GX = g30 escapes out of the main loop (H200 -1.1 us/call as PDL secondary)
+- Goal: the n5s4 H200 escape cost (1.5-2.0 us/call after a pred; PL took 0.2-0.5) without in-loop patch events.
+- Final design (dev/g30_src.cu -DG30_GX=1, G30_GXN=4 escape warps, GXC 64 cols, GXR 512 words; records dev/n5s6/gx.py,
+  inlined in sub_template as _g30_gx_tables): escapes decode to 2^-15 in the main loop (no patch); prepare() builds per (tile g,
+  split y) int32 [rlen]: [0] ncols, [1..5] list starts per 16 rows + end, [8..8+GXC) sorted unique escape cols (slot = index),
+  [8+GXC..] uint2 (slot | row<<16 | last-of-row<<22 | (col&7)<<28, v bits) in row order. Warps 10..13: warp 10 bulk-copies the
+  record before griddepcontrol.wait; after it, TMA 2D boxes {8 cols, MTOK} (no swizzle) at (col & ~7) per escape col into gbuf;
+  each warp owns 16-row groups, zeroes its corr slice, then walks its entries flat (unroll 4; lane = token): cn += x,
+  cp = fma(x, v, cp), at last-of-row corr[red idx] = fma(cn, -2^-15, cp). WG1: bar.sync 3 (+escape warps), red = d + corr.
+  One-hot exact (red = 2^-15 + (v - 2^-15) = v when v - 2^-15 is exact in FP32, i.e. |v| >= ~2^-38 rel.), bench test 39/39, esc PASS.
+- H100 (dev/n5s6/gxm.py M keys rounds; old = main g30 (PL), noesc = -DG30_ESC=0 wrong-output oracle), us standalone | after 3 us pred:
+  m32 qkv S3 old 14.0 | 12.7-12.8, GX 14.9-15.0 | 11.3-11.4, noesc 14.0 | 11.3-11.4; pooler S2 old 20.3-20.7 | 19.8-20.1, GX 20.6-20.7 |
+  19.9-20.4, noesc 20.3-20.5 | 19.7; unp S1 old 19.0-19.1 | 17.7-17.8, GX 19.2 | 17.1-17.8, noesc 18.9-19.0 | 16.9-17.0.
+  m16 after pred: qkv -1.2, pool -0.3, unp -0.8..-1.1; standalone ties.
+- **H200 check 53639fe3 (acae6b8) 1.3608x** (diag only, picks unchanged), _diag30e g30 | GX m32: standalone qkv 13.2/13.1, pooler
+  17.1/18.1, unp 16.0/16.6; **after 3 us pred qkv 12.0/10.9, pooler 15.6/14.5, unp 14.7/13.1-14.1**. rel err identical.
+- Use: PDL-secondary g30 calls (layer unpool/o g30n; pooler needs GX in g30k). Not qkv (first op, standalone tie) or the proj
+  board (standalone timing: pooler/unp lose 0.6-1.0).
+- Dead ends on the way (each measured, qkv m32 S3 H100 after pred, noesc 11.6):
+  * x producer gathers x from the x stage it is about to refill (+ smem mask/scan setup before the wait): 20.5 us. Bisected:
+    pre-wait header loads + mask delay the first x TMA (+1.4); per-stage gather on the starved producer warp (+4; the x LDS only
+    ~2.4 of it); WG0 divergent per-thread fixup loop (+0.8).
+  * gathers by cp.async 4 B from global (L2) during the stream: +7..18 us: LSU loads starve behind the saturated TMA W stream
+    (= the n5s4 FXW mystery). Same for local-memory spills: a lambda capturing a register array by reference -> 280 B stack ->
+    setup 10 us. RULE: during a TMA stream, no LSU global/local loads on anything that must finish in time; use TMA/bulk copies.
+  * in-kernel escape setup (mask, scan, compaction) on one warp: ~5 us (serial latency chain on a starved warp): precompute in prepare().
+  * TMA tile box whose inner start coordinate is not 16 B aligned -> ILLEGAL INSTRUCTION (UTMALDG): box at col & ~7, pick col & 7.
+  * fixup walk on WG1 after the loop (+1.5 us on the tail); one escape warp (walk ~3-4 us, qkv +1.5); nanosleep before the walk worse.
+- Check 53639fe3: 1/20 checks 10-28.
