@@ -1,0 +1,7 @@
+n5s13 (lead 2026-10-28 01:10Z item 1): T=8 o -> boundary -> pr8. DEAD on H100 (see NOTES-moe n5s13).
+ob8_tail_src.cu = r-layer ob8_src.cu (s86 OB8) + tail mode (pdl & 4, KT = (pdl >> 8) & 255, needs bk 128 and KT 32):
+only the last KT o-blocks to finish (ticket on ob8_bar) wait for the grid; they do the boundary's elementwise pass
+(one float4 per thread) from per-block partials; the others exit so pr8 ramps on their SMs.
+layer_ob8tail.diff: layer.py OB8_TAIL / OB8_X flags (+ zeros 4096 extra ob8_part floats for stamps) and build.py
+embedding ob8 again. ob8_stamps.py: per-block globaltimer stamps (needs the stamp lines, removed from this copy).
+Run in a /tmp copy of r-layer muse_decode_layer with `TUNE = {}` appended (else the tuner may pick g30n:o over ob8).

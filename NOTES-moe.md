@@ -2210,3 +2210,30 @@
 - Re-checked proj's FYI (g30 S2 pooler beats g30k G104 by 3.2-3.5 us standalone, lost in-layer to the side-stream router):
   a serial router-before-pooler order nets <= ~0.5 us (router ~2-3 us on the critical path): not built.
 - Housekeeping: STATE-moe.md compressed to 138 lines (n5s4-n5s11 session headers -> one NOW block).
+
+## n5s13 (2026-10-28 01:10Z - 02:30Z): lead 01:10Z items (v1 o -> bnd -> pr8; T=8 tk2f first copy); 0 runs
+Base: /tmp copy of r-layer main c0413d8 (v148), H100, `TUNE = {}` appended to every A/B file (with the tuner on, a
+noisy pick of g30n:o silently replaced ob8 in the first A/B: always pin the tuner for flag A/Bs).
+- v1 sliding timeline (tools/timeline.py, s99): o g12 ends ~28-30, Triton _boundary ends 2.5-4.1 us later, pr8 ends
+  ~22 us after the boundary. Ablations:
+  * boundary with both reductions removed (rb = rs = 1): bnd tail after o unchanged (3.7/3.9 vs 2.5-4.1): it is
+    wait-release + L2 load + store latency, not compute.
+  * ORACLE bnd free (its gdc_wait removed: wrong output, timing only): pr8 ends 22.0/22.4 us after o vs 24.9-27.6
+    => upper bound ~3-4 us v1 sl (proj s80's oracle: -4.2).
+- Built: OB8 TAIL mode (tools/n5s13: s86's ob8 kernel = o GEMM + algebraic boundary partials, but instead of the full
+  grid barrier only the last KT blocks to finish (ticket) wait and do the elementwise pass; the other blocks exit so pr8
+  ramps on their SMs). Per-block globaltimer stamps (ob8_stamps.py) found, in order:
+  1. elementwise loop with stores between dependent loads: serialized L2 round trips (fixed: loads first, float4);
+  2. pre-spin loads in the spinning thread made the spin end 6-10 us late (an acquire/fence waits for them);
+  3. the remaining floor: ticket -> end ~4.5-5 us = 2 round trips (partials, then cold `s` from HBM) at ~2 us each
+     while pr8's 100+ blocks ramp (HBM queues full). Loading s before the spin only moves the wait into the fence.
+  The Triton boundary pays ~1 round trip after o (it loads s/alpha/beta/gain BEFORE its PDL wait, during o).
+- H100 ab_files 5 rounds (tuner off), v1 sliding / full: main 144.51 / 156.19 | OB8 full barrier 147.20 / 158.14 |
+  OB8 tail KT=32 145.92 / 157.18 => DEAD (+1.4 / +1.0 us). Not handed off.
+- Lesson: on the H100, after o every extra global round trip costs ~2 us because pr8's pre-wait ramp saturates HBM;
+  the boundary's 2.5-4 us is ~ 1 round trip + launch/flush hops. Any fused version must load its operands before the
+  barrier (only the blocks' OWN columns are known then -> needs all blocks alive = OB8's full barrier, which blocks pr8).
+- Item 2 (T=8 tk2f: first expert copy straight from the router's output): NOT built. Same timeline: tk2f (TK2FX, PDL
+  secondary of the rmsnorm which triggers right after its wait) starts 0.3 us after pr8 ends. Moving tk2f's route
+  prologue into pr8's routing block keeps the chain serial (same work, one global round trip either way; routing ->
+  first weight byte = data dependency). Bound ~0.5-1 us v1 only, and per the round-trip lesson above likely 0.

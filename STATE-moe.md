@@ -1,16 +1,12 @@
 # STATE-moe
 
-## NOW (n5s12, 2026-10-28 01:10Z): NO OPEN MOE LANE. Lane request to lead (COORD Requests n5s10) unanswered.
-- Every moe item is closed on H200 data: tk2f (layer-owned, s81), twm/twq dq (s18-s30), attention (s45), pr32 at T=16/32
-  (n5s10: layer check 4937830f tuner, g30k104 beats it by 2.3 us) and T=8 (n5s8), batch-1 chain persistent kernel (n5s9 audit:
-  bound 3-4.5 us d1 < lead's 8 us threshold). Don't rebuild these without a new mechanism; NOTES n5s1-n5s12 hold the numbers.
-- Enabler for layer (n5s11): tools/n5s11/cuda_strip.py strips CUDA comments from a built submission.py (judge 1,000,000 B
-  limit; v145 963.7 -> 890.6 KB, SASS identical). Offered under COORD Requests; layer decides.
-- Latest H200 layer profile (r-layer profiles/submission.133068b877b54e3c.txt, 2.1097x): experts still the biggest slice:
-  d1 sl tk2f 28.2 (full 20.7), d16 sl 64.8, d32 sl 75.4 (+norm2 11.2), v1 sl 63.8 (full 35.9), v16 sl twm 159.2 + moe_norm 33.6,
-  v32 sl twm 208.6 || hot 115.3. Gaps vs floor: STATE-layer table (v16/v32 sl ~6% each = twm, dq-bound, closed).
-- Checks: moe 20/20 and attention 20/20 unused on 10-28 (moe board = test bed only; attention board = record only).
-- pr32 files (dead, kept for reference): tools/n5s1 (pr32_src.cu = head.cu + body3.cu), n5s3 PR_SA, n5s8 PR_F32, n5s10 tune parser.
+## NOW (n5s13, 2026-10-28 02:30Z): lead 01:10Z items DONE on H100, both no-go. Next lane: ask lead (COORD Results).
+- (1) v1 o -> bnd -> pr8: oracle (bnd free) bound -3..4 us v1 sl; OB8 tail-barrier build (tools/n5s13) +1.4 sl / +1.0 full,
+  OB8 full barrier +2.7 / +2.0 (H100 ab_files, tuner off). Floor: every post-o global round trip ~2 us under pr8's ramp.
+- (2) T=8 tk2f first copy from the router: not built; tk2f already starts 0.3 us after pr8; bound <= 0.5-1 us.
+- Every other moe item closed on H200 data (n5s12 list): tk2f (layer-owned), twm/twq dq, attention, pr32, batch-1 chain.
+- Enabler (n5s11): tools/n5s11/cuda_strip.py (layer 1 MB judge limit). Offered under COORD Requests; layer decides.
+- Checks: moe 20/20 and attention 20/20 unused on 10-28.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding

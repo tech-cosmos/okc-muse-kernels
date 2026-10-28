@@ -1,0 +1,37 @@
+994a995,996
+> OB8_X = 0
+> OB8_TAIL = 0  # n5s13: tail mode, last OB8_TAIL blocks do the elementwise pass (0 = full grid barrier)
+2898,2903c2900,2909
+<         256: ({}, {"rg": False, "twf_split": 0}, {"rg": False}, {"twf_split": 0}, {"twf_split": 1022}, {"nvscl": False, "sl": True},
+<               {"lt:o": True}, {"lt:unpool": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76},
+<               {"twm_tail": 32}, {"hot": 40}, {"lt:qkv_gate": False})}  # s84: aplan  # s77 stacks
+< # n5s8: T=256 base {rg, twf_split 66}: H100 real routings (seeds 99/7/13, 3 rounds, all 36 old options) sl -6.6, full -10.8 us vs
+< # {hot 32} alone (every seed); options losing there dropped (hot 0/24 sl +12/+17: the f824b925 H200 tuner picked hot 24 on its
+< # synthetic routing and v32 sl ran 378 us; twq +14..22; gnorm/fr/bkt off +2..8; twm_hot +1..4).
+---
+>         256: ({}, {"nvscl": False, "sl": True}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
+>               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
+>               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
+>               {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
+>               {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True}, {"twf_split": 66},
+>               {"twf_split": 66, "twm_order": 76}, {"twf_split": 1022}, {"twf_split": 1022, "twm_order": 76}, {"fr": False},
+>               {"fr": False, "twm_order": 76}, {"fr": False, "twm_order": 76, "lt:unpool": True}, {"hot": 0}, {"hot": 24}, {"hot": 40},
+>               {"rg": True}, {"rg": True, "twf_split": 1022}, {"rg": True, "twf_split": 66},
+>               {"rg": True, "twf_split": 66, "lt:o": True}, {"rg": True, "twf_split": 66, "lt:unpool": True},
+>               {"rg": True, "twf_split": 1022, "lt:pooler": True, "lt:unpool": True, "lt:o": True},)}  # s84: aplan  # s77 stacks
+2914c2920
+<              (256, True): {"hot": 32, "rg": True, "twf_split": 66}, (256, False): {"hot": 32, "rg": True, "twf_split": 66}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
+---
+>              (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
+3198c3204
+<     state["ob8_part"] = torch.empty(G12_CFG["o"][3] * 32, dtype=torch.float32, device=dev)  # s86 OB8 per-block partials
+---
+>     state["ob8_part"] = torch.zeros(G12_CFG["o"][3] * 32 + 4096, dtype=torch.float32, device=dev)  # s86 OB8 per-block partials
+3505c3511
+<                              | 2 * _opt(state, tokens, "ob8late", OB8_LATE))
+---
+>                              | 2 * _opt(state, tokens, "ob8late", OB8_LATE) | (4 | 256 * OB8_TAIL | OB8_X if OB8_TAIL else 0))
+74c74
+< DEAD_SRCS = ("22", "OB8")  # n5s6: g22 (G22_CFG = {}, s22 dead) and ob8 (OB8 False, s86 dead) not embedded: judge 1 MB limit
+---
+> DEAD_SRCS = ("22",)  # n5s6: g22 (G22_CFG = {}, s22 dead) and ob8 (OB8 False, s86 dead) not embedded: judge 1 MB limit
