@@ -2302,3 +2302,15 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   ONE cluster, DSMEM reduce: 2-4 CTAs of a cluster; untested); (b) layer v160 NORME_TRIG already overlaps the T=128 unpool W prologue
   with twm's drain (-2..4 us H100) = the overlap route is the layer's.
 - 2 moe-board checks used (a763ccaf, e6416b6f) of proj's 8 today. 0 submits.
+
+## n5s12 (2026-10-28 06:22Z-06:45Z, night5 session 12): no lead answer to the n5s11 lane ask; paper check of what is left; 0 judge runs, no build
+- Re-read the H200 a763ccaf timelines for the "first-wave ramp ~8-10 us" at bs128 (v16: first ~35 us at 3.0 TB/s, then 3.5-4.0).
+  First wave = heaviest-first N16-32 gemm13 items (43-52 us vs N8 37 us): consumer-bound. moe n5s25/s30: N8 items are consumer-bound
+  at ~the HBM share too (34.4 us warm at G16), so reordering/mixing heavy+light only moves the dip (o76/o1 alternation measured
+  ~0). Ramp = consumer time, already in busy/G: NOT a separate item.
+- Cluster/DSMEM K-piece combine (my last untested drain idea): on paper DEAD. s93 measured cluster co-scheduling skew ~1.2 + DSMEM
+  reduce ~1.3 us per tile = ~2.5 us vs the ~3 us global piece epilogue, and twm is a dynamic-claim persistent kernel: both CTAs
+  of a cluster would have to claim the same tail item together (one waits for the other's current item). Gain <= ~1 us: not built.
+- Also re-checked: lossless NVFP4 code compression (random_weights e2m1 codes are uniform 4.0 bits: nothing), 11-bit BF16 (dead
+  n5s4), drain-time L2 prefetch of unpool W (dead, layer s6 / moe), row-split tails (TWM_TAIL dead s30).
+- => twm bs128 lane fully closed in proj's hands. Asked the lead again (COORD Requests n5s12).

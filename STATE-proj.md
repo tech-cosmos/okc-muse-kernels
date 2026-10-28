@@ -1,5 +1,5 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log (sessions in order, newest last)
-Updated 2026-10-28 06:25 UTC (night5 n5s11 = session 11). **LANE (lead 03:50Z/04:50Z): twm big-M = bs128 (T=128) for proj**
+Updated 2026-10-28 06:45 UTC (night5 n5s12 = session 12; n5s12 = paper check only, twm bs128 fully closed incl. cluster/DSMEM combine and first-wave ramp: NOTES n5s12). **LANE (lead 03:50Z/04:50Z): twm big-M = bs128 (T=128) for proj**
 (moe = bs256). Work on branch **proj/twm** (muse_bf16_proj/twm/, copies of r-moe; never moe's dir); moe reviews before layer integrates.
 Budget: muse_moe_w4a16 checks 8 proj / 12 moe per UTC day (`okc check muse_moe_w4a16 <file>`); scored runs there are moe's.
 **n5s11 RESULT: bs128 has no >= 5 us item left in twm's structure.** Cost model (COORD Requests n5s11): bs128 steady state is
