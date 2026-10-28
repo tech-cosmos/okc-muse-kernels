@@ -2575,3 +2575,11 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - v163 = v162 + rg in TUNE_BASE[(128, *)] (est. v16 sl -1.9, full -2.9 us = ~+0.12% total).
 - Lesson: tools/h200.py real-routing ab_flag is ~3-4 GPU-min for 3 shapes x 3-4 seeds x 5 stmts; its base-first/base-last spread
   is <= ~1 us except T=256 sl s99 (10 us drift): always repeat the base. Shared ledger hit 40/60 by 07:45Z (all lanes).
+- check c9f263d6 (v163 = d02f7a6) **2.1476x** [2.115, 2.180], judge prepare_s 88.6. us ours/SGLang: d1 68.2/171.8 76.5/181.9,
+  d16 122.3/252.5 206.2/431.0, d32 154.8/261.4 **283.2**/621.4, v1 112.1/264.5 119.3/269.7, v16 271.5/552.0 362.9/713.7,
+  v32 341.1/741.2 507.1/1076.8. d32 full 283.2 = best ever (prev 301); v16 sl 271.5 slow = node (the tuner's synthetic T=128 sl
+  default 268.8 here vs 257.3 in 8f5427dc, 273.0 in 3e39a051: +-8 us per node, hides rg's ~2 us). Not submitted (< 2.1580x;
+  09:28Z-rule submits of 10-28 used). 10-28 after it: 6 checks / 8 submits.
+- Next: the H200 pre-screen makes <1% per-shape changes measurable (noise <= ~1 us within a run): candidates the H100 called ties
+  (NOTES "tie"/"noise" items: g30 T=16 options, BND_SPLIT, pr1 npf, kv_pf...) can be re-decided there in batches, 3-4 GPU-min each;
+  the shared cap is 60 GPU-min/day across lanes.

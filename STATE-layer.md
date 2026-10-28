@@ -2,6 +2,10 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (tools/h200.py) real-routing ab_flag 14/14 inputs
+  (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
+  unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 8 submits.
+  Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
 night5 s19: no build, 0 runs; proj KQ K-split = -0.3 us vs the twf_split 66 we already tune (not ported). NOTES n5s19.
 night5 s18: check 3e39a051 (v162, unchanged main) **2.1143x**, prepare_s 88.9: abs us beat the board run v153 on 9/12 shapes
   (d32 sl 149.7 vs 155.7, d32 full 301.2 vs 308.2, v32 sl 327.8 vs 335.7, d16 sl 124.0 vs 129.9) but SGLang drew fast (ratio is per run).
