@@ -33,6 +33,28 @@
 #ifndef G30_MTOK
 #define G30_MTOK 128
 #endif
+#ifndef G30_GX  // proj n5s6: escapes OUT of the main loop: the x producer warp gathers x at the escape columns from each
+#define G30_GX 0  // x stage just before refilling it (smem, no extra gating); WG0 adds x * (v - 2^-15) in FP32 after the reduce
+#endif
+#ifndef G30_GXC
+#define G30_GXC 64  // G30_GX: max distinct escape columns per CTA (prepare() checks: g30_gx_tables)
+#endif
+#ifndef G30_GXD
+#define G30_GXD 0  // debug (wrong output): 1 no fixup walk, 2 no x gathers
+#endif
+#ifndef G30_GXN
+#define G30_GXN 4  // G30_GX: escape warps (1, 2 or 4); warp 10 + e owns the 16-row groups e, e + GXN, ..
+#endif
+#ifndef G30_GXW
+#define G30_GXW 0  // G30_GX: escape warp sleeps this many ns before its walk
+#endif
+#ifndef G30_GXR
+#define G30_GXR 512  // G30_GX: max record u32 words
+#endif
+#if G30_GX
+#undef G30_PL
+#define G30_PL 0
+#endif
 #define G30_ND (G30_MTOK / 2)
 #ifndef G30_S
 #define G30_S 1  // proj s95: K split over a (1, S, 1) cluster, rank 1 sums into rank 0 via DSMEM (S <= 2)
@@ -134,10 +156,11 @@ __device__ __forceinline__ void wg_mma_rs(float* d, unsigned a0, unsigned a1, un
 #endif
 }
 
-__global__ void __launch_bounds__(320, 1)
-g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ wp, __nv_bfloat16* __restrict__ out,
-           const float2* __restrict__ hdr, int N, int KS, float scale) {
-  // KS = k-stages; wp = [G][KS][WST]
+__global__ void __launch_bounds__(G30_GX ? 320 + 32 * G30_GXN : 320, 1)
+g30_kernel(const __grid_constant__ CUtensorMap tmX, const __grid_constant__ CUtensorMap tmG, const uint8_t* __restrict__ wp, __nv_bfloat16* __restrict__ out,
+           const float2* __restrict__ hdr, int N, int KS, float scale,
+           const uint32_t* __restrict__ gtab, int rlen) {
+  // KS = k-stages; wp = [G][KS][WST]; G30_GX: tmG = x boxes {8, MTOK}, gtab = [G][S][rlen] records (cols at 8, list at 8 + gcm)
   extern __shared__ __align__(1024) uint8_t smraw[];
   uint8_t* sm = (uint8_t*)(((uintptr_t)smraw + 1023) & ~(uintptr_t)1023);
   uint8_t* xs = sm;                                  // NS x 16 KB
@@ -182,6 +205,75 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
 #if !G30_PRE
   asm volatile("griddepcontrol.wait;" ::: "memory");  // x (and out's memory) belong to the previous kernels
 #endif
+#if G30_GX
+  // per-(tile, split) escape record from prepare() (g30_gx_tables): u32 [0] ncols, [1..5] list start per 16 rows (+ end),
+  // [8 .. 8 + GXC) escape columns (ascending; slot = index), [8 + GXC ..] uint2 (slot | row << 16 | last-of-row << 22 |
+  // (col & 7) << 28, v) in row order. Warp 10 (escape warp): record bulk copy before the wait; after it, x boxes {8 cols, MTOK} at every
+  // escape column (TMA) into gbuf; then corr = sum over the tile's escapes of x * v - x * 2^-15 (FP32), in red's layout,
+  // built while the consumers stream; WG1 writes red = d + corr.
+  uint32_t* grec = (uint32_t*)(ws + G30_NW * G30_WST + 1024 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 : 0));
+  __nv_bfloat16* gbuf = (__nv_bfloat16*)(grec + G30_GXR);
+  float* corr = (float*)(gbuf + G30_GXC * G30_MTOK * 8);  // [ND][128]
+  uint64_t* hbar = (uint64_t*)(corr + G30_ND * 128);  // [0] record landed, [1] x gathers landed
+  if (warp >= 10) {
+    const int ew = warp - 10;
+    if (ew == 0 && lane == 0) {
+      mbar_init(hbar, 1);
+      mbar_init(hbar + 1, 1);
+      asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+      mbar_expect_tx(hbar, rlen * 4);
+      bulk1d(grec, gtab + (size_t)(g * G30_S + blockIdx.y) * rlen, rlen * 4, hbar);
+    }
+    for (int gr = ew; gr < 4; gr += G30_GXN)  // own slice of corr (rows 16 gr ..: lanes 32 gr .. of every j)
+#pragma unroll
+      for (int j = 0; j < G30_ND; j++) corr[j * 128 + gr * 32 + lane] = 0.f;
+    asm volatile("griddepcontrol.wait;" ::: "memory");  // x belongs to the previous kernels
+    if (ew == 0 && lane == 0) {
+      mbar_wait(hbar, 0);
+      const int nc = (G30_GXD & 2) ? 0 : (int)grec[0];
+      mbar_expect_tx(hbar + 1, nc * G30_MTOK * 16);
+      for (int c = 0; c < nc; c++) tma2d(gbuf + c * G30_MTOK * 8, &tmG, (int)grec[8 + c] & ~7, 0, hbar + 1);
+    }
+    asm volatile("bar.sync 4, %0;" :: "n"(32 * G30_GXN) : "memory");  // barriers initialized by warp 10
+    mbar_wait(hbar + 1, 0);  // (implies the record landed)
+    if (G30_GXW) __nanosleep(G30_GXW);
+    __syncwarp();
+    const uint2* gel = (const uint2*)(grec + 8 + G30_GXC);
+    for (int gr = ew; gr < 4; gr += G30_GXN) {
+    const int p1 = (G30_GXD & 1) ? 0 : (int)grec[2 + gr];
+    float cn[(G30_MTOK + 31) / 32], cp[(G30_MTOK + 31) / 32];  // per row: corr = -2^-15 sum x + sum x v, lane = token
+#pragma unroll
+    for (int u = 0; u < (G30_MTOK + 31) / 32; u++) cn[u] = cp[u] = 0.f;
+#pragma unroll 4
+    for (int p = (int)grec[1 + gr]; p < p1; p++) {  // flat walk (row order; bit 22 = last entry of its row): loads independent of the sums
+      const uint2 en = gel[p];
+      const float v = __uint_as_float(en.y);
+#pragma unroll
+      for (int u = 0; u < (G30_MTOK + 31) / 32; u++) {
+        const int tk = lane + 32 * u;
+        if (tk < G30_MTOK) {
+          const float xv = __bfloat162float(gbuf[((en.x & 0xFFFF) * G30_MTOK + tk) * 8 + (en.x >> 28)]);
+          cn[u] += xv;
+          cp[u] = fmaf(xv, v, cp[u]);
+        }
+      }
+      if (en.x & (1u << 22)) {
+        const int row = (en.x >> 16) & 63;
+#pragma unroll
+        for (int u = 0; u < (G30_MTOK + 31) / 32; u++) {
+          const int tk = lane + 32 * u;
+          if (tk < G30_MTOK)  // owner: lane (row % 8) * 4 + (tk % 8) / 2 of warp row / 16, d[4 (tk / 8) + 2 ((row / 8) & 1) + tk % 2]
+            corr[(4 * (tk >> 3) + 2 * ((row >> 3) & 1) + (tk & 1)) * 128 + (row >> 4) * 32 + (row & 7) * 4 + ((tk & 7) >> 1)] =
+                fmaf(cn[u], -0x1p-15f, cp[u]);
+          cn[u] = cp[u] = 0.f;
+        }
+      }
+    }
+    }
+    asm volatile("bar.arrive 3, %0;" :: "n"(128 + 32 * G30_GXN) : "memory");  // corr ready for WG1
+    return;
+  }
+#endif
   if (warp == 9) {
 #if G30_PRE
     asm volatile("griddepcontrol.wait;" ::: "memory");  // x belongs to the previous kernels
@@ -200,7 +292,12 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
   float d[G30_ND];
 #pragma unroll
   for (int j = 0; j < G30_ND; j++) d[j] = 0.f;
-#if G30_ESC
+#if G30_GX
+#if G30_PRE
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // consumers: out written after
+#endif
+#define G30_FIX(a)
+#elif G30_ESC
   unsigned cand[2 * G30_ESC], nxt;
 #define G30_POP { nxt = cand[0]; _Pragma("unroll") for (int e = 0; e < 2 * G30_ESC - 1; e++) cand[e] = cand[e + 1]; cand[2 * G30_ESC - 1] = ~0u; }
   {
@@ -297,8 +394,14 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
   float* red = (float*)xs;
   asm volatile("bar.sync 1, 256;" ::: "memory");
   if (wg == 1) {
+#if G30_GX
+    asm volatile("bar.sync 3, %0;" :: "n"(128 + 32 * G30_GXN) : "memory");  // + the escape warps: corr ready
+#pragma unroll
+    for (int j = 0; j < G30_ND; j++) red[j * 128 + t] = d[j] + corr[j * 128 + t];
+#else
 #pragma unroll
     for (int j = 0; j < G30_ND; j++) red[j * 128 + t] = d[j];
+#endif
   }
   asm volatile("bar.sync 1, 256;" ::: "memory");
   if (wg == 1) return;
@@ -346,7 +449,7 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
 }
 
 static PFN_cuTensorMapEncodeTiled_v12000 g_enc = nullptr;
-static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, uint32_t b0, uint32_t b1) {
+static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, uint32_t b0, uint32_t b1, bool sw = true) {
   if (!g_enc) {
     cudaDriverEntryPointQueryResult q;
     cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled", (void**)&g_enc, 12000, cudaEnableDefault, &q);
@@ -354,7 +457,7 @@ static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, ui
   cuuint64_t dims[2] = {inner, outer}, strides[1] = {inner * 2};
   cuuint32_t box[2] = {b0, b1}, es[2] = {1, 1};
   CUresult r = g_enc(m, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, (void*)p, dims, strides, box, es,
-                     CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                     CU_TENSOR_MAP_INTERLEAVE_NONE, sw ? CU_TENSOR_MAP_SWIZZLE_128B : CU_TENSOR_MAP_SWIZZLE_NONE, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
                      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   TORCH_CHECK(r == CUDA_SUCCESS, "g30 tensor map encode failed ", (int)r);
 }
@@ -368,12 +471,21 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
   CUtensorMap tx;
   g30::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
   const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 + 1024 : 0)
-                   + (G30_PL ? (2 * G30_ESC + 1) * 256 * 4 : 0);
+                   + (G30_PL ? (2 * G30_ESC + 1) * 256 * 4 : 0)
+                   + (G30_GX ? G30_GXR * 4 + G30_GXC * G30_MTOK * 16 + G30_ND * 128 * 4 + 16 : 0);
+  // G30_GX: hdr = escape records int32 [G * S][rlen] from g30_gx_tables (rlen <= GXR, rlen % 4 == 0)
+  CUtensorMap tg = tx;
+  int rlen = 0;
+#if G30_GX
+  g30::mk(&tg, x.data_ptr(), K, G30_MTOK, 8, G30_MTOK, false);
+  rlen = hdr.size(1);
+  TORCH_CHECK(hdr.dtype() == torch::kInt32 && hdr.size(0) == (N / 64) * G30_S && rlen <= G30_GXR && rlen % 4 == 0, "g30 GX: records");
+#endif
   static bool once = false;
   if (!once) { cudaFuncSetAttribute(g30::g30_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(N / 64, G30_S);
-  cfg.blockDim = dim3(320);
+  cfg.blockDim = dim3(G30_GX ? 320 + 32 * G30_GXN : 320);
   cfg.dynamicSmemBytes = smem;
   cfg.stream = at::cuda::getCurrentCUDAStream();
   cudaLaunchAttribute at[2];
@@ -382,9 +494,9 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
   at[1].id = cudaLaunchAttributeClusterDimension;
   at[1].val.clusterDim.x = 1; at[1].val.clusterDim.y = G30_S; at[1].val.clusterDim.z = 1;
   cfg.attrs = at; cfg.numAttrs = G30_S > 1 ? 2 : 1;
-  TORCH_CHECK(cudaLaunchKernelEx(&cfg, g30::g30_kernel, tx, (const uint8_t*)wp.data_ptr(), (__nv_bfloat16*)out.data_ptr(),
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, g30::g30_kernel, tx, tg, (const uint8_t*)wp.data_ptr(), (__nv_bfloat16*)out.data_ptr(),
                                  (const float2*)hdr.data_ptr(), N, K / 64,
-                                 (float)scale) == cudaSuccess, "g30 launch failed");
+                                 (float)scale, (const uint32_t*)hdr.data_ptr(), rlen) == cudaSuccess, "g30 launch failed");
 }
 
 #ifdef G30K_ON
@@ -419,9 +531,11 @@ __device__ __forceinline__ int sk_cta(long long u, long long P, int G) {  // CTA
   return c;
 }
 
-__global__ void __launch_bounds__(320, 1)
-g30k_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ wp, __nv_bfloat16* __restrict__ out,
-            const float2* __restrict__ hdr, int N, int KS, float scale, float* __restrict__ slab, int* __restrict__ ticket, int zn) {
+#define G30K_GXH 24  // G30_GX record header words: [0] ncols, [1] nseg, [2 + 5 s ..] list starts per 16 rows + end of segment s
+__global__ void __launch_bounds__(G30_GX ? 320 + 32 * G30_GXN : 320, 1)
+g30k_kernel(const __grid_constant__ CUtensorMap tmX, const __grid_constant__ CUtensorMap tmG, const uint8_t* __restrict__ wp,
+            __nv_bfloat16* __restrict__ out, const float2* __restrict__ hdr, int N, int KS, float scale, float* __restrict__ slab,
+            int* __restrict__ ticket, int zn, const uint32_t* __restrict__ gtab, int rlen) {
   extern __shared__ __align__(1024) uint8_t smraw[];
   uint8_t* sm = (uint8_t*)(((uintptr_t)smraw + 1023) & ~(uintptr_t)1023);
   uint8_t* xs = sm;
@@ -450,6 +564,74 @@ g30k_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
   const long long ta = (long long)(gg) * KP;                                   \
   const int i0 = 2 * (int)((u0 > ta ? u0 : ta) - ta);                          \
   const int i1 = 2 * (int)((u1 < ta + KP ? u1 : ta + KP) - ta);
+#if G30_GX
+  // proj n5s7: g30's GX escape path per CTA: one record (g30k_gx_tables) covering this CTA's segments; the escape warps build
+  // the corr tile of segment s while the consumers stream, WG1 adds it at the segment's end (bar 3), then frees corr (bar 5).
+  uint32_t* grec = (uint32_t*)((uint8_t*)stg + G30_MTOK * 72 * 2);
+  __nv_bfloat16* gbuf = (__nv_bfloat16*)(grec + G30_GXR);
+  float* corr = (float*)(gbuf + G30_GXC * G30_MTOK * 8);  // [ND][128] in red's layout
+  uint64_t* hbar = (uint64_t*)(corr + G30_ND * 128);
+  if (warp >= 10) {
+    const int ew = warp - 10;
+    if (ew == 0 && lane == 0) {
+      mbar_init(hbar, 1);
+      mbar_init(hbar + 1, 1);
+      asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+      mbar_expect_tx(hbar, rlen * 4);
+      bulk1d(grec, gtab + (size_t)blockIdx.x * rlen, rlen * 4, hbar);
+    }
+    asm volatile("griddepcontrol.wait;" ::: "memory");  // x belongs to the previous kernels
+    if (ew == 0 && lane == 0) {
+      mbar_wait(hbar, 0);
+      const int nc = (int)grec[0];
+      mbar_expect_tx(hbar + 1, nc * G30_MTOK * 16);
+      for (int c = 0; c < nc; c++) tma2d(gbuf + c * G30_MTOK * 8, &tmG, (int)grec[G30K_GXH + c] & ~7, 0, hbar + 1);
+    }
+    asm volatile("bar.sync 4, %0;" :: "n"(32 * G30_GXN) : "memory");  // barriers initialized by warp 10
+    mbar_wait(hbar + 1, 0);
+    const int nseg = (int)grec[1];
+    const uint2* gel = (const uint2*)(grec + G30K_GXH + G30_GXC);
+    for (int s_ = 0; s_ < nseg; s_++) {
+      if (s_ > 0) asm volatile("bar.sync 5, %0;" :: "n"(128 + 32 * G30_GXN) : "memory");  // WG1 has read the previous corr
+      for (int gr = ew; gr < 4; gr += G30_GXN) {
+#pragma unroll
+        for (int j = 0; j < G30_ND; j++) corr[j * 128 + gr * 32 + lane] = 0.f;
+        __syncwarp();
+        const int p1 = (int)grec[2 + 5 * s_ + gr + 1];
+        float cn[(G30_MTOK + 31) / 32], cp[(G30_MTOK + 31) / 32];
+#pragma unroll
+        for (int u = 0; u < (G30_MTOK + 31) / 32; u++) cn[u] = cp[u] = 0.f;
+#pragma unroll 4
+        for (int p = (int)grec[2 + 5 * s_ + gr]; p < p1; p++) {
+          const uint2 en = gel[p];
+          const float v = __uint_as_float(en.y);
+#pragma unroll
+          for (int u = 0; u < (G30_MTOK + 31) / 32; u++) {
+            const int tk = lane + 32 * u;
+            if (tk < G30_MTOK) {
+              const float xv = __bfloat162float(gbuf[((en.x & 0xFFFF) * G30_MTOK + tk) * 8 + (en.x >> 28)]);
+              cn[u] += xv;
+              cp[u] = fmaf(xv, v, cp[u]);
+            }
+          }
+          if (en.x & (1u << 22)) {
+            const int row = (en.x >> 16) & 63;
+#pragma unroll
+            for (int u = 0; u < (G30_MTOK + 31) / 32; u++) {
+              const int tk = lane + 32 * u;
+              if (tk < G30_MTOK)
+                corr[(4 * (tk >> 3) + 2 * ((row >> 3) & 1) + (tk & 1)) * 128 + (row >> 4) * 32 + (row & 7) * 4 + ((tk & 7) >> 1)] =
+                    fmaf(cn[u], -0x1p-15f, cp[u]);
+              cn[u] = cp[u] = 0.f;
+            }
+          }
+        }
+      }
+      asm volatile("bar.arrive 3, %0;" :: "n"(128 + 32 * G30_GXN) : "memory");  // corr of segment s_ ready for WG1
+    }
+    return;
+  }
+#endif
   if (warp == 8) {
     if (lane == 0) {
       int r = 0;
@@ -510,7 +692,7 @@ g30k_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
     asm volatile("bar.sync 2, 128;" ::: "memory");                                                                        \
   }
   int rbase = 0;
-#if G30_ESC
+#if G30_ESC && !G30_GX
   float2 hcur[2 * G30_ESC];
 #define G30K_HDR(gg)                                                                                          \
   _Pragma("unroll") for (int rr = 0; rr < 2; rr++) _Pragma("unroll") for (int e = 0; e < G30_ESC; e++)       \
@@ -523,7 +705,7 @@ g30k_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
     float d[G30_ND];
 #pragma unroll
     for (int j = 0; j < G30_ND; j++) d[j] = 0.f;
-#if G30_ESC
+#if G30_ESC && !G30_GX
     unsigned cand[2 * G30_ESC], nxt;
 #if !G30K_PF
     if (g > gA) G30K_HDR(g)
@@ -591,8 +773,15 @@ g30k_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__
     rbase += i1 - i0;
     asm volatile("bar.sync 1, 256;" ::: "memory");
     if (wg == 1) {
+#if G30_GX
+      asm volatile("bar.sync 3, %0;" :: "n"(128 + 32 * G30_GXN) : "memory");  // + the escape warps: this segment's corr
+#pragma unroll
+      for (int j = 0; j < G30_ND; j++) red[j * 128 + t] = d[j] + corr[j * 128 + t];
+      if (g < gB) asm volatile("bar.arrive 5, %0;" :: "n"(128 + 32 * G30_GXN) : "memory");  // corr free for the next segment
+#else
 #pragma unroll
       for (int j = 0; j < G30_ND; j++) red[j * 128 + t] = d[j];
+#endif
     }
     asm volatile("bar.sync 1, 256;" ::: "memory");
     if (wg == 1) continue;
@@ -670,20 +859,30 @@ void g30k_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tens
 #endif
   CUtensorMap tx;
   g30::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
-  const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 1024 + G30_ND * 128 * 4 + G30_MTOK * 72 * 2;
+  const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 1024 + G30_ND * 128 * 4 + G30_MTOK * 72 * 2
+                   + (G30_GX ? G30_GXR * 4 + G30_GXC * G30_MTOK * 16 + G30_ND * 128 * 4 + 16 : 0);
+  // G30_GX: hdr = escape records int32 [G][rlen] from g30k_gx_tables (rlen <= GXR, rlen % 4 == 0)
+  CUtensorMap tg = tx;
+  int rlen = 0;
+#if G30_GX
+  g30::mk(&tg, x.data_ptr(), K, G30_MTOK, 8, G30_MTOK, false);
+  rlen = hdr.size(1);
+  TORCH_CHECK(hdr.dtype() == torch::kInt32 && hdr.size(0) == G && rlen <= G30_GXR && rlen % 4 == 0, "g30k GX: records");
+#endif
   static bool once = false;
   if (!once) { cudaFuncSetAttribute(g30::g30k_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3((unsigned)G);
-  cfg.blockDim = dim3(320);
+  cfg.blockDim = dim3(G30_GX ? 320 + 32 * G30_GXN : 320);
   cfg.dynamicSmemBytes = smem;
   cfg.stream = at::cuda::getCurrentCUDAStream();
   cudaLaunchAttribute at[1];
   at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
   at[0].val.programmaticStreamSerializationAllowed = pdl ? 1 : 0;
   cfg.attrs = at; cfg.numAttrs = 1;
-  TORCH_CHECK(cudaLaunchKernelEx(&cfg, g30::g30k_kernel, tx, (const uint8_t*)wp.data_ptr(), (__nv_bfloat16*)out.data_ptr(),
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, g30::g30k_kernel, tx, tg, (const uint8_t*)wp.data_ptr(), (__nv_bfloat16*)out.data_ptr(),
                                  (const float2*)hdr.data_ptr(), N, K / 64, (float)scale, (float*)slab.data_ptr(),
-                                 (int*)ticket.data_ptr(), G30K_F32 ? (int)slab.numel() : 0) == cudaSuccess, "g30k launch failed");
+                                 (int*)ticket.data_ptr(), G30K_F32 ? (int)slab.numel() : 0,
+                                 (const uint32_t*)hdr.data_ptr(), rlen) == cudaSuccess, "g30k launch failed");
 }
 #endif  // G30K_ON
