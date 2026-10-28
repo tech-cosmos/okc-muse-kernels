@@ -2861,3 +2861,9 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - H200 judge DIAG a913b38e (tools/n6s3/mkdiag_epi.py: TWM_EPI 0/1/0/1, layer big-M settings, layer v16/v32 routings):
   v16 166.4/164.7/166.8/165.0, v32 198.1/195.1/198.1/195.1 us => v16 -1.8, v32 -3.0 us (every seed, maxdiff 0).
 - Then also rolled tw_epi itself under TWM_EPI (tw_hot in twm, twq): bitwise, H100 -1.0/-0.2/+0.2/-0.8 = noise.
+- Plain check fc7e86d6 of a60019d (TWM_EPI): 2.3127x (bs1 26.6, bs16 88.5, bs32 116.7, bs8 63.7, bs128 199.9, bs256 235.3 us)
+  > board best 2.2703x -> submitted a60019d (see next line for the result). NB okc's content_hash is NOT the file's sha256;
+  I verified the checked code by time (check created 8 s after the a60019d commit, 44 s before the next edit).
+- TWM_HOTC (n6s3): moe_twm's in-kernel hot class (cl 3, tw_hot<80/96>) compiled in only when python TWM_HOT / TWM_HOT_M
+  is set (_hotc(); library key (DQW, TWM_EPI, hotc)). Default off -> moe_twm 11.4k -> 8.0k SASS. Bitwise, 15/15; H100 A/B vs
+  a60019d: board128 -0.2, board256 -2.5, v16 -2.5, v32 -1.5 us. Not yet on the H200.

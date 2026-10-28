@@ -1,14 +1,20 @@
 # STATE-moe
 
-## NOW (n6s2, 2026-10-28 21:15Z): REDESIGN follow-up on the H100 (NOTES n6s2); overlap lever CLOSED, per-item fixed cost OPEN
-- Gap table (n6s1, REDESIGN.md): ours/ideal bs1 1.60, bs8 1.32, bs16 1.23, bs32 1.21, bs128 1.42, bs256 1.53 => big-M + bs1.
-- n6s2: n6s1's DISTA "RS A reads 3x" = ptxas serialization artifact (RS wgmma with distinct A runs at peak). twm stage
-  microbench (tools/n6s2/ring.py, real dq, 384 thr): 802/870/985 cyc/stage N8/N16/N32; ALU floor 488; deeper A ring (wait<3>,
-  now compiles clean) = 0; mma.sync -12% at N8 only; 7 ALU ops/8 weights is minimal for any _POS (laysearch.py).
-- OPEN: per-item fixed cost. H200 warm N8 item 34.4 us vs 64 stages x 802 cyc = 25.9 us at 1.98 GHz => up to ~8 us/item.
-- NEXT: (1) TWM_TL stamps (start, first stage, last stage, end) in a gemm13-only consumer-bound H100 proxy, then a DIAG check
-  on the H200; if >= 3 us/item, overlap the epilogue with the next item's first stages (or R1, REDESIGN section 4).
-  (2) mma.sync for N8 items as a twm variant (H200 A/B). Modal resets 00:00Z; moe checks 4 left 10-28.
+## NOW (n6s3, 2026-10-28 ~21:30Z): I-CACHE is a real twm lever. TWM_EPI on main (a60019d), bitwise; H200 v16 -1.8 / v32 -3.0 us
+- n6s3 4-stamp timeline (tools/n6s3/mk_tl4.py, mkdiag.py; H200 DIAG 54eb9bdb): per CTA per call loop ~120-136 us, epilogue
+  9-14 us, gaps ~2 us. The N24/N32 epilogue time stayed with the global stores REMOVED: cause = i-cache (moe_twm was 16.7k SASS
+  ~264 KB; fully unrolled epilogues per (RT, N, gated) ran cold from L2). Fix TWM_EPI = 1: smem-staged chunk stores + ROLLED
+  8-token-group loop (acc shift by 4). twm 16.7k -> 11.4k SASS. H200 DIAG a913b38e (A B A B): v16 -1.8, v32 -3.0 us.
+- Handoff posted (tools/n6s3/patch_layer_epi.py for r-layer moe_src; layer paused: lead decides).
+- NEXT (ranked): (1) shrink moe_twm code further (11.4k SASS still > i-cache): find what's big (cuobjdump per region:
+  8 tw_item loop instances RT4 N8/16/24/32 + RT2 N8/16/32/PB, tw_hot 80/96 (hot class inside twm, rarely used with the
+  separate moe_hot), K-split paths); candidates: drop the N24 instance (use N32), compile tw_hot out of twm when TWM_HOT
+  isn't used (layer pins hot to moe_hot), dedupe g2/gated loop bodies. Measure each with tools/n6s3/sass.py + ab2.py, then
+  one H200 DIAG (TWM_EPI-style python-keyed library switch, tools/n6s3/mkdiag_epi.py pattern).
+  (2) the same i-cache view for tk2f decode (tk2f/tk2h instance sizes) and the per-stage ~230 cyc overhead (s27): cold loop
+  code at each item start? (3) REL (helper-warp release) = noise on H100 (tools/n6s3/mk_rel.py), retest on H200 only if cheap.
+- Tools: tools/n6s3/ab2.py A.py B.py (paired H100 A/B, board bs128/256 + layer v16/v32, prints max|A-B|); sass.py <file>
+  (ptxas spills + SASS counts of twm/hot); itl4.py (H100 per-item loop/epi split). The judge REJECTS `import reference`.
 
 ## WAS (n5s34-n5s40): tk2f consumer, twm dq cut, dq superoptimizer (8 int + 4 HMUL2 per 8 weights is minimal), dequant-once: all CLOSED (NOTES)
 

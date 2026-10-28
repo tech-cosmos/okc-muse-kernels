@@ -98,6 +98,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TK2F_L2H 0       // s21: tk2f weight-copy L2 hints (python TK2F_L2H): 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only; 4 = evict_last every group of a multi-group expert, evict_first else
 #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
 #define TWM_EPI 0        // n6s3: staged, rolled tw_item epilogue (python TWM_EPI)
+#define TWM_HOTC 0       // n6s3: compile moe_twm's hot class (cl 3) in (python: on iff TWM_HOT / TWM_HOT_M set)
 #define DQW 0            // n22: dq() rotations on the FMA pipe (python DQW; DIAG builds both)
 #define NORM_EARLY 0     // n4s1: twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them (python NORM_EARLY)
 #ifndef TK2G_PAR4
@@ -2991,8 +2992,10 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
 #define TWI(RT, NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
                                                         h < 0 ? 64 : 32, pt, tick + j, &s_flag, h ? -16384 : 16384)
     if (cl == 3) {
+#if TWM_HOTC  // n6s3: the in-twm hot class only when python TWM_HOT / TWM_HOT_M asks for it (i-cache: moe_twm 11.4k -> 8.0k SASS without)
       if (nv <= 80) tw_hot<80, NSTG, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
       else tw_hot<96, NSTG, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
+#endif
     } else if (!big) {
       switch ((nv + 7) >> 3) {
         case 1: TWI(4, 8); break;
@@ -5621,7 +5624,12 @@ CUDA_SRC = CUDA_SRC.replace("//@@WGMMA@@", _gen_wgmma())
 
 _LIB = None
 TWM_EPI = 1  # n6s3: staged + rolled tw_item epilogue (i-cache), bitwise = 0
-_LIBX = {}  # n22: (DQW, TWM_EPI) -> library
+_LIBX = {}  # n22: (DQW, TWM_EPI, hotc) -> library
+
+
+def _hotc():  # n6s3: moe_twm hot class compiled in only if some setting can use it
+    return int(bool(TWM_HOT or any(TWM_HOT_M.values())))
+
 _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_gemm2(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
@@ -5674,7 +5682,7 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
 
 def _lib():
     global _LIB
-    _LIB = _LIBX.get((int(DQW), int(TWM_EPI)))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
+    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc()))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
     if _LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = CUDA_SRC.replace("#define TK2F_L2H 0 ", f"#define TK2F_L2H {int(TK2F_L2H)} ")
@@ -5682,6 +5690,7 @@ def _lib():
         src = src.replace("#define NORM_EARLY 0 ", f"#define NORM_EARLY {int(NORM_EARLY)} ")
         src = src.replace("#define TWM_L2H 0 ", f"#define TWM_L2H {int(TWM_L2H)} ")
         src = src.replace("#define TWM_EPI 0 ", f"#define TWM_EPI {int(TWM_EPI)} ")  # n6s3
+        src = src.replace("#define TWM_HOTC 0 ", f"#define TWM_HOTC {int(_hotc())} ")  # n6s3
         if TK2F_S6 or DIAG:  # n20
             src = src.replace("#define TK2F_S6K 0 ", "#define TK2F_S6K 1 ")
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
@@ -5699,7 +5708,7 @@ def _lib():
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_l2h2", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
-        _LIBX[(int(DQW), int(TWM_EPI))] = _LIB
+        _LIBX[(int(DQW), int(TWM_EPI), _hotc())] = _LIB
     return _LIB
 
 
