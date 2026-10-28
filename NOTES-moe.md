@@ -2656,3 +2656,30 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - Reading for layer's H200 TK2F_ORX DIAG (r-layer n5s25, oracles as tuner probes): ornc-orz on the H200 is an UPPER bound of
   nothing useful; the honest ceiling is base0 - (stream-only time), which n5s15/n5s29 put within 0.5-2.5% of the H200 HBM ceiling
   for tk2f's ring. 00:00Z Modal oracle run (n5s32 queue) CANCELLED: the decomposition says it would not name a buildable piece.
+
+## n5s34 (2026-10-28 08:44Z - 09:40Z): CONSUMER-INSTRUCTION oracles in-layer (lead 08:50Z): tk2f decode (a)+(b) < 3 us except d32 3.7 (H100) -> CLOSED; 0 judge runs, 0 Modal
+- Budget: moe's 12 moe-board checks for 10-28 used (board 14/20, the rest is proj's), Modal 55.8/60 min: H100 in-layer only.
+- tools/n5s34/oracles3.py <r-layer submission.py> <outdir> (r-layer 2caa722, TUNE = {}, wrong output): orq = dq() free (A regs =
+  raw q word, 4 scale HMUL2 kept), ors = scale HMUL2 free (masked codes as A), orqs = both, orm = mma.sync in tk2f_consume/tk2g_row
+  -> integer xor into acc. dq() is patched globally, so v16/v32 = the same oracle on twm.
+- H100 in-layer (r-layer bench.py bench, 1 run each, noise ~+-0.5..1), us SLIDING (full), delta vs base0:
+            base0          orqs (a+b)     orq (a)        ors (b)        orm (c)
+    d1     85.0 (104.7)   -0.4 (-0.8)    -0.8 (-0.3)    +0.4 (-0.2)    -0.3 (0.0)
+    d16   190.8 (295.4)   -2.3 (-3.2)    -0.5 (-1.7)    -0.1 (-0.7)    -0.1 (-1.3)
+    d32   188.6 (413.9)   -3.7 (-1.1)    -3.2 (-1.0)    -1.3 (-0.1)    -1.0 (+0.2)
+    v1    142.1 (157.6)   -2.2 (-1.4)    -0.6 (-0.5)    -0.1 (-0.6)    -0.5 (-0.4)
+    v16   300.7 (445.7)   -6.9 (-0.6)   -10.7 (-5.5)    -3.1 (-1.8)    +0.4 (twm mma not patched: control)
+    v32   376.0 (627.9)   -8.9 (-3.0)    -9.4 (-3.6)    -3.4 (-1.0)    +3.0 (control)
+- On record on the H200 (n12 judge DIAG, moe kernel on the layer routings, pre-SCB): ALL consumer math free (nm) = d1 1.8, d16 4.2,
+  d32 6.5, v1 3.6 us; SCB later took ~1 us at d16/d32. So the H200 ceiling of (a)+(b) is <= ~1.8 / 3.2 / 5.5 / 3.6 us, H100 says less.
+- Buildable part is far smaller than "free": the lead's "o3 as one shf+lop3" is IMPOSSIBLE with this output mask. M = 0x81C081C0 is
+  period-16 with set A = {6,7,8,15}; four rotations would need translates of A to tile Z16, and A - A = +-{1,2,7,8,9} leaves no
+  4-element translate set (exhaustive by hand: every 3-set {0,4,10}, {0,5,10}, {0,5,11}, {0,3,6} has no 4th) -> one o3 needs the
+  IMAD (or 2+ ops). Scales are already 4 HMUL2 per 8 weights with free .H0_H0/.H1_H1 broadcasts (SCB); folding them into FP32
+  acc (one k16 mma = one scale block) is 4 FFMA instead of 4 HMUL2 and not bitwise. byte_perm LUT = >= 4 PRMT + nibble prep per 8.
+- VERDICT: tk2f decode consumer-instruction lane CLOSED (lead's rule: (a)+(b) < 3 us at d1/d16/v1; d32 3.7 H100 / <= 5.5 H200 with
+  no buildable cut). twm (v16/v32, proj's lane): dq free = -9..-11 us sliding H100 (~1% layer each) is the only consumer number
+  >= 1%, but it is the FREE ceiling: twm dq cuts are on record dead (s18-s30 + s22 pingpong). Passed to proj/lead, not built.
+- H200 confirmation (optional, ~8 GPU-min, after 00:00Z): from ~/r-layer regenerate /tmp/n5s34 then
+  python ~/r-moe/tools/h200.py muse_decode_layer base=/tmp/n5s34/base0.py cand=/tmp/n5s34/orqs.py orq=/tmp/n5s34/orq.py
+  --cmd "python bench.py bench 2>&1 | grep -E ' us |geomean|rror'"
