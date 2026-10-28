@@ -1,45 +1,16 @@
 # STATE-moe
 
-## n5s11 (01:10Z 10-28): no moe lane open (all closed on H200 data; lane request to lead stands). Built an ENABLER for layer:
-tools/n5s11/cuda_strip.py = strip C comments from the CUDA strings of a built submission.py (judge limit 1,000,000 B; layer v145
-963.7 KB). v145 -> 890.6 KB (-73 KB; keeps each source's header block and any comment a runtime .replace() anchor uses).
-cpp -fpreprocessed token streams equal per string; SASS identical for every default build (tools/n5s11/sass_eq.py); NOTES n5s11. Layer: call strip_file() in build.py.
-
-## n5s10 (00:30Z 10-28): pr32 DEAD on the H200 (layer check 4937830f tuner: T=32 pr32+unp 164.4 vs picked g30k104+unp 162.1;
-T=16 +3 us vs default). Closed; asked layer to drop the option. moe has NO open item: tk2f/twm/attention/pr32/batch-1 chain all closed.
-Tool: tools/n5s10/pr32_tune.py <layer judge log>. moe checks 20/20 fresh today (moe board = test bed only).
-
-## n5s9 (23:55Z): lead 22:45Z step 1 DONE (batch-1 ramp/tail audit, H100 v144, NOTES n5s9, tools/n5s9): excess over 3.12 TB/s
-d1 sl 22.3 us (qkv 3.9, csl+o 4.9, bnd+pr1 2.3, tk2f 7.6, n2u+bnd 3.7), v1 sl 39.4 (5.5/8.4/7.1/13.1/4.8). Addressable by a
-post-attention persistent chain kernel ~3-4.5 us d1 upper bound (tail ~2.5, front <=1, routing <=1), 1-3 realistic: < 8 us,
-so step 2 NOT built. Open: nothing queued; attention lane budget resets 00:00Z.
-
-## n5s8 (23:25Z): BUILT pr32 at T=8 with an FP32 router (PR_F32, tools/n5s8) to replace pr8: exact (FP32-class logits), standalone
-H100 21.0 us, but IN-LAYER H100 DEAD (v1 sl +1.8..2.3, full +3.8..4.3 us vs pr8; no-PDL worse). Not handed off. NOTES n5s8.
-Next: still the 00:00Z v144 H200 'layer tune T=16/32' pr32 lines (n5s5 recipe); no other open moe item.
-
-## n5s4-n5s7 (21:32-22:35Z): PR_HL tie (off); paper bounds (pr32 pre-wait L2 prefetch zero-sum, MTOK16 S1 64 CTAs, 5/6-bit scale
-compression = n20 S6 dead); audits found no unmeasured item. H200 pr32 verdict recipe: grep "layer tune T=\(16\|32\)" in
-r-layer profiles/<v143+ check>.log, keep pr32/default fields; pr32 wins if > ~1 us better than default (NOTES n5s5).
-
-## NOW (night5 s3, 2026-10-27 22:00Z): pr32 in layer main v141 (TUNE option); PR_SA (r-moe 11d49b7) -0.5..0.7 us H200 proxy
-- n5s3: PR_SA 1 (in-layer validate ALL OK) = st.async pair handoffs (NOTES n5s3): L2W M16 16.8->16.2, M32 17.9->17.3; chain -1 us. Layer:
-  copy tools/n5s1/pr32_src.cu over r-layer pr32_src.cu (or tools/n5s3/pr32_sa.diff). Remaining chain costs (L2W M32): finisher
-  ingest 128 KB 2.3 us, sum 1.0, route_token 2.3 (8 picks x 2 redux + shfl, 1 warp/token): next lever if the H200 chain is critical.
-- pr32 = T=16/32 pooler (g30n S2 12-bit) + router (hi/lo BF16 rows, first 8 stages of every streaming CTA) + routing, ONE launch:
-  grid (66,2) pairs; x 0/1 = 4 finisher CTAs (spare SMs) poll a counter, bulk-pull pair partials, route 1 token/warp (redux top-8).
-  Files: muse_moe_w4a16/tools/n5s1/pr32_src.cu (= head.cu + body3.cu; edit those, then `cat head.cu body3.cu > pr32_src.cu` and
-  set the MTOK/S defaults to 32/2), pr32.py (standalone exactness + timing + `DEFS="PR_TL 1"` timeline), patch_layer_pr32.py.
-- H100: standalone 23.1 us (pooler alone 20.0); in-layer tie..-1.4 (d32 -1.3/-1.3, d16 +1.1/-1.4 sl/full). Tests clean (NOTES n5s1).
-- NEXT: (1) watch COORD for proj/layer integrating it + the H200 'layer tune T=16/32' pr32 lines; if the H200 picks it, tune
-  NW/NS there (NW 8/NS 16 now; H200 may want deeper W ring) and try MTOK 16 S1 variants. (2) If the H200 rejects it: look at
-  the timeline on the H200 via a layer DIAG (finisher chain ~10-12 us must end before the pooler). (3) Ideas: put the router
-  rows' partial store on a non-streaming path earlier (stage order), cut warp 10's fence wait (4.6 us at NW 8).
-- n5s2 H200 PROXY (PR_L2W: weights L2-resident): pr32 M32 consumer+chain floor 17.9 us (H100 HBM-bound 23.0), pooler streaming
-  ends 12.0-12.8 us = ~4.6 TB/s-equivalent > H200 HBM: on the H200 pr32 should stream at ~HBM rate (est. 15-17 us vs g24 ~25/call);
-  routing (finishers) ends at 11.0 < pooler end: chain hidden. NW/NS sweep spread <= 0.5 us: keep 8/16. Waiting for H200 tune lines.
-- moe checks 20/20 used on 10-27 (reset 00:00Z); moe board best febfcb1f 2.2469x; attention board best 957cabd7 2.5962x.
-
+## NOW (n5s12, 2026-10-28 01:10Z): NO OPEN MOE LANE. Lane request to lead (COORD Requests n5s10) unanswered.
+- Every moe item is closed on H200 data: tk2f (layer-owned, s81), twm/twq dq (s18-s30), attention (s45), pr32 at T=16/32
+  (n5s10: layer check 4937830f tuner, g30k104 beats it by 2.3 us) and T=8 (n5s8), batch-1 chain persistent kernel (n5s9 audit:
+  bound 3-4.5 us d1 < lead's 8 us threshold). Don't rebuild these without a new mechanism; NOTES n5s1-n5s12 hold the numbers.
+- Enabler for layer (n5s11): tools/n5s11/cuda_strip.py strips CUDA comments from a built submission.py (judge 1,000,000 B
+  limit; v145 963.7 -> 890.6 KB, SASS identical). Offered under COORD Requests; layer decides.
+- Latest H200 layer profile (r-layer profiles/submission.133068b877b54e3c.txt, 2.1097x): experts still the biggest slice:
+  d1 sl tk2f 28.2 (full 20.7), d16 sl 64.8, d32 sl 75.4 (+norm2 11.2), v1 sl 63.8 (full 35.9), v16 sl twm 159.2 + moe_norm 33.6,
+  v32 sl twm 208.6 || hot 115.3. Gaps vs floor: STATE-layer table (v16/v32 sl ~6% each = twm, dq-bound, closed).
+- Checks: moe 20/20 and attention 20/20 unused on 10-28 (moe board = test bed only; attention board = record only).
+- pr32 files (dead, kept for reference): tools/n5s1 (pr32_src.cu = head.cu + body3.cu), n5s3 PR_SA, n5s8 PR_F32, n5s10 tune parser.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding

@@ -2199,3 +2199,14 @@
 - Use (layer build.py, after strip_comments): `sys.path.insert(0, <r-moe tools/n5s11>)` or copy cuda_strip.py into the
   layer dir; `out, k = cuda_strip.strip_file(out)` (asserts token equality per string, needs `cpp` = gcc's, present).
 - 0 judge runs.
+
+## n5s12 (2026-10-28 00:51Z - 01:10Z): no lane, no build; 0 runs
+- Read COORD: no lead answer to the n5s10 lane request (newest lead entry still 22:45Z). Read layer's new H200 check
+  133068b8 (2.1097x) profile + tuner lines: nothing new for moe. Experts per shape (us): d1 sl tk2f 28.2 / full 20.7,
+  d16 sl 64.8, d32 sl 75.4 + norm2 11.2, v1 sl 63.8 / full 35.9 (routing-dependent expert counts, consistent with the
+  H200 fit 14.1 + 6.97/expert), v16 sl twm 159.2 + moe_norm 33.6 (PDL wait), v32 sl twm 208.6 || hot 115.3. T=32 tuner
+  again picks g30k104 + g30n unpool over pr32 (pr32+unp 164.7 vs 164.5 default-unp+qkv). Every lever there is already on
+  record as measured dead (twm dq s18-s30, tk2f s81, expert L2 prefetch beside pooler s38/s55, router-first orders s3/s5).
+- Re-checked proj's FYI (g30 S2 pooler beats g30k G104 by 3.2-3.5 us standalone, lost in-layer to the side-stream router):
+  a serial router-before-pooler order nets <= ~0.5 us (router ~2-3 us on the critical path): not built.
+- Housekeeping: STATE-moe.md compressed to 138 lines (n5s4-n5s11 session headers -> one NOW block).
