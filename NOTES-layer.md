@@ -2358,3 +2358,18 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   H100 ~2.1 TB/s effective; earlier unpool-W L2 prefetch at tk2f end (UPF/UPF2/UPF3) all dead).
 - Next session: T=1/8 options all decided; open items unchanged (o+bnd+pr1 megakernel ~0.5% d1; moe/proj Handoffs: proj G30_GX
   branch proj/g30gx when posted -> TUNE option at T=16/32 unpool/o, bundle into one check with v152).
+
+## night5 s10 (2026-10-28 02:39Z-, okc-night5 session 10): v153 = v152 + proj G30_GX (branch proj/g30gx afc0c8b)
+- Board at start: #42 at 2.1339x (#1 pjmullin3 2.399x, #10 2.254x). 10-28 budget: 15 checks / 10 submits.
+- Cherry-picked proj/g30gx afc0c8b (based on v150) onto main v152: clean merge (g30_src.cu GX path, layer.py G30GX_CFG /
+  G30KGX_CFG builds + TUNE options: T=16 {g30n:o + g30gx:o}; T=32 g30gx unpool/o, g30kgx pooler (NS 8) and combos). proj also
+  moved the T=32 escape options (g30n:* off, g30k 0/120, pr32) into a comment: the H200 tuner never picked them.
+- validate --quick: test 0/13, scored 0/12, opt 0/252, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/406;
+  cold prepare **220.1 s FAIL** (proj's prep_time ran concurrently). Dropped pr32 builds (PR32_TOKENS = (); moe n5s10 asked:
+  never picked on H200) -> cold **161.5 s** OK. Committed 3ef3268 (v153).
+- **check 60f02748 (v153) 2.1373x** (CI 2.105-2.169; board 2.1339x). ours/SGLang us: d1 66.3/172.5, 75.0/183.0; d16 129.0/264.3,
+  206.2/433.1; d32 152.8/261.7, 310.4/621.0; v1 108.8/259.6, 113.1/260.5; v16 265.6/517.4, 359.8/710.8; v32 333.8/714.7, 508.1/1071.1.
+  v1 full 113.1 = best ever (was 126.6 in bb8ea548; T=8 full picked g14alt 3).
+  H200 tuner GX: T=32 sl default 155.0 | g30kgx:pooler 154.7 (picked, confirm 154.9 vs 154.3) | g30gx unpool 155.2 / o 154.8 /
+  both 155.5 | all three 155.2; T=32 full default 319.0 | g30kgx 318.0 | gx o/unp 318.8 (picked tk2h 3 at 317.9); T=16 sl/full
+  g30n:o+g30gx:o 167.2/231.4 vs default 166.3/231.5 (tie). So GX in-layer on the H200 = g30kgx pooler -0.3..1.0 us, rest tie.

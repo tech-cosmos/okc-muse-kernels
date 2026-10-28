@@ -3081,7 +3081,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0},
             {"g19:qkv_gate": True}, {"cslpw": False}, {"cslpw": False, "pr8_npf": 212},
             {"pr8_npf": 206}, {"pr8_npf": 212}, {"pr8_npf": 112},
-            {"g30n:o": True}),  # n5s9: base += {nu8d/nu8x off, cslpw, pr8_npf 220}; tk2fx off dropped (real routings +0.5..1.7 us at T=1/8)  # n5s5: g30n MTOK 8 o: H100 ab_flag v1 sl -0.3..-0.8, full +1.0..1.6 us (pr8 is the long pole): H200 decides  # s91: pr8 bulk PF depth on the H200 (H100 can't judge it)  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
+            {"g30n:o": True}, {"g30n:o": False}),  # n5s10: T=8 sl base += g30n:o (H200 tuner picked it in bb8ea548 + 60f02748; H100 -0.3..-0.8); {g30n:o True} = the full-layer option  # n5s9: base += {nu8d/nu8x off, cslpw, pr8_npf 220}; tk2fx off dropped (real routings +0.5..1.7 us at T=1/8)  # n5s5: g30n MTOK 8 o: H100 ab_flag v1 sl -0.3..-0.8, full +1.0..1.6 us (pr8 is the long pole): H200 decides  # s91: pr8 bulk PF depth on the H200 (H100 can't judge it)  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
         128: ({}, {"g30:o": True}, {"lt:pooler": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"fr": False}, {"ltalt:pooler": 1}, {"ltalt:pooler": 2}),  # n5s8: H100 real routings (seeds 99/7/13):
               # twf_split 66/1022 flips sign per routing (-9/+11/-1 us sl), bkt/gnorm/g30:unpool off, lt:qkv_gate off, o_pf 0 lose: dropped  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
@@ -3101,7 +3101,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 _T8N = {"cslpw": True, "pr8_npf": 220}  # n5s9 v152: nu8d/nu8x off back to a tuner option: H200 tuner (check bb8ea548) -1.1 sl / -1.6 full us with them ON
 _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
 TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True, "pr1_rb": 32},
-             (8, True): {"nu8": True, "g14alt:qkv_gate": 3, **_T8N}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1, **_T8N},
+             (8, True): {"nu8": True, "g14alt:qkv_gate": 3, "g30n:o": True, **_T8N}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1, **_T8N},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
              (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
              (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},

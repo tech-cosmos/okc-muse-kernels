@@ -17001,7 +17001,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0},
             {"g19:qkv_gate": True}, {"cslpw": False}, {"cslpw": False, "pr8_npf": 212},
             {"pr8_npf": 206}, {"pr8_npf": 212}, {"pr8_npf": 112},
-            {"g30n:o": True}),
+            {"g30n:o": True}, {"g30n:o": False}),
         128: ({}, {"g30:o": True}, {"lt:pooler": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"fr": False}, {"ltalt:pooler": 1}, {"ltalt:pooler": 2}),
         256: ({}, {"twf_split": 1022}, {"nvscl": False, "sl": True},
@@ -17010,7 +17010,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
 _T8N = {"cslpw": True, "pr8_npf": 220}
 _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
 TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True, "pr1_rb": 32},
-             (8, True): {"nu8": True, "g14alt:qkv_gate": 3, **_T8N}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1, **_T8N},
+             (8, True): {"nu8": True, "g14alt:qkv_gate": 3, "g30n:o": True, **_T8N}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1, **_T8N},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
              (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
              (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
