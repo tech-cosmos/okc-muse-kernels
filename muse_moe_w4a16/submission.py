@@ -1769,6 +1769,38 @@ __device__ __forceinline__ void tw_epi(float (&acc)[RT][N / 2], int lane, int wa
                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
   const int g = lane >> 2, t = lane & 3;
   constexpr int H = GATED ? RT / 2 : RT;
+#if TWM_EPI
+  // n6s3: rolled 8-token-group loop (i-cache), accumulators shift down by 4 per group; same values/stores as below
+#pragma unroll 1
+  for (int gi = 0; gi < N / 8; ++gi) {
+    if (gi * 8 >= nv) break;
+#pragma unroll
+    for (int r = 0; r < H; ++r) {
+      const int tile = rb * NW * H + warp * H + r;
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const int tok = gi * 8 + t * 2 + (q & 1);
+        if (tok < nv) {
+          const int col = tile * 16 + g + ((q & 2) ? 8 : 0);
+          const float v = acc[r][q] * gsc;
+          if (GATED) {
+            const float u = acc[r + H][q] * gsc;
+            const int c = col & 63;
+            const int lc = (col & ~63) | (((c >> 2) & 3) << 4) | (((c >> 1) & 1) << 3) | ((c >> 4) << 1) | (c & 1);
+            Out[(size_t)(off + tok) * NOUT + lc] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+          } else {
+            Out[(size_t)sroutes[off + tok] * NOUT + col] = __float2bfloat16(v);
+          }
+        }
+      }
+    }
+#pragma unroll
+    for (int r = 0; r < RT; ++r)
+#pragma unroll
+      for (int i = 0; i + 4 < N / 2; ++i) acc[r][i] = acc[r][i + 4];
+  }
+  return;
+#endif
 #pragma unroll
   for (int r = 0; r < H; ++r) {
     const int tile = rb * NW * H + warp * H + r;

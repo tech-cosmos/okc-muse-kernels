@@ -2850,3 +2850,14 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   -0.5, board256 -0.2, v16 -0.6, v32 -0.2 us = noise. Not pursued alone.
 - EPI2 (tools/n6s3/mk_epi.py): tw_item's DYN epilogue stages each warp's 8-token group in 1 KB smem (+8 KB dyn smem past
   the ring in twm/twf/hot) and writes 16-B (Y) / 8-B (RT4 inter) / 4-B (RT2 inter) chunks. bench test 15/15 PASS.
+- WAIT, the stores were not the cost: EPI2 cut the store phase only partly (H100 N32 gemm13 16 -> 10 us), and with the
+  global writes REMOVED (timing-only copy) N24/N32 gemm13 still spent 5.5-9 us there. Cause = I-CACHE: moe_twm is 16.7k SASS
+  (~264 KB), every (RT, N, gated/g2) epilogue fully unrolled, so rare item kinds (N24/N32) run cold code fetched from L2
+  (nonlinear in N; 3 us even in the warm 1-expert proxy). ROLL (gi loop `#pragma unroll 1`, group reads acc[.][0..3], then
+  accumulators shift down by 4 with constant-index moves): twm 16.7k -> 12.2k SASS, moe_hot 4.3k -> 1.4k; H100 timeline
+  N24 gemm13 store phase 5.5 -> 1.2, gemm2 N32 10 -> 3 us.
+- ON MAIN a16e336: TWM_EPI = 1 (python global; library keyed by (DQW, TWM_EPI); EPI2 staging + ROLL). Bitwise = before
+  (ab2 max|A-B| 0), bench test 15/15. H100 A/B vs HEAD: board128 -1.9, board256 -4.8, v16 -3.3, v32 -2.7 us.
+- H200 judge DIAG a913b38e (tools/n6s3/mkdiag_epi.py: TWM_EPI 0/1/0/1, layer big-M settings, layer v16/v32 routings):
+  v16 166.4/164.7/166.8/165.0, v32 198.1/195.1/198.1/195.1 us => v16 -1.8, v32 -3.0 us (every seed, maxdiff 0).
+- Then also rolled tw_epi itself under TWM_EPI (tw_hot in twm, twq): bitwise, H100 -1.0/-0.2/+0.2/-0.8 = noise.
