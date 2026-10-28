@@ -1,5 +1,10 @@
 # STATE-moe
 
+## n5s11 (01:10Z 10-28): no moe lane open (all closed on H200 data; lane request to lead stands). Built an ENABLER for layer:
+tools/n5s11/cuda_strip.py = strip C comments from the CUDA strings of a built submission.py (judge limit 1,000,000 B; layer v145
+963.7 KB). v145 -> 890.6 KB (-73 KB; keeps each source's header block and any comment a runtime .replace() anchor uses).
+cpp -fpreprocessed token streams equal per string; SASS identical for every default build (tools/n5s11/sass_eq.py); NOTES n5s11. Layer: call strip_file() in build.py.
+
 ## n5s10 (00:30Z 10-28): pr32 DEAD on the H200 (layer check 4937830f tuner: T=32 pr32+unp 164.4 vs picked g30k104+unp 162.1;
 T=16 +3 us vs default). Closed; asked layer to drop the option. moe has NO open item: tk2f/twm/attention/pr32/batch-1 chain all closed.
 Tool: tools/n5s10/pr32_tune.py <layer judge log>. moe checks 20/20 fresh today (moe board = test bed only).

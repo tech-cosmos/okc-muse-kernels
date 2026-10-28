@@ -2170,3 +2170,32 @@
   timeline (not available to moe: layer checks only) there is no evidence to tune against; closed.
 - Ask to layer: drop {"pr32": ...} options from TUNE[16]/TUNE[32] (and the pr32 builds) to cut cold prepare time.
 - 0 runs. Note: I accidentally ran `git pull` in ~/r-layer this session (fast-forward, clean tree, no harm); read r-layer only.
+
+## n5s11 (2026-10-28 00:24Z - ): CUDA-comment stripper for the layer build (1 MB judge upload limit); 0 runs
+- Lane: none open (n5s10 asked the lead). Re-read the H200 data for anything unmeasured: layer check 4937830f per-kernel
+  profile (v16 sl twm 165 + moe_norm 37; v32 sl twm 201 || hot 155; d32 sl tk2f 87) and the moe board (#1 2.62x vs our
+  2.25x; our weakest shape decode 32 1.72x = 124.8 us vs SOL 70.8). Every lever found was already measured dead:
+  expert-W L2 prefetch beside the d32 pooler (layer s55), twm ALU+tensor bound (s28/s29), GS16 (s12, 4 H200 diags), tk2f
+  closed (layer s81). Nothing new to build there.
+- Built instead (enabler): layer v145 is 963.7 KB of the judge's 1,000,000 B limit (layer n5s6: 36 KB headroom; any new
+  kernel breaks it). tools/n5s11/cuda_strip.py strips // and /* */ comments from the 25 raw CUDA strings embedded in the
+  built submission.py (string/char literals and backslash splices respected; comment-only lines dropped; each source's
+  leading // header block kept for readers). Verified per string: `cpp -fpreprocessed -P` token streams equal; the 26
+  runtime .replace() anchors all still present. v145: 963,742 -> 890,149 B (-73.6 KB; -86.6 KB without kept headers).
+- First A/B failed at import: layer.py text-patches moe CUDA with anchors built in Python variables that include
+  comments (TK2F_LATE_TRIG: '{  // routing, as moe_tk2 GATED'). Fix: a comment is KEPT if its text occurs in any other
+  (non-embedded) string constant of the file. Result v145: 963,742 -> 890,598 B (-73.1 KB; headroom 36 -> 109 KB).
+- Validation (/tmp copies of r-layer v145 = d372b7e, TUNE = {} appended to both so the tuner cannot pick differently):
+  (1) per string `cpp -fpreprocessed -P` token streams equal (25 strings);
+  (2) SASS: both files prepared with separate TORCH_EXTENSIONS_DIRs, tools/n5s11/sass_eq.py pairs .so by kernel-name set:
+      every device build IDENTICAL (moe 115 kernels, g10 42, csl 16, g24 8, nds, nvs, nvscl, g27, g30 x7, g30k x2, pr32 x2);
+      only muse_layer_lt1 (host-only cuBLASLt wrapper, 0 device kernels) differs, as expected (__LINE__ in host checks);
+  (3) layer tools/files_eq.py stripped vs original, 12 scored shapes x 2 seeds: 11 non-identical, all 1-2 BF16 ulp at
+      d16/d32 (+ v1 2e-4) and one decode 32 sliding seed-0 routing flip (1 id, maxdiff 1.85); CONTROL original vs an
+      identical copy: 10 non-identical, same 1-2 ulp pattern at d16/d32. => those diffs are the layer's own run-to-run
+      nondeterminism at T=16/32 (known since moe s18), not the strip (SASS identical). FYI layer: that nondeterminism can
+      flip a near-tie route (seen once in 24 here), which is the routing-check risk the lead flagged 10-26.
+- Not covered by (2): builds that only TUNE options trigger (g30n, g19, g22...): covered by (1) only.
+- Use (layer build.py, after strip_comments): `sys.path.insert(0, <r-moe tools/n5s11>)` or copy cuda_strip.py into the
+  layer dir; `out, k = cuda_strip.strip_file(out)` (asserts token equality per string, needs `cpp` = gcc's, present).
+- 0 judge runs.
