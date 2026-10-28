@@ -1,0 +1,58 @@
+2493c2493
+< #define TWM_TL 0
+---
+> #define TWM_TL 1
+2496d2495
+< #define HOT_NX 0  // n5s21: exact-N moe_hot probe builds (tests only)
+2922,2923c2921
+<   constexpr int NX = NH > 64 ? 128 : NH;  // n5s21: x box rows (exact-N classes 72..120 load the 128-row box)
+<   constexpr int XB = NX * 128, STRIDE = XB + HG::WB + HG::SB;
+---
+>   constexpr int XB = NH * 128, STRIDE = XB + HG::WB + HG::SB;
+2945c2943
+<     const bool h = nt > (NH > 64 ? 64 : NH / 2) && nt <= NH;
+---
+>     const bool h = nt > NH / 2 && nt <= NH;
+2970c2968
+<       const CUtensorMap* map = g2 ? &maps2.m[NX == 128 ? 5 : 3] : &maps13.m[NX == 128 ? 5 : 3];
+---
+>       const CUtensorMap* map = g2 ? &maps2.m[NH == 128 ? 5 : 3] : &maps13.m[NH == 128 ? 5 : 3];
+3041c3039
+<   constexpr int SMEM = NSTG * ((NH > 64 ? 128 : NH) * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024;
+---
+>   constexpr int SMEM = NSTG * (NH * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024;
+3060,3063d3057
+< #if HOT_NX
+<   if (g_hot & 16) return (g_sa & 1) ? hot_go<true, 104>(HOTA) : hot_go<false, 104>(HOTA);  // n5s21 exp: exact-N probe
+<   if (g_hot & 32) return (g_sa & 1) ? hot_go<true, 80>(HOTA) : hot_go<false, 80>(HOTA);
+< #endif
+5745d5738
+< HOT_NXB = 0  # n5s21: probe bits (16: NH 104, 32: NH 80; HOT_NX builds only)
+5790c5783
+< DIAG = 0
+---
+> DIAG = 1
+5793,5796c5786,5789
+< DIAG_VARIANTS = {  # s25: same-check control: twm (the layer's T=128 default) vs twq q4 vs the HOTQ stack; b = repeats.
+<     # Keep a twm control in EVERY big-M DIAG (s25: twq variants were compared only to a regressed q4, never to twm).
+<     "dec": [("sq", {}), ("np", {"NORM2_PDL": 1}), ("sqb", {}), ("npb", {"NORM2_PDL": 1})],  # n5s19: norm2 PDL secondary
+<     "big": [("twm", {"RG": 0, "TWQ_M": {}})],  # n5s15: control only (decode-only DIAG)
+---
+> DIAG_VARIANTS = {  # proj n5s11: big-M K-split tail sizes (twm control first and last)
+>     "dec": [("sq", {})],
+>     "big": [("twm", {}), ("s33", {"TWF_SPLIT_M": {128: 33, 256: 33}}), ("s66", {"TWF_SPLIT_M": {128: 66, 256: 66}}),
+>             ("s50", {"TWF_SPLIT_M": {128: 50, 256: 50}}), ("a23", {"TWF_SPLIT_M": {128: 1023, 256: 1023}}), ("twmb", {})],
+6035c6028
+< DIAG_TL = ()  # s14: twm item orders to timeline in the diag (needs TWM_TL 1 in the CUDA source: diag copies only)
+---
+> DIAG_TL = (1,)  # s14: twm item orders to timeline in the diag (needs TWM_TL 1 in the CUDA source: diag copies only)
+6037,6038c6030
+< DIAG_TLV = [("h32", {"HOT_M": {256: 32}}), ("h32s66", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {128: 66, 256: 66}}),
+<             ("h32a22", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {128: 1022, 256: 1022}})]
+---
+> DIAG_TLV = [("twm", {}), ("s66", {"TWF_SPLIT_M": {128: 66, 256: 66}}), ("s33", {"TWF_SPLIT_M": {128: 33, 256: 33}})]
+6259,6260c6251
+<                 lib.moe_set_hot((1 if hg else 0) | (2 if TWM_PB_M.get(M, 64) == 48 else 0) | (HOT_TWG.get(M, 0) << 8 if hg else 0)
+<                                 | (HOT_NXB if hg else 0))
+---
+>                 lib.moe_set_hot((1 if hg else 0) | (2 if TWM_PB_M.get(M, 64) == 48 else 0) | (HOT_TWG.get(M, 0) << 8 if hg else 0))

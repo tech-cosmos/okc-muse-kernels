@@ -1,0 +1,28 @@
+1783a1784
+> __device__ unsigned long long g_lend[160];
+1863a1865
+>   if (warp == 0 && lane == 0) { unsigned long long t_; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t_)); g_lend[blockIdx.x] = t_; }
+2491a2494,2496
+> #ifndef TWM_LEND
+> #define TWM_LEND 1
+> #endif
+2898c2903
+<     if (tl && tid == 0 && ntl < 20) tl[3 + 3 * ntl] = gtimer();
+---
+>     if (tl && tid == 0 && ntl < 20) { tl[3 + 3 * ntl] = TWM_LEND ? *(volatile unsigned long long*)&g_lend[blockIdx.x] : gtimer(); }
+3089c3094
+<   return launch_k(kf, std::max(1, grid - (g_hot >> 8)), 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+---
+>   return launch_k(kf, (getenv("TWM_G") ? atoi(getenv("TWM_G")) : std::max(1, grid - (g_hot >> 8))), 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+3420c3425
+<     if (tl && tid == 0 && ntl < 20) tl[3 + 3 * ntl] = gtimer();
+---
+>     if (tl && tid == 0 && ntl < 20) { tl[3 + 3 * ntl] = TWM_LEND ? *(volatile unsigned long long*)&g_lend[blockIdx.x] : gtimer(); }
+5783c5788
+< DIAG = 1
+---
+> DIAG = 0
+6055c6060
+<     act = [c for c in range(132) if tl[c, 63].item() > 0]
+---
+>     import os; act = [c for c in range(int(os.environ.get("TWM_G", 132))) if tl[c, 63].item() > 0]
