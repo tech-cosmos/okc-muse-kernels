@@ -2379,3 +2379,12 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   {g30n:o True} (full) + {g30n:o False} (sliding escape). test 0/13, scored 0/12, opt 0/252. Not checked (tuner-pick pin: a tie).
 - Next: nothing new queued from moe/proj. Open item = T=1 o+bnd+pr1 megakernel (bound ~0.5% d1). T=32 base could take
   g30kgx:pooler if the next H200 tuner picks it again (one pick so far, -0.6 us).
+- Lead 03:25Z: judge prepare_s cap 220 s; log prepare_s per run. Judge prepare_s: 73c50eea 183.1, bb8ea548 202.5, 60f02748 183.5,
+  3e3b9fd3 189.0 s (local cold ~0.85x of the judge's). Get them with `okc status <FULL 16-hex job id> --json` (short ids fail);
+  tuner picks: python /tmp/picks.py-style regex on json.dumps (arrow is > in the raw JSON).
+  H200 picks (bb8ea548 / 60f02748 / 3e3b9fd3): T=1 sl pr1_rb 32 x3 (= base), full g10alt:o 1 / pr1_rb 32 / g10alt:o 1;
+  T=16 sl g30n:unpool x2, bal (= base); full g30n:unpool+qkv x2, g30n:qkv; T=32 sl g19:o, g30kgx x2; full g24sk2 combo, tk2h 3,
+  g30kgx; T=8 sl g30n:o x3; full nu8d+x (= base since v152), g14alt 3 x2; T=128 default/lt:o/ltalt:pooler 2; T=256 lt:o x2 + lt all.
+- v155 = v154 + TUNE lists cut to those picks (+ escapes {g30kgx:pooler False}, {g30n:o False}, {g14alt 1}); base pins T=32
+  g30kgx:pooler (sl+full), T=8 full g14alt 3. Old lists: git show 51acdef:muse_decode_layer/layer.py. test/scored/opt 0/42/fuzz OK,
+  cold prepare **139.4 s** (v153 161.5 s). Builds that now serve no option (g19 qkv/o at T=32, g24sk2, lt alts ...) not yet pruned.
