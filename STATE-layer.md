@@ -6,6 +6,8 @@ night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (too
   (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
   unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 8 submits.
   Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
+night5 s22: no build, 0 judge runs: H200 (Modal) real-input T=128 A/B: g30:unpool off +2.2..3.6, fr off +0.9..2.2 us
+  on 6/6 inputs: T=128 base {fr, g30:unpool, rg} confirmed, NEXT 4 CLOSED. proj claimed NEXT 3 (pr128) 07:50Z.
 night5 s21: no build, 0 judge runs. H200 (Modal) standalone ranking of T=128 g30 forms (NOTES n5s21 table): R2 dead, qkv
   split dead (reduce +3.7 us), unpool g30 is +1.1 us vs cuBLAS standalone on H200 (main keeps it for the in-layer PDL overlap),
   pooler FP32-slab g30 -4.6 us vs cuBLAS -> only pays with the router's hi/lo rows inside it (NEXT 3). fr False at T=128: H100 tie.
@@ -23,26 +25,7 @@ night5 s16: main = v160 (9fa5164) = v158 + moe n5s24 norm ids/tw batch (v159, bi
   NORM_EARLY path triggers PDL dependents at start: the T=128 g30 unpool's W prologue now runs under twm's drain; H100 v16 sl -1.9..-4.4,
   full -2.1..-2.3 us, 3 seeds). check aba95f63 2.1033x (noise: d1/v1 slow) but v16 sl 260.7 = best H200 (prev 265-269); g30 starts
   ~21 us earlier in the H200 profile. validate ALL OK, cold 69.7 s, judge prepare_s 89.6. Not submitted. 10-28: 9 checks / 8 submits.
-night5 s15: **main = v158** (76f4632) = v157 + moe n5s23 routegathern latency fix (bitwise = v157; H100 v32 sl -2, v16 sl -1 us;
-  H200 routegathern 7.4 -> 5.2 us). check 1d0568ec 2.1100x (noise), prepare_s 89.4; not submitted. 10-28: 10 checks / 8 submits.
-night5 s14: no build (pooler||router option = s55 dead; csl-in-qkv-drain bounded ~0.4% and CSL_PW-like crowding: NOTES n5s14); 0 runs.
-night5 s13: no build (all layer levers on record measured/bounded; NOTES n5s13). Lead's scored run of v157 = 35af5031
-  **2.1420x** (prepare_s 100.6): board best unchanged. 10-28 budget: 11 checks / 8 submits. Lane request posted in COORD.
-night5 s12: **main = v157** (83bc412) = v156 + TSHIM (g30 x8 + lt libs built torch-header-free: a lib's ~50 CPU-s was torch
-  header parsing, ptxas 0.1 s) + MOE_PRUNE (moe lib 115 -> ~28 kernels). check af87d466 2.1460x (noise), **judge prepare_s 92.2 s**
-  (v156 182.0): ~128 s of headroom under the 220 s cap for new builds/TUNE options. H100 12-shape A/B tie; SASS identical.
-  10-28 budget after it: 11 checks / 9 submits. Other libs still pay ~45 CPU-s headers each (NOTES n5s12) if builds grow again.
-night5 s11: **main = v156** (50355f2) = v155 + nvcc --split-compile=0 on moe/g10 libs + build pool 16 + 4 dead g30 builds dropped
-  (local cold 142 -> 131.5 s; H100 12-shape A/B tie). check 0e4ba3c2 2.1421x, **judge prepare_s 182.0** (no gain on the judge's
-  build host). 10-28 budget after it: 12 checks / 9 submits. No new layer lever found (NOTES n5s11).
-night5 s10: **main = v155** = v153 + T=8 sl base g30n:o, T=8 full g14alt 3, T=32 base g30kgx:pooler, TUNE lists cut to the H200
-  picks of the last 3 runs (lead 03:25Z: judge prepare_s <= 220 s): cold 139.4 s local, **judge prepare_s 176.7** (v153 189.0).
-  check cd6b3ba4 v155 2.1074x (d16/d32 sl best ever 123.1/147.2; d1/v32 sl worse = run noise per tuner logs; not submitted).
-  Next: prune builds that serve no TUNE option any more (g19 qkv/o T=32, g24sk2, lt alts...: check each against TUNE_BASE).
-  v153 = v152 + proj G30_GX (branch proj/g30gx afc0c8b: TUNE options; H200 tuner: g30kgx:pooler T=32 sl -0.3..0.6 us picked,
-  rest tie) - pr32 builds (cold 220 -> 161.5 s). check 60f02748 2.1373x -> submit 3e3b9fd3 2.1580x (board best). 10-28 budget
-  after cd6b3ba4: 13 checks / 9 submits.
-Older session summaries (night5 s1-s9, s85-s107): NOTES-layer.md.
+Older session summaries (night5 s1-s15, s85-s107): NOTES-layer.md.
 
 ## Per-load H200 us vs the s12 floor (board run 19ebde23 = v108; lead 05:07Z request; s74)
 Score %/us = gain in total score per us saved on that layer type (geomean of 6 loads x (46 sl + 16 full)).
@@ -69,10 +52,10 @@ per-shape evidence). Open items, biggest first (none started):
 1. o+bnd+pr1 megakernel at T=1 (bound ~-3 us d1 = ~+0.5%; NOTES s45/s61/s74; moe n5s9 audit: post-attention chain <= 3-4.5 us).
 1b. DONE n5s16/n5s17 (v160, v161): no serial PDL hand-off left (timeline_all audit, NOTES n5s17).
 2. Any new Handoff from moe (attention lane) / proj: port as a TUNE option, validate, bundle into one check.
-3. (n5s21, ~+0.19%, 2-3 sessions, below the 1% bar) T=128 'pr128': g30 FP32-slab pooler S2 (128 CTAs) that also carries the
+3. (proj is prototyping it since 07:50Z 10-28; integrate when handed off) (n5s21, ~+0.19%, 2-3 sessions, below the 1% bar) T=128 'pr128': g30 FP32-slab pooler S2 (128 CTAs) that also carries the
    router's 256 hi rows (12-bit) + 256 lo rows (raw BF16, 2nd decode path) within <= 132 CTAs; _routing sums router slabs,
    moe_routegathern sums the 2 pooler slabs (gnorm). H200 Modal: pooler slab 22.3 vs cuBLAS 26.9 us; FR = pooler + ~3 us.
-4. (cheap, Modal) H200 real-input A/B of g30:unpool False at T=128 (H200 standalone cuBLAS 20.6 vs g30 21.7; H100 in-layer +6..8).
+4. DONE n5s22: g30:unpool + fr stay on at T=128 (H200 real-input, 6/6 inputs).
 T=16: every g30 option ties on 3 H200 checks (f824b925, 133068b8, 4937830f): don't add more g30 work at T=16.
 
 ## Board

@@ -2615,3 +2615,15 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - H100 real-input ab_flag (variants/n5s21_notune.py = v163 + TUNE {} + _ab; seeds 99/7/13, 2 rounds) T=128 fr False vs mean of
   base first/last: sl +1.0/-0.5/-0.8, full -0.5/-1.3/-0.3 us: tie (n5s8's "full -3..-6" was before rg). Not sent to the H200.
 - Shared Modal ledger: 52.2 of 60 GPU-min used on 10-28 after this session (mine today: n5s20 ~18 incl. a lost reservation, n5s21 8.8).
+
+## night5 s22 (2026-10-28 07:38Z-08:00Z, okc-night5 session 22): H200 (Modal) real-input A/B at T=128 of g30:unpool and fr; no build; 0 judge runs
+- STATE NEXT 4. /tmp/n5s22/a = variants/n5s21_notune.py (= main v163 submission.py + TUNE {} + _ab); runner copied to
+  dev/n5s22_h200_run.sh (`python tools/h200.py muse_decode_layer a=<dir> --cmd 'bash run.sh'`), ab_flag "verify 16", 2 rounds,
+  seeds 99/7/13. 3.4 GPU-min. Modal H200 us [0 base | 1 g30:unpool off | 2 fr off | 3 both off | 4 base]:
+  sl s99 249.4|253.3|251.7|254.4|249.9, s7 255.3|258.8|257.0|259.9|256.3, s13 258.4|261.3|259.8|262.7|258.2;
+  full s99 354.0|356.9|355.8|357.5|353.8, s7 350.7|353.3|351.7|353.7|350.6, s13 316.5|318.7|318.2|320.1|316.1.
+- Read: g30:unpool off loses +2.2..3.6 us on 6/6 inputs (so the H200's standalone cuBLAS-unpool edge of -1.1 us, n5s21, is
+  more than paid back by the in-layer PDL prologue under twm's drain); fr off loses +0.9..2.2 on 6/6 (the n5s21 H100 'tie' was
+  H100-only). Both off adds up. T=128 TUNE_BASE {fr, g30:unpool, rg} confirmed on the H200: CLOSED, main unchanged.
+- proj claimed NEXT 3 (pr128: T=128 g30 pooler+router hi/lo one launch) at 07:50Z in COORD: layer does not start it.
+- Shared Modal ledger 55.8 / 60 GPU-min on 10-28 after this run.
