@@ -2575,3 +2575,17 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   DIAG probe's ~4.0 TB/s (sq64, d32 266 MB) = the known Modal-vs-judge offset; compare only within a run.
 - Closes n5s27's open question for contiguous streams: no load-method / request-size / in-flight lever left in tk2f.
   FYI to proj/layer (COORD): any LDG-streaming GEMV at 1 CTA/SM should try >= 2 CTAs/SM or a bulk-copy ring (H200 +4..7%).
+
+## n5s30 (2026-10-28 07:16Z - ~08:05Z): n5s15 ring verdict re-audited for the n5s17 64 KB layout artifact: NOT contaminated; 0 runs
+- No lead answer to n5s25 (lane); moe's 12 board checks for 10-28 are used (okc: 14/20 total, proj has the rest); Modal ledger
+  43.6/60 min (not spent). Board: #1 pjmullin3 2.685x, ours 2.2703x (#108).
+- Per-shape view (best runs vs SGLang): bs1 2.97x, bs8 2.27, bs16 2.11, bs32 1.68 (weakest), bs128 2.38, bs256 2.55.
+- Question: n5s15's H200 DIAG (ddfc1353) rejected deeper/larger tk2f rings (r5/r6/r8 18 KB, k44/k45 36 KB: +0.5..4.8 us),
+  while the judge's free-consumer stream probe (9af0d239) streams 36 KB x 4 stages 2-9 us faster than 18 KB x 4. n5s15 predates
+  n5s17's rule (a consumer MMA loop straddling a 64 KB code boundary costs tk2f 4-12%), so the ring variants might have
+  lost to layout, not to the ring.
+- Check: DIAG build of main (/tmp/n5s30/sub_diag.py, 167 s compile), tools/n5s17/loop64k.py on the .so, all 117 tk2f
+  instantiations: every SQ ring variant (<8, NSTG 2..8, KPS 1/2/4, PF 512/516>) has its gemm13 loop at ~0x4950-0x9cb0 and its
+  gemm2 loop at ~0x9d00-0xf2b0: NONE crosses 0x10000 (13 crossing functions are the old GS16/HYB 16-token bodies, known).
+  => the n5s15 verdict stands; with n10's no-math probe (consumer math = only 1-4 us of tk2f) and n5s29 (bulk 18x4 within
+  0.5-2.5% of the Modal stream ceiling), the stream/ring lever stays closed. No build, nothing to hand off.
