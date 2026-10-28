@@ -10541,6 +10541,11 @@ void g10_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t u, in
 if UNPOOL_PDL:
     _i = _moe_CUDA_SRC.index("{\n", _moe_CUDA_SRC.index("__global__ void __launch_bounds__(512) moe_norm2(")) + 2
     _moe_CUDA_SRC = _moe_CUDA_SRC[:_i] + '  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + _moe_CUDA_SRC[_i:]
+NORME_TRIG = True
+if NORME_TRIG:
+    _a = "  if (rdy) {\n    // n4s1 (NORM_EARLY)"
+    assert _moe_CUDA_SRC.count(_a) == 1
+    _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, '  if (rdy) {\n    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // n5s16 NORME_TRIG\n    // n4s1 (NORM_EARLY)')
 POOLER_HI_PRIORITY = ()
 ROUTER_L2_PF_TOKENS = ()
 ROUTER_AFTER_POOLER = ()

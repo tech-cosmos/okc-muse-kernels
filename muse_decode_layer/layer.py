@@ -732,6 +732,14 @@ _G10_SRC = None  # @@G10@@
 if UNPOOL_PDL:
     _i = _moe_CUDA_SRC.index("{\n", _moe_CUDA_SRC.index("__global__ void __launch_bounds__(512) moe_norm2(")) + 2
     _moe_CUDA_SRC = _moe_CUDA_SRC[:_i] + '  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + _moe_CUDA_SRC[_i:]
+# n5s16 NORME_TRIG: moe_norm (NORM_EARLY path, T > 32: rdy != nullptr) triggers its dependents at start, so the T=128 g30
+# unpool (PDL secondary, W ring loads before its griddepcontrol.wait) launches on the SMs twm's drain frees instead of after
+# moe_norm's exit. Its x (moe_norm's out) is read only after the wait (= moe_norm complete): no ordering change.
+NORME_TRIG = True
+if NORME_TRIG:
+    _a = "  if (rdy) {\n    // n4s1 (NORM_EARLY)"
+    assert _moe_CUDA_SRC.count(_a) == 1
+    _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, '  if (rdy) {\n    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // n5s16 NORME_TRIG\n    // n4s1 (NORM_EARLY)')
 # moe_tk2 (decode experts, T <= 32) as PDL secondaries: gemm13 (TK2_PDL13) launches while _rmsnorm_gain (patched
 # to trigger at its start) runs; its producer warp streams the first weight stages and does the in-kernel routing
 # before the consumers' griddepcontrol.wait (right before their first x read). gemm2 (TK2_PDL2) waits at entry.
