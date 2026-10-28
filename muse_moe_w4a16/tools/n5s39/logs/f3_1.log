@@ -1,0 +1,2 @@
+F3 w=mask:q,s=imad:w,X=sh,Y=sh finals 4 ops 8 -> sat
+   ['X_27=True', 'Y_84=True', 'f0_16=True', 'f1_4=True', 'f2_2=True', 'f3_0=True', 's_k14=True', 's_k3=True', 's_k8=True', 'w_C0=True', 'w_C16=True', 'w_C17=True', 'w_C19=True', 'w_C1=True', 'w_C20=True', 'w_C3=True', 'w_C4=True']

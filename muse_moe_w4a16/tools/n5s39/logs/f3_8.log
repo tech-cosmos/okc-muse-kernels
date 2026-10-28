@@ -1,0 +1,1 @@
+F3 w=mask:q,s=imad:w,v=mask:q,t=imad:v finals 3 ops 7 -> unsat

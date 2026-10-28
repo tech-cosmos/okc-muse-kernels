@@ -1,6 +1,9 @@
 # STATE-moe
 
-## NOW (n5s38, 10:45Z): idle, lane ask stands; proj H200 twm dq-free -23 us ceiling re-checked: every route to it dead on record (NOTES n5s38)
+## NOW (n5s39, 11:50Z): dq superoptimizer (lead 10:55Z) DONE: no 7-int-op dq() in any searched family; today = 8 int + 4 HMUL2 = 12/8 weights (NOTES n5s39, tools/n5s39)
+- z3 routing model rediscovers production at 8 ops; 30+ 7-op shapes (shift/mask/IMAD/IMAD-merge/PRMT/funnel/select) all UNSAT;
+  exhaustive shift family 0/129,766. Full-ISA BV CEGIS intractable at N>=6. Only route below 12 = fold scale (proj's prmt-LUT).
+## WAS (n5s38, 10:45Z): idle, lane ask stands; proj H200 twm dq-free -23 us ceiling re-checked: every route to it dead on record (NOTES n5s38)
 ## WAS (n5s37, 10:35Z): per-shape value table in NOTES n5s37 (bs1 fixed cost = 1.5 us per +1% board, all pieces dead)
 ## WAS (n5s36, 2026-10-28 10:40Z): 'dequant once, mma many' (lead 10:20Z) = already built as moe_hot N128 (NOTES n5s36)
 - Layer v16/v32 routings: 0 repeated dq (v16 max 49 tok = one N64 pass; v32 hot 73-98 tok = one moe_hot N128 pass). Microbench

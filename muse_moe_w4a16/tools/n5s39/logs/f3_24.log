@@ -1,0 +1,1 @@
+F3 X=sh,Y=fun:q:X,Z=fun:X:q finals 4 ops 7 -> unsat

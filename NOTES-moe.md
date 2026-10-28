@@ -2732,3 +2732,33 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   pipe-bound); dq/tensor overlap is dead SM-wide (s18/s22/s27 microbenches: ALU work by OTHER warps does not overlap wgmma,
   RS or SS); 4 warps/SMSP +3-6% best case (s28, moe_twq lost on the H200); scale-on-accumulator costs as many FFMA as the HMUL2
   it saves (N8: 4 vs 4 per k16). => the ceiling can't be reached by any form on record or any new one I can name. No build, 0 judge runs, 0 Modal.
+
+## Night5 session 39 (2026-10-28 10:56Z - ~11:50Z): dq superoptimizer (lead 10:55Z); no 7-int-op dq() exists in any searched family; no build; 0 judge runs, 0 Modal
+- PREMISE FIX: today's dq()+scale is 8 int + 4 HMUL2 = **12 instr per 8 weights** (n5s35 SASS: 96 per 64 weights), not
+  12 dq + 4 HMUL2. The 10:55Z target (<= 12 total) is already met; a cut needs <= 7 int ops (or < 4 HMUL2).
+- Floors: 4 HMUL2 per 8 weights (4 distinct bf16x2 outputs, the scale has 4 significant bits so int ops can't do the
+  product without a pre-scaled LUT = proj's prmt-LUT route) and >= 4 int ops (one per output). Window = 4..7 int ops.
+- Bit placement is fixed: the only exact e2m1 -> bf16 map without bias is the subnormal one (sign 15, e1 e0 m at 8 7 6,
+  same +16), P = {6,7,8,15,22,23,24,31}: any exponent bias breaks e=0 (0/0.5) under a pure multiply.
+- Tools (tools/n5s39/, logs/ = every run):
+  * famsearch.py: exhaustive, 3 shl/shr/rot sources + q, 4 LOP3(x,y,IMM) finals, all 256 luts, per-bit IMM choice:
+    129,766 source sets -> 0 solutions (2 sources: 0). Sanity: finds the toy tiling P={0-3,16-19}.
+  * f2sat.py / f3sat.py: z3 Bool-level routing model (no BV arithmetic): free layout (exact cover of the 32 q bits),
+    intermediates = sh (shl/shr/rot), mask (q|X & C, C free), imad (BASE*K + [ADD], K = 1..3 free bits, collision at t ->
+    bits >= t garbage), sel (per-bit select), fun (SHF.L funnel of 2 values), pr (PRMT any bytes of 2 values or RZ);
+    outputs = DIRECT clean intermediate or final LOP3 MASK / SEL / MOR (OR-merge). SANITY: 8 ops w,s,X,Y -> SAT and
+    rediscovers production by itself (C = 0x001B001B, K = {3,8,14}, two rotations); 9-op pr/fun variant SAT.
+    ALL 7-op shapes UNSAT (each 1-10 min): w,s,X | X,w=mask:X,s | w,s,t (2 imads) | X,w,s=imad:w:X (imad-merge) |
+    X,Y,sel | w,s,X,Y +3 | X,w,s,v +3 | w,s,v,t +3 | X,w=mask:X,s,Y +3 | X,w,s,t +3 | w,s,t,u +3 | X,Y,sel,imad +3 |
+    X,Y,Z,W +3 | X,pr(q,q),Y | pr(q,z),fun(R,R),Y | X,pr(q,X),Y | X,fun(q,X),fun(X,q) | X,pr(q,X),fun(R,R) |
+    w,s,fun(s,s) | w,s,fun(s,q) | X,Y,pr(X,Y) | w,s,pr(q,s) | X,w,s,pr(s,z) +3 | pr,X,mask(R),imad +3 | X,Y,pr(X,Y),Z +3.
+    ("+3" = 4 intermediates, 3 LOP3 finals, 1 output = a clean intermediate directly.) F2 addX 0/1: also UNSAT.
+  * supopt.py / supopt2.py / supopt3.py: general CEGIS over full 32-bit BV semantics (lop3 any lut, shf funnel, prmt incl.
+    sign, imad, iadd3, one free IMM per instr). Correct (N=4 UNSAT in 45 s) but intractable at N >= 6 (no CEGIS
+    iteration in 30 min; the free 32-bit layout is a huge refutation space). So NOT a proof for the whole ISA; the
+    families above are the shapes that can work (every output needs bit-level zeros -> a LOP3 mask in its ancestry).
+- Not covered: 3-data-reg LOP3 (no IMM; = SEL/MOR of already-clean values), IADD3 3-way merges, PRMT sign-replicate
+  (copies one bit 8x: useless for routing).
+- Value even if 7 existed: 1/12 of the dq() oracle = ~-1.9 us per v16/v32 sliding layer (proj a9fd9026 -22.6/-23.8).
+- VERDICT: best sequence found = today's (o0 = q&M; rotl10&M; rotl13&M; ((q&0x001B001B)*16648)&M; 4 HMUL2) = 12 per 8
+  weights. The only open route below 12 is folding the scale away (pre-scaled prmt LUT, proj's half of 10:55Z).
