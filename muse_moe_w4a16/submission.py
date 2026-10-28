@@ -99,6 +99,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
 #define TWM_EPI 0        // n6s3: staged, rolled tw_item epilogue (python TWM_EPI)
 #define TWM_HOTC 0       // n6s3: compile moe_twm's hot class (cl 3) in (python: on iff TWM_HOT / TWM_HOT_M set)
+#define TWM_REL 0        // n6s4: moe_twm gemm13 release by helper warp 9 (python TWM_REL; n6s3 mk_rel.py)
 #define TWM_KSC 1        // n6s4: compile moe_twm's K-split tail code in (python: on iff TWF_SPLIT / TWF_SPLIT_M set; 2 = both builds, per call)
 #define DQW 0            // n22: dq() rotations on the FMA pipe (python DQW; DIAG builds both)
 #define NORM_EARLY 0     // n4s1: twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them (python NORM_EARLY)
@@ -2754,6 +2755,10 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   __shared__ uint32_t slut[256];
   __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[2][32], s_ord[4], s_cost;
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
+#if TWM_REL
+  __shared__ __align__(8) uint64_t relb[2];
+  __shared__ int s_rel[2];
+#endif
   int* done = meta + 68;
   // s14: nsplit < 0 = no K split; instead the lightest (last) non-big experts whose RT 4 gemm2 items add up to
   // <= -nsplit run their gemm2 at RT 2 with 32-token passes (class 2: half-size items, shorter drain)
@@ -2788,6 +2793,9 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   if (tid < 33) s_off[tid] = meta[33 + tid];
   if (tid == 0) {
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 8 * 32); }
+#if TWM_REL
+    mbar_init(&relb[0], 256); mbar_init(&relb[1], 256);
+#endif
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
   __syncthreads();
@@ -2910,6 +2918,19 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   };
   if (warp >= 8) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
+#if TWM_REL
+    if (warp == 9) {  // n6s3 REL helper: releases finished gemm13 items (2 slots; items are >> the release latency apart)
+      if (lane == 0)
+        for (int k = 0;; ++k) {
+          mbar_wait(&relb[k & 1], (k >> 1) & 1);
+          const int e = s_rel[k & 1];
+          if (e < 0) break;
+          __threadfence();
+          atomicAdd(done + e, 1);
+        }
+      return;
+    }
+#endif
     if (warp > 8 || lane != 0) return;
     int* counter = meta + 66;
     int st = 0, ph = 0, i = 0;
@@ -2979,6 +3000,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   int ntl = 0;
   if (tl && tid == 0) tl[0] = gtimer();
 #endif
+  int nrel = 0;
   for (;;) {
     mbar_wait(&full[st], ph);
     const int item = s_item[st];
@@ -2988,7 +3010,13 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
       else if (ntl < 20) { tl[2 + 3 * ntl] = gtimer(); tl[4 + 3 * ntl] = item; }
     }
 #endif
-    if (item < 0) break;
+    if (item < 0) {
+#if TWM_REL
+      if (tid == 0) s_rel[nrel & 1] = -1;
+      mbar_arrive(&relb[nrel & 1]);
+#endif
+      break;
+    }
     int g2, a, p, rb, h, j;
     decode(item, g2, a, p, rb, h, j);
     const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? PB : 32;
@@ -3026,11 +3054,17 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     if (!g2) {
       // release this item's inter rows to gemm2 producers on other SMs (their TMA reads them: async proxy)
       asm volatile("fence.proxy.async.global;" ::: "memory");
+#if TWM_REL  // n6s3/n6s4 REL: the helper warp 9 fences + counts (consumers go on to the next item)
+      if (tid == 0) s_rel[nrel & 1] = e;
+      mbar_arrive(&relb[nrel & 1]);
+      ++nrel;
+#else
       asm volatile("bar.sync 1, 256;" ::: "memory");
       if (tid == 0) {
         __threadfence();
         atomicAdd(done + e, 1);
       }
+#endif
     }
 #if NORM_EARLY
     else {  // n4s1: Y rows of expert e complete after its last gemm2 item (a K-split's 2nd half writes Y before it counts)
@@ -5648,6 +5682,7 @@ TWM_HOTC_FORCE = None
 
 
 TWM_KSC_FORCE = None
+TWM_REL = 0  # n6s4: 1 = moe_twm gemm13 release by a helper warp (n6s3 REL; H100 noise)
 TWM_KSC_DUAL = 0  # n6s4: with a K split set for some M, build moe_twm with and without the split code (calls without a split take the smaller one)
 
 
@@ -5712,7 +5747,7 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
 
 def _lib():
     global _LIB
-    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc(), _ksc()))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
+    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL)))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
     if _LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = CUDA_SRC.replace("#define TK2F_L2H 0 ", f"#define TK2F_L2H {int(TK2F_L2H)} ")
@@ -5722,6 +5757,7 @@ def _lib():
         src = src.replace("#define TWM_EPI 0 ", f"#define TWM_EPI {int(TWM_EPI)} ")  # n6s3
         src = src.replace("#define TWM_HOTC 0 ", f"#define TWM_HOTC {int(_hotc())} ")  # n6s3
         src = src.replace("#define TWM_KSC 1 ", f"#define TWM_KSC {int(_ksc())} ")  # n6s4
+        src = src.replace("#define TWM_REL 0 ", f"#define TWM_REL {int(TWM_REL)} ")  # n6s4
         if TK2F_S6 or DIAG:  # n20
             src = src.replace("#define TK2F_S6K 0 ", "#define TK2F_S6K 1 ")
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
@@ -5739,7 +5775,7 @@ def _lib():
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_l2h2", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
-        _LIBX[(int(DQW), int(TWM_EPI), _hotc(), _ksc())] = _LIB
+        _LIBX[(int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL))] = _LIB
     return _LIB
 
 
