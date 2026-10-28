@@ -2485,3 +2485,23 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   (layer's moe_src moe_norm/moe_norm2 have the same pattern but nothing to gain). Not submitted (2.2713 vs board 2.2703 = noise).
 - proj/twm (7ae024a, 3 independent consumer WGs) is self-declared dead by proj (H100 +25..43%): nothing to review.
 - New tool: tools/n5s24/ab.py = paired A/B of two submission.py files in one process (use for any bitwise-equal latency change).
+
+## n5s25 (2026-10-28 05:56Z - 06:55Z): bs256 (T=256) cost model from proj's H200 timelines; no lever >= 5 us left in moe's lane; 0 runs
+- Lead 04:50Z asked for a bs256 cost model before building. Source: proj's H200 DIAG a763ccaf (layer v32 routings, 5 seeds,
+  h32 = moe_hot on 32 CTAs; log /tmp/pjtw/muse_bf16_proj/twm/n5s11/a763ccaf.log, summary tools/n15/an.py):
+    twm   exit max 192-217, busy/G 168-189 (mean 177), loss (exit - busy/G) 16-28; s66/s33 K-split: loss 11-18, busy/G +1.5..3.
+  Bytes ~624 MB at 4.0 TB/s = 156 us. => v32 = HBM floor 156 + consumer excess ~21 (busy/G - bytes time) + drain ~15-22
+  + routegather 4.4 + norm tail ~2.5.
+- The low-TB/s phases in the timelines (first ~30 us at ~1.05 TB/s; a ~25 us dip at 2.2-2.4 around 115-140 us = gemm2's
+  heavy RT2 items) are NOT idle SMs: heavy (N40-64) items are consumer-bound and busy/G counts them. Per s30/s16 the N8
+  item is consumer-bound too (34.4 us warm at G16 = 31.7 GB/s/SM = the HBM share), so reordering (o76/o4, alternation) can't
+  shorten busy: it only moves where the bandwidth dips are (matches o76 'flattens the start, lowers the middle').
+- Consumer excess ~21 us: every per-weight lever is measured dead: dq at the 8-op minimum (s27 exhaustive search), DQW
+  rotations on the FMA pipe (n4s22: IMAD latency, worse), KPS 2 stages (s16: warm items 34.2 = unchanged), pingpong/warp-spec
+  (s22/s27: ALU and tensor don't overlap), 4 warps/SMSP (s28 microbench 3-6% best case; moe_twq lost on the H200; proj tw3
+  independent rings +25..43%), FP8/INT8 MMA (activations must stay BF16; e2m1 x e4m3 doesn't fit e4m3), exact-N hot (n5s21
+  -2.3 measured, ~-3.7 full). Remaining: drain ~15-22 = proj's KQ cheap-combine K-split (claimed n5s11, twm code is shared:
+  TWF_SPLIT_M per M covers T=256 too), and route+norm ~7 (already latency-fixed n5s23/n5s24).
+- => No bs256 build passes the lead's 5 us gate in moe's lane. Told the lead (COORD Requests n5s25) and proposed:
+  moe takes over muse_attention_decode sliding batch-1 again or a layer gap, or works with proj on the drain (two different
+  splits: proj = K pieces; moe could try ROW-split tail items without a combine, but TWM_TAIL row classes already lost s30).
