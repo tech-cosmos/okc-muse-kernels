@@ -2834,3 +2834,19 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   before the epilogue's stores/flags drain (epilogue overlapped with the next item's first dq), or R1's longer per-CTA ranges.
   (2) mma.sync for the N8 items only (-12% stage; bs256 items are mostly N8/N16) as a twm variant, H200 A/B.
 - Tools: tools/n6s2/{rsa,pipes,dqv,laysearch,lat,ring,twwarm}.py (each prints its SASS checks). 0 judge runs, 0 Modal.
+
+## n6s3 (2026-10-28 20:25Z - ): twm per-item cost measured (4-stamp timeline): the EPILOGUE is the per-item fixed cost; EPI2 staged stores built
+- Tools: muse_moe_w4a16/tools/n6s3/mk_tl4.py (TWM_TL build + 4th stamp: tw_item loop end, and post-tw_epi delta in desc
+  bits 32+) -> /tmp/n6s3/sub_tl.py; itl4.py [board] (H100 per-kind loop/epi/stores medians); mkdiag.py (H200 DIAG copy,
+  'n6tl' lines; the judge REJECTS any `import reference` (422, no check charged), so layer routings only); ab2.py A.py B.py
+  (paired H100 A/B of two files in one process: board bs128/bs256 x5 seeds + layer v16/v32, cold L2, prints max|A-B|).
+- H200 judge DIAG check 54eb9bdb (layer v16/v32, 5 seeds each): per CTA per call loop 119-136 us, EPILOGUE 9.3-13.6 us,
+  item gaps 1.7-2.3 us. Per item (loop/epi/stores-part, us): gemm13 N8 35/2.1-3.1/0.7-1.6, N16 42/3.7-5.7/3.1-5.0,
+  N24 41/6.4-7.4/5.7-6.9, N32 46/7.3-10.2/6.7-9.6, RT2 N40-56 33/3.5-5.4/2.2-4.6; gemm2 N8 17-34/1.0-3.0/0.3-0.5, N16 38/1.3-2.2,
+  N32 43/4.0-4.6. => the scattered 2-byte stores of tw_epi are the cost (nonlinear in N: store queue backs up); the gemm13
+  release (bar.sync + threadfence + atomic) ~1-2 us at N8.
+  H100 same tool (itl4.py / local diag): epi 16-32 us per CTA per call (DRAM-saturated, worse).
+- REL (tools/n6s3/mk_rel.py: gemm13 release by helper warp 9 via 2 mbarriers): bitwise, tests pass, H100 A/B board128
+  -0.5, board256 -0.2, v16 -0.6, v32 -0.2 us = noise. Not pursued alone.
+- EPI2 (tools/n6s3/mk_epi.py): tw_item's DYN epilogue stages each warp's 8-token group in 1 KB smem (+8 KB dyn smem past
+  the ring in twm/twf/hot) and writes 16-B (Y) / 8-B (RT4 inter) / 4-B (RT2 inter) chunks. bench test 15/15 PASS.

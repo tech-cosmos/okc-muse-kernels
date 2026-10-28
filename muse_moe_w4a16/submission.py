@@ -97,6 +97,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TWM_PB48 0  // n12: build moe_twm<.., PB 48> (python TWM_PB_M); DIAG builds only (+7 s compile)
 #define TK2F_L2H 0       // s21: tk2f weight-copy L2 hints (python TK2F_L2H): 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only; 4 = evict_last every group of a multi-group expert, evict_first else
 #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
+#define TWM_EPI 0        // n6s3: staged, rolled tw_item epilogue (python TWM_EPI)
 #define DQW 0            // n22: dq() rotations on the FMA pipe (python DQW; DIAG builds both)
 #define NORM_EARLY 0     // n4s1: twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them (python NORM_EARLY)
 #ifndef TK2G_PAR4
@@ -1794,6 +1795,69 @@ __device__ __forceinline__ void tw_epi(float (&acc)[RT][N / 2], int lane, int wa
   }
 }
 
+// n6s3 TWM_EPI: staged epilogue (see tw_epi for the layouts). stg = this warp's 8 x 64 bf16 staging buffer in smem
+// (1 KB, past the ring: +8 KB dyn smem in twm/twf/hot). Writes 16-B (Y rows) / 8-B (RT 4 inter) / 4-B (RT 2 inter) chunks.
+// The 8-token-group loop is NOT unrolled (group gi reads acc[.][0..3], then the accumulators shift down by 4): moe_twm
+// is ~16.7k SASS, far over the i-cache, and the fully unrolled epilogues of rare item kinds (N24/N32) ran cold from L2
+// (H200 DIAG 54eb9bdb: 6-10 us per N24/N32 gemm13 item end; the time stayed with the global stores removed). Bitwise = tw_epi.
+template <int RT, int N, bool GATED, int NW>
+__device__ __forceinline__ void tw_epi2(float (&acc)[RT][N / 2], int lane, int warp, int nv, int off, int rb, float gsc,
+                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out,
+                                        __nv_bfloat16* stg) {
+  const int g = lane >> 2, t = lane & 3;
+  constexpr int H = GATED ? RT / 2 : RT;
+  const int col0 = (rb * NW * H + warp * H) * 16, c0 = col0 & 63;
+#pragma unroll 1
+  for (int gi = 0; gi < N / 8; ++gi) {
+    if (gi * 8 >= nv) break;
+    __syncwarp();
+#pragma unroll
+    for (int r = 0; r < H; ++r)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const int tok = t * 2 + (q & 1), cw = r * 16 + g + ((q & 2) ? 8 : 0);
+        const float v = acc[r][q] * gsc;
+        if (GATED) {
+          const float u = acc[r + H][q] * gsc;
+          const int c = (c0 + cw) & 63;
+          const int lc = (((c >> 2) & 3) << 4) | (((c >> 1) & 1) << 3) | ((c >> 4) << 1) | (c & 1);
+          stg[tok * 64 + lc] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+        } else {
+          stg[tok * 64 + cw] = __float2bfloat16(v);
+        }
+      }
+    __syncwarp();
+    if (GATED) {
+      // the warp's positions in its 64-column block: lc bit 2 fixed (RT 4: 4-element chunks) or bits 1-2 fixed (RT 2: 2)
+      constexpr int CE = H == 2 ? 4 : 2;
+      const int fb = H == 2 ? (c0 >> 5) * 4 : (c0 >> 4) * 2;
+#pragma unroll
+      for (int i = lane; i < 64; i += 32) {
+        const int tok = i >> 3, p = (i & 7) * 8 + fb;
+        if (gi * 8 + tok < nv) {
+          __nv_bfloat16* dst = Out + (size_t)(off + gi * 8 + tok) * NOUT + (col0 & ~63) + p;
+          if (CE == 4) *reinterpret_cast<uint2*>(dst) = *reinterpret_cast<const uint2*>(stg + tok * 64 + p);
+          else *reinterpret_cast<uint32_t*>(dst) = *reinterpret_cast<const uint32_t*>(stg + tok * 64 + p);
+        }
+      }
+    } else {
+      constexpr int CH = H * 2;  // 16-B chunks per token
+#pragma unroll
+      for (int i = lane; i < 8 * CH; i += 32) {
+        const int tok = i / CH, k = i % CH;
+        if (gi * 8 + tok < nv)
+          *reinterpret_cast<uint4*>(Out + (size_t)sroutes[off + gi * 8 + tok] * NOUT + col0 + k * 8) =
+              *reinterpret_cast<const uint4*>(stg + tok * 64 + k * 8);
+      }
+    }
+#pragma unroll
+    for (int r = 0; r < RT; ++r)
+#pragma unroll
+      for (int i = 0; i + 4 < N / 2; ++i) acc[r][i] = acc[r][i + 4];
+  }
+  __syncwarp();
+}
+
 // DYN: one main loop for both GEMMs (moe_twf), epilogue picked by g2 at run time
 template <int RT, int KG, int N, int NSTG, bool GATED, int NW, bool DYN = false, bool SA = false, int STRIDE = 0,
           int XBO = 0>  // s29: XBO = x tile bytes (weights' offset in the stage) when != the TWC default
@@ -1946,8 +2010,14 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
 #pragma unroll
         for (int i = 0; i < NA; ++i) acc[r][i] += __ldcg(ot + (r * NA + i) * 256 + ct);
     }
+#if TWM_EPI
+    __nv_bfloat16* stg = reinterpret_cast<__nv_bfloat16*>(const_cast<char*>(smem) + NSTG * (STRIDE ? STRIDE : C::STG) + warp * 1024);
+    if (g2) tw_epi2<RT, N, false, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out, stg);
+    else tw_epi2<RT, N, true, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out, stg);
+#else
     if (g2) tw_epi<RT, N, false, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
     else tw_epi<RT, N, true, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
+#endif
   } else {
     tw_epi<RT, N, GATED, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
   }
@@ -2489,7 +2559,7 @@ static int64_t twf_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
                        torch::Tensor sr_, torch::Tensor inter_, torch::Tensor y_, torch::Tensor tk_, torch::Tensor part_,
                        int64_t ns) {
   constexpr int NSTG = 8;
-  constexpr int SMEM = NSTG * TWC<RT, true, 8>::STG + 1024;
+  constexpr int SMEM = NSTG * TWC<RT, true, 8>::STG + 1024 + (TWM_EPI ? 8192 : 0);  // n6s3 staging
   static int grid = 0;
   if (!grid) {
     int dev, nsm;
@@ -3068,7 +3138,7 @@ static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
   constexpr int NSTG = 8;
-  constexpr int SMEM = NSTG * ((NH > 64 ? 128 : NH) * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024;
+  constexpr int SMEM = NSTG * ((NH > 64 ? 128 : NH) * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024 + (TWM_EPI ? 8192 : 0);
   static bool init = false;
   if (!init) {
     cudaFuncSetAttribute(moe_hot<NSTG, SA, NH>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
@@ -3099,7 +3169,7 @@ static int64_t twm_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
                       torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor inter_,
                       torch::Tensor y_, torch::Tensor tk_, torch::Tensor part_, int64_t ns) {
   constexpr int NSTG = 8;
-  constexpr int SMEM = NSTG * TWC<4, true, 8>::STG + 1024;
+  constexpr int SMEM = NSTG * TWC<4, true, 8>::STG + 1024 + (TWM_EPI ? 8192 : 0);  // n6s3 staging
   static int grid = 0;
   if (!grid) {
     int dev, nsm;
@@ -5518,7 +5588,8 @@ def _gen_wgmma():
 CUDA_SRC = CUDA_SRC.replace("//@@WGMMA@@", _gen_wgmma())
 
 _LIB = None
-_LIBX = {}  # n22: DQW -> library
+TWM_EPI = 1  # n6s3: staged + rolled tw_item epilogue (i-cache), bitwise = 0
+_LIBX = {}  # n22: (DQW, TWM_EPI) -> library
 _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor);"
         "int64_t moe_gemm2(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
@@ -5571,13 +5642,14 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
 
 def _lib():
     global _LIB
-    _LIB = _LIBX.get(int(DQW))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
+    _LIB = _LIBX.get((int(DQW), int(TWM_EPI)))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
     if _LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = CUDA_SRC.replace("#define TK2F_L2H 0 ", f"#define TK2F_L2H {int(TK2F_L2H)} ")
         src = src.replace("#define DQW 0 ", f"#define DQW {int(DQW)} ")
         src = src.replace("#define NORM_EARLY 0 ", f"#define NORM_EARLY {int(NORM_EARLY)} ")
         src = src.replace("#define TWM_L2H 0 ", f"#define TWM_L2H {int(TWM_L2H)} ")
+        src = src.replace("#define TWM_EPI 0 ", f"#define TWM_EPI {int(TWM_EPI)} ")  # n6s3
         if TK2F_S6 or DIAG:  # n20
             src = src.replace("#define TK2F_S6K 0 ", "#define TK2F_S6K 1 ")
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
@@ -5595,7 +5667,7 @@ def _lib():
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_l2h2", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
-        _LIBX[int(DQW)] = _LIB
+        _LIBX[(int(DQW), int(TWM_EPI))] = _LIB
     return _LIB
 
 
