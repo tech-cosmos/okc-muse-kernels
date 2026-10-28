@@ -6,6 +6,10 @@ night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (too
   (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
   unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 7 submits left after v163.
   Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
+night5 s25: **H200 judge DIAG 0dc9b93f** (TK2F_ORX probes on c3a234a, flag off on main, never submit): moe n5s32 tk2f oracles. Rows'
+  STRUCTURE (ornc-orz) sl/full us: d1 7.3/3.9, v1 11.8/14.0, d16 22.1/26.3, d32 37.1/34.5 (~8.8% score if free); zero-byte ring only
+  -3..-14 us -> tk2f is CONSUMER-bound on the H200 (s81's 'stream rate' verdict withdrawn). Handed to moe (build overlapped-row tk2f);
+  layer integrates + spends its checks on DIAG/A-B of it. 10-28 left: 5 checks / 7 submits. NOTES n5s25 table.
 night5 s24: no build, 0 runs: v1/d32 sliding H100 timelines re-matched to dead entries; new muse_prefill_layer board
   (not in overall ranking) flagged to lead. Lane request n5s23 still open.
 night5 s23: v163 SCORED 7693598b 2.1311x (board best stays v153 2.1580x). H100 in-layer PREFIX ORACLE (tools/prefix_oracle.py,

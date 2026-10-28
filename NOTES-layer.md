@@ -2665,3 +2665,29 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - New board seen: `muse_prefill_layer` (Prefill layer, T=753x4 / 16K chunks, SGLang 387.4 ms, #1 2.025x, 555 rows; we have no
   row; 20 checks + 10 scored/day unused). The overall board still ranks exactly by muse_decode_layer speedup (top 45 checked,
   /api/v1/leaderboard 'solved' max 4), so prefill does not count overall today. Flagged to lead under Requests.
+
+## night5 s25 (2026-10-28 08:11Z-08:45Z): H200 judge DIAG of moe n5s32's tk2f oracles -> rows' structure is 7-37 us/layer on the H200
+- Built (c3a234a, OFF on main): TK2F_ORX DIAG flag (moe_src python `TK2F_ORX`; `_moe__lib` turns on `#define TK2F_ORX 1`). tk2f_go
+  re-dispatches, generic over every built PF config: g_orx (= cfg / 100000000, stripped in moe_tk2f_launch, also in the pruned copy)
+  1 orz = PF | 4096 (a1 = a0, b1 = b0: no rows), 2 orn = PF | 2048 (tk2f_produce ORN: plain arrive on full, no copies), 3 ornc =
+  PF | 2048 | 256 (+ no consumer math). TUNE option tk2x 7/8/9 ("diag": timed, never picked) at T = 1 (layer path), 8 (nu8 path), 16
+  and 32 (moe kernel_fn path); T=32 also with tk2h 0 (tk2h's consumer ignores PF 256). DIAG copy: `sed 's/^_moe_TK2F_ORX = False/
+  _moe_TK2F_ORX = True/' submission.py > variants/diag_orx.py` (md5 38c5890a). Main bench test 13/13 PASS.
+- H100 DIAG bench tuner (synthetic skewed routing), sliding base | orz | orn | ornc: T1 86.7|62.6|75.0|68.3, T8 143.3|72.9|111.7|88.9,
+  T16 219.1|97.3|168.4|119.8, T32 tk2h0 215.8|103.2|176.8|134.8.
+- CHECK 0dc9b93f (DIAG copy of c3a234a, NEVER submit): 2.1286x, prepare_s 83.2, all picks default. H200 tuner whole-layer us:
+  | T / layer | base | orz | orn | ornc | rows (b-orz) | STRUCTURE (ornc-orz) | math, instant ring (orn-ornc) | bytes not hidden (b-orn) |
+  | 1 sl      | 77.5 | 52.3 | 71.2 | 59.6 | 25.2 |  7.3 | 11.6 |  6.3 |
+  | 1 full    | 74.7 | 64.1 | 71.6 | 68.0 | 10.6 |  3.9 |  3.6 |  3.1 |
+  | 8 sl      |103.3 | 65.0 | 93.3 | 76.8 | 38.3 | 11.8 | 16.5 | 10.0 |
+  | 8 full    |121.1 | 77.2 |111.8 | 91.2 | 43.9 | 14.0 | 20.6 |  9.3 |
+  | 16 sl     |166.4 | 80.5 |152.4 |102.6 | 85.9 | 22.1 | 49.8 | 14.0 |
+  | 16 full   |238.4 |163.6 |226.1 |189.9 | 74.8 | 26.3 | 36.2 | 12.3 |
+  | 32 sl h0  |184.5 | 87.7 |173.0 |124.8 | 96.8 | 37.1 | 48.2 | 11.5 |  (default tk2h 4: 179.8 | orz 89.3 | orn 169.7)
+  | 32 full h0|337.6 |245.0 |324.1 |279.5 | 92.6 | 34.5 | 44.6 | 13.5 |
+  READING: on the H200 the tk2f rows are CONSUMER-bound: with a zero-byte zero-latency ring the layer is only 3-14 us faster (b-orn),
+  while structure + math with no bytes at all take 15-85 us. s81's "tk2f at the stream rate" (ref - nm = 1.5-4.3 us) only showed the
+  math alone hides; structure + math together do not. Structure free (additive, x the per-load %/us table) = d1 1.3+0.2, v1 1.3+0.6,
+  d16 1.8+0.8, d32 2.2+0.7 = ~8.8% score upper bound (synthetic routing; real is < that: the stream floor is under it, unknown since
+  no stream-only oracle exists). moe n5s32's build gate (>= 5 us d1, >= 10 d16/d32/v1 on the H200) is met on every shape. Saves
+  moe's queued 15 Modal GPU-min. Next: moe builds the overlapped-row tk2f (its lane); layer integrates + gives it DIAG checks.
