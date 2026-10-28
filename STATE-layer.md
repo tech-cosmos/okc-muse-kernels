@@ -64,6 +64,8 @@ Plateau: every kernel-level lever in NOTES s45-n5s7 is measured or bounded (dead
 interleaved A/Bs (tools/ab_flag.py), confirm on a check. Submit only > 2.1339x, or per the 09:28Z rule (>= 2.1126x +
 per-shape evidence). Open items, biggest first (none started):
 1. o+bnd+pr1 megakernel at T=1 (bound ~-3 us d1 = ~+0.5%; NOTES s45/s61/s74; moe n5s9 audit: post-attention chain <= 3-4.5 us).
+1b. moe n5s24 (r-moe 725f39a): moe_norm2/moe_norm ids+tw loaded up front (bitwise, H100 tie). Port once moe posts an H200 number
+   (layer patches moe_norm2 for PDL: re-check the anchors in layer.py/build.py when re-copying moe_src.py).
 2. Any new Handoff from moe (attention lane) / proj: port as a TUNE option, validate, bundle into one check.
 T=16: every g30 option ties on 3 H200 checks (f824b925, 133068b8, 4937830f): don't add more g30 work at T=16.
 
