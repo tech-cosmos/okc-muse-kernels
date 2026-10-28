@@ -598,6 +598,9 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
         _moe_TK2H_M.clear()
         if _opt(state, m, "tk2h", 0):  # s58: moe n6 tk2h (GS16 merged consumer + PF4) at T=16/32, value = 2-group weight W + 1
             _moe_TK2H_M[m] = _opt(state, m, "tk2h", 0)
+        _moe_TK2PR_M.clear()
+        if _opt(state, m, "tk2pr", 0):  # n5s29 PR (pair role tk2f) at T=16/32, value = pair row weight digit W + 1
+            _moe_TK2PR_M[m] = _opt(state, m, "tk2pr", 0) - 1
         _moe_TWF_SPLIT_M.clear()
         if _opt(state, m, "twf_split", 0):  # moe s19: K-split tail of moe_twm (light experts only; combinable with order)
             _moe_TWF_SPLIT_M[m] = _opt(state, m, "twf_split", 0)
@@ -1551,9 +1554,9 @@ _moe__CPP = _moe__CPP + "int64_t moe_set_upf(int64_t, int64_t, int64_t, int64_t)
 # sum_k (y w1)^2 (moe_norm3's tot) by atomics into float row 64 of y32 (zeroed by the pre-expert _rmsnorm_gain), so the
 # layer's nu8 kernel can do norm3 + the unpool slice split over k (no norm3 launch, W in smem before its wait).
 # w1 via moe_set_ss() (a host static read at launch / capture time, as moe_set_upf).
-_a = "                                             int& ph, int& rb) {\n  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * ((PF & 1024) ? 1120 : 1152);"
+_a = "                                             int& ph, int& rb, const int* s_sb = nullptr) {\n  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * ((PF & 1024) ? 1120 : 1152);"
 assert _moe_CUDA_SRC.count(_a) == 1
-_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("int& ph, int& rb) {", "int& ph, int& rb, const float* w1x = nullptr, float* ssx = nullptr) {")
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("int& ph, int& rb, const int* s_sb = nullptr) {", "int& ph, int& rb, const int* s_sb = nullptr, const float* w1x = nullptr, float* ssx = nullptr) {")
                                       + "\n  float ssa = 0.f;  // s26 NU8 (PF & 16)")
 _a = ("        if (PF & 4) reinterpret_cast<float*>(Out)[(size_t)s_srt[off + tok] * NOUT + col] = v * gsc;  // route slot order\n"
       "        else reinterpret_cast<float*>(Out)[(size_t)(off + tok) * NOUT + col] = v;\n      }\n")
@@ -1574,7 +1577,7 @@ _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a + """      if constexpr ((PF & 16) 
 _a = ("  tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, "
       "s_red, smem, full,\n                                     empty, st, ph, rb);\n")
 assert _moe_CUDA_SRC.count(_a) == 1
-_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("empty, st, ph, rb);", "empty, st, ph, rb, w1, (PF & 16) ? Y + 64 * 4096 : nullptr);"))
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("empty, st, ph, rb);", "empty, st, ph, rb, nullptr, w1, (PF & 16) ? Y + 64 * 4096 : nullptr);"))
 _a = "    constexpr int NA = (PF & 8) ? 2 : 1;  // s13 PF & 8"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, """    float w1c = 0.f;  // s26 NU8: this thread's epilogue column's w1, loaded before the row's MMA loop
@@ -1853,6 +1856,10 @@ _MOE_TK2F_PRUNED = """
   cfg %= 1000000;
   TORCH_CHECK(!s6, "layer MOE_PRUNE: tk2f S6 not built");
   if (sq) {
+#if TK2PR
+    if (cfg >= 190000 && cfg < 200000 && cfg % 1000 == 204)  // n5s29 PR (pair role)
+      return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512 | 16384 | (TK2PR_PAD << 20)>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+#endif
     if (cfg >= 140000 && cfg < 150000 && cfg % 1000 == 4)
       return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4 | 512>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
     TORCH_CHECK(cfg == 184204, "moe_tk2f SQ: cfg ", cfg);
@@ -1881,6 +1888,10 @@ def _moe_prune(src):
     return src[:a] + _MOE_TK2F_PRUNED.rsplit("}\n", 1)[0] + src[b:]
 
 
+TK2PR = False  # n5s29 PR (pair role tk2f, option "tk2pr" at T=16/32): off = not built
+TK2PR_TL = False  # n5s29 DIAG: + per-CTA globaltimer stamps (moe_prt_read)
+
+
 def _moe__lib():  # = moe_src's _lib() + moe_set_upf
     global _moe__LIB
     if _moe__LIB is None:
@@ -1890,13 +1901,20 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
             src = src.replace("#define TK2F_ORX 0", "#define TK2F_ORX 1")
         if MOE_PRUNE and not _moe_TK2F_DIAG:
             src = _moe_prune(src)
+        cpp, fx = _moe__CPP, []
+        if TK2PR:  # n5s29: build the PR (pair role) tk2f instantiation
+            src = src.replace("#define TK2PR 0", "#define TK2PR 1")
+            if TK2PR_TL:  # n5s29 DIAG: per-CTA timeline of the PR kernel
+                src = src.replace("#define TK2PR_TL 0", "#define TK2PR_TL 1") + (
+                    "\nint64_t moe_prt_read(torch::Tensor o) { return (int64_t)cudaMemcpyFromSymbol(o.data_ptr(), g_prt, sizeof(g_prt)); }\n")
+                cpp, fx = cpp + "int64_t moe_prt_read(torch::Tensor);", ["moe_prt_read"]
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
-        _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=src,
+        _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=cpp, cuda_sources=src,
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
                                            "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch", "moe_routegathern_launch",
-                                           "moe_set_hot", "moe_hot_launch"],
+                                           "moe_set_hot", "moe_hot_launch", *fx],
                                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3", *NVCC_SPLIT],
                                 extra_cflags=["-O3"], verbose=False)
     return _moe__LIB

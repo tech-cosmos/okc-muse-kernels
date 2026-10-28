@@ -89,6 +89,16 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
+#define TK2PR 0        // layer n5s29: PR (pair role) tk2f instantiation (PF 16384; layer TK2PR)
+#define TK2PR_QU 2     // layer n5s29: compact pair body stage-loop unroll
+#define TK2PR_C 1      // layer n5s29: compact pair body (tk2p_consume)
+#define TK2PR_SWAP 0   // layer n5s29: layout probe (singles branch first in source)
+#define TK2PR_PAD 0    // layer n5s29: PR dead-pad KB before the pair loops
+#define TK2PR_TL 0     // layer n5s29 DIAG: PR per-CTA globaltimer stamps (g_prt; moe_prt_read)
+#if TK2PR_TL
+__device__ unsigned long long g_prt[4 * 160];
+__device__ __forceinline__ unsigned long long gtime() { unsigned long long t; asm volatile("mov.u64 %0, %globaltimer;" : "=l"(t)); return t; }
+#endif
 #define TK2F_ORX 0       // layer n5s25: moe n5s32 oracle probes orz/orn/ornc (tuner timing only; DIAG check copies)
 #define TK2F_DIAG 0      // layer s81: tk2f DIAG instantiations (no-math / KPS 4 SQ timing probes, tuner-only; set by TK2F_DIAG below)
 #define TK2F_L2H 4       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
@@ -3333,7 +3343,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
                                              const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
-                                             int& ph, int& rb) {
+                                             int& ph, int& rb, const int* s_sb = nullptr) {
   constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * ((PF & 1024) ? 1120 : 1152);
   constexpr bool S6 = (PF & 1024) != 0;  // layer s73 (moe n20): 6-bit scale codes
   constexpr bool BAL = (PF & 32) != 0;  // moe n8 BAL: per-segment counters cnt[64 + j]
@@ -3351,6 +3361,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       const int e = s_e[a];
       gsc = gs[e] * 256.0f;
       off = s_off[e] + gi * 8;
+      if constexpr ((PF & 16384) != 0) off += s_sb[a];  // layer n5s29 PR: the single space starts after the expert's pairs
       n = min(8, s_off[e + 1] - off);
       ci = a * 4 + gi;
       if (BAL && !GATED) {
@@ -3621,7 +3632,7 @@ __device__ __forceinline__ void tk2g_row(const uint32_t* slut, const uint4 (&xf)
   }
 }
 
-template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA>
+template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA, bool SLOT = false, bool TWO_ONLY = false>
 __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* __restrict__ gs,
                                              const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
@@ -3652,7 +3663,7 @@ __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* 
       }
 #pragma unroll
       for (int h = 0; h < 2; ++h) {
-        if (h && n <= 8) break;
+        if (!TWO_ONLY && h && n <= 8) break;
         const bool v = h * 8 + g < n;
         int row = 0;
         if (v) row = GATED ? (s_srt[off + h * 8 + g] >> 3) : (off + h * 8 + g);
@@ -3670,8 +3681,8 @@ __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* 
         }
       }
     }
-    if (n > 8) tk2g_row<NRT, NC, NSTG, GATED, KPS, SA, true>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb);
-    else tk2g_row<NRT, NC, NSTG, GATED, KPS, SA, false>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb);
+    if (TWO_ONLY || n > 8) tk2g_row<NRT, NC, NSTG, GATED, KPS, SA, true, false, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, false, s_srt);
+    else tk2g_row<NRT, NC, NSTG, GATED, KPS, SA, false, false, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, false, s_srt);
     if (GATED && (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
       asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
       if (tid == 0) {
@@ -3680,6 +3691,179 @@ __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* 
       }
     }
   }
+}
+
+// layer n5s29 PR body 2 ("compact pair", TK2PR_C): ONE small run-time-gated pair-row body for both phases. The stage loop
+// is rolled and both token groups' x sit in lane-private smem (2 x 8 KB per warp after the ring), so the hot loop is a
+// few KB and lands inside the kernel's first 64 KB of code (the fully unrolled TWO loops sit at 0xebe0+: ncu no_inst ~50%).
+// s_red single-buffered (2 groups x 2 tiles): one extra bar.sync per row.
+template <int NC, int NSTG, int KPS, bool SLOT>
+__device__ __forceinline__ void tk2p_consume(const uint32_t* slut, const float* __restrict__ gs13, const float* __restrict__ gs2,
+                                             const __nv_bfloat16* X, __nv_bfloat16* inter, float* Y, int* cnt, int need,
+                                             int c0, int c1, int d0, int d1, const int* s_rp13, const int* s_rp2,
+                                             const int* s_e, const int* s_off, const int* s_srt, float* s_red, uint4* smem,
+                                             uint64_t* full, uint64_t* empty) {
+  constexpr int NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * 1152;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
+  uint4* xs0 = smem + NSTG * NC * KPS * 72 + warp * (NQ * 2 * 32) + lane;
+  uint4* xs1 = xs0 + NC * NQ * 2 * 32;
+  const uint4* wsm = smem + warp * 32 + lane;
+  int st = 0, ph = 0;
+#pragma unroll 1
+  for (int p = 0; p < 2; ++p) {
+    const bool gated = p == 0;
+    const int RPE = gated ? 256 : 128, r0 = gated ? c0 : d0, r1 = gated ? c1 : d1;
+    const int* s_rs = gated ? s_rp13 : s_rp2;
+    const __nv_bfloat16* Xp = gated ? X : inter;
+    int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0;
+    float gsc = 0.f;
+#pragma unroll 1
+    for (int R = r0; R < r1; ++R) {
+      if (R >= seg_end) {
+        while (s_rs[a + 1] <= R) ++a;
+        const int gi = (R - s_rs[a]) / RPE;
+        seg_start = s_rs[a] + gi * RPE;
+        seg_end = seg_start + RPE;
+        const int e = s_e[a];
+        gsc = (gated ? gs13[e] : gs2[e]) * 256.0f;
+        off = s_off[e] + gi * 16;
+        n = min(16, s_off[e + 1] - off);
+        if (!gated) {  // all gemm13 rows written (by any CTA, both roles)
+          int c;
+          do {
+            asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt) : "memory");
+          } while (c < need);
+        }
+        asm volatile("bar.sync 1, %0;" ::"n"(NC * 32) : "memory");  // every lane done with the previous segment's x
+#pragma unroll 1
+        for (int h = 0; h < 2; ++h) {
+          const bool v = h * 8 + g < n;
+          int row = 0;
+          if (v) row = gated ? (s_srt[off + h * 8 + g] >> 3) : (off + h * 8 + g);
+          const uint4* xr = reinterpret_cast<const uint4*>(Xp + (size_t)row * KD + 16 * t);
+          uint4* xs = h ? xs1 : xs0;
+#pragma unroll
+          for (int qq = 0; qq < NQ; ++qq) {
+            const int kc = qq * NC + warp;
+            uint4 x0 = make_uint4(0, 0, 0, 0), x1 = x0;
+            if (v) { x0 = __ldg(xr + kc * 8); x1 = __ldg(xr + kc * 8 + 1); }
+            xs[(qq * 2) * 32] = x0;
+            xs[(qq * 2 + 1) * 32] = x1;
+          }
+        }
+      }
+      float acc[2][2][4];
+#pragma unroll
+      for (int h = 0; h < 2; ++h)
+#pragma unroll
+        for (int i = 0; i < 2; ++i)
+#pragma unroll
+          for (int r = 0; r < 4; ++r) acc[h][i][r] = 0.f;
+#pragma unroll 2
+      for (int q = 0; q < NS; ++q) {
+        uint4 xa[KPS][2], xb[KPS][2];
+#pragma unroll
+        for (int h = 0; h < KPS; ++h) {
+          xa[h][0] = xs0[((q * KPS + h) * 2) * 32]; xa[h][1] = xs0[((q * KPS + h) * 2 + 1) * 32];
+          xb[h][0] = xs1[((q * KPS + h) * 2) * 32]; xb[h][1] = xs1[((q * KPS + h) * 2 + 1) * 32];
+        }
+        mbar_wait(&full[st], ph);
+        const uint4* sw4 = wsm + st * (SB / 16);
+        uint4 wv0[KPS], wv1[KPS];
+        uint32_t sw[KPS];
+#pragma unroll
+        for (int h = 0; h < KPS; ++h) {
+          wv0[h] = sw4[h * SW];
+          wv1[h] = sw4[(KPS + h) * SW];
+          sw[h] = reinterpret_cast<const uint32_t*>(sw4 + 2 * KPS * SW - warp * 32 - lane)[(h * NC + warp) * 32 + lane];
+        }
+        const int cs = st;
+        if (++st == NSTG) { st = 0; ph ^= 1; }
+#pragma unroll
+        for (int h = 0; h < KPS; ++h) {
+          uint32_t sc[4];
+          { const uint32_t p0 = scp<0>(sw[h]), p1 = scp<1>(sw[h]); sc[0] = blo(p0); sc[1] = bhi(p0); sc[2] = blo(p1); sc[3] = bhi(p1); }
+#pragma unroll
+          for (int ii = 0; ii < 2; ++ii) {
+            const uint4 wv = ii ? wv1[h] : wv0[h];
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+              uint32_t af[4];
+              dq(u4get(wv, j), sc[2 * ii], sc[2 * ii + 1], af);
+              mma16816(acc[0][ii], af, u4get(xa[h][j >> 1], (j & 1) * 2), u4get(xa[h][j >> 1], (j & 1) * 2 + 1));
+              mma16816(acc[1][ii], af, u4get(xb[h][j >> 1], (j & 1) * 2), u4get(xb[h][j >> 1], (j & 1) * 2 + 1));
+            }
+          }
+        }
+        mbar_arrive(&empty[cs]);
+      }
+      asm volatile("bar.sync 1, %0;" ::"n"(NC * 32) : "memory");  // single-buffered s_red: previous row's reads done
+#pragma unroll
+      for (int h = 0; h < 2; ++h)
+#pragma unroll
+        for (int ii = 0; ii < 2; ++ii)
+#pragma unroll
+          for (int r = 0; r < 4; ++r) s_red[(((h * NC + warp) * 2 + ii) * 4 + r) * 32 + lane] = acc[h][ii][r];
+      asm volatile("bar.sync 1, %0;" ::"n"(NC * 32) : "memory");
+      const int rp = R - seg_start, l = lane, gg = l >> 2, tt = l & 3;
+      if (gated) {
+        const int h = tid >> 7, r = (tid >> 5) & 3;
+        float v = 0.f, u = 0.f;
+#pragma unroll
+        for (int w = 0; w < NC; ++w) {
+          v += s_red[(((h * NC + w) * 2) * 4 + r) * 32 + l];
+          u += s_red[(((h * NC + w) * 2 + 1) * 4 + r) * 32 + l];
+        }
+        const int tok = h * 8 + 2 * tt + (r & 1);
+        if (tok < n) {
+          v *= gsc;
+          u *= gsc;
+          const int col = rp * 16 + gg + ((r & 2) ? 8 : 0);
+          inter[(size_t)(off + tok) * NOUT + col] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+        }
+        if (R + 1 == seg_end || R + 1 == r1) {  // publish this CTA's rows of the segment
+          asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+          if (tid == 0) {
+            __threadfence();
+            atomicAdd(cnt, R + 1 - max(seg_start, r0));
+          }
+        }
+      } else {
+        const int ii = tid >> 7, r = (tid >> 5) & 3;
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+          float v = 0.f;
+#pragma unroll
+          for (int w = 0; w < NC; ++w) v += s_red[(((h * NC + w) * 2 + ii) * 4 + r) * 32 + l];
+          const int tok = h * 8 + 2 * tt + (r & 1);
+          if (tok < n) {
+            const int col = (rp + ii * RPE) * 16 + gg + ((r & 2) ? 8 : 0);
+            if (SLOT) Y[(size_t)s_srt[off + tok] * NOUT + col] = v * gsc;
+            else Y[(size_t)(off + tok) * NOUT + col] = v;
+          }
+        }
+      }
+    }
+  }
+}
+
+// layer n5s29 PR: the pair role of moe_tk2f as ONE noinline call per CTA, so its hot loops sit in their own SASS function
+// (inlined, they land past the kernel's first 64 KB of code: ncu no_inst 46-52% on the H100 even with no loop straddling).
+template <int NC, int NSTG, int KPS, bool SA, bool SLOT>
+__device__ __forceinline__ void tk2pr_pairs(const uint32_t* slut, const float* gs13, const float* gs2, const __nv_bfloat16* X,
+                                         __nv_bfloat16* inter, float* Y, int* cnt, int need, int c0, int c1, int d0, int d1,
+                                         const int* s_rp13, const int* s_rp2, const int* s_e, const int* s_off,
+                                         const int* s_srt, float* s_red, uint64_t* full, uint64_t* empty) {
+  extern __shared__ __align__(128) uint4 smem[];
+  uint4* s_x2 = smem + NSTG * NC * KPS * 72;  // after the ring: 8 KB per consumer warp (group 1's x)
+  int st = 0, ph = 0, rb = 0;
+  tk2g_consume<512, NC, NSTG, true, KPS, SA, SLOT, true>(slut, gs13, X, inter, cnt, need, c0, c1, s_rp13, s_e, s_off, s_srt,
+                                                         s_red, smem, s_x2, full, empty, st, ph, rb);
+#if TK2PR_TL
+  if (threadIdx.x == 0) g_prt[blockIdx.x * 4 + 1] = gtime();
+#endif
+  tk2g_consume<256, NC, NSTG, false, KPS, SA, SLOT, true>(slut, gs2, inter, Y, cnt, need, d0, d1, s_rp2, s_e, s_off, s_srt,
+                                                          s_red, smem, s_x2, full, empty, st, ph, rb);
 }
 
 // s12 MERGED consumer (tk2h): both phases in ONE run-time loop, so the kernel holds one main-loop body per row kind
@@ -4125,7 +4309,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   extern __shared__ __align__(128) uint4 smem[];
   __shared__ uint32_t slut[256];
   __shared__ int s_e[32], s_off[33], s_rs13[33], s_rs2[33], s_srt[256], s_wc[8][32], s_nact;
-  __shared__ float s_red[(GS == 16 || MRG ? 4 : 2) * NC * 256];
+  constexpr bool PR = (PF & 16384) != 0;  // layer n5s29 PR (pair role): see below
+  __shared__ float s_red[(GS == 16 || MRG || (PR && !TK2PR_C) ? 4 : 2) * NC * 256];
+  __shared__ int s_rp13[PR ? 33 : 1], s_rp2[PR ? 33 : 1], s_sb[PR ? 32 : 1];
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   __shared__ int s_rid[4];
   __shared__ __align__(8) uint64_t ridb[4];
@@ -4200,7 +4386,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   if (tid < 32) {
     const int e = s_e[tid];
     const int ng = tid < nact ? (s_off[e + 1] - s_off[e] + GS - 1) / GS : 0;
-    int incl = ng;
+    int incl = PR ? (ng & 1) : ng;  // PR: the single space = each expert's odd leftover 8-token group
 #pragma unroll
     for (int o = 1; o < 32; o <<= 1) {
       const int v = __shfl_up_sync(0xffffffffu, incl, o);
@@ -4209,6 +4395,18 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     s_rs13[tid + 1] = incl * 256;
     s_rs2[tid + 1] = incl * 128;
     if (tid == 0) { s_rs13[0] = 0; s_rs2[0] = 0; }
+    if constexpr (PR) {  // the pair space = each expert's full 16-token pairs (tokens 0 .. 16 np - 1)
+      int ip = ng >> 1;
+#pragma unroll
+      for (int o = 1; o < 32; o <<= 1) {
+        const int v = __shfl_up_sync(0xffffffffu, ip, o);
+        if (tid >= o) ip += v;
+      }
+      s_rp13[tid + 1] = ip * 256;
+      s_rp2[tid + 1] = ip * 128;
+      s_sb[tid] = (ng >> 1) * 16;
+      if (tid == 0) { s_rp13[0] = 0; s_rp2[0] = 0; }
+    }
   }
   __syncthreads();
   const int n13 = s_rs13[nact], n2 = s_rs2[nact];
@@ -4232,7 +4430,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   int a0 = (int)((long long)n13 * blockIdx.x / gridDim.x), a1 = (int)((long long)n13 * (blockIdx.x + 1) / gridDim.x);
   int b0 = (int)((long long)n2 * blockIdx.x / gridDim.x), b1 = (int)((long long)n2 * (blockIdx.x + 1) / gridDim.x);
-  if (GS == 8 && !DYN && D > 0) {  // s12 weighted split (wE = D / 8 for extra-group rows), see tk2w_bound
+  if (GS == 8 && !DYN && !PR && D > 0) {  // s12 weighted split (wE = D / 8 for extra-group rows), see tk2w_bound (n5s29: not PR)
     __shared__ int s_ab[4];
     if (warp == 0) {
       const int v0 = tk2w_bound(blockIdx.x, nact, D, 256, s_e, s_off), v1 = tk2w_bound(blockIdx.x + 1, nact, D, 256, s_e, s_off);
@@ -4265,6 +4463,90 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       b0 = tk2g_split(blockIdx.x, nact, D, 128, s_e, s_off);
       b1 = tk2g_split(blockIdx.x + 1, nact, D, 128, s_e, s_off);
     }
+  }
+  if constexpr (PR) {
+    // layer n5s29 PR (pair role, = moe n5s16's untried "separate CTA role"): CTAs [G - k, G) run ONLY the pair space with
+    // the GS16 TWO body (one dequant for 16 tokens), the others ONLY the single space with tk2f's 1-group body; each SM
+    // runs one body (no i-cache sharing). k from the routing (same on every CTA): pair rows weigh D / 8 of a single row.
+    const int G = gridDim.x, n13p = s_rp13[nact], n2p = s_rp2[nact];
+    int k = 0;
+    if (n13p > 0) {
+      const float wp = 0.125f * D * n13p;
+      k = __float2int_rn(G * wp / ((float)n13 + wp));
+      k = max(1, min(k, n13 > 0 ? G - 1 : G));
+    }
+    const bool pr = (int)blockIdx.x >= G - k;
+    const int Gr = pr ? k : G - k, bi = pr ? blockIdx.x - (G - k) : blockIdx.x;
+    const int m13 = pr ? n13p : n13, m2 = pr ? n2p : n2, need = n13 + n13p;
+    const int c0 = (int)((long long)m13 * bi / Gr), c1 = (int)((long long)m13 * (bi + 1) / Gr);
+    const int d0 = (int)((long long)m2 * bi / Gr), d1 = (int)((long long)m2 * (bi + 1) / Gr);
+    const int* rs13 = pr ? s_rp13 : s_rs13;
+    const int* rs2 = pr ? s_rp2 : s_rs2;
+    int st = 0, ph = 0;
+    if (warp == NC) {
+      if (lane == 0) {
+        int i = 0;
+        tk2f_produce<512, NC, NSTG, KPS, true, false>(Wq13, S13, c0, c1, rs13, s_e, smem, full, empty, st, ph, i);
+        tk2f_produce<256, NC, NSTG, KPS, true, false>(Wq2, S2, d0, d1, rs2, s_e, smem, full, empty, st, ph, i);
+      }
+      return;
+    }
+    int rb = 0;
+#if TK2PR_TL
+    if (tid == 0) { g_prt[blockIdx.x * 4] = gtime(); g_prt[blockIdx.x * 4 + 3] = (unsigned long long)(pr ? 1000 + k : k); }
+#endif
+#if TK2PR_SWAP
+    if (__builtin_expect(!pr, 0)) {
+      tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, need, c0, c1, s_rs13, s_e, s_off, s_srt, s_red, smem,
+                                                    full, empty, st, ph, rb, s_sb);
+#if TK2PR_TL
+      if (tid == 0) g_prt[blockIdx.x * 4 + 1] = gtime();
+#endif
+      tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, need, d0, d1, s_rs2, s_e, s_off, s_srt, s_red, smem,
+                                                     full, empty, st, ph, rb, s_sb);
+    } else {
+      if constexpr (((PF >> 20) & 31) != 0) {  // dead pad of ((PF >> 20) & 31) KB (never taken: nact <= 32): layout probe
+        if (nact > 32) {
+#pragma unroll
+          for (int i = 0; i < ((PF >> 20) & 31) * 64; ++i) asm volatile("membar.cta;" ::: "memory");
+        }
+      }
+#if TK2PR_C
+      tk2p_consume<NC, NSTG, KPS, (PF & 4) != 0>(slut, gs13, gs2, X, inter, Y, cnt, need, c0, c1, d0, d1, s_rp13, s_rp2, s_e, s_off,
+                                                 s_srt, s_red, smem, full, empty);
+#else
+      tk2pr_pairs<NC, NSTG, KPS, SA, (PF & 4) != 0>(slut, gs13, gs2, X, inter, Y, cnt, need, c0, c1, d0, d1, s_rp13, s_rp2, s_e,
+                                                    s_off, s_srt, s_red, full, empty);
+#endif
+#else
+    if (pr) {
+      if constexpr (((PF >> 20) & 31) != 0) {  // dead pad of ((PF >> 20) & 31) KB (never taken: nact <= 32): layout probe
+        if (nact > 32) {
+#pragma unroll
+          for (int i = 0; i < ((PF >> 20) & 31) * 64; ++i) asm volatile("membar.cta;" ::: "memory");
+        }
+      }
+#if TK2PR_C
+      tk2p_consume<NC, NSTG, KPS, (PF & 4) != 0>(slut, gs13, gs2, X, inter, Y, cnt, need, c0, c1, d0, d1, s_rp13, s_rp2, s_e, s_off,
+                                                 s_srt, s_red, smem, full, empty);
+#else
+      tk2pr_pairs<NC, NSTG, KPS, SA, (PF & 4) != 0>(slut, gs13, gs2, X, inter, Y, cnt, need, c0, c1, d0, d1, s_rp13, s_rp2, s_e,
+                                                    s_off, s_srt, s_red, full, empty);
+#endif
+    } else {
+      tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, need, c0, c1, s_rs13, s_e, s_off, s_srt, s_red, smem,
+                                                    full, empty, st, ph, rb, s_sb);
+#if TK2PR_TL
+      if (tid == 0) g_prt[blockIdx.x * 4 + 1] = gtime();
+#endif
+      tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, need, d0, d1, s_rs2, s_e, s_off, s_srt, s_red, smem,
+                                                     full, empty, st, ph, rb, s_sb);
+#endif
+    }
+#if TK2PR_TL
+    if (tid == 0) g_prt[blockIdx.x * 4 + 2] = gtime();
+#endif
+    return;
   }
   if (PF & 32) {  // moe n8 BAL: gemm13's extra rows (n13 % G) on the LAST CTAs, gemm2's (n2 % G) on the FIRST ones
     const int G = gridDim.x, b = blockIdx.x, q1 = n13 / G, e1 = G - n13 % G, q2 = n2 / G, e2 = n2 % G;
@@ -4322,7 +4604,7 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
                        const void* gs13, const void* gs2, const void* x, const void* ids, int start, int count,
                        void* meta, void* sr, void* inv, void* inter, void* y, void* cnt, const void* tw = nullptr,
                        const void* w1 = nullptr, void* out = nullptr, float eps = 0.f) {
-  constexpr int SMEM = NSTG * NC * KPS * 1152 + (GS == 16 ? NC * 8 * 2 * 32 * 16 : 0);
+  constexpr int SMEM = NSTG * NC * KPS * 1152 + (GS == 16 || (PF & 16384) ? NC * 8 * 2 * 32 * 16 : 0) * ((PF & 16384) && TK2PR_C ? 2 : 1);
   static int grid = 0;
   if (!grid) {
     int dev, nsm;
@@ -4390,6 +4672,10 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512 | 1024>(0, TK2F_ARGS0);
   }
   if (sq) {  // SA 84204 only (+ BAL): d1 slot, T = 16 / 32
+#if TK2PR
+    if (cfg >= 190000 && cfg < 200000 && cfg % 1000 == 204)  // layer n5s29 PR: SQ PF4 + pair role, pair row weight (8 + W) / 8
+      return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512 | 16384 | (TK2PR_PAD << 20)>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+#endif
     if (cfg >= 140000 && cfg < 150000 && cfg % 1000 == 4)  // moe n16: tk2h GS16 + PF4 on SQ stages
       return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4 | 512>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
 #if TK2F_DIAG
@@ -5039,7 +5325,7 @@ TK2F_SQ = 1  # layer s68 (moe n14, H200 d32 -1.5, d16 -0.55 us, bitwise = off): 
 
 def _tk2f_w(c, st):
     """(cfg, w13, w2) for moe_tk2f_launch: SA 84204 (+ BAL) -> + 10000000 on the single-copy buffers (SQ)."""
-    sq = c % 1000000 == 184204 or (140000 <= c % 1000000 < 150000 and c % 1000 == 4)  # 84204 (+ BAL) / moe n16 tk2h
+    sq = c % 1000000 == 184204 or (140000 <= c % 1000000 < 150000 and c % 1000 == 4) or (190000 <= c % 1000000 < 200000 and c % 1000 == 204)  # 84204 (+ BAL) / moe n16 tk2h / n5s29 PR
     if TK2F_SQ and sq and TK2F_S6_ON and "w13s6" in st:  # layer s73 (moe n20 S6)
         return c + 20000000, st["w13s6"], st["w2s6"]
     if TK2F_SQ and sq and "w13sq" in st:
@@ -5062,8 +5348,13 @@ def _tk2x(c, st, code):
     return 10000000 + (184402, 184403, 184412, 184413)[code - 2], st["w13sq4"], st["w2sq4"]
 
 
+TK2PR_M = {}  # layer n5s29 PR (pair role): M -> pair row weight digit W (pair row = (8 + W) / 8 of a single row); SQ + PF4
+
+
 def _tk2f_cfg0(M, st):
     sa = 100000 if TK2SA and st["sa"] else 0
+    if TK2PR_M.get(M) is not None and sa:
+        return sa + 90000 + TK2PR_M[M] * 1000 + 204
     if TK2H_M.get(M) and sa:
         return sa + 40000 + (TK2H_M[M] - 1) * 1000 + 4
     if TK2W and M > 1:
@@ -5105,7 +5396,7 @@ def kernel_fn(data, st):
             lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
             c5 = c % 1000000 % 100000
-            if (80000 < c5 < 100000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
+            if (80000 < c5 < 90000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4) or (90000 <= c5 < 100000 and c5 % 1000 == 204):  # s13 slot-ordered y32 (n6: tk2h + 4; n5s29 PR is PF4)
                 lib.moe_norm3_launch(y32, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out, st["cnt"])
                 return out
             lib.moe_norm2_launch(y32, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], POST_NORM_EPS, out,
