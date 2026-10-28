@@ -2539,3 +2539,17 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - Open question I could not settle: the free-consumer probe gains from 144 KB in flight, the real kernel loses from it.
   So the consumers' own traffic (x/inter loads, y32 stores) or SM-side delivery, not DRAM, sets the rate with
   consumers on. Not a build item without a new measurement idea.
+
+## n5s28 (2026-10-28 07:00Z - ~07:55Z): s9 fused norm (TK2FN) re-tested after n5s17's code-layout finding: still DEAD; 0 runs
+- No lead answer to n5s25's lane request; moe checks 10-28 all used (12/12). Modal H200 ledger 32/60 min used today: not spent.
+- Question: s9's fused post-expert norm in tk2f (tk2f_norm: last-M-ticket CTAs do moe_norm2's work) lost +2 us bs1 on the
+  judge (168fa04c). n5s17 later showed a hot MMA loop straddling a 64 KB code boundary costs tk2f 4-12%, so the s9 loss
+  could have been a layout artifact. Today's FN instantiation (tk2f<8,4,2,false,true>): loop64k.py = no crossing.
+- Fair H100 A/B (same old config both sides: A = main with _tk2f_cfg forced to 204 = non-SQ/non-SA + moe_norm2,
+  B = TK2FN = 1 = the same tk2f + fused tail; tools/n5s24/ab.py, seeds 1-3, GPU shared with other agents):
+    graph replay B-A: bs1 +5.0, bs8 +3.3, bs16 +3.1, bs32 +2.6 us.
+  Per kernel (tools/n5s28/prof.py, torch.profiler, cold L2): bs1 tk2f 38.8 + norm2 4.0 vs FN tk2f 43.2; bs16 161.1 + 4.3
+  vs 165.7. => the fused tail costs as much as the whole norm2 kernel (it is the same latency chain: y32 store ->
+  fence -> ticket atomic -> spin until all G CTAs ticked -> y32 reload -> reduce -> store), and replay loses the overlap
+  of norm2's launch with tk2f's drain. Not layout. DEAD for good (with n5s19 norm2-as-PDL-secondary): keep moe_norm2.
+- Nothing to hand off.
