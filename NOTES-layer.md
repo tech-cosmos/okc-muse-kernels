@@ -2790,3 +2790,25 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   fixed overhead (L1 carveout ~1 us: dyn smem 200 KB -> e.g. keep x of ONE group in smem by splitting the pair row's K in
   halves, or alias the x region into the ring; the other ~2 us: ncu gemm2 long_sb / waits) -> T=32 ~-3 us sl, then real-routing
   Modal A/B (after 00:00Z; Modal 55.8/60 used 10-28) at d16/d32 x seeds. If the overhead can't be cut, PR is dead (tie).
+
+## night5 s30 (2026-10-28 10:41Z - ~11:05Z): tk3/PR lane CLOSED on its zero-overhead ceiling; no build, 0 judge runs, 0 Modal
+- Plan from s29 was "cut PR's ~3 us fixed overhead". Before building I bounded what a PERFECT cut buys, from s29's own H100
+  real-routing A/Bs (W 4, vs main's base): d32 sliding PR - base = s99 +0.6, s7 -0.2, s13 +5.4 us; the fixed overhead measured
+  at k = 0 is +3.2..3.8 us. Zero-overhead PR at d32 = s99 -2.6..-3.2, s7 -3.4..-4.0, s13 +1.6..+2.2 -> mean ~-1.6 us sliding
+  (H200 tuner T=32: PR +0.1..+1.5 with overhead -> ~-2..-3 without). d16: PR = non-BAL tk2f = BAL base +4 us -> still +0.2..+0.8
+  with zero overhead (no gain). Score value: ~2 us x 0.058 %/us (d32 sl) + ~2 us x 0.020 (d32 full) = <= ~0.16% total.
+- Why the ceiling is that low: main's T=32 base (tk2h) ALREADY merges an expert's 2 token groups into one consumer pass (GS16 W
+  read once), so PR only re-schedules the same pair work; and the pair body's best possible rate is bounded by s29's microbench
+  (wgmma N16 611 vs mma.sync pair-from-smem 671 cyc per 8 KB stage = 9%). In-layer the compact pair row is 2.2x a single row
+  (5.3 vs 2.4 us, latency-bound 2000 cyc/18 KB stage); even at the microbench rate the gain over tk2h stays inside ~9% of pair work.
+- The overhead cut itself (L1 carveout ~1.1 us from 200 KB dyn smem: needs x of one group back in registers = the unrolled body
+  that landed past 64 KB of code in s29 b) would be a 2-3 session rebuild for <= 0.16%. Not started. Branch layer/tk3 a2ed836 stays
+  as the record (TK2PR off on main, nothing to port).
+- => tk3 lane CLOSED (lead 09:55Z: "if tk3 is dead, say so and take tk2f bs1"): tk2f bs1 is on record dead piece by piece
+  (moe n5s37: route->copy n5s23, fused norm s9/n5s28, norm2 PDL n5s19, PSC s12, ring n5s15/n5s29/n5s30, structure n5s33) and its
+  fixed cost already overlaps the pre-expert kernels by PDL in-layer (layer n5s23: d1 experts excess 12 us H100, that is the stream
+  + consumer, not the fixed part). Lane request posted in COORD. main unchanged (v163); 10-28 left: 4 checks / 7 submits.
+- Re-looked for >= 1% levers outside the three closed lanes: attention board #1 3.03x vs ours 2.60x; in-layer the only big
+  attention excess is verify full (_gw_verify v16/v32 H200 106/196 us vs gather-bound decode full 87/168: ~0.6-0.8% of score
+  if it reached the gather rate), but native verify-full kernels tied/lost twice (~/attn s71, s111) and FP8 QK/PV forms are on
+  record (~/attn NOTES s33, s81-s90). No new idea there from me this session.

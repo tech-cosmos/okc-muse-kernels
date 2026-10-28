@@ -6,6 +6,9 @@ night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (too
   (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
   unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 7 submits left after v163.
   Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
+night5 s30: tk3/PR CLOSED on its zero-overhead ceiling (s29 H100 A/Bs minus the 3.2-3.8 us fixed part: d32 sl ~-1.6..-3 us,
+  d16 none since tk2h/BAL already merge 2-group experts) = <= ~0.16% score; tk2f bs1 fallback is on record dead (moe n5s37).
+  No build, 0 runs. Lane request in COORD. 10-28 left: 4 checks / 7 submits.
 night5 s29: tk3 lane: BUILT "PR" (pair-role tk2f: k CTAs run 16-token pairs with a compact rolled TWO body, rest tk2f's
   1-group rows) on BRANCH layer/tk3 a2ed836 (option tk2pr, TK2PR build flag; main untouched). Correct 37/37. H100 d16 ~= non-BAL,
   +4 vs BAL; d32 tie..+5. DIAG check df997d8f 2.158x (= v163 redraw, PR not picked, not submitted), prepare_s 91.9: H200 tuner
@@ -23,8 +26,6 @@ night5 s26: H100 in-layer FREE-piece oracles (tools/free_oracle.py, NOTES n5s26 
 night5 s25: H200 judge DIAG 0dc9b93f (TK2F_ORX probes on c3a234a, flag off on main, never submit) of moe n5s32's tk2f oracles:
   ornc-orz d1 7.3, v1 11.8, d16 22.1, d32 37.1 us sl, but (moe n5s33, BRA tie) that is the no-data consumer chain, not a gain;
   b-orn (free stream) only 3-14 us -> consumer and stream BALANCED on the H200; lever closed. 10-28 left: 5 checks / 7 submits.
-night5 s24: no build, 0 runs: v1/d32 sliding H100 timelines re-matched to dead entries; new muse_prefill_layer board
-  (not in overall ranking) flagged to lead. Lane request n5s23 still open.
 night5 s23: v163 SCORED 7693598b 2.1311x (board best stays v153 2.1580x). H100 in-layer PREFIX ORACLE (tools/prefix_oracle.py,
   NOTES n5s23 table): experts = 45-65% of every sliding layer, excess over stream floor d1 12 / v1 15 / d16 15 / d32 20 / v16 40 /
   v32 41 us H100 = the only >= 1% items (moe/proj lanes); every layer-lane segment is <= ~0.5% from its floor. Lane request posted.
