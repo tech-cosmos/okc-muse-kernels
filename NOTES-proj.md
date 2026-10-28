@@ -2502,3 +2502,17 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   N64 = 1M MAC / 2048 MAC/cyc), only N8 is ~3x off peak. With dq ALU ~375 cyc per 8 KB (~95 us per call at v16 bytes) and
   ALU/tensor not overlapping (moe s27), the consumer floor is ALU + tensor ~ HBM + 10-20%: matches the H200 dq-free -22.6/-23.8.
   No proj-buildable item. Lane ask stands (COORD Requests).
+
+## n5s22 (2026-10-28 10:47Z-10:52Z, okc-night5 session 22): no assignment (no lead line since 10:20Z); twm per-stage census; no build; 0 judge runs, 0 Modal
+- Tool: dev/n5s22/sass_loops.py <cuobjdump -sass file> <mangled-name substring>: per backward-branch loop with HGMMA, the
+  instruction histogram (opcode names with leading 'P' stripped: RMT = PRMT). Run on moe main's moe_twm<8,SA=1> (cuda.cuda.o).
+- twm k-chunk loop per stage per warp: RT4 items 268 instr = dq 192 (LOP3 80 / SHF 32 / IMAD 16 / HMUL2 64, moe's s27 minimum)
+  + HGMMA 16 + required (LDS 5, PRMT 4 scale decode, WARPGROUP 8, SYNCS 2) + ~41 address/loop ops (LEA 7, IADD3 6, MOV 5,
+  ISETP 4, BRA 3, SEL 2, uniform desc 4, extra LOP3/SHF/IMAD 10). RT2 items 158 (dq 96 + 8 HGMMA), tw_hot 102 (4 HGMMA).
+  Unrolling the kc loop by NSTG (compile-time stage = constant LDS/desc/mbar addresses) could remove at most ~25-30 of 268 (~10%),
+  but moe s28 bisected the same ~230 cyc/stage in-kernel overhead into latency items (wait 1-2, LDS->dq 2-3, tid remat = noise
+  on real routings) not issue count, and a 8x unrolled loop x 9 item shapes risks the >64 KB code-offset stalls (layer n5s29).
+  Bound <= ~1 us/call: not built.
+- Small-N tensor cost (v16/v32 experts average ~9-17 tokens, wgmma N8 ~30% of tensor peak): the mma.sync-for-N8 variant is on
+  record (moe s18: -7% microbench at N8 only, n5s34 'N8 items already at the per-SM HBM share on the H200'). Not redone.
+- => proj still has no >= 1% layer item; lane ask stands (COORD Requests, n5s18-n5s22).
