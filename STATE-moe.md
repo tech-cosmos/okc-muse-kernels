@@ -1,6 +1,6 @@
 # STATE-moe
 
-## NOW (n5s21, 2026-10-28 05:45Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
+## NOW (n5s22, 2026-10-28 05:50Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
 - n5s15: tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps); bytes-in-flight lever closed.
 - n5s16: H200 ORACLE: the extra 8-token groups cost d16 4.0 / d32 7.7 us (tk2f fit 14.1 + 6.97 E + 4.4 X us).
 - n5s16-n5s18: EVERY 16-token shared-dequant form on mma.sync tk2f is DEAD: inlined (i-cache), noinline (ABI), tk2h merged
@@ -21,7 +21,9 @@
 - n5s21 (lead 04:50Z: moe = bs256): exact-N moe_hot (hot experts 65..128 tok padded to N128) H200 DIAG 43eb5326: N104 probe v32
   -2.3 us mean (~half the SM-time model) -> full exact-N ~-3.7 us < 5 us bar: not built. Probe HOT_NX/HOT_NXB kept off. Untested: board-only
   HOT_M {256: 32} + TWF_SPLIT_M {256: 66} at bs256 (layer already runs it). No other bs256 item >= 5 us on my model.
-- Checks 10-28: moe 8 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326), 0 submits; attention 0/20.
+- n5s22: main = board bs256 at the layer's config (HOT_M {256: 32} + TWF_SPLIT_M {256: 66}): check cefcc133 2.2632x, submit 951c17e0 2.2535x = board best.
+  bs256 lane: no untried lever >= 5 us on my model (NOTES n5s22 list). Next: only a new structural idea, or a lead reassignment.
+- Checks 10-28: moe 9 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326, cefcc133), 1 submit (951c17e0); attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
@@ -37,7 +39,7 @@ Tools (run from muse_attention_decode/): tools/bench.py test|bench; tools/jsum.p
 H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-CTA clock64 timeline of csl, VAR=... variants).
 
 ## Board
-- Best submit: febfcb1f @72d1274 (SCB), **2.2469x** (2026-10-27 09:20Z; check ed55a5c0 2.2635x). Was 6a92803a 2.190x. Board is a TEST BED only (lead 01:45Z): the layer counts.
+- Best submit: 951c17e0 @21deb8a (bs256 hot32+split66), **2.2535x** (2026-10-28 05:45Z; check cefcc133 2.2632x). Was febfcb1f @72d1274 (SCB) 2.2469x. Was 6a92803a 2.190x. Board is a TEST BED only (lead 01:45Z): the layer counts.
   Checks 20/20 used on 10-26 (DIAGs since s12: never submit those); budget resets 00:00Z. Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
   bs128 196-207, bs256 243-251 (judge noise +-4%).
 - **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.

@@ -2443,3 +2443,12 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   tok) extrapolates to ~-3.7 us/v32 call < the lead's 5 us bar: NOT building the per-expert-N (noinline per-N item) version.
 - Board note: main runs no moe_hot at bs256 (HOT_M = {}); the s29 note "board bs256 has no expert > 49 tok" held for seed 7 only.
   HOT_M {256: 32} + TWF_SPLIT_M {256: 66} (= the layer's config) is an untested BOARD-only config A/B (no layer gain).
+
+## n5s22 (2026-10-28 05:15Z - 05:50Z): board-only bs256 config = the layer's (HOT_M {256: 32} + TWF_SPLIT_M {256: 66}); 1 check + 1 submit
+- Re-read s14/s15/s24/s27-s30 for an untried bs256 lever with >= 5 us: none (LDS stage-ahead prefetch dead s14/s24, HOT_TWG dead n15,
+  pingpong/warp-spec dead s22/s27 (ALU and tensor work don't overlap SM-wide), per-stage overhead bisected s28, exact-N n5s21 -2.3 us).
+- So spent one check on the n5s21 untested item: main 21deb8a = HOT_M {256: 32} + TWF_SPLIT_M {256: 66} (what layer runs at T=256).
+  Local: bench test 15/15, tools/s29/hot_stress.py 0/40 bad, 0 non-bitwise vs HOT off.
+- check cefcc133 2.2632x: bs1 27.9, bs16 88.6, bs32 120.6, bs8 62.9, bs128 203.6, bs256 240.5 (ed55a5c0 main: 245.6).
+- submit 951c17e0 **2.2535x** (new moe board best, was febfcb1f 2.2469x): bs1 27.0, bs16 94.6, bs32 126.6, bs8 66.9, bs128 200.1,
+  bs256 242.5. bs256 -3..5 us vs older runs (within ~2% noise, consistent with the layer's own H200 tuner picks). No layer change (layer already runs it).
