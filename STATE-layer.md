@@ -2,6 +2,9 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s11: **main = v156** (50355f2) = v155 + nvcc --split-compile=0 on moe/g10 libs + build pool 16 + 4 dead g30 builds dropped
+  (local cold 142 -> 131.5 s; H100 12-shape A/B tie). check 0e4ba3c2 2.1421x, **judge prepare_s 182.0** (no gain on the judge's
+  build host). 10-28 budget after it: 12 checks / 9 submits. No new layer lever found (NOTES n5s11).
 night5 s10: **main = v155** = v153 + T=8 sl base g30n:o, T=8 full g14alt 3, T=32 base g30kgx:pooler, TUNE lists cut to the H200
   picks of the last 3 runs (lead 03:25Z: judge prepare_s <= 220 s): cold 139.4 s local, **judge prepare_s 176.7** (v153 189.0).
   check cd6b3ba4 v155 2.1074x (d16/d32 sl best ever 123.1/147.2; d1/v32 sl worse = run noise per tuner logs; not submitted).

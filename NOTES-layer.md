@@ -2411,3 +2411,11 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   * _BUILD_POOL 8 -> 16 threads (19 builds incl. attention): builds done 122.9 -> 106 s (24 threads: 98 s; kept 16 for judge RAM).
   * cold prepare (prep_time.py): v155 142.2 s (builds 125.6 + tune 15.7) -> v156 131.5 s (builds 103.8 + tune 25.2: GPU shared).
 - v156 validate --quick (prep skipped, measured above): ALL OK: test 13/13, scored 0/12, opt 0/42, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/60.
+- check 0e4ba3c2 (v156, 50355f2) 2.1421x (CI 2.110-2.174), tests 13/13, **judge prepare_s 182.0 s** (v155 cd6b3ba4 176.7, v153 189.0;
+  earlier 183.1/202.5/183.5): the local -11 s (builds -22 s) does NOT show on the judge, whose build host is likely core-limited
+  (split-compile and 16 threads only help with spare cores). Neutral, kept (no build failed). us ours/SGLang: d1 67.0/170.5,
+  75.7/180.5; d16 130.6/268.2, 205.8/432.9; d32 153.6/261.8, 292.5/616.0 (d32 full best ever); v1 118.9/278.2, 123.2/279.0;
+  v16 261.5/526.5, 356.1/703.5; v32 338.7/737.1, 519.1/1098.2. Tuner picks: T=1 full g10alt:o 1, T=16 g30n:unpool (+qkv full),
+  T=32 default, T=8 default, T=128 sl ltalt:pooler 2, T=256 sl lt:o. Not submitted (< 2.1580x; no per-shape change intended).
+- Next: no layer-own lever left with a size (audits s45-n5s10 + this one); the gap to #1 is the experts (moe board lane:
+  pjmullin3 moe 2.623x vs ours 2.247x) and attention. Port moe/proj Handoffs as they land; bundle into one check.
