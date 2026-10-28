@@ -1,18 +1,17 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log (sessions in order, newest last)
-Updated 2026-10-28 05:00 UTC (night5 n5s10 = session 10). **LANE (lead 03:50Z LANE DECISION 7): twm = moe big-M bs128/256**
-(v16/v32 in the layer). Work on branch **proj/twm** (muse_bf16_proj/twm/ = copy of r-moe muse_moe_w4a16 @182ec67; never moe's dir);
-moe reviews before layer integrates. Budget: muse_moe_w4a16 checks 8 proj / 12 moe per UTC day (`okc check muse_moe_w4a16 <file>`),
-scored runs on that board are moe's; log checks with the problem name. 11-bit qkv/pooler format (~0.3%) parked behind this.
-**n5s10: tw3 (3 independent consumer WGs, each its own ring of half-items, shared producer thread) DEAD**: bitwise = twm, H100
-bs128 +25..43%, bs256 +40%; 2-WG control loses the same -> per-WG x tiles/rings are the cost. 13-16 warps/CTA cap regs at 128
-(a higher __maxnreg__ fails the launch and NORM_EARLY's moe_norme then HANGS: tw3_go TORCH_CHECKs). NOTES n5s10.
-H100 twm baseline (t3.py, seeds 7/8/9): bs128 259/237/213, bs256 279/272/270 us. Board routings: bs128 19-26 experts (max 23-45
-tok), bs256 24-27 (max 42-149).
-NEXT (twm): (1) spend 1 moe-board check on an H200 per-CTA twm timeline of the BOARD routings (moe's DIAG/DIAG_TLV tool,
-tools/n15/an.py) to size drain / first wave / consumer excess per shape before building; (2) by that: drain (items 35-50 us,
-~3.3 waves) or the lockstep 3-WG form (shared x, groups of 3 halves of one (e, pass), <= 128 regs; rank low: moe s28 says
-4 warps/SMSP buy 3-6%). Read NOTES-moe s15/s19/s20/s27-s29 dead list first.
-**proj board best: submit eb166fc0 (34b7483) 1.3574x.** Checks 10-28: 1/20, scored 0/10.
+Updated 2026-10-28 06:25 UTC (night5 n5s11 = session 11). **LANE (lead 03:50Z/04:50Z): twm big-M = bs128 (T=128) for proj**
+(moe = bs256). Work on branch **proj/twm** (muse_bf16_proj/twm/, copies of r-moe; never moe's dir); moe reviews before layer integrates.
+Budget: muse_moe_w4a16 checks 8 proj / 12 moe per UTC day (`okc check muse_moe_w4a16 <file>`); scored runs there are moe's.
+**n5s11 RESULT: bs128 has no >= 5 us item left in twm's structure.** Cost model (COORD Requests n5s11): bs128 steady state is
+HBM-bound (sum of H200 item costs / 132 = bytes at 4.0 TB/s +-3%); excess ~45 us = drain ~20-22 + ramp ~8-10 + route/norm ~8 +
+consumer ~5. 3-WG twm: <= ~3 us (NOT built; n5s10 tw3 dead). Drain by K-split: built KQ (2^kq K pieces, last-ticket sum, no spin,
+deterministic; twm/n5s11/submission_kq.py, TWM_KQ_M): H200 e6416b6f v16 -2.8 (k1s66 = s11 halves -2.5), v32 -2.2 (k2s33): CLOSED.
+Mechanism (H100 G33 + H200 timelines a763ccaf): K loop linear 0.51 us/chunk, whole-item epilogue 1.9 us, every K piece ~3 us
+(partial + fence + ticket round trips) vs a ~17 us average half-item tail.
+NEXT (ask lead, COORD Requests n5s11): no proj twm item >= 5 us. Candidates: cluster/DSMEM piece reduce (no global round trip,
+untested, est. <= 3-5 us), or back to the layer's GEMMs / integration (lane b). DIAG lesson: judge log_tail ~76 lines: keep DIAG
+output short (MEAN lines first get cut).
+**proj board best: submit eb166fc0 (34b7483) 1.3574x.** Checks 10-28: proj 1/20, scored 0/10; moe board (proj share) 2/8.
 Older session headers (n5s1-n5s9, s46-s100; last GEMM-lane state: layer main v155 validated, g30kgx pinned at T=32): NOTES-proj.md.
 ## Board
 - **Best: submit eb166fc0 = 34b7483, 1.3574x** (n5s5, G30_PL). Before: a0168544 = ffb1ae8, 1.3543x (s100b, g30 picks + m32 rings 16/16). Before: a12513ed 1.3483x. Before: 1ff4721e87c844c2 = ca7e557, 1.3233x (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).

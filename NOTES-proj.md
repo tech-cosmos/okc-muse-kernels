@@ -2256,3 +2256,49 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   3 halves, the last group of an (e, pass) has 1-2 halves = up to 1/3 idle) at <= 128 regs (RT4 N32 body: acc 64 + A 32 +
   wv 16 regs: likely spills). moe's s28 microbench says 4 warps/SMSP buy only 3-6% even without overheads. Rank: low.
 - 0 judge runs. Branch proj/twm: muse_bf16_proj/twm/ (copy of r-moe submission @182ec67 + tw3, t3.py A/B harness).
+
+## n5s11 (2026-10-28 04:52Z-, night5 session 11): bs128 cost model (3-WG fails the 5 us gate); per-item cost split; KQ K-split tail
+- Lead 04:50Z: proj = bs128 (T=128 twm 3-consumer-WG); post a 3-line cost model, build only if >= 5 us/call. Posted (COORD Requests n5s11):
+  bytes (board-like routings, /tmp/pj11/cm.py = twm/cm.py): E 18-26 x 28.3 MB = 127-184 us at 4.0 TB/s; sum(H200 item cost)/132 = stream
+  time +-3% on 12 seeds (only 0-1 experts > 32 tokens at bs128) => steady state HBM-bound; board bs128 204 us => ~45 us excess = drain
+  ~20-22 + first-wave ramp ~8-10 + route/norm ~8 + consumer excess ~5. 3-WG only trims the consumer excess (<= ~3 us; n5s10 form
+  +25..43%): NOT built. The >= 5 us item is the drain.
+- H200 DIAG check a763ccaf (moe board, test run 2.2369x, never submit; diff twm/n5s11/diag_a763ccaf.diff on r-moe main 2f66dbb):
+  DIAG_VARIANTS big = twm/s33/s66/s50/a23/twmb + DIAG_TLV twm/s66/s33 timelines (layer routings). LESSON: the judge's log_tail kept
+  only the last 76 lines: the MEAN lines (printed first) were cut; only timelines survived. Keep total DIAG output < ~70 lines.
+  Timelines (single shot, last exit us) v16 s13/s17/s99: twm 160.3/149.5/149.6, s66 160.4/139.7/145.2, s33 154.2/145.0/145.3;
+  v32 s7/s11/s13/s17/s99: twm 192.3/197.1/191.3/195.7/217.1, s66 182.0/195.6/195.9/197.4/206.5, s33 180.5/185.5/194.9/196.9/209.8.
+  Loss (exit - busy/G) twm 16-28 -> s66/s33 11-18; busy/G +1.5..3.5. H200 item means: N8 gemm2 whole 33.8-34.4 us, K half ~20.
+- H100 per-item cost split (TWM_G env grid override + TWM_LEND = item end stamped at the end of tw_item's K loop; /tmp/pj11/g, g2;
+  twm/n5s11/fixf.py, lend_g2.diff), G33 (no HBM limit): K loop is LINEAR, 0.51 us per k chunk, ~0 fixed (64 chunks 32.6, 32 chunks
+  16.4); epilogue+release 1.9 us per whole item, 3.6 us per K half (first stores + fence + flag, second spins + loads + adds + Y).
+  => a K-split item costs 5.3 us more CTA time than whole: that is why s33/s66 only tie in the layer tuner. Same on the H200 (half ~20.0
+  vs whole 34.0 with the same mix arithmetic).
+- KQ build (branch proj/twm muse_bf16_proj/twm/n5s11/submission_kq.py = r-moe 552aad3 + KQ; python TWM_KQ_M {M: kq} with
+  TWF_SPLIT_M {M: ns}; default off, old paths unchanged): the last ns light gemm2 items run as 2^kq K pieces (64 >> kq chunks;
+  launch code: bit 22 + count << 12 + kq in bits 0-2, encoded even without order bits); every piece __stcg's its FP32
+  partial to its own 16 KB slot (j << kq) + h, __threadfence, bar.sync, ticket atomicAdd; the last ticket holder zeroes the
+  ticket, re-reads all pieces from L2 PIECE-MAJOR (16 loads in flight per piece) and sums in part order (deterministic, unlike s11
+  halves), then the normal Y epilogue; non-last pieces skip the NORM_EARLY done count (s_nd2 counts a KQ item once). Part buffer
+  ns << kq slots (DIAG_TL: <= 132 slots). Tests (twm/n5s11/kqt.py): 28 big-M routings (bs128/256 x 6 seeds, skewed, 257, 33, 64) x
+  {o66, k1s66, k2s33, k3s16, k2s40, k1s132} x 3 reps: 0 bad, worst maxdiff vs no split 0.0039 (= s11 halves).
+  Bugs on the way: (1) pofs test `pofs & (1 << 20)` was true for s11's -16384 (negative) -> 2nd half took the new path, 1st half spun
+  forever = GPU HANG (killed in ~10 min; check `pofs >= (1 << 20)`). (2) `v += q == hp ? acc : ldcg` in a runtime loop inside the
+  unrolled r/i loops: ptxas ran > 9 min on the moe lib (normal ~2): never select on register arrays in runtime loops. (3) element-major
+  sum with `unroll 1` serialized ~128 dependent L2 loads: k3 pieces +60 us tail.
+- H100 G33 per-piece cost (twm/n5s11/fixf.py on a TWM_TL + TWM_G copy): K half 19.8 us (s11 20.0), eighth 7.2 us (= 4.1 loop + ~3 us
+  epilogue: stcg + fence + ticket round trips). Skipping the done count saved only ~0.35 us/piece. The per-piece fixed ~3 us
+  (vs 1.9 us whole-item epilogue) is the limit for finer tails.
+- H100 MEAN (layer routings, cold L2, twm/n5s11/kqb.py, GPU lock), us v16 | v32: twm 202.9/203.4 | 245.0/244.5, o66 200.8 | 247.0,
+  k1s66 200.2 | 246.2, k2s33 203.0 | 244.8, k2s20 206.3 | 247.1, k3s16 206.1 | 249.5. Ties (H100 is HBM-bound in the tail anyway).
+- **H200 check e6416b6f (moe board, 2.2200x test run, never submit; /tmp/pj11/d2 = submission_kq.py + DIAG 1, 19 output lines)**, MEAN
+  5 layer seeds us (repeat control twmb within 0.3): v16 twm 179.5 | o66 176.9 | k1s66 176.6 | k2s33 178.5 | k2s20 178.7 | k1s33 178.0 |
+  twmb 179.2; v32 (moe defaults, order 76, no hot) twm 229.5 | o66 230.6 | k1s66 229.9 | k2s33 227.4 | k2s20 230.7 | k1s33 228.5 | twmb 229.7.
+  Per seed v16 k1s66: -8.8/-5.4 on seeds 17/99 (partial last wave), ~0 on 7/11/13. => K-split tails buy at most ~2-3 us per call on
+  the H200 (any form, any piece count): BELOW the 5 us gate. KQ = s11 halves in speed (but deterministic). DRAIN-BY-K-SPLIT CLOSED.
+  Why: every piece pays a ~3 us epilogue (FP32 partial + fence + ticket round trips) while the drain is ~1/2 item (~17 us) on average;
+  quarters/eighths add more piece overhead than they remove tail.
+- Not done / left for the drain: (a) a cheaper piece epilogue would need no global round trip per piece (e.g. pieces of one item on
+  ONE cluster, DSMEM reduce: 2-4 CTAs of a cluster; untested); (b) layer v160 NORME_TRIG already overlaps the T=128 unpool W prologue
+  with twm's drain (-2..4 us H100) = the overlap route is the layer's.
+- 2 moe-board checks used (a763ccaf, e6416b6f) of proj's 8 today. 0 submits.
