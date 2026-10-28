@@ -2683,3 +2683,19 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - H200 confirmation (optional, ~8 GPU-min, after 00:00Z): from ~/r-layer regenerate /tmp/n5s34 then
   python ~/r-moe/tools/h200.py muse_decode_layer base=/tmp/n5s34/base0.py cand=/tmp/n5s34/orqs.py orq=/tmp/n5s34/orq.py
   --cmd "python bench.py bench 2>&1 | grep -E ' us |geomean|rror'"
+
+## n5s35 (2026-10-28 09:48Z - ~10:15Z): twm dq instruction cut (lead 09:20Z/09:55Z) = at its floor in SASS; no build; 0 judge runs, 0 Modal
+- Budget: moe's 12 moe-board checks for 10-28 used; Modal 55.8/60 min (resets 00:00Z): H100/SASS only.
+- SASS of the twm N8 consumer K loop (proj n5s19 dump /tmp/pj19/twm.sass, moe_twm<8,false,64>, 0x46f0-0x5230), per iteration
+  (64 weights/thread = 8 dq() calls, 8 HGMMA): LOP3 45, HMUL2 32, SHF 20, IMAD 11, LDS 9, uniform/control ~40.
+  dq() core = 8 x (5 LOP3 + 2 SHF.L.W + 1 IMAD + 4 HMUL2) = 40/16/8/32 = 96 = EXACTLY the s27 minimum (8 int ops + 4 HMUL2 per
+  8 weights; s27 tools/s27m/dq_tiling_search.py: no rotate/shift/PRMT/funnel/IMAD.WIDE layout reaches 7; n5s34: o3 needs its IMAD).
+  Extras = 5 LOP3 + 4 SHF + 3 IMAD per iteration (byte-index math `(w >> k) & 0x3fc` = scale/LUT addressing) = 12 of ~180
+  instr (~7% of the loop). Even if all 12 were free: <= ~7% of the dq-free ceiling = <= ~0.7 us/sliding v16/v32 (H100).
+- Other dq levers already on record dead: pipe move SHF -> IMAD.WIDE (DQW, n22: +11% time, latency-bound), byte_perm/smem LUT
+  (s27/s30: >= today's op count), scale fold after MMA (s29: = FFMA count at N8, kills the wgmma ring, not bitwise),
+  mma.sync for N8 items (s18: -7% microbench, N8 items already at the per-SM HBM share on the H200), warp-specialized /
+  pingpong dq (s22/s27: ALU and tensor work do not overlap SM-wide).
+- VERDICT: twm dq instruction-cut lane CLOSED (nothing buildable >= 1 us, lead bar 6 us). The 00:00Z H200 dq-free oracle would
+  only bound a lever that has no buildable form, so I won't spend Modal on it unless the lead wants the number anyway
+  (command in n5s34). Lane request to lead in COORD.

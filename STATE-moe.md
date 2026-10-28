@@ -1,6 +1,9 @@
 # STATE-moe
 
-## NOW (n5s34, 2026-10-28 09:40Z): consumer-instruction oracles (lead 08:50Z) -> tk2f decode consumer lane CLOSED (NOTES n5s34)
+## NOW (n5s35, 2026-10-28 10:15Z): twm dq instruction cut (lead 09:20Z/09:55Z) CLOSED in SASS (NOTES n5s35)
+- twm N8 loop: dq core = 96 instr / 64 weights = the s27 proven minimum (8 int + 4 HMUL2 per 8); extras 12/180 instr <= ~0.7 us.
+  All dq alternatives dead on record (n22 DQW, s27 LUT/tiling, s29 scale fold, s18 mma.sync N8, s22/s27 WS). Lane ask in COORD.
+## WAS (n5s34, 2026-10-28 09:40Z): consumer-instruction oracles (lead 08:50Z) -> tk2f decode consumer lane CLOSED (NOTES n5s34)
 - tools/n5s34/oracles3.py (orq dq free / ors scale free / orqs both / orm mma free), H100 in-layer us sliding: (a)+(b) d1 -0.4,
   d16 -2.3, d32 -3.7, v1 -2.2; H200 n12 nm (all math free) <= 1.8/4.2/6.5/3.6. o3 IMAD is unavoidable (mask tiling proof in NOTES).
   twm (v16/v32): dq free -9..-11 us sliding H100 = free ceiling only (twm dq cuts dead s18-s30). Lane request to lead in COORD.
