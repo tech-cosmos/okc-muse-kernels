@@ -88,6 +88,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
+#define TK2DT 0  // n5s18 (DEAD, H100: d16 +8..20 us): deferred-TWO tk2f (cfg 85204 SQ; python TK2DT_M); DIAG builds only
 #define TK2X 0  // n5s16 (DEAD, i-cache): HYB / HYB2 GS16 consumers (tk2x_consume / tk2x_two; python TK2X_M / TK2X2_M); DIAG builds only
 #define TK2F_ORACLE 0  // n5s16 DIAG builds: run-time oracle (l2h bit 12, python TK2F_ORACLE; WRONG output): tk2f computes only the first GS-token group of each expert
 #define TK2F_SQDEEP 0  // n5s15: deeper / 36 KB SQ rings (cfg 205/206/208/404/405 + 84xxx), DIAG builds only
@@ -3473,7 +3474,7 @@ template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false, 
 __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
                                              int r1, const int* s_rs, const int* s_e, uint4* smem, uint64_t* full,
                                              uint64_t* empty, int& st, int& ph, int& i, uint64_t* xrdy = nullptr,
-                                             int early = 0, int l2h = TK2F_L2H) {
+                                             int early = 0, int l2h = TK2F_L2H, const int* s_mg = nullptr) {
   constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * (S6 ? 1120 : 1152), KB = NC * KPS;
   constexpr int SG = S6P ? NC * KPS * 1152 : SB;  // n20 S6P: S6 images at the 8-bit stage stride in global memory
   static_assert(!S6 || (SQ && KPS == 2), "S6: SQ stages, KPS 2");
@@ -3496,7 +3497,8 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
     // mode 1-3: nfin = a later group of this expert re-reads this row; mode 4: any group of a multi-group expert
     // (the other group's CTA may read the same row first)
     // n4s3: the mode is a launch argument (cfg + 1000000 * (mode + 1)); the #define only compiles the hint code in
-    const bool nfin = l2h == 4 ? s_rs[a + 1] - s_rs[a] > RPE : R + RPE < s_rs[a + 1];
+    // n5s18 DT: s_mg[a] = the expert has > 2 token groups (its rows are read by both row spaces)
+    const bool nfin = s_mg ? s_mg[a] != 0 : l2h == 4 ? s_rs[a + 1] - s_rs[a] > RPE : R + RPE < s_rs[a + 1];
     const int hk = l2h == 0 ? 0 : nfin ? (l2h == 3 ? 0 : 1) : (l2h == 2 ? 0 : 2);  // 0 none, 1 evict_last, 2 evict_first
     const uint64_t pol = hk == 1 ? pol_last : pol_first;
 #endif
@@ -3533,8 +3535,9 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
                                              const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
-                                             int& ph, int& rb, uint64_t* xrdy = nullptr) {
+                                             int& ph, int& rb, uint64_t* xrdy = nullptr, const int* s_ob = nullptr) {
   constexpr bool S6 = (PF & 1024) != 0;  // n20: 6-bit scale codes (SQ stages of NC * KPS * 1120 bytes)
+  constexpr bool DT = (PF & 524288) != 0;  // n5s18 DT: 1-group row space, s_ob[a] = the expert's leftover group's first token
   constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * (S6 ? 1120 : 1152);
   // n7 BAL (PF & 32): per-segment gemm13 -> gemm2 counters cnt[64 + j] (gemm2 segment j waits only for gemm13 segment j)
   // with the rounding rows placed so that no CTA gets an extra row in BOTH phases (see moe_tk2f)
@@ -3555,7 +3558,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       seg_end = seg_start + RPE;
       const int e = s_e[a];
       gsc = gs[e] * 256.0f;
-      off = s_off[e] + gi * 8;
+      off = (DT ? s_ob[a] : s_off[e]) + gi * 8;
       n = min(8, s_off[e + 1] - off);
       ci = a * 4 + gi;
       if (BAL && !GATED) {
@@ -3883,6 +3886,68 @@ __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* 
     if (n > 8) tk2g_row<NRT, NC, NSTG, GATED, KPS, SA, true>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb);
     else tk2g_row<NRT, NC, NSTG, GATED, KPS, SA, false>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb);
     if (GATED && (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
+      asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+      if (tid == 0) {
+        __threadfence();
+        atomicAdd(cnt, R + 1 - max(seg_start, r0));
+      }
+    }
+  }
+}
+
+// n5s18 DT ("deferred TWO", tk2f PF & 524288): the 16-token PAIR rows of the experts with >= 2 token groups, in their
+// own loop that runs after the CTA's 1-group rows of the same phase (code placed after the main loops: n5s17 layout
+// rule). gated is a run-time flag: ONE TWO body for both phases (i-cache). s_rs = the pair row space (np_e * RPE rows
+// per expert); pair pi of expert e = tokens s_off[e] + 16 pi ... + 15 (n > 8 always). Group 0's x in registers, group 1's
+// lane-private in s_x2 (as tk2g_consume).
+template <int NC, int NSTG, int KPS, bool SA, bool SLOT>
+__device__ __forceinline__ void tk2t_consume(bool gated, const uint32_t* slut, const float* __restrict__ gs,
+                                             const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
+                                             const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
+                                             float* s_red, uint4* smem, uint4* s_x2, uint64_t* full, uint64_t* empty,
+                                             int& st, int& ph, int& rb) {
+  constexpr int NQ = 64 / NC;
+  const int sh = gated ? 8 : 7;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
+  uint4 xf[NQ][2];
+  uint4* xs = s_x2 + warp * (NQ * 2 * 32) + lane;
+  int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0;
+  float gsc = 0.f;
+  for (int R = r0; R < r1; ++R) {
+    if (R >= seg_end) {
+      while (s_rs[a + 1] <= R) ++a;
+      const int gi = (R - s_rs[a]) >> sh;
+      seg_start = s_rs[a] + (gi << sh);
+      seg_end = seg_start + (1 << sh);
+      const int e = s_e[a];
+      gsc = gs[e] * 256.0f;
+      off = s_off[e] + gi * 16;
+      n = min(16, s_off[e + 1] - off);
+      if (!gated) {  // all gemm13 rows (both row spaces) written: see moe_tk2f
+        int c;
+        do {
+          asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt) : "memory");
+        } while (c < need);
+      }
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        const bool v = h * 8 + g < n;
+        int row = 0;
+        if (v) row = gated ? (s_srt[off + h * 8 + g] >> 3) : (off + h * 8 + g);
+        const uint4* xr = reinterpret_cast<const uint4*>(X + (size_t)row * KD + 16 * t);
+#pragma unroll
+        for (int qq = 0; qq < NQ; ++qq) {
+          const int kc = qq * NC + warp;
+          uint4 x0 = make_uint4(0, 0, 0, 0), x1 = x0;
+          if (v) { x0 = __ldg(xr + kc * 8); x1 = __ldg(xr + kc * 8 + 1); }
+          if (h) { xs[(qq * 2) * 32] = x0; xs[(qq * 2 + 1) * 32] = x1; }
+          else { xf[qq][0] = x0; xf[qq][1] = x1; }
+        }
+      }
+    }
+    tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem,
+                                                           full, empty, st, ph, rb, gated, s_srt);
+    if (gated && (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
       asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
       if (tid == 0) {
         __threadfence();
@@ -4673,7 +4738,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   extern __shared__ __align__(128) uint4 smem[];
   __shared__ uint32_t slut[256];
   __shared__ int s_e[32], s_off[33], s_rs13[33], s_rs2[33], s_srt[256], s_wc[8][32], s_nact;
-  __shared__ float s_red[((GS == 16 && !(PF & 65536)) || MRG ? 4 : 2) * NC * 256];  // n5s16 TK2S: 2
+  constexpr bool DT = (PF & 524288) != 0;  // n5s18 deferred TWO (see tk2t_consume)
+  __shared__ float s_red[((GS == 16 && !(PF & 65536)) || MRG || DT ? 4 : 2) * NC * 256];  // n5s16 TK2S: 2
+  __shared__ int s_rt13[DT ? 33 : 1], s_rt2[DT ? 33 : 1], s_ob[DT ? 32 : 1], s_mg[DT ? 32 : 1];
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   __shared__ int s_rid[4];
   __shared__ __align__(8) uint64_t ridb[4];
@@ -4781,12 +4848,34 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       const int v = __shfl_up_sync(0xffffffffu, incl, o);
       if (tid >= o) incl += v;
     }
+    if constexpr (DT) {  // n5s18: 1-group space = each expert's odd leftover group, pair space = ng / 2 16-token pairs
+      const int np = ng >> 1;
+      int i1 = ng & 1, ip = np;
+#pragma unroll
+      for (int o = 1; o < 32; o <<= 1) {
+        const int v1 = __shfl_up_sync(0xffffffffu, i1, o), vp = __shfl_up_sync(0xffffffffu, ip, o);
+        if (tid >= o) { i1 += v1; ip += vp; }
+      }
+      s_rs13[tid + 1] = i1 * 256;
+      s_rs2[tid + 1] = i1 * 128;
+      s_rt13[tid + 1] = ip * 256;
+      s_rt2[tid + 1] = ip * 128;
+      s_ob[tid] = s_off[e] + 16 * np;
+      s_mg[tid] = ng > 2;
+      if (tid == 0) { s_rs13[0] = 0; s_rs2[0] = 0; s_rt13[0] = 0; s_rt2[0] = 0; }
+    } else {
     s_rs13[tid + 1] = incl * 256;
     s_rs2[tid + 1] = incl * 128;
     if (tid == 0) { s_rs13[0] = 0; s_rs2[0] = 0; }
+    }
   }
   TK2F_SYNC();
   const int n13 = s_rs13[nact], n2 = s_rs2[nact];
+  const int t13 = DT ? s_rt13[nact] : 0, t2 = DT ? s_rt2[nact] : 0;
+  // n5s18 DT: pair rows split over the CTAs in reverse order (the CTAs with an extra 1-group row get none extra here)
+  const int bq = gridDim.x - 1 - blockIdx.x;
+  const int c0 = (int)((long long)t13 * bq / gridDim.x), c1 = (int)((long long)t13 * (bq + 1) / gridDim.x);
+  const int d0 = (int)((long long)t2 * bq / gridDim.x), d1 = (int)((long long)t2 * (bq + 1) / gridDim.x);
   if constexpr (DYN) {
     const int G = gridDim.x, ns13 = max(0, n13 / G - D), ns2 = max(0, n2 / G - D);
     int st = 0, ph = 0, k = 0;
@@ -4853,8 +4942,15 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
       constexpr bool SQ = (PF & 512) != 0;  // n14: single-copy stages (Wq13 / Wq2 = the _sq_pack buffers)
       constexpr bool S6 = (PF & 1024) != 0;  // n20: 6-bit scale codes (the _s6_pack buffers)
       constexpr bool S6P = (PF & 2048) != 0;  // n20 S6P (DIAG): padded S6 images (_s6_pack pad)
+      if constexpr (DT) {  // n5s18: the consumers' order: 13 1-group, 13 pairs, 2 1-group, 2 pairs
+        tk2f_produce<512, NC, NSTG, KPS, SQ, S6, S6P>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv, s_mg);
+        tk2f_produce<512, NC, NSTG, KPS, SQ, S6, S6P>(Wq13, S13, c0, c1, s_rt13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv, s_mg);
+        tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2, s_mg);
+        tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, d0, d1, s_rt2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2, s_mg);
+      } else {
       tk2f_produce<512, NC, NSTG, KPS, SQ, S6, S6P>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv);
       tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2);
+      }
     }
     return;
   }
@@ -4870,6 +4966,34 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   if constexpr (MRG) {
     tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0, (PF & 1024) != 0>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
                                         s_srt, s_red, smem, smem + NSTG * NC * KPS * 72, full, empty, st, ph, rb);
+    return;
+  }
+  if constexpr (DT) {  // n5s18 deferred TWO: [13 1-group][13 pairs][2 1-group][2 pairs]; ONE pair-loop call site
+    uint4* s_x2 = smem + NSTG * NC * KPS * 72;  // after the ring: 8 KB per consumer warp
+    const int need = n13 + t13;
+    tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, need, a0, a1, s_rs13, s_e, s_off, s_srt, s_red,
+                                                   smem, full, empty, st, ph, rb, nullptr, s_ob);
+    // execution order 13 1-group, 13 pairs, 2 1-group, 2 pairs; CODE order: both 1-group loops, then the pair loop (so
+    // the 1-group loops sit below 0x10000 and no hot loop straddles a 64 KB boundary: check with tools/n5s17/loop64k.py)
+#pragma unroll 1
+    for (int p = 0; p < 3; ++p) {
+      asm volatile("bar.sync 1, %0;" ::"n"(NC * 32) : "memory");  // s_red strides differ between the row kinds
+      if (p == 1) {
+        tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, need, b0, b1, s_rs2, s_e, s_off, s_srt, s_red,
+                                                        smem, full, empty, st, ph, rb, nullptr, s_ob);
+        continue;
+      }
+      if constexpr (((PF >> 20) & 31) != 0) {  // dead pad of ((PF >> 20) & 31) KB (never taken: nact <= 32) so that the
+        if (nact > 32) {                        // pair loop starts past 0x10000 instead of straddling it (n5s17 rule)
+#pragma unroll
+          for (int i = 0; i < ((PF >> 20) & 31) * 64; ++i) asm volatile("membar.cta;" ::: "memory");
+        }
+      }
+      const bool gt = p == 0;
+      tk2t_consume<NC, NSTG, KPS, SA, (PF & 4) != 0>(gt, slut, gt ? gs13 : gs2, gt ? X : inter, gt ? (void*)inter : (void*)Y,
+                                                    cnt, need, gt ? c0 : d0, gt ? c1 : d1, gt ? s_rt13 : s_rt2, s_e, s_off,
+                                                    s_srt, s_red, smem, s_x2, full, empty, st, ph, rb);
+    }
     return;
   }
   if constexpr ((PF & 65536) != 0) {  // n5s16 TK2S: one body, x in smem after the ring (GS / 8 x 8 KB per warp)
@@ -4968,7 +5092,7 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
                        const void* gs13, const void* gs2, const void* x, const void* ids, int start, int count,
                        void* meta, void* sr, void* inv, void* inter, void* y, void* cnt, const void* tw = nullptr,
                        const void* w1 = nullptr, void* out = nullptr, float eps = 0.f) {
-  constexpr int SMEM = NSTG * NC * KPS * 1152 + ((PF & 65536) ? (GS / 8) * NC * 8192 : (GS == 16 ? NC * 8 * 2 * 32 * 16 : 0));
+  constexpr int SMEM = NSTG * NC * KPS * 1152 + ((PF & 65536) ? (GS / 8) * NC * 8192 : (GS == 16 || (PF & 524288) ? NC * 8 * 2 * 32 * 16 : 0));
   static int grid = 0;
   if (!grid) {
     int dev, nsm;
@@ -5130,6 +5254,10 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
       if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 576>(0, TK2F_ARGS0);
       if (cfg == 84204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 580>(0, TK2F_ARGS0);
     }
+#endif
+#if TK2DT
+    if (sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0 && cfg == 85204)  // n5s18 DT (deferred TWO) + PF4 -> moe_norm3
+      return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 524288 | (20 << 20)>(0, TK2F_ARGS0);  // + 20 KB layout pad
 #endif
     TORCH_CHECK(sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0 && (cfg == 204 || cfg == 84204), "moe_tk2f SQ: cfg ", cfg);
     if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 512>(0, TK2F_ARGS0);
@@ -5387,6 +5515,7 @@ def _lib():
             src = src.replace("#define TK2F_SQDEEP 0 ", "#define TK2F_SQDEEP 1 ")  # n5s15
             src = src.replace("#define TK2F_ORACLE 0 ", "#define TK2F_ORACLE 1 ")  # n5s16
             src = src.replace("#define TK2X 0 ", "#define TK2X 2 ")  # n5s16
+            src = src.replace("#define TK2DT 0 ", "#define TK2DT 1 ")  # n5s18
             src = src.replace("#define TK2H_P4 0 ", "#define TK2H_P4 1 ").replace("#define TK2F_SQRT 0 ", "#define TK2F_SQRT 1 ")  # n16 (n14's TK2F_SQ4 / n13's TK2_EXP / TWM_PB48: done)
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=src,
@@ -5969,6 +6098,7 @@ TK2XP_M = {}  # n5s17: HYB (= TK2X_M) + a dead pad before the gemm2 consumer (64
 TK2R_M = {}  # n5s17: ROLE probe (cfg 87204 = 84204 + a never-taken top-level TWO branch): {M: 1}
 TK2S_M = {}  # n5s16: TK2S one-body consumer (x in smem, rolled stage loop): {M: W}, W < 0 = GS 8, else GS 16 weight W
 TK2X2_M = {}  # n5s16: HYB2 = HYB with the 2-group rows in a __noinline__ function (cfg 1005W004 SQ): {M: W}
+TK2DT_M = {}  # n5s18: per-M deferred-TWO tk2f (16-token pair rows in their own loop after the 1-group rows): {M: 1}
 TK2X_M = {}  # n5s16: per-M HYB GS16 (tk2x_consume, SQ + PF4 -> moe_norm3) 2-group row weight W: {M: W}
 TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
 
@@ -5977,7 +6107,7 @@ def _tk2f_cfg(M, st):
     c = _tk2f_cfg0(M, st)
     rt = TK2F_L2H_RT is not None or TK2F_L2H2_RT is not None
     if TK2F_SQ and ("w13sq" in st or "w13s6" in st) and (not rt or DIAG) and (c in (100204, 184204) or (
-            TK2H_SQ and 140000 <= c < 150000 and c % 1000 == 4) or (150000 <= c < 180000 and c % 1000 == 4) or (120004 <= c < 129000 and c % 1000 == 4) or c in (129004, 187204, 188204, 189204, 190204, 191204, 192204, 193204, 194204, 195204, 196204, 197204, 198204, 199204, 180204, 181204, 182204) or (110000 <= c < 120000 and c % 1000 == 4) or (
+            TK2H_SQ and 140000 <= c < 150000 and c % 1000 == 4) or (150000 <= c < 180000 and c % 1000 == 4) or (120004 <= c < 129000 and c % 1000 == 4) or c in (129004, 185204, 187204, 188204, 189204, 190204, 191204, 192204, 193204, 194204, 195204, 196204, 197204, 198204, 199204, 180204, 181204, 182204) or (110000 <= c < 120000 and c % 1000 == 4) or (
             "w13sq4" in st and c in (100402, 100403, 184402, 184403, 100404, 100405, 184404, 184405)) or (
             DIAG and c in (100205, 100206, 100208, 184205, 184206, 184208, 100202, 100203, 184202, 184203, 101604, 185604)) or (
             "w13sq8" in st and c in (100104, 100106, 184104, 184106))):  # n14 SQ (SA, default configs; KPS 4 in DIAG)
@@ -5989,6 +6119,8 @@ def _tk2f_cfg(M, st):
 
 def _tk2f_cfg0(M, st):
     sa = 100000 if TK2SA and st["sa"] else 0
+    if M in TK2DT_M and sa:  # n5s18 deferred TWO (cfg 85204 SQ, slot-ordered y32 -> moe_norm3)
+        return sa + 85204
     if M in TK2XP_M and sa:  # n5s17 HYB + layout pad: (W, P) P = 0: 12 KB, 1: 14 KB
         W, P = TK2XP_M[M]
         return sa + (20004, 25004)[P] + W * 1000

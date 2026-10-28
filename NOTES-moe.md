@@ -2374,3 +2374,26 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   pairs), each split evenly over all CTAs (balanced without a weight), producer streaming in the same order. Unknowns: the
   TWO loop's own rate in isolation (17 KB loop; tk2g TWO = ~1.15x a 1-group row by instruction count), and whether the
   extra ordering/prologue eats the prize (H200 oracle: extra groups cost d16 4.0 / d32 7.7 us; layer's h3 at d32 gets 2.8).
+
+## n5s18 (2026-10-28 03:55Z - ): "deferred TWO" tk2f built (n5s17's NEXT) = DEAD on the H100; 0 checks
+- Built (r-moe, DIAG builds only: #define TK2DT, python TK2DT_M {M: 1}, cfg 85204 SQ + PF4 -> moe_norm3, PF bit 524288):
+  separate row spaces per expert: 1-group space = the odd leftover group (s_rs13/s_rs2, s_ob[a] = its first token), pair
+  space = ng/2 16-token pairs (s_rt13/s_rt2); both split evenly over the CTAs (pairs in reverse CTA order); producer streams
+  13 1-group, 13 pairs, 2 1-group, 2 pairs; consumers: tk2f_consume (unchanged body) + tk2t_consume (new: ONE run-time-gated
+  tk2g_row TWO body for both phases, x group 1 lane-private in 64 KB dyn smem); L2 hints: evict_last only for ng > 2 experts.
+  Bitwise = sq on all 20 decode DIAG routings + 6 synthetic hot-expert routings (up to 32 tokens/expert = 2 pairs),
+  tools/n5s18/dt_t.py. Layout: the compiler places the pair loop right after the gemm13 loop whatever the source order
+  (state-machine loop tried) -> it straddled 0x10000; a 20 KB dead pad (never-taken `nact > 32` branch) moves it to
+  0x10300-0x16120, gemm2 1-group loop to 0x16220-0x1ac10 (loop64k: no crossing).
+- H100 ncu (tools/n5s18/ncu_dt.py VAR=sq|dt, 3 runs each, GPU shared): d16 s7 sq 87.9-90.1 / dt 106.8-109.5 us;
+  d16 s99 (NO pair rows) 110-116 / 120-127; d32 s11 126.3 / 155.0; d32 s99 103.2 / 126.5. Instructions -1..-11%.
+- Why (ncu source counters, stall samples per M instructions): 1-group gemm13 loop 285 (= sq 289), gemm2 1-group loop 307
+  vs sq 242 (+27%, it now sits at 0x16220: more no-instruction stalls, 0.07 -> 0.39 per issue at s99), pair loop 478 (1.65x):
+  a pair row costs about what two 1-group rows cost (d16 s7: pair loop 1964 samples vs ~2030 for the 1-group equivalent).
+  Registers: DT kernel REG 168 (the cap at 288 threads) + 168 B stack (spills at loop edges, a few LDL per pair row);
+  sq REG 160, no stack. TWO needs group-0 x (64 regs) + 2 accumulator sets + wv: it cannot fit in 168 next to the rest.
+  Tested and ruled out: +64 KB dyn smem on sq alone = no cost (d16 s99 108.4).
+- CONCLUSION (with n5s10/s12/n5s16/n5s17): in the mma.sync tk2f, a 16-token shared dequant never beats two 8-token rows:
+  inlined (i-cache), noinline (ABI), merged (tk2h +4%), rolled smem-x (TK2S +10% H200), separate loop (DT: pair ~= 2 rows,
+  and the layout move costs the other loops). The extra-group cost (H200 oracle d16 4.0 / d32 7.7 us) stays; layer's tk2h
+  W3 at d32 is the best form. Not worth an H200 check (the H200 is more consumer-critical than the H100).
