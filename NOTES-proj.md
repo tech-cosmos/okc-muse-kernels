@@ -2314,3 +2314,21 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Also re-checked: lossless NVFP4 code compression (random_weights e2m1 codes are uniform 4.0 bits: nothing), 11-bit BF16 (dead
   n5s4), drain-time L2 prefetch of unpool W (dead, layer s6 / moe), row-split tails (TWM_TAIL dead s30).
 - => twm bs128 lane fully closed in proj's hands. Asked the lead again (COORD Requests n5s12).
+
+## n5s13 (2026-10-28 06:42Z-07:45Z, night5 session 13): 11-bit BF16 format (lead's parked proj item) prototyped at m=1: DEAD (measured); 0 judge runs
+- No lead answer to the n5s11/n5s12 lane ask; twm closed, so took the lead's parked item (03:50Z: "11-bit qkv/pooler format ~0.3%"),
+  in a NEW form (n5s4 killed the per-row escape-list form): 3-bit exponent code (7-code window, code 7 = soft escape), sign|mantissa
+  byte unchanged, soft-escape exponents in a 16 B nibble record per 512 weights (implicit positions, flat order), rare hard escapes
+  (outside lo-14..lo+8, zeros) in the existing per-row header (placeholder 2^-21). = ~11.25 bits/weight (6% fewer bytes).
+- Weights (reference.generate_weights): Gaussian-like, H(exponent) 2.54 bits; tensor-best 7-code window leaves 2.24% (qkv/pooler)
+  / 2.50% (unpool, o) soft escapes, hard 0.01/row, max 27-31 soft escapes per 512-weight unit (32 cap: borderline).
+- dev/n5s13/gemv13e.cu (= gemv13 without CPA/L2PF + E11 decode: 3-bit codes packed 5 pairs/word + u16 tail, 4 instr per BF16 pair,
+  pair 5 split over spare bits) and dev/n5s13/e11.py (packer pack11, exact probes incl. soft and hard escape columns: PASS).
+  H100 cold-L2 graph us, 12-bit g13 / E11 exact / E11 decode-only (no escape work), best cfg of 4:
+  qkv 13.28 / 21.14 / 12.64; pooler 20.35 / 32.02 / 19.52; unpool 21.28 / 32.18 / 19.84.
+  Decode alone is free (-4..7% = ~the bytes ratio). The escape work kills it: popc mask + warp shfl scan per 16-weight unit
+  WITHOUT the fix loop (D11=NOLOOP) already costs +3 us at qkv (16.26 vs 13.28): the m=1 GEMV can't take ~40 extra instr per unit.
+- The only escape-work-free variant: 8 codes (no escape code; out-of-window clamped) + explicit per-row CSR correction lists
+  (col|exp|byte in 4 B, 1.35% of weights) added as independent x[col]*(true-ph) terms = 11.43 bits = 4.7% fewer bytes ->
+  est. -2.5..3.5% at m=1 (H200 qkv ~-0.3, pr1 pooler ~-0.5 us) = ~0.2-0.3% layer for new formats in g13/g13o/pr1/g14/pr8 + layer
+  re-wiring. NOT built: below any useful bar. 11-bit/sub-12-bit lossless BF16 = CLOSED for this weight distribution.
