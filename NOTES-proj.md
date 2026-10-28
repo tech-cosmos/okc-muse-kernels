@@ -2205,3 +2205,15 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Cold prepare: each g30 variant is a separate ~39 s load_inline (host compile dominates; g30n/g30gx/g30k/g30kgx all 39 s);
   4 extra builds -> 175-188 s, pool 12 workers no help; trimmed to 2 builds (T=32 only): 150.1 s vs v152 148.4 s.
 - 0 judge runs.
+
+## n5s8 (2026-10-28 03:17-04:10Z, night5 session 8): layer bundle v155kgx (prepare-time trim), 0 judge runs
+- Layer H200 tuner lines (r-layer profiles 60f02748 + 3e3b9fd3 logs), T=32: g30kgx:pooler won all 4 runs (sl 154.7/154.0 vs default
+  155.0, full 318.0/315.6 vs 319.0/316.9: -1.0..-1.3 us; picked 3x, the 4th lost to tk2h 3 by 0.0). g30gx unpool/o and both: +-0.2 (never).
+  T=16 {g30n:o + g30gx:o}: tie. => GX in-layer pays only in g30k (pooler); g30n GX is dead on the H200.
+- Branch proj/v155kgx d9822c4 = layer main v154 (51acdef) + TUNE_BASE[(32,*)] g30kgx:pooler True, TUNE[32] escape {g30kgx:pooler False},
+  G30GX_CFG = set() (2 g30 builds, o m16 + m32 S1, gone) and the 6 g30gx options removed. validate --quick ALL OK (test 13/13,
+  scored 0/12, opt 0/242, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256, fuzz 0/386); cold prepare 141.3 s vs main v154 153.3 s
+  (same machine, back to back). Judge prepare_s ~189 -> ~175 s expected (lead cap 220).
+- Found while diffing TUNE: v153 (cherry-pick of SUPERSEDED afc0c8b) still carries the stray comment that swallowed TUNE[32]'s
+  {g30n:* False}, {g30k 0/120}, {pr32}, {g19:qkv/o}, {lt:qkv_gate} options. Harmless per the lead's 03:25Z rule (none picked on the
+  H200 recently), so not restored; the comment text is gone in v155kgx.

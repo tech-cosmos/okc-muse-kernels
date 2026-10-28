@@ -1,5 +1,8 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log (sessions in order, newest last)
-Updated 2026-10-28 03:20 UTC (night5 n5s7 = session 7). Lane: the layer's T>=16 GEMMs (proj board = test bed only).
+Updated 2026-10-28 04:10 UTC (night5 n5s8 = session 8). Lane: the layer's T>=16 GEMMs (proj board = test bed only).
+**n5s8: branch proj/v155kgx d9822c4 for layer** = v154 + g30kgx:pooler pinned in TUNE_BASE[32] (H200 tuner won all 4 T=32 runs in
+60f02748/3e3b9fd3, -1.0..-1.3 us) + g30gx builds/options dropped (never won, +-0.2): validate --quick ALL OK, cold prepare 141.3 vs 153.3 s.
+g30n GX is DEAD on the H200 in-layer (only g30k GX pays). Remaining NEXT (2) GX at T=8 o: dropped with it (same g30n GX path).
 **n5s7: G30_GX handed to layer as r-layer branch proj/g30gx152 5b39450** (= layer main v152 + g30_src.cu + 5 TUNE[32] options:
 {g30gx:unpool}, {g30gx:o}, both, {g30kgx:pooler}, all three). NEW: GX inside g30k (layer T=32 pooler, stream-K FP32 slabs): one
 record per CTA (layer.py _g30k_gx_tables = dev/n5s7/gxk.py: header 24 words [ncols, nseg, 5 list starts per segment], cols at 24,
