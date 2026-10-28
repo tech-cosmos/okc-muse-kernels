@@ -2332,3 +2332,19 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   (col|exp|byte in 4 B, 1.35% of weights) added as independent x[col]*(true-ph) terms = 11.43 bits = 4.7% fewer bytes ->
   est. -2.5..3.5% at m=1 (H200 qkv ~-0.3, pr1 pooler ~-0.5 us) = ~0.2-0.3% layer for new formats in g13/g13o/pr1/g14/pr8 + layer
   re-wiring. NOT built: below any useful bar. 11-bit/sub-12-bit lossless BF16 = CLOSED for this weight distribution.
+
+## n5s14 (2026-10-28 06:58Z-07:15Z, night5 session 14): H200 (Modal) in-layer bound of the 12-bit escape path = +0.34% total: CLOSED; 0 judge runs
+- Still no lead answer to the n5s11-n5s13 lane ask. Used the lead's new Modal H200 pre-screen (tools/h200.py, 06:55Z) for the one
+  open question on proj's GEMM line: how much do g30's escapes still cost INSIDE the layer on the H200 (n5s4 standalone: 1.5-2 us/call)?
+- Oracle (wrong output, timing only; prepare's 1e-2 relative F.linear check accepts it): r-layer main 671cbdd submission.py with
+  line 12502 `#define G30_ESC 8` -> 0 (no in-loop patches in g30/g30n/g30k) and line 12517 `G30_GXD 0` -> 3 (GX: no fixup walk, no x
+  gathers); pr32's own G30_ESC (line 13388) untouched. NB submission.py INLINES the .cu sources: a dir overlay of g30_src.cu is a no-op.
+  `python ~/r-proj/tools/h200.py muse_decode_layer base=muse_decode_layer/submission.py cand=/tmp/pj14/sub_noesc.py` (rounds 1, 3.3 GPU-min).
+- Modal H200 us, base | no-escape (sl, full): d1 71.3/87.2 | 71.7/87.1; d16 147.2/219.9 | 146.5/217.7; d32 150.5/305.9 | 149.2/304.1;
+  v1 113.6/127.9 | 113.4/127.6; v16 254.0/362.0 | 253.4/359.4; v32 340.6/519.8 | 338.6/520.1. bench geomean 2.059 -> 2.066 (+0.34%).
+  Tuner picks differ a bit between the two (T=32 sl picked the g24sk2 bundle in cand, T=32 full g30kgx off): part of it is pick noise.
+- => even FREE escapes in every g30 call buy <= ~0.3% of the layer; any real fix recovers a fraction. g30 escape work CLOSED.
+  T=1/T=8 kernels (g13/pr1/g14/pr8) fix escapes on the reduced row sum (2 FMAs per escape, break at the first empty slot): smaller still,
+  not measured.
+- Ledger note: my first launch (overlay variant, killed after ~1 min when I saw the overlay was a no-op) kept its 11-min reservation in
+  ~/.h200_ledger.json (pkill skipped the finally block). Not edited. Lesson: let h200.py runs finish or Ctrl-C them, never pkill.
