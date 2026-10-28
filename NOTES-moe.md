@@ -2452,3 +2452,19 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - check cefcc133 2.2632x: bs1 27.9, bs16 88.6, bs32 120.6, bs8 62.9, bs128 203.6, bs256 240.5 (ed55a5c0 main: 245.6).
 - submit 951c17e0 **2.2535x** (new moe board best, was febfcb1f 2.2469x): bs1 27.0, bs16 94.6, bs32 126.6, bs8 66.9, bs128 200.1,
   bs256 242.5. bs256 -3..5 us vs older runs (within ~2% noise, consistent with the layer's own H200 tuner picks). No layer change (layer already runs it).
+
+## n5s23 (2026-10-28 05:25Z - 05:50Z): moe_routegather latency fix (route+gather before twm at M > 32); 1 check + 1 submit
+- Found via H100 graph timelines (tools/n5s23/tlg.py <bs> <seeds>: torch.profiler on graph replays, cold L2): moe_routegather
+  took 5.6 us (bs128) / 8.6 us (bs256) on the H100 and 4.4 / 6.3 us in the H200 profile of 951c17e0, on the critical path
+  (twm waits for it). Cause: the id-scan loop issued one dependent __ldcg round trip per 256 ids (the __match_any_sync
+  between iterations stops the compiler from batching), then the x row loads, then up to 8 serial __ldcg of the token's ids.
+- Fix (on main eb8c03c): x row loads + the token's 8 ids issued right after griddepcontrol; scan loads 8 ids/thread in one
+  batch (RGU 8) before the match/atomic loop; repeated-id fixup via __shfl_sync. Integer counts: bitwise = before
+  (tools/n5s23/dump.py: 40 big-M routings bs33/128/256/257 normal+skewed, eager + graph), bench test 15/15.
+  H100: bs128 5.6 -> 3.7, bs256 8.6 -> 5.8 us. (Step 1 alone, batched scan: 4.8 / 6.5.)
+- check d3761aa5 2.2641x: H200 routegather bs128 4.4 -> 3.2, bs256 6.3 -> 4.4 us; bs256 233.3 (was 240.5/242.5).
+- submit 4fb734c6 **2.2703x** = new moe board best (bs1 26.4, bs16 89.5, bs32 120.9, bs8 68.0, bs128 201.1, bs256 236.3).
+- LAYER: its moe_routegathern (v32: 7.4 us H200 in af87d466; v16 runs moe_route 1.9 + moe_gathern 3.6) has the same pattern.
+  tools/n5s23/patch_layer_rg.py <layer.py> ports the same 3 changes (applies cleanly to r-layer 2f66dbb; NOT compiled/tested
+  in-layer). Expect ~-2..3 us at v32 and possibly RG winning at v16 too. Posted under COORD Handoffs.
+- Other small latency-bound kernels may have the same serial-load-in-loop pattern: worth grepping (moe_route, moe_norm prologue).
