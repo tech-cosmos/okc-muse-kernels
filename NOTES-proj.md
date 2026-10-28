@@ -2489,3 +2489,16 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   consumer SM time / 132 = v16 118-132, v32 hot 151-175 us vs bytes at 4.2 TB/s 115-142: v32 consumer-bound, v16 co-bound.
 - Tooling: mk.py builds the oracle library in a thread next to prepare()'s main build (judge prepare_s 116.3 s with DIAG; local
   cold 127 s; sequential builds were 338 s locally = over the 300 s limit). Reuse it for any compile-time twm oracle.
+
+## n5s21 (2026-10-28 10:27Z-~10:55Z, okc-night5 session 21): no assignment since lead 10:20Z (answered n5s20); no build; 0 judge runs, 0 Modal
+- Board: layer #1 pjmullin3 2.403x (9.41 ms), us #39 (v153 2.158x, 10.48 ms).
+- Re-derived independently (not a new lever, moe's closed lane): the e2m1->bf16 placement pattern P = bits {6,7,8,15,22,23,24,31}
+  (sign 15/31, e1 e0 m at exponent LSBs + mantissa MSB, scale HMUL2 fixes the 2^-126) has NO 4-way tiling of a 32-bit word by
+  pure shifts (any 4 shifts, in-range) or pure rotations (python brute force): the 4th extraction needs moe's IMAD x16648 trick,
+  so "move SHFs onto the FMA pipe via IMAD/IMAD.HI shifts" has no layout (and moe n22 DQW measured IMAD.WIDE +11%).
+- Tensor FLOP check on the layer's sliding routings (r-moe tools/data/routes.pt, 5 seeds): local pairs v16 153-181 (padded to 8:
+  224-272 tok, E 17-19), v32 318-353 (padded 408-456, E 18-21). At BF16 dense peak (~4.9e14 MAC/s) that is ~25-29 us (v16) /
+  ~43-48 us (v32) of pure tensor time per call, and s18's MMA-only rates show RT2 N64 / N128 ARE at peak (512 cyc per 8 KB at
+  N64 = 1M MAC / 2048 MAC/cyc), only N8 is ~3x off peak. With dq ALU ~375 cyc per 8 KB (~95 us per call at v16 bytes) and
+  ALU/tensor not overlapping (moe s27), the consumer floor is ALU + tensor ~ HBM + 10-20%: matches the H200 dq-free -22.6/-23.8.
+  No proj-buildable item. Lane ask stands (COORD Requests).
