@@ -2489,3 +2489,17 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   af87d466 had 7.4): the -2 us holds on the H200. Per shape: d1 65.9/75.3, d16 125.9/209.6, d32 149.1/301.6, v1 112.2/123.7,
   v16 269.1/357.7, v32 345.6/514.4 (d32 sl 1.702x: SGLang 253.8 that run). Whole-run noise; < 2.1364x (1% rule): not submitted.
 - 10-28 budget after it: 10 checks / 8 submits.
+
+## night5 s16 (2026-10-28 05:55Z-, okc-night5 session 16): v159 moe n5s24 norm port; v160 NORME_TRIG (T=128 unpool under twm's drain)
+- v159 (92c12db) = v158 + moe n5s24 (r-moe 725f39a) in the layer's moe_src.py: moe_norm (ids + tw to smem before the
+  NORM_EARLY spin / after the wait) and moe_norm2 (all 8 ids + tw in one batch), layer copy keeps __ldcg. test 13/13.
+  files_eq (TUNE = {}): v16/v32 bitwise = v158; d16/d32/v1 differ, but v158 vs v158 differs the same way (atomics). H100
+  ab_files verify (4 rounds): tie (-0.7..+0.8 us).
+- FOUND: moe_norm (T > 32, NORM_EARLY path) never triggered its PDL dependents, so the T=128 g30 unpool (PDL secondary, W ring
+  loaded before griddepcontrol.wait: G30_PDL) launched only after moe_norm exited: its W prologue never overlapped twm's ~20 us
+  drain (which is why s100 measured G30_PDL ~0). v160 NORME_TRIG (layer.py text patch): launch_dependents at the start of
+  moe_norm's rdy path. x is still read after g30's wait (= moe_norm complete): no ordering change. T=256's unpool is lt (no PDL
+  prologue): unaffected; g30 at T=256 is dead (s100).
+- H100 timeline v16 sl (TUNE = {}): g30 starts 249.8 us (during the drain, twm ends 278.8) vs 278.7 without; unpool ends 22.1 us
+  after moe_norm vs 24.5. ab_files (TUNE = {}, A B A B), off -> on: seed 99 (6 rounds) v16 sl 305.8 -> 301.2 (-4.4), full 450.7
+  -> 448.5 (-2.1); seed 7 sl -1.9, full -2.2; seed 13 sl -1.9, full -2.3; v32 / v1 tie on all seeds.
