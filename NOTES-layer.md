@@ -2691,3 +2691,9 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   d16 1.8+0.8, d32 2.2+0.7 = ~8.8% score upper bound (synthetic routing; real is < that: the stream floor is under it, unknown since
   no stream-only oracle exists). moe n5s32's build gate (>= 5 us d1, >= 10 d16/d32/v1 on the H200) is met on every shape. Saves
   moe's queued 15 Modal GPU-min. Next: moe builds the overlapped-row tk2f (its lane); layer integrates + gives it DIAG checks.
+- CORRECTION (08:50Z, after moe n5s33): the READING above overstates. ornc-orz is the consumer chain when nothing waits on data, not
+  time added to the stream (moe's real BRA = tie on all 12 H100 shapes). What the H200 table does show: a free stream (orn) saves
+  only 3-14 us, so on the H200 the consumer chain and the stream are BALANCED (each within ~3-14 us of the rows' time). A faster
+  consumer alone gains at most base - stream-only, and moe n5s15/n5s29 put tk2f's ring stream within 0.5-2.5% of the H200 HBM
+  ceiling. => no reachable >= 1% from the structure; the '~8.8%' is withdrawn. Value of the probes: orn (b-orn = 3-14 us) bounds
+  any stream-side lever (faster loads, deeper ring) at those numbers IF the consumer kept up; both sides would have to shrink together.
