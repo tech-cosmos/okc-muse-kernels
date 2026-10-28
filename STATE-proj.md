@@ -1,5 +1,5 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log (sessions in order, newest last)
-Updated 2026-10-28 06:45 UTC (night5 n5s12 = session 12; n5s12 = paper check only, twm bs128 fully closed incl. cluster/DSMEM combine and first-wave ramp: NOTES n5s12). **LANE (lead 03:50Z/04:50Z): twm big-M = bs128 (T=128) for proj**
+Updated 2026-10-28 07:45 UTC (n5s13 = session 13: 11-bit BF16 format prototyped at m=1 and measured DEAD: NOTES n5s13; still no lane answer). Before: n5s12 = paper check only, twm bs128 fully closed incl. cluster/DSMEM combine and first-wave ramp: NOTES n5s12. **LANE (lead 03:50Z/04:50Z): twm big-M = bs128 (T=128) for proj**
 (moe = bs256). Work on branch **proj/twm** (muse_bf16_proj/twm/, copies of r-moe; never moe's dir); moe reviews before layer integrates.
 Budget: muse_moe_w4a16 checks 8 proj / 12 moe per UTC day (`okc check muse_moe_w4a16 <file>`); scored runs there are moe's.
 **n5s11 RESULT: bs128 has no >= 5 us item left in twm's structure.** Cost model (COORD Requests n5s11): bs128 steady state is
@@ -135,5 +135,5 @@ SGLang H200 us: qkv ~14 (m<=32) 17 (m128) 20 (m256); o ~7/7.2/9.2; pooler ~21.5/
 ## Next (ranked): see the header NEXT. Standing items:
 - LANE (b) (lead 08:55Z): port + validate layer bundles on r-layer proj/<name> branches when asked (tools/validate.py, cold prepare).
 - Watch layer merges of proj/g30pl (G30_PL) and the H200 'layer tune' lines for g30n/g30k/pr32 options.
-- Below the line / dead: pr8 K-split tail, 11-bit format, g22/g23/DeepGEMM m128/256, hybrid BF16 rows, qkv stream-K, off-loop
+- Below the line / dead: pr8 K-split tail, 11-bit format (n5s4 escape lists; n5s13 nibble records measured: escape work +20..60% at m=1), g22/g23/DeepGEMM m128/256, hybrid BF16 rows, qkv stream-K, off-loop
   escape fixups from L2 or by a gating warp (n5s4/n5s5), d1 GEMV ramps (s70/s71: at reader + ~1 us).
