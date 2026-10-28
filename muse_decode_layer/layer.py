@@ -848,6 +848,20 @@ G30N_CFG = {("unpool", 32): (1, 16, 16), ("pooler", 32): (1, 20, 8), ("qkv_gate"
             ("o", 32): (1, 16, 16), ("o", 16): (1, 16, 16),  # (S, NW, NS); n5s4: o (K 1024: each CTA's W share ~ its ring)
             ("o", 8): (1, 8, 8)}  # n5s5: G30_MTOK 8 (m64n8k16), T=8 o (v1); NW 8 (half the W ring) so CTAs co-reside with vtk
 G30N_DEFAULT_ON = set()  # (key, T) on without TUNE; otherwise TUNE option "g30n:<key>"
+# proj n5s6 G30_GX (g30_src.cu -DG30_GX=1): g30n escapes OUT of the main loop: prepare() records per (64-row tile, K split)
+# (_g30_gx_tables), 4 escape warps TMA x boxes at the escape cols + an FP32 corr tile, WG1 writes d + corr. One-hot exact.
+# H200 (proj check 53639fe3, m32 after a 3 us PDL pred): qkv 12.0->10.9, pooler 15.6->14.5, unpool 14.7->13.1..14.1 us;
+# standalone tie/+0.6..1.0 (so not qkv, the graph's first op). TUNE option "g30gx:<key>" (with g30n:<key> on).
+G30GX_CFG = {("unpool", 32), ("o", 32), ("o", 16)}  # T=16 unpool dropped (H100 tie; cold prepare)
+G30GX_DEFAULT_ON = set()
+_G30GX = {}
+# proj n5s7: the same in g30k (pooler T=16/32): one record per CTA (_g30k_gx_tables), the escape warps build each segment's
+# corr tile in turn. H100 after a 3 us pred: m32 G104 19.9 -> 19.4 us, G120 +0.3, m16 G104 tie (H200 decides).
+# TUNE option "g30kgx:<key>": True (with g30k:<key> = G on).
+G30KGX_CFG = {("pooler", 32)}  # T=16 dropped (H100 standalone tie; cold prepare)
+G30KGX_NS = 8  # x ring stages of the GX build: GX adds ~43 KB smem at m32; at NS 16 (221 KB) the side-stream router no longer
+# co-resides on the pooler SMs: H100 in-layer d32 sl +1.3 us (NS 12: +0.5..1.0); NS 8 (190 KB): sl -0.8..-1.0, full -0.6..-0.7 us
+_G30KGX = {}
 # s96 H100 in-layer (TUNE off, 3 rounds x seeds 99/7): unpool T=32 -1.2..-2.1 us (2 runs); pooler S2 +9..11 (128 cluster CTAs vs the
 # side-stream router), S1 d16 sl +2.5..3.3 full -0.8; T=16 unpool / qkv S3 tie. TUNE option: T=32 g30n:unpool (validate tuner: sl picks it -1.0..-1.4 us, full +9 us -> default; T=16 g30n:pooler sl +14 us, dropped).
 _G30N = {}
@@ -2621,6 +2635,136 @@ def _g30n_build(c):
     return _G30N[c]
 
 
+def _g30gx_build(c):
+    """c = (MTOK, S, NW, NS) -> the G30_GX g30 lib (None on failure)."""
+    if c not in _G30GX:
+        try:
+            import hashlib
+            from torch.utils.cpp_extension import load_inline
+            dfs = [f"-DG30_MTOK={c[0]}", f"-DG30_S={c[1]}", f"-DG30_NW={c[2]}", f"-DG30_NS={c[3]}", "-DG30_GX=1"]
+            _G30GX[c] = load_inline(
+                name="layer_g30gx_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
+                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
+                cuda_sources=_G30_SRC, functions=["g30_gemm"],
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
+        except Exception as ex:  # noqa: BLE001
+            print("layer g30gx build failed:", c, ex)
+            _G30GX[c] = None
+    return _G30GX[c]
+
+
+def _g30gx_builds():
+    if _G30_SRC is None:
+        return []
+    return [(lambda c=c: _g30gx_build(c)) for c in sorted({(m, *G30N_CFG[(k, m)]) for (k, m) in G30GX_CFG if (k, m) in G30N_CFG})]
+
+
+def _g30_gx_tables(hdr, K, S, gxc=64, gxr=512):
+    """proj n5s6 (r-proj dev/n5s6/gx.py): hdr [N][ESC] (col bits, v) pairs from _compress -> int32 [N / 64 * S][rlen]
+    escape records for G30_GX: [0] ncols, [1..5] list starts per 16 rows + end, [8, 8 + gxc) sorted escape cols (slot =
+    index), [8 + gxc ..] (slot | row << 16 | last-of-row << 22 | (col & 7) << 28, v bits) in row order. None if one does not fit."""
+    h = hdr.detach().cpu()
+    N = h.shape[0]
+    cols = h[:, :, 0].contiguous().view(torch.int32)
+    vb = h[:, :, 1].contiguous().view(torch.int32)
+    valid = h[:, :, 1] != 2.0 ** -15
+    KS = K // 64
+    recs = []
+    for g in range(N // 64):
+        for y in range(S):
+            i0, i1 = 2 * (y * (KS // 2) // S), 2 * ((y + 1) * (KS // 2) // S)  # = g30's K split
+            c = cols[g * 64:(g + 1) * 64]
+            ok = valid[g * 64:(g + 1) * 64] & (c >= i0 * 64) & (c < i1 * 64)
+            rows, es = ok.nonzero(as_tuple=True)
+            cc = c[rows, es]
+            uc = torch.unique(cc)
+            if len(uc) > gxc:
+                return None
+            slot = torch.searchsorted(uc, cc)
+            starts = [int((rows < 16 * w).sum()) for w in range(4)] + [len(rows)]
+            last = torch.ones_like(rows, dtype=torch.bool)
+            last[:-1] = rows[1:] != rows[:-1]
+            ent = torch.stack([slot | (rows << 16) | (last.int() << 22) | ((cc & 7) << 28), vb[g * 64:(g + 1) * 64][rows, es]], 1).reshape(-1)
+            recs.append((uc, starts, ent))
+    rlen = (8 + gxc + max(len(r[2]) for r in recs) + 3) // 4 * 4
+    if rlen > gxr:
+        return None
+    out = torch.zeros(len(recs), rlen, dtype=torch.int32)
+    for i, (uc, starts, ent) in enumerate(recs):
+        out[i, 0] = len(uc)
+        out[i, 1:6] = torch.tensor(starts, dtype=torch.int32)
+        out[i, 8:8 + len(uc)] = uc
+        out[i, 8 + gxc:8 + gxc + len(ent)] = ent
+    return out.to(hdr.device)
+
+
+def _g30kgx_build(c):
+    """c = (MTOK, NW, NS) -> the G30_GX g30k lib (None on failure)."""
+    if c not in _G30KGX:
+        try:
+            import hashlib
+            from torch.utils.cpp_extension import load_inline
+            dfs = ["-DG30K_ON", "-DG30K_F32=1", f"-DG30_MTOK={c[0]}", f"-DG30_NW={c[1]}", f"-DG30_NS={c[2]}", "-DG30_GX=1"]
+            _G30KGX[c] = load_inline(
+                name="layer_g30kgx_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
+                cpp_sources="void g30k_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
+                            "torch::Tensor, torch::Tensor, int64_t);",
+                cuda_sources=_G30_SRC, functions=["g30k_gemm"],
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
+        except Exception as ex:  # noqa: BLE001
+            print("layer g30kgx build failed:", c, ex)
+            _G30KGX[c] = None
+    return _G30KGX[c]
+
+
+def _g30k_gx_tables(hdr, K, G, gxc=64, gxr=512, gxs=4):
+    """proj n5s7 (r-proj dev/n5s7/gxk.py): G30_GX records for g30k, one per CTA: int32 [G][rlen]: [0] ncols, [1] nseg,
+    [2 + 5 s, + 5) list starts per 16 rows + end of segment s, [24, 24 + gxc) the CTA's escape cols ascending (slot = index),
+    [24 + gxc ..] (slot | row << 16 | last-of-row << 22 | (col & 7) << 28, v bits) segment-major, row order. None if one does not fit."""
+    h = hdr.detach().cpu()
+    N = h.shape[0]
+    cols = h[:, :, 0].contiguous().view(torch.int32)
+    vb = h[:, :, 1].contiguous().view(torch.int32)
+    valid = h[:, :, 1] != 2.0 ** -15
+    KP = K // 128
+    P = N // 64 * KP
+    recs = []
+    for b in range(G):
+        u0, u1 = b * P // G, (b + 1) * P // G  # = g30k's split
+        gA, gB = u0 // KP, (u1 - 1) // KP
+        if gB - gA + 1 > gxs:
+            return None
+        segs = []
+        for g in range(gA, gB + 1):
+            ta = g * KP
+            i0, i1 = 2 * (max(u0, ta) - ta), 2 * (min(u1, ta + KP) - ta)
+            c = cols[g * 64:(g + 1) * 64]
+            ok = valid[g * 64:(g + 1) * 64] & (c >= i0 * 64) & (c < i1 * 64)
+            rows, es = ok.nonzero(as_tuple=True)
+            segs.append((rows, c[rows, es], vb[g * 64:(g + 1) * 64][rows, es]))
+        uc = torch.unique(torch.cat([sg[1] for sg in segs]))
+        if len(uc) > gxc:
+            return None
+        hw, ents, n = [len(uc), len(segs)] + [0] * 22, [], 0
+        for si, (rows, cc, vv) in enumerate(segs):
+            hw[2 + 5 * si:7 + 5 * si] = [n + int((rows < 16 * q).sum()) for q in range(4)] + [n + len(rows)]
+            slot = torch.searchsorted(uc, cc)
+            last = torch.ones_like(rows, dtype=torch.bool)
+            last[:-1] = rows[1:] != rows[:-1]
+            ents.append(torch.stack([slot | (rows << 16) | (last.int() << 22) | ((cc & 7) << 28), vv], 1).reshape(-1))
+            n += len(rows)
+        recs.append((uc, hw, torch.cat(ents)))
+    rlen = (24 + gxc + max(len(r[2]) for r in recs) + 3) // 4 * 4
+    if rlen > gxr:
+        return None
+    out = torch.zeros(G, rlen, dtype=torch.int32)
+    for i, (uc, hw, ent) in enumerate(recs):
+        out[i, :24] = torch.tensor(hw, dtype=torch.int32)
+        out[i, 24:24 + len(uc)] = uc
+        out[i, 24 + gxc:24 + gxc + len(ent)] = ent
+    return out.to(hdr.device)
+
+
 def _g30k_build(c):
     """c = (MTOK, NW, NS) -> the g30k (stream-K, FP32 slab out) lib (None on failure)."""
     if c not in _G30K:
@@ -2643,7 +2787,8 @@ def _g30k_build(c):
 def _g30k_builds():
     if _G30_SRC is None:
         return []
-    return [(lambda c=c: _g30k_build(c)) for c in sorted({(m, v[1], v[2]) for (k, m), v in G30K_CFG.items()})]
+    return ([(lambda c=c: _g30k_build(c)) for c in sorted({(m, v[1], v[2]) for (k, m), v in G30K_CFG.items()})]
+            + [(lambda c=c: _g30kgx_build(c)) for c in sorted({(m, v[1], min(v[2], G30KGX_NS)) for (k, m), v in G30K_CFG.items() if (k, m) in G30KGX_CFG})])
 
 
 def _g30n_builds():
@@ -2732,8 +2877,31 @@ def _g30n_prepare(state, w, comp, g):
             ok = False
         if ok:
             state["g30n"][(key, m)] = (lib, e, w[key].shape[0])
+            if (key, m) in G30GX_CFG:
+                _g30gx_prepare(state, key, m, (S, NW, NS), e, w[key], x, ref)
         else:
             print("layer g30n dropped:", key, m)
+
+
+def _g30gx_prepare(state, key, m, c, e, wk, x, ref):
+    """proj n5s6: the G30_GX twin of a g30n entry: same pack, escape records instead of the header."""
+    lib = _g30gx_build((m, *c))
+    rec = _g30_gx_tables(e[1], wk.shape[1], c[0]) if lib is not None else None
+    if rec is None:
+        print("layer g30gx dropped (build or records):", key, m)
+        return
+    out = torch.full((m, wk.shape[0]), float("nan"), dtype=torch.bfloat16, device=x.device)
+    try:
+        lib.g30_gemm(x, e[0], rec, out, e[2], 0)
+        torch.cuda.synchronize()
+        ok = ((out.float() - ref).norm() / ref.norm()).item() < 1e-2
+    except Exception as ex:  # noqa: BLE001
+        print("layer g30gx failed:", key, m, ex)
+        ok = False
+    if ok:
+        state.setdefault("g30gx", {})[(key, m)] = (lib, (e[0], rec, e[2]), wk.shape[0])
+    else:
+        print("layer g30gx dropped:", key, m)
 
 
 def _g30k_slabs(n, k, G):
@@ -2790,8 +2958,32 @@ def _g30k_prepare(state, w, comp, g):
                 ok = False
             if ok:
                 state["g30k"].setdefault((key, m), {})[G] = (lib, e, buf, ns, G)
+                if (key, m) in G30KGX_CFG:
+                    _g30kgx_prepare(state, key, m, (m, NW, min(NS, G30KGX_NS)), e, buf, ns, G, x, ref)
             else:
                 print("layer g30k dropped:", key, m, G)
+
+
+def _g30kgx_prepare(state, key, m, c, e, buf, ns, G, x, ref):
+    """proj n5s7: the G30_GX twin of a g30k entry (same pack and slab buffer, per-CTA escape records)."""
+    lib = _g30kgx_build(c)
+    rec = _g30k_gx_tables(e[1], x.shape[1], G) if lib is not None else None
+    if rec is None:
+        print("layer g30kgx dropped (build or records):", key, m, G)
+        return
+    try:
+        buf.zero_()
+        lib.g30k_gemm(x, e[0], rec, buf, e[2], 0, _NOZ(x.device), _NOZ(x.device), G)
+        torch.cuda.synchronize()
+        ok = ((buf[:ns].sum(0) - ref).norm() / ref.norm()).item() < 1e-2 and not bool(buf[ns:].any())
+    except Exception as ex:  # noqa: BLE001
+        print("layer g30kgx failed:", key, m, G, ex)
+        ok = False
+    buf.zero_()
+    if ok:
+        state.setdefault("g30kgx", {}).setdefault((key, m), {})[G] = (lib, (e[0], rec, e[2]), buf, ns, G)
+    else:
+        print("layer g30kgx dropped:", key, m, G)
 
 
 def _g27_build():
@@ -2869,9 +3061,11 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
              {"g27:o": False},  # s84: attention plan (full layers only)
              {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"pr32": True},
+             {"g30n:o": True, "g30gx:o": True},  # proj n5s6 G30_GX
              {"g30n:o": True}, {"g30n:o": False}, {"g30n:o": False, "g27:o": False},  # n5s4 g30n o (base at 16 full); n5s3: moe pr32; night5 s1: g30n at T=16 (H100 tie: H200 decides); n5s3: qkv S3 built again (uneven K split)
              ),
-        32: ({}, {"g30n:o": False}, {"g30n:o": False, "lt:o": True}, {"g30n:qkv_gate": False}, {"g30n:unpool": False}, {"g30k:pooler": 0}, {"g30k:pooler": 120}, {"g30k:pooler": 0, "g30n:unpool": False, "g30n:qkv_gate": False}, {"pr32": True, "g30k:pooler": 0}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
+        32: ({}, {"g30gx:unpool": True}, {"g30gx:o": True}, {"g30gx:unpool": True, "g30gx:o": True}, {"g30kgx:pooler": True},
+             {"g30kgx:pooler": True, "g30gx:unpool": True, "g30gx:o": True},  # proj n5s6/n5s7 G30_GX {"g30n:o": False}, {"g30n:o": False, "lt:o": True}, {"g30n:qkv_gate": False}, {"g30n:unpool": False}, {"g30k:pooler": 0}, {"g30k:pooler": 120}, {"g30k:pooler": 0, "g30n:unpool": False, "g30n:qkv_gate": False}, {"pr32": True, "g30k:pooler": 0}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
@@ -3124,6 +3318,9 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
     e = state.get("g30k", {}).get((key, m), {}).get(_opt(state, m, "g30k:" + key, G30K_DEFAULT.get((key, m), 0)))
     if e is not None:  # proj s99: stream-K g30 on G CTAs, FP32 slabs [ns, T, n] summed by the rmsnorm
         _G24_ZN.pop((key, m), None)
+        egx = state.get("g30kgx", {}).get((key, m), {}).get(e[4])
+        if egx is not None and _opt(state, m, "g30kgx:" + key, False):  # proj n5s7 G30_GX in g30k
+            e = egx
         nk = G24_ZCHAIN.get(key)  # ZN like g24: g30k zeroes the next g24's FP32 out after its work (T=16: pooler -> unpool)
         en = _g24_sel(state, nk, m) if nk is not None and _opt(state, m, "g24z", m in G24Z_TOKENS) else None
         zo = _NOZ(x.device)
@@ -3134,6 +3331,9 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
     e = state.get("g30n", {}).get((key, m))
     if e is not None and _opt(state, m, "g30n:" + key, (key, m) in G30N_DEFAULT_ON):  # proj s96: g30 at T=16/32 (BF16 out)
         _G24_ZN.pop((key, m), None)
+        egx = state.get("g30gx", {}).get((key, m))
+        if egx is not None and _opt(state, m, "g30gx:" + key, (key, m) in G30GX_DEFAULT_ON):  # proj n5s6 G30_GX
+            e = egx
         out = torch.empty((m, e[2]), dtype=torch.bfloat16, device=x.device)
         e[0].g30_gemm(x.contiguous(), e[1][0], e[1][1], out, e[1][2], G30_PDL)
         return out
@@ -3702,4 +3902,4 @@ def _kernel_fn(data, state):
     return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
 
 
-_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30k_builds(), *_pr32_builds())]
+_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]
