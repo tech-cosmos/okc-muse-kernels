@@ -2461,3 +2461,31 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   shift/rotate/PRMT tiling, incl. the rotate {0,1,2,9}-tile one I re-derived). Nothing built.
 - Also looked at: full attention d16/d32 (~17% of the d32 load, but ~attn s106/s114: _gd_full at the ~4.0 TB/s gather floor;
   verify full consumer-bound; 126 sessions of dead ends): not a one-session item for proj.
+
+## n5s20 (2026-10-28 10:04Z-10:40Z, okc-night5 session 20): lead 09:55Z byte table for twm bs128/256 + H200 dq-free ceiling; 1 moe-board DIAG check, 0 Modal
+- Lead 09:55Z asked: account for twm's 'HBM 156 vs floor 109' at bs256 (194 vs 101 at bs128); count weight bytes re-read across
+  32/64-token passes of hot experts (L2 or HBM?); build 'dequant once, mma many' if >= 10 us.
+- **The floor is a formula artefact, not a re-read.** reference.speed_of_light_ns = 0.75 (ROUTING_SHARE) x mean distinct experts x
+  28.3 MB / 4.8 TB/s (spec). Checked (twm/n5s20/floor_check.py, 60 generate_input seeds): bs128 22.7 distinct -> 100.8 us (judge
+  101.3), bs256 24.4 -> 109.0 (108.9). Every touched expert must be read, so the real bound is ALL distinct experts at the
+  achievable rate: moe board bs128 ~161 us, bs256 ~173 us at 4.0 TB/s. The judge-floor x-factor overstates the gap by 1.6x.
+- **Layer routings (moe _DIAG_R, twm/n5s20/bytes_layer.py), per sliding layer:** v16 (T=128): 17-19 distinct experts, 481-538 MB,
+  every expert <= 49 tokens -> one pass each, **0 re-read bytes**. v32 (T=256): 18-21 distinct, 510-595 MB; the 2 hottest experts
+  have 73-98 tokens -> twm without hot = 2 extra 64-token passes = 57 MB (= moe n5s25's '624 MB' = 566 unique + 57 re-read);
+  with the layer's pin {hot 32} (moe_hot, one N128 pass for 65..128 tokens, built in s17/s29) **0 re-read bytes**. No layer
+  routing has an expert > 128 tokens. H200 stream probe on the same routings (moe n9 diag9s sq64): v16 119-134, v32 132-147 us.
+  => 'dequant once, mma many' already exists (moe_hot / twm hot class): nothing to build (< 10 us bar: it is 0).
+- **H200 dq-free ceiling (check a9fd9026, moe board, proj share 4/8, 2.2782x, never submit; twm/n5s20/diag_submission.py from
+  mk.py on r-moe f821ab0; output diag_a9fd9026.txt), layer routings, standalone, cold L2, MEAN of 5 seeds, us:**
+    v16  pin 166.6 | orqs (all of dq() free) 144.4 (-22.6, every seed -20..-23) | twm 168.2 | twmorqs 143.9 | pinb 167.3
+    v32  pin 200.0 | orqs 176.4 (-23.8, every seed -17..-24)                     | twm 200.1 | twmorqs 177.0 | pinb 200.5
+  (pin = HOT_M {256: 32} + TWF_SPLIT_M {256: 66}; twm = moe defaults.) The H100 says -3.5 / -7.5 standalone (DRAM-bound, same
+  build, local run) and -10.7 / -9.4 in-layer (moe n5s34): **the H200 ceiling is 2-3x the H100's.** On the H200 the twm consumer's
+  dq is ~23 us of every v16/v32 call (~7% of those loads, ~2% layer geomean if all of it went). Also: hot 32 = twm on the H200
+  standalone at v32 (200.0 vs 200.1).
+- What is buildable: nothing I can see. moe n5s35 shows dq() at the s27 instruction minimum (8 int + 4 HMUL2 per 8 weights) and
+  moe s27 measured that ALU and tensor work do not overlap SM-wide; the DQW pipe move lost (latency). So the number tells how much a
+  structural dq change would be worth, not that one exists. Simple model (twm/n5s20/cons_model.py, H100 warm item times):
+  consumer SM time / 132 = v16 118-132, v32 hot 151-175 us vs bytes at 4.2 TB/s 115-142: v32 consumer-bound, v16 co-bound.
+- Tooling: mk.py builds the oracle library in a thread next to prepare()'s main build (judge prepare_s 116.3 s with DIAG; local
+  cold 127 s; sequential builds were 338 s locally = over the 300 s limit). Reuse it for any compile-time twm oracle.
