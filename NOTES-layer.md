@@ -2627,3 +2627,31 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   H100-only). Both off adds up. T=128 TUNE_BASE {fr, g30:unpool, rg} confirmed on the H200: CLOSED, main unchanged.
 - proj claimed NEXT 3 (pr128: T=128 g30 pooler+router hi/lo one launch) at 07:50Z in COORD: layer does not start it.
 - Shared Modal ledger 55.8 / 60 GPU-min on 10-28 after this run.
+
+## night5 s23 (2026-10-28 07:44Z - ~08:40Z): v163 scored; in-layer PREFIX ORACLE (H100); no layer-lane item >= 1%
+- submit 7693598b (v163, d02f7a6, per lead 07:35Z): **2.1311x**, prepare_s 89.8; d1 68.3/75.5, d16 127.9/206.7, d32 154.9/295.3,
+  v1 110.4/122.9, v16 267.3/350.7, v32 327.4/503.0. Board best stays 3e3b9fd3 2.1580x (#37). v163 needs no more scored runs.
+- Modal ledger 55.8/60 GPU-min used for 10-28 before this session: no H200 oracle possible today (one run reserves >= 11 min).
+- tools/prefix_oracle.py <submission.py> <dir>: TUNE = {} variants that return dummy outputs right after qkv (q), attention (a),
+  o + first boundary (o), pooler/router/rmsnorm + routing join (p), experts (e: _tail returns before unpool + 2nd boundary;
+  at T=1/8 n2u/nu8 carry the unpool, so only the boundary goes). Segment = difference of adjacent prefixes (in-layer, incl.
+  launch gaps and lost overlap). H100 tools/ab_files.py 3 rounds, all 12 shapes, medians (us), sliding (full in parentheses):
+  | load | qkv | attn | o+bnd | pool/rt/norm | experts | unpool+bnd | total | expert hits (slots, max/expert) |
+  | d1   | 14.1 | 4.3 (12.7) | 6.6 | 20.1 | 39.0 (n2u incl.) | 1.4 | 85.8 (105.6) | 3 (3, 1) |
+  | d16  | 17.0 | 8.2 (125) | 8.3 | 25.8 | 113.3 | 18.4 | 190.6 (292.8) | 11 (25, 6) |
+  | d32  | 16.6 | 12.9 (242) | 10.8 | 27.9 | 99.7 | 19.1 | 188.1 (412.7) | 9 (50, 16) |
+  | v1   | 15.0 | 4.9 (16.5) | 8.1 | 24.0 | 86.1 (nu8 incl.) | 2.8 | 140.6 (155.9) | 8 (10, 2) |
+  | v16  | 18.8 | 12.5 (133) | 13.9 | 37.0 | 191.0 | 26.0 | 298.9 (444.5) | 17 (162, 45) |
+  | v32  | 20.2 | 15.1 (253) | 19.3 | 42.5 | 237.0 | 42.2 | 374.9 (627.9) | 22 (359, 92) |
+  Floors at the H100's ~3.0 TB/s stream rate (moe n5s29): qkv 28.3 MB 12-bit 9.4 us (BF16 cuBLAS at T>=128: 12.6); o 16.8 MB
+  5.6; pooler 50 MB 12-bit + router 8.4 MB 19.5; expert 26.7 MB each (NVFP4 + scales) -> d1 27, v1 71, d16 98, d32 80, v16 151,
+  v32 196 us.
+  => Experts are 45-65% of every sliding layer and their excess over the stream floor is d1 ~12, v1 ~15, d16 ~15, d32 ~20,
+  v16 ~40, v32 ~41 us H100 (~0.7x on the H200): the ONLY >= 1% items (d1 ~1.5%, v1 ~1.2%, v16/v32 ~1.1% each of total score).
+  moe NOTES n5s20/n5s29 decompose the decode part (fixed 14.1 = routing 1.5 + first fill 2.1 + tail spread 2.3 + norm2;
+  4.4/extra group) with every piece dead; big-M is proj (bs128) / moe (bs256).
+  Layer-lane segments: pool/rt/norm at d1 = floor (20.1 vs 19.5); o+bnd <= floor + 1..3 us; attention sliding closed (4-15 us,
+  latency-bound, HBM idle); qkv as first op 14.1 vs 9.4 at T=1 (~0.5% d1 on H200, proj s17: g13 at bare TMA-stream speed),
+  T=128/256 qkv 18.8/20.2 vs 12-bit 9.4 (g30 qkv forms dead n5s21, ~0.3% if it hit the floor); unpool+bnd T>=16 = proj n5s14's
+  co-bound +1.0% ceiling for pooler+unpool together. No single layer-lane item reaches 1% of total score.
+- 0 judge checks, 1 submit (v163), 0 Modal min. Lane request posted in COORD.

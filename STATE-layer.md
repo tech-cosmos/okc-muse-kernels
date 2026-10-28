@@ -4,8 +4,11 @@ BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
 night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (tools/h200.py) real-routing ab_flag 14/14 inputs
   (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
-  unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 8 submits.
+  unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 7 submits left after v163.
   Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
+night5 s23: v163 SCORED 7693598b 2.1311x (board best stays v153 2.1580x). H100 in-layer PREFIX ORACLE (tools/prefix_oracle.py,
+  NOTES n5s23 table): experts = 45-65% of every sliding layer, excess over stream floor d1 12 / v1 15 / d16 15 / d32 20 / v16 40 /
+  v32 41 us H100 = the only >= 1% items (moe/proj lanes); every layer-lane segment is <= ~0.5% from its floor. Lane request posted.
 night5 s22: no build, 0 judge runs: H200 (Modal) real-input T=128 A/B: g30:unpool off +2.2..3.6, fr off +0.9..2.2 us
   on 6/6 inputs: T=128 base {fr, g30:unpool, rg} confirmed, NEXT 4 CLOSED. proj claimed NEXT 3 (pr128) 07:50Z.
 night5 s21: no build, 0 judge runs. H200 (Modal) standalone ranking of T=128 g30 forms (NOTES n5s21 table): R2 dead, qkv
