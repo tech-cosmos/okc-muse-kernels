@@ -2298,7 +2298,7 @@ default build is unchanged. Every variant bitwise = main locally (maxdiff 0), ex
   dq pass) -- GS16/tk2h lost before (xs smem LDS + regs + i-cache; "2-group row ~6 us per segment"); find out WHY a
   2-group row costs more than two 1-group rows before building again (SASS/stall audit of tk2g_row TWO on the H100).
 
-## n5s16 (2026-10-28 02:36Z - ): extra 8-token groups: H200 oracle bound + GS16 hybrid consumer (DEAD: i-cache); 1 moe check (DIAG)
+## n5s16 (2026-10-28 02:36Z - 03:40Z): extra 8-token groups: H200 oracle bound + GS16 hybrid consumer (DEAD: i-cache); 1 moe check (DIAG)
 - TK2F_ORACLE (DIAG builds; run-time via moe_set_l2h2(v + 1000) -> kernel arg l2h bit 12; WRONG output, timing only):
   tk2f computes only each expert's first token group (ng capped at 1). A first version keyed a 2nd library on it:
   local DIAG prepare 280 s (judge limit 300 s!) -> made it run-time (prepare back to 141 s). Default build bitwise as before.
@@ -2324,3 +2324,22 @@ default build is unchanged. Every variant bitwise = main locally (maxdiff 0), ex
   can stay rolled (`#pragma unroll 1` over q, one ~200-instr stage body) and the 2nd group is a uniform branch per STAGE (not
   per mma). Smem: ring 73.7 KB + x 2 groups x 8 warps x 8 KB = 128 KB + s_red single-buffered 16 KB + ~4 KB statics = ~222 KB
   (< 227 KB). Risks: LDS of x per mma for 1-group rows (+1 LDS.128 per 2 mma), loss of unrolled ILP. Prize: <= d32 7.7 / d16 4.0.
+- TK2S (built, a072c85; PF 65536, cfg 29004 GS8 / 1W004 GS16 in SQ, python TK2S_M {M: W}, W < 0 = GS8; DIAG builds only):
+  ONE main-loop body for 1- and 2-group rows: x of the segment's groups in SMEM (lane-private [grp][qq][2] x 32 lanes, 8 KB per
+  warp and group), stage loop rolled (#pragma unroll 1 over q), 2nd group = uniform branch; GS16 s_red single-buffered + 1 extra
+  bar.sync per row (smem: 73.7 KB ring + 128 KB x + 16 KB red fits). Bitwise = sq everywhere (maxdiff 0, bench test 15/15).
+  H100 DIAG: s8 +0.3..1.2 us; s0/s3 (GS16 W 0/3) d16 +2.7/+4.6, d32 +4.1/+3.5.
+  H200 check 8ed43995 (a072c85 + DIAG, 2.2354x test run, never submit), MEAN us:
+            sq    or1   h3    s8    s0    s3    sqb
+    d1     30.1  30.1  30.2  30.8  30.2  30.1  30.0
+    d16    64.8  60.7  66.8  68.5  77.1  76.4  64.5
+    d32    83.7  75.8  81.1  91.8 100.4  96.4  83.6
+    v1     64.5  64.2  64.3  65.5  64.5  64.3  64.3
+  => DEAD. On the H200 tk2f's consumer is critical: the rolled smem-x body costs +3.7 (d16) / +8.1 (d32) even with ONE group,
+  and the GS16 versions +12..17 us. The H100 hid most of it again (DRAM-bound). The oracle (or1) re-measured: d16 -4.1, d32 -7.9.
+- CONCLUSION extra-group lever: every way to share a dequant across 16 tokens found so far loses on the H200: inlined extra body
+  (i-cache, +5%/row), noinline (ABI spills), merged run-time-gated body (tk2h, +4%/1-group row), rolled smem-x body (+10%).
+  tk2h W3 at d32 (layer's pick, -2.8) stays the best. Remaining untried shape: a SEPARATE kernel (or a separate CTA role inside
+  tk2f, e.g. the last k CTAs) that runs only the 2-group segments with its own register-x body, concurrently with tk2f's 1-group
+  rows -> one body per CTA role, no i-cache sharing. Not built; prize <= d32 ~5 (vs h3), d16 ~4 us.
+- Checks 10-28 used by moe: 6/20 (+ e19541a1, 8ed43995). 0 submits.

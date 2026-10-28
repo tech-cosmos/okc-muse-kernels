@@ -7,11 +7,12 @@
   groups cost 4.0 / 7.7 us; tk2h W3 gets only 2.8 of it at d32 (loses 1.3 at d16). HYB GS16 consumer (3 bodies) and HYB2
   (__noinline__ TWO rows) both lose on the H100: an inlined never-run TWO body costs ~5%/row via the I-CACHE (ncu no-instr
   stall 1.3 -> 4.4%). NOTES n5s16.
-- NEXT tk2f: ONE small body for 1- and 2-group rows: x of both groups in SMEM (no xf registers), stage loop rolled (unroll 1
-  over q), 2nd group = uniform branch per stage. Smem fits (~222 KB with s_red single-buffered). Prize <= d32 7.7, d16 4.0 us
-  H200 (d32 ~ -5 vs the layer's tk2h). First an H100 prototype: 1-group rows must stay at sq's speed (DIAG s99 / ncu_x.py).
+- n5s16 TK2S (one rolled body, x in smem, GS 8/16) DEAD on the H200 (8ed43995: GS8 alone d16 +3.7, d32 +8.1; GS16 +12..17):
+  tk2f's consumer is critical on the H200. Every 16-token-sharing form so far loses (inlined body = i-cache, noinline = ABI,
+  tk2h merged = +4%/row, rolled smem = +10%). Untried: a separate CTA role / kernel running ONLY the 2-group segments with
+  its own register-x body (one body per CTA role). Prize <= d32 ~5 us vs the layer's h3, d16 ~4.
 - Then big-M (twm drain ~20 us; 3-WG proposal weak: twq 16 warps ~50% issue).
-- Checks 10-28: moe 5/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1), 0 submits; attention 0/20.
+- Checks 10-28: moe 6/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995), 0 submits; attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
