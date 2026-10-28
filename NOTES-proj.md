@@ -2516,3 +2516,21 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Small-N tensor cost (v16/v32 experts average ~9-17 tokens, wgmma N8 ~30% of tensor peak): the mma.sync-for-N8 variant is on
   record (moe s18: -7% microbench at N8 only, n5s34 'N8 items already at the per-SM HBM share on the H200'). Not redone.
 - => proj still has no >= 1% layer item; lane ask stands (COORD Requests, n5s18-n5s22).
+
+## n5s23 (2026-10-28 11:06Z-11:20Z, okc-night5 session 23): lead 10:55Z prmt-LUT dq route: hand-derived DEAD (> 12); no build; 0 judge runs, 0 Modal
+- Task (lead 10:55Z): cost a PRMT byte-LUT decode of E2M1 (8-byte LUT in 2 regs, 3-bit selectors, sign via lop3; or a
+  pre-scaled per-group LUT folding the HMUL2 away); microbench on the H200 only if <= 12 instr per 8 weights (today dq() =
+  8 int (LOP3/SHF/IMAD) + 4 HMUL2; scale decode is amortised: 4 PRMT per 16 dq in the RT4 SASS, n5s22).
+- Facts (dev/n5s23/prmt_lut.py): unsigned bf16 of the 8 magnitudes (any bias 2^E) has 4 distinct low bytes + 3-4 distinct high
+  bytes = fits ONE 8-byte PRMT table; with signs it needs >= 10 distinct bytes (no 8-byte table can supply the sign).
+- Why it loses: (1) one PRMT makes one bf16x2 = 2 weights, so >= 4 PRMT per 8 weights; (2) each weight needs TWO selector
+  nibbles (lo-byte idx, hi-byte idx; nibble bit 3 must be 0 or PRMT goes to sign-replicate mode), i.e. 4 bits of selector info
+  per weight for the magnitude alone: with the sign that is 5 bits/weight > the 4 stored bits, so selectors must be computed
+  (>= 1 LOP3 each + window shifts for 3 of 4 outputs) and the sign added after (1 LOP3 per output, PRMT cannot OR it in);
+  (3) HMUL2 stays. Bound: 4 PRMT + 4 sel + 2-3 SHF + 4 sign = >= 14 int + 4 HMUL2 = >= 18 vs 12. DEAD.
+- Pre-scaled LUT variant: the wgmma/mma A fragment gives each lane exactly 4 weights per row per k16 = per scale group (rows
+  g/g+8, k 2t,2t+1,2t+8,2t+9; fixed by the B = x smem layout, no k permutation without permuting x), so a per-group LUT is
+  used for 4 weights; building 8 scaled entries (16 B = 4 regs: lo/hi tables, +1 interleave PRMT per output) costs >= 3 ops per
+  4 weights, lookup >= 2 PRMT per output: >= 14 per 8 weights. DEAD. Not microbenched (lead's bar: only if <= 12).
+- => all three dq routes on record (shift/rotate tiling moe s27/n5s21, IMAD/FMA-pipe moe n22, PRMT LUT here) are above or at
+  today's 12. The H200 dq-free -22.6/-23.8 us stays an unreachable ceiling. proj has no >= 1% item; lane ask stands.
