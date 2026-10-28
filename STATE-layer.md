@@ -2,6 +2,10 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s12: **main = v157** (83bc412) = v156 + TSHIM (g30 x8 + lt libs built torch-header-free: a lib's ~50 CPU-s was torch
+  header parsing, ptxas 0.1 s) + MOE_PRUNE (moe lib 115 -> ~28 kernels). check af87d466 2.1460x (noise), **judge prepare_s 92.2 s**
+  (v156 182.0): ~128 s of headroom under the 220 s cap for new builds/TUNE options. H100 12-shape A/B tie; SASS identical.
+  10-28 budget after it: 11 checks / 9 submits. Other libs still pay ~45 CPU-s headers each (NOTES n5s12) if builds grow again.
 night5 s11: **main = v156** (50355f2) = v155 + nvcc --split-compile=0 on moe/g10 libs + build pool 16 + 4 dead g30 builds dropped
   (local cold 142 -> 131.5 s; H100 12-shape A/B tie). check 0e4ba3c2 2.1421x, **judge prepare_s 182.0** (no gain on the judge's
   build host). 10-28 budget after it: 12 checks / 9 submits. No new layer lever found (NOTES n5s11).

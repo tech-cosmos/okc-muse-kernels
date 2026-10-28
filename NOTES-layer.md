@@ -2419,3 +2419,27 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   T=32 default, T=8 default, T=128 sl ltalt:pooler 2, T=256 sl lt:o. Not submitted (< 2.1580x; no per-shape change intended).
 - Next: no layer-own lever left with a size (audits s45-n5s10 + this one); the gap to #1 is the experts (moe board lane:
   pjmullin3 moe 2.623x vs ours 2.247x) and attention. Port moe/proj Handoffs as they land; bundle into one check.
+
+## night5 s12 (2026-10-28 04:25Z-05:15Z, okc-night5 session 12): v157 = judge prepare_s 182 -> 92 s (TSHIM + MOE_PRUNE)
+- moe n5s17 request (loop64k.py over the layer's libs): no kernel the layer launches has an MMA loop across a 64 KB boundary.
+  Crossings only in dead instantiations (plain GS16 tk2f <8,4,2,0,0,0/1,16,0,0>, moe_tw<2,4,8,1,8>).
+- Kernel census (torch profiler over prepare() incl. every TUNE option + all TESTS/SCORED shapes, /tmp/layer_kn.py): 302 kernel
+  names; the moe lib's 115 kernels -> 12 used (tk2f SA PF4, SQ PF4, SQ BAL, SQ tk2h; twm<8,1>, hot<8,1,128>, route/gather/norm*).
+- MOE_PRUNE (layer.py `_moe_prune`): unused moe launchers -> TORCH_CHECK stubs (gemm13/gemm2/tb/tw/twf/twq/tk2fn/sk),
+  moe_tk2f_launch cut to the used cfgs (+ cfg 100001 and moe_tk2 kept for tools/tk2f_stress.py). Used-kernel SASS identical.
+  Alone it saved only ~50 of 1154 CPU-s: device code is NOT the compile cost.
+- WHY: nvcc --time on a 1-kernel g30 lib: ptxas 0.09 s; cudafe++ 11 s + cicc 12 s + gcc 11 s on cuda.cu, main.cpp 12 s:
+  ~50 CPU-s per lib is torch-header parsing (torch/extension.h). 17 torch-extension libs = ~750 of ~1150 CPU-s.
+- TSHIM (layer.py `_TSHIM_H`, `_tdesc`, `_G30Raw`, `_LtRaw`, `_g30_load`): load_inline(no_implicit_headers=True,
+  with_pytorch_error_handling=False); cuda.cu includes a stand-in (torch::Tensor = 9-int64 descriptor ptr/ndim/sizes[4]/numel/
+  dtype/contig, TORCH_CHECK throws std::runtime_error, at::cuda::getCurrentCUDAStream = stream passed from Python), main.cpp
+  pybind11 only; a `*_raw(std::vector<int64_t> descs, ..., stream)` entry wraps the unchanged launcher. Python adapters keep the
+  call signatures. Applied to the 8 g30-family libs (names *_ts) + lt. 1-kernel lib 50 -> ~6 CPU-s. SASS of all g30 kernels identical.
+  Host cost per call is higher (descriptor list) but only during capture: graph replay unaffected.
+- Local cold prepare: v156 CPU 1154 s / wall 129 s -> v157 556 s / 65-67 s. H100 ab_files (TUNE = {}, A B B A x 3, 12 shapes): tie
+  (all within ~1 us). validate --quick ALL OK.
+- check af87d466 (v157, 83bc412) 2.1460x (CI 2.114-2.178), **judge prepare_s 92.2 s** (v156 182.0): the judge host is CPU-bound,
+  total compile CPU is what counts. us: d1 66.9/74.7, d16 126.1/200.8, d32 156.3/303.2, v1 110.0/125.6, v16 265.2/352.7,
+  v32 336.8/510.2 = noise vs board. Not submitted (< 2.1580x).
+- Remaining torch-header libs (each ~45 CPU-s of header parse): g10 (one lib, many srcs), g24, g27 (use torch::empty inside),
+  moe (30 launchers), attention csl/nds/nvs/nvscl. Not needed now (prepare_s 92 << 220 cap); convert if builds grow.
