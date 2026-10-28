@@ -2890,21 +2890,17 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"cslpw": True, "g14alt:qkv_gate": 3}, {"cslpw": True, "g14alt:qkv_gate": 2},
             {"cslpw": True, "pr8_npf": 206}, {"cslpw": True, "pr8_npf": 220}, {"cslpw": True, "pr8_npf": 112},
             {"g30n:o": True}),  # n5s5: g30n MTOK 8 o: H100 ab_flag v1 sl -0.3..-0.8, full +1.0..1.6 us (pr8 is the long pole): H200 decides  # s91: pr8 bulk PF depth on the H200 (H100 can't judge it)  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
-        128: ({}, {"g30:unpool": False}, {"g30:unpool": False, "twf_split": 66, "lt:o": True, "lt:unpool": True}, {"g30:o": True}, {"g30:o": True, "twf_split": 66}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
-              {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": False},
-              {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},
-              {"ltalt:pooler": 1}, {"ltalt:pooler": 2}, {"ltalt:pooler": 1, "twf_split": 66, "lt:o": True, "lt:unpool": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
+        128: ({}, {"g30:o": True}, {"lt:pooler": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
+              {"twm_order": 76}, {"fr": False}, {"ltalt:pooler": 1}, {"ltalt:pooler": 2}),  # n5s8: H100 real routings (seeds 99/7/13):
+              # twf_split 66/1022 flips sign per routing (-9/+11/-1 us sl), bkt/gnorm/g30:unpool off, lt:qkv_gate off, o_pf 0 lose: dropped  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
               # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
-        256: ({}, {"nvscl": False, "sl": True}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
-              {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
-              {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
-              {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
-              {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True}, {"twf_split": 66},
-              {"twf_split": 66, "twm_order": 76}, {"twf_split": 1022}, {"twf_split": 1022, "twm_order": 76}, {"fr": False},
-              {"fr": False, "twm_order": 76}, {"fr": False, "twm_order": 76, "lt:unpool": True}, {"hot": 0}, {"hot": 24}, {"hot": 40},
-              {"rg": True}, {"rg": True, "twf_split": 1022}, {"rg": True, "twf_split": 66},
-              {"rg": True, "twf_split": 66, "lt:o": True}, {"rg": True, "twf_split": 66, "lt:unpool": True},
-              {"rg": True, "twf_split": 1022, "lt:pooler": True, "lt:unpool": True, "lt:o": True},)}  # s84: aplan  # s77 stacks
+        256: ({}, {"twf_split": 1022}, {"nvscl": False, "sl": True},
+              {"lt:o": True}, {"lt:unpool": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76},
+              {"twm_tail": 32}, {"hot": 40}, {"lt:qkv_gate": False})}  # s84: aplan  # s77 stacks
+# n5s8: T=16 full bal in the base: H100 real routings (seeds 99/7/13) -2.5/-4.0/-1.5 us; H200 tuner picked it in 4937830f+133068b8.
+# n5s8: T=256 base {rg, twf_split 66}: H100 real routings (seeds 99/7/13, 3 rounds, all 36 old options) sl -6.6, full -10.8 us vs
+# {hot 32} alone (every seed); options losing there dropped (hot 0/24 sl +12/+17: the f824b925 H200 tuner picked hot 24 on its
+# synthetic routing and v32 sl ran 378 us; twq +14..22; gnorm/fr/bkt off +2..8; twm_hot +1..4).
 # s35: per-(T, sliding) defaults under the tuner (the tune pick overrides them; {} = these): the picks both logged H200
 # tuners of 909010f (0f065691, 703d3a7e) agreed on, so a noisy judge tuner can't fall back to the slower setting.
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
@@ -2913,9 +2909,9 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
              (8, True): {"nu8": True, "g14alt:qkv_gate": 3}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
              (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
-             (16, False): {**_G24_ALL, "g30n:o": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
+             (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
              (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
-             (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
+             (256, True): {"hot": 32, "rg": True, "twf_split": 66}, (256, False): {"hot": 32, "rg": True, "twf_split": 66}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
 # n5s4: g30n o (T=32 sl+full, T=16 full; 12-bit o, W ring filled under PDL before the attention ends): H100 ab_flag TUNE {}, 4 rounds
 # x seeds 99/7 (3 runs): d32 sl -1.6/-1.5, -1.9/-1.8, full -2.2/-1.8; d16 full -2.4/-2.4, d16 sl +0.8/+0.7 (vs g27: option only).
 # Escape options {g30n:o: False} (+ lt:o) in TUNE[16]/TUNE[32]: g30n is checked before g27/g24/lt for o, so lt:o/g27:o options need it off.

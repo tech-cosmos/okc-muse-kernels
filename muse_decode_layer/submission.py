@@ -16633,28 +16633,19 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
             {"cslpw": True, "g14alt:qkv_gate": 3}, {"cslpw": True, "g14alt:qkv_gate": 2},
             {"cslpw": True, "pr8_npf": 206}, {"cslpw": True, "pr8_npf": 220}, {"cslpw": True, "pr8_npf": 112},
             {"g30n:o": True}),
-        128: ({}, {"g30:unpool": False}, {"g30:unpool": False, "twf_split": 66, "lt:o": True, "lt:unpool": True}, {"g30:o": True}, {"g30:o": True, "twf_split": 66}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
-              {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": False},
-              {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},
-              {"ltalt:pooler": 1}, {"ltalt:pooler": 2}, {"ltalt:pooler": 1, "twf_split": 66, "lt:o": True, "lt:unpool": True},),
-        256: ({}, {"nvscl": False, "sl": True}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
-              {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
-              {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
-              {"twm_hot": 1, "twm_order": 76, "lt:unpool": True}, {"bkt": False}, {"bkt": False, "twm_order": 76, "lt:unpool": True},
-              {"gnorm": False}, {"gnorm": False, "twm_order": 76, "lt:unpool": True}, {"twf_split": 66},
-              {"twf_split": 66, "twm_order": 76}, {"twf_split": 1022}, {"twf_split": 1022, "twm_order": 76}, {"fr": False},
-              {"fr": False, "twm_order": 76}, {"fr": False, "twm_order": 76, "lt:unpool": True}, {"hot": 0}, {"hot": 24}, {"hot": 40},
-              {"rg": True}, {"rg": True, "twf_split": 1022}, {"rg": True, "twf_split": 66},
-              {"rg": True, "twf_split": 66, "lt:o": True}, {"rg": True, "twf_split": 66, "lt:unpool": True},
-              {"rg": True, "twf_split": 1022, "lt:pooler": True, "lt:unpool": True, "lt:o": True},)}
+        128: ({}, {"g30:o": True}, {"lt:pooler": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
+              {"twm_order": 76}, {"fr": False}, {"ltalt:pooler": 1}, {"ltalt:pooler": 2}),
+        256: ({}, {"twf_split": 1022}, {"nvscl": False, "sl": True},
+              {"lt:o": True}, {"lt:unpool": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76},
+              {"twm_tail": 32}, {"hot": 40}, {"lt:qkv_gate": False})}
 _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
 TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True, "pr1_rb": 32},
              (8, True): {"nu8": True, "g14alt:qkv_gate": 3}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
              (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
-             (16, False): {**_G24_ALL, "g30n:o": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
+             (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
              (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
-             (256, True): {"hot": 32}, (256, False): {"hot": 32}}
+             (256, True): {"hot": 32, "rg": True, "twf_split": 66}, (256, False): {"hot": 32, "rg": True, "twf_split": 66}}
 CSL_PW_TOKENS = (16,)
 CSL_PW_CARVE = False
 if _moe_TK2F_DIAG:

@@ -2292,3 +2292,22 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   H200 tune T=32 sl: default 168.9 vs every escape 169.5-172.4 (g30k 120 182.7); full 326.8 vs 327.4-329.5: the base is right.
   vs 133068b8 (v146, same kernels): d32 full +12.4 (295.5 -> 307.9), v32 sl +45, d16 sl -7, v1 sl -8: node noise both ways.
   Not submitted (< 2.1126x, the 09:28Z rule's 1%).
+
+## night5 s8 (2026-10-28 01:18Z-, okc-night5 session 8): tuner picks vs REAL routings -> T=256 base {rg, twf_split 66}, T=128/256 options pruned
+- Why: f824b925's v32 sl ran 378.5 us (ratio 1.956) vs 333.1 (2.095) in 133068b8 on the same kernels; its H200 tuner picked
+  T=256 sl {hot: 24} (133068b8 picked {rg}). The tuner times ONE synthetic routing (SYNTH_P, seed 1234); the judge's inputs
+  route very differently per input (verify 32: 2nd expert 38..88 of 256 tokens over reference seeds 1-5/7/13/99), and the
+  judge picks the router per run (reference.weights_fields: router_seed hitting a target load).
+- H100 ab_flag on REAL inputs (variants/n5s8_notune.py = main with TUNE = {}; TUNE_BASE swapped per stmt; seeds 99/7/13,
+  3 rounds; /tmp/n5s8_ab256.txt, /tmp/n5s8_ab128.txt). us vs base, sl seeds | full seeds:
+  * T=256 (verify 32): hot 24 +8/+23/+21 | +1/+18/-8; hot 0 +14/+6/+16 | +8/0/-8; twq 4/12 +14..30; gnorm off +6..10;
+    fr off / bkt off / twm_hot +1..6; rg +10/-2/-6 | -5/-4/-15; **rg + twf_split 66 -1/-9/-10 | -13/-14/-5** (1022 same);
+    lt:* / twm_order / nvscl: +-1 of each other (ab_flag shows a ~+3 us sl bias on every non-first stmt).
+  * T=128 (verify 16): twf_split 66/1022 -9/+11/-1 | +1/-6/+5 (flips sign per routing: a tuner coin flip); g30:unpool off
+    +6..8; bkt off +2..4 sl; gnorm off +4..5 sl; lt:qkv_gate off +2..3; fr off +1 sl / -3..-6 full; lt:o/unpool/ltalt ties.
+- Tried first and reverted: tuner timing every candidate on 3 synthetic routing draws (SYNTH_P + the shares of reference
+  seeds 1 and 4): on the H100 it still saw hot 24 as a tie (402.7 vs 404.3 us), i.e. the synthetic stream misses whatever makes
+  hot 24 lose on real inputs (token correlation within verify blocks? not pinned down). Pruning on real-input A/Bs instead.
+- v149: TUNE_BASE[(256, *)] = {hot 32, rg, twf_split 66}; TUNE[256] 36 -> 10 options (no rg/twf-off escapes: the synthetic
+  tuner must not undo a real-routing win; twf 1022, lt:*,
+  twm_order 76, twm_tail 32, hot 40, nvscl, lt:qkv_gate off); T=16 full base += bal; TUNE[128] 22 -> 10 (twf_split, bkt/gnorm/g30:unpool off, o_pf 0, lt:qkv_gate off dropped).
