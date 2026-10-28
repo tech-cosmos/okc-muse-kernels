@@ -2761,4 +2761,4 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   (copies one bit 8x: useless for routing).
 - Value even if 7 existed: 1/12 of the dq() oracle = ~-1.9 us per v16/v32 sliding layer (proj a9fd9026 -22.6/-23.8).
 - VERDICT: best sequence found = today's (o0 = q&M; rotl10&M; rotl13&M; ((q&0x001B001B)*16648)&M; 4 HMUL2) = 12 per 8
-  weights. The only open route below 12 is folding the scale away (pre-scaled prmt LUT, proj's half of 10:55Z).
+  weights. proj n5s23 closed the other half (prmt-LUT >= 14 int + 4 HMUL2): dq+scale stays at 12.
