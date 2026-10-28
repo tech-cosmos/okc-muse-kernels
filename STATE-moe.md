@@ -150,4 +150,3 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   Also s7's grid-barrier version. A separate norm2 kernel is as cheap as any in-kernel tail on the H200.
 - (s7) norm fused into moe_tk2f behind a grid barrier (worse, bs1 +3 us); L2 bulk prefetch of next rows in tk2f
   (much worse); memset node for counters (+2.6 us; keep counters in state, zeroed by norm2).
-- (s6) moe_tw with 16 consumer warps x RT 1 (cfg 1118): 115M vs 78M instr, local +10%. Decode NSTG 6/12 (judge -5%).
