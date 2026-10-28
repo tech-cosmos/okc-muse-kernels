@@ -2697,3 +2697,29 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   consumer alone gains at most base - stream-only, and moe n5s15/n5s29 put tk2f's ring stream within 0.5-2.5% of the H200 HBM
   ceiling. => no reachable >= 1% from the structure; the '~8.8%' is withdrawn. Value of the probes: orn (b-orn = 3-14 us) bounds
   any stream-side lever (faster loads, deeper ring) at those numbers IF the consumer kept up; both sides would have to shrink together.
+
+## night5 s26 (2026-10-28 09:06Z - 10:20Z): H100 in-layer 'free piece' oracles (lead 08:15Z), 0 judge runs, 0 Modal min
+- tools/free_oracle.py <submission.py> <dir> writes base0 (TUNE = {}) + free_{a,b1,r,b2}: piece X runs once in the eager warm-up
+  call, its outputs are cloned and kept per (tokens, sliding), later calls (incl. the captured graph) launch nothing for X and
+  hand the kept outputs on (same routing downstream). tools/free_check.py: free_a/b1/r outputs = base (0 or base's own run-to-run
+  noise) on all 12 shapes; free_b2 differs (as meant). a = attn_kernel_fn, b1 = first _boundary (absent where fused: T=1 pr1bnd,
+  T=8 ob8), r = _route (T=16/32/128 side stream) / _routing (T=256 FR) (T=1/8 pr1/pr8 fused: n/a), b2 = _tail's _boundary
+  (T=8 incl. the nu8 scatter-combine).
+- H100 ab_files 3 rounds, main v163 (5f7841b), seed 99, us saved when free = base - free_X, sliding / full:
+  | load | base sl/full  | attention   | b1        | router+routing | b2        | glue b1+r+b2 sl x %/us |
+  | d1   |  85.4/105.7   |  2.4/ 13.0  | fused     | fused (pr1)    | 1.4/1.5   | 1.4 -> 0.25% |
+  | d16  | 191.0/294.5   |  7.3/124.0  | 1.8/3.0   | 2.6/3.1        | 2.8/3.0   | 7.2 -> 0.60% |
+  | d32  | 189.0/413.8   | 14.1/242.5  | 0.9/2.2   | -0.3/-0.2      | 2.0/2.6   | 2.9 -> 0.17% |
+  | v1   | 141.7/156.9   |  3.3/ 18.4  | 1.6/2.1   | fused (pr8)    | 3.7/3.3   | 5.3 -> 0.59% |
+  | v16  | 299.4/444.2   | 11.4/132.7  | 7.6/5.3   | 1.7/3.3        | 4.1/2.9   | 13.4 -> 0.55% |
+  | v32  | 378.0/628.1   | 15.8/253.2  | 14.9/10.2 | 5.6/3.4        | 11.8/9.9  | 32.3 -> 1.07% |
+  (%/us = the H200 sliding weights from STATE, applied to H100 us: an upper bound.) All glue free = ~3.2% sliding + ~1.1% full;
+  sliding attention free = ~3.2% (closed: s64 at the gather floor, latency-bound); full attention = gather floor (s84).
+- Reachable part: the T=128/256 boundaries move 12.6 / 25.2 MB (a + s read, s' + h written) = 4.2 / 8.4 us at 3.0 TB/s, so of
+  v32's b1+b2 26.7 us ~17 is bytes. Standalone _boundary (cold L2): T=128 6.8 us (1.85 TB/s), T=256 11.0 (2.29 TB/s); SPL 2/4 and
+  4/8 warps worse; 32 warps 6.4 / 10.2 us (-0.8). BUILT BND_W32_MIN (32 warps at T >= 128, both boundaries): in-layer ab_files
+  5 rounds ABAB: v16 sl -0.6/+0.2, full -0.3/-0.4, v32 sl -0.4/-0.3, full +0.4/0.0 = TIE (in-layer the boundary sits behind cuBLAS
+  drains/launch, not its own fixed cost). Reverted, DEAD. Remaining excess (v32 ~10 us sl, v16 ~5) is launch/serialization
+  between cuBLAS GEMMs (no PDL in nvjet) and the boundary: removable only by fusing the boundary into the GEMMs (row norm over
+  8192 cols needs a cross-CTA reduce; folding the gain into W changes h's BF16 rounding vs SGLang = routing risk). ~0.3-0.5% at best.
+=> No layer-lane piece has a reachable >= 1%: biggest free numbers are v32 glue (32 us sl, ~2/3 bytes) and sliding attention (closed).

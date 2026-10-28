@@ -6,6 +6,10 @@ night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (too
   (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
   unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 7 submits left after v163.
   Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
+night5 s26: H100 in-layer FREE-piece oracles (tools/free_oracle.py, NOTES n5s26 table): us saved sl/full: attention d1 2.4/13,
+  d16 7.3/124, d32 14.1/243, v1 3.3/18, v16 11.4/133, v32 15.8/253; glue b1+r+b2 sl d1 1.4, d16 7.2, d32 2.9, v1 5.3, v16 13.4,
+  v32 32.3 (T=256 boundaries ~2/3 bytes). BND_W32_MIN (32-warp boundary at T>=128, standalone -0.8 us) = in-layer TIE: dead.
+  No layer-lane piece has a reachable >= 1%. 0 judge runs, 0 Modal. 10-28 left: 5 checks / 7 submits.
 night5 s25: H200 judge DIAG 0dc9b93f (TK2F_ORX probes on c3a234a, flag off on main, never submit) of moe n5s32's tk2f oracles:
   ornc-orz d1 7.3, v1 11.8, d16 22.1, d32 37.1 us sl, but (moe n5s33, BRA tie) that is the no-data consumer chain, not a gain;
   b-orn (free stream) only 3-14 us -> consumer and stream BALANCED on the H200; lever closed. 10-28 left: 5 checks / 7 submits.
