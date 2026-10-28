@@ -2104,21 +2104,40 @@ __global__ void __launch_bounds__(256) moe_gather(const uint32_t* __restrict__ X
 __global__ void __launch_bounds__(256) moe_routegather(const int* __restrict__ ids, int nroutes, int start, int count,
     const uint32_t* __restrict__ X, int* __restrict__ meta, int* __restrict__ sroutes, uint32_t* __restrict__ XG) {
   __shared__ int cnt[32], pre[32], s_pos[8];
-  const int tid = threadIdx.x, tok = blockIdx.x;
+  const int tid = threadIdx.x, tok = blockIdx.x, lane = tid & 31;
   if (tid < 32) { cnt[tid] = 0; pre[tid] = 0; }
   asm volatile("griddepcontrol.wait;" ::: "memory");
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
-  __syncthreads();
+  // n5s23: the x row loads go out first (independent of the counts) and each thread's ids are loaded in one batch of
+  // RGU before any __match_any_sync: the old loop issued one dependent L2 round trip per 256 ids (H100 bs256 8.5 us).
+  const uint32_t* src = X + (size_t)tok * (KD / 2);
+  uint32_t v[KD / 2 / 256];
+#pragma unroll
+  for (int i = 0; i < KD / 2 / 256; ++i) {
+    const int o = tid + 256 * i, w = o & 31, t = w & 3, jh = w >> 2;
+    v[i] = __ldcg(src + ((o & ~31) | (8 * t + jh)));
+  }
   const int lim = tok * 8;
-  for (int i = tid; i < ((nroutes + 255) & ~255); i += 256) {  // uniform trip count: __match_any_sync below
-    const int e = i < nroutes ? __ldcg(ids + i) - start : -1;
-    const bool v = e >= 0 && e < count;
-    // warp-aggregated: one smem atomic per distinct expert per warp
-    const unsigned m = __match_any_sync(0xffffffffu, v ? e : -1);
-    const unsigned mp = __match_any_sync(0xffffffffu, (v && i < lim) ? e : -1);
-    const int lane = tid & 31;
-    if (v && (__ffs(m) - 1) == lane) atomicAdd(&cnt[e], __popc(m));
-    if (v && i < lim && (__ffs(mp) - 1) == lane) atomicAdd(&pre[e], __popc(mp));
+  const int mye = tid < 8 ? __ldcg(ids + lim + tid) - start : -1;  // this token's ids (warp 0 lanes 0..7)
+  __syncthreads();
+  constexpr int RGU = 8;
+  for (int b = 0; b < nroutes; b += 256 * RGU) {  // uniform trip count: __match_any_sync below
+    int ev[RGU];
+#pragma unroll
+    for (int u = 0; u < RGU; ++u) {
+      const int i = b + 256 * u + tid;
+      ev[u] = i < nroutes ? __ldcg(ids + i) - start : -1;
+    }
+#pragma unroll
+    for (int u = 0; u < RGU; ++u) {
+      const int i = b + 256 * u + tid, e = ev[u];
+      const bool ok = e >= 0 && e < count;
+      // warp-aggregated: one smem atomic per distinct expert per warp
+      const unsigned m = __match_any_sync(0xffffffffu, ok ? e : -1);
+      const unsigned mp = __match_any_sync(0xffffffffu, (ok && i < lim) ? e : -1);
+      if (ok && (__ffs(m) - 1) == lane) atomicAdd(&cnt[e], __popc(m));
+      if (ok && i < lim && (__ffs(mp) - 1) == lane) atomicAdd(&pre[e], __popc(mp));
+    }
   }
   __syncthreads();
   if (tid < 32) {
@@ -2151,22 +2170,19 @@ __global__ void __launch_bounds__(256) moe_routegather(const int* __restrict__ i
     }
   }
   __syncthreads();
-  if (tid < 8) {
-    const int e = __ldcg(ids + lim + tid) - start;
-    int pos = -1;
-    if (e >= 0 && e < count) {
-      pos = pre[e];
-      for (int j = 0; j < tid; ++j) pos += __ldcg(ids + lim + j) - start == e;  // repeated ids in a token (not from topk)
+  if (tid < 32) {
+    const int e = mye;
+    int pos = -1, rep = 0;
+#pragma unroll
+    for (int j = 0; j < 7; ++j) {  // repeated ids in a token (not from topk)
+      const int ej = __shfl_sync(0xffffffffu, mye, j);
+      rep += j < tid && ej == e;
+    }
+    if (tid < 8 && e >= 0 && e < count) {
+      pos = pre[e] + rep;
       sroutes[pos] = lim + tid;
     }
-    s_pos[tid] = pos;
-  }
-  const uint32_t* src = X + (size_t)tok * (KD / 2);
-  uint32_t v[KD / 2 / 256];
-#pragma unroll
-  for (int i = 0; i < KD / 2 / 256; ++i) {
-    const int o = tid + 256 * i, w = o & 31, t = w & 3, jh = w >> 2;
-    v[i] = __ldcg(src + ((o & ~31) | (8 * t + jh)));
+    if (tid < 8) s_pos[tid] = pos;
   }
   __syncthreads();
 #pragma unroll
