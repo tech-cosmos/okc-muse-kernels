@@ -2343,3 +2343,12 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
     nu8 off, g19 qkv, g30n:o).
 - v151 validate --quick ALL OK: test 0/13, scored 0/12, opt 0/264, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/428,
   cold prepare 162.5 s.
+- **check bb8ea548 (v151) 2.1168x** (CI 2.085-2.149; within 1% of board 2.1339x). ours/SGLang us: d1 66.8/170.2, 77.4/181.3;
+  d16 129.1/264.4, 201.7/425.2; d32 154.4/259.5, 311.6/613.0; v1 114.7/270.5, 126.6/283.4; v16 266.0/530.8, 360.4/717.3;
+  v32 332.4/701.4, 510.0/1053.2. v1 ratios 2.358/2.237 (last 4 checks sl 2.311-2.387, full 2.220-2.258): no clear v1 win ->
+  NOT submitted (09:28Z rule (b) unmet). d16 full 201.7 = best ever (bal base, n5s8).
+  H200 tuner T=8 (synthetic): sl default 111.5 | nu8d+nu8x ON 110.4 | nu8x on 110.6 | cslpw off 112.5 | npf 206/212/112 112.1-112.4 |
+  g30n:o 110.2 (picked); full 137.0 | nu8d/x ON 135.4 (picked) | cslpw off 137.0 | npf 112 140.6. So on the H200 the nu8d/nu8x
+  half loses (~+1.1/+1.6 us) while cslpw+npf 220 holds: H100 and H200 disagree on nu8d (not routing: hardware).
+- v152 = v151 with _T8N = {cslpw, pr8_npf 220} only (nu8d/nu8x off -> TUNE[8] options again). validate test/scored/opt/fuzz ALL OK.
+  Not checked alone (a tuner-option tie: lead 10:50Z); goes with the next real change.
