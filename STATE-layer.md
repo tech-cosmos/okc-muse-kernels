@@ -2,6 +2,10 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s18: check 3e39a051 (v162, unchanged main) **2.1143x**, prepare_s 88.9: abs us beat the board run v153 on 9/12 shapes
+  (d32 sl 149.7 vs 155.7, d32 full 301.2 vs 308.2, v32 sl 327.8 vs 335.7, d16 sl 124.0 vs 129.9) but SGLang drew fast (ratio is per run).
+  Not submitted. Re-checked: T=256 boundary writes no h32 (~24 MB/call = near floor); T=256 unpool/FR are ~compute-bound (cuBLAS).
+  10-28: 7 checks / 8 submits (09:28Z-rule submits of 10-28 used).
 night5 s17: **main = v162** = v160 + attn RF_TRIG_ALL (batched _red_fin triggers after its wait) + CB_TRIG (_combine triggers after
   its wait): the o GEMM's W ring now fills under the merge at d16/d32/v1 full (H100 -0.2..-0.8 us) + T=8 full base g30n:o (H200 tuner
   picked it once CB_TRIG was in). check 8f5427dc (v161) 2.1169x, prepare_s 88.8; v16 sl 262.6 confirms v160 (2 H200 samples ~261 vs
@@ -30,17 +34,7 @@ night5 s10: **main = v155** = v153 + T=8 sl base g30n:o, T=8 full g14alt 3, T=32
   v153 = v152 + proj G30_GX (branch proj/g30gx afc0c8b: TUNE options; H200 tuner: g30kgx:pooler T=32 sl -0.3..0.6 us picked,
   rest tie) - pr32 builds (cold 220 -> 161.5 s). check 60f02748 2.1373x -> submit 3e3b9fd3 2.1580x (board best). 10-28 budget
   after cd6b3ba4: 13 checks / 9 submits.
-night5 s9: main = v152 = v150 + T=8 TUNE_BASE {cslpw, pr8_npf 220} (H100 real routings + H200 tuner agree); TUNE[1]/[8] tk2fx-off
-  options dropped (real routings +0.5..1.7 us). check bb8ea548 (v151 = same + nu8d/nu8x off in the base) **2.1168x** (within 1%; v1
-  2.358/2.237 not a clear win: not submitted). H200 tuner: nu8d/nu8x ON wins -1.1/-1.6 us (H100 said off): reverted to options in v152.
-  v152 validate test/scored/opt/fuzz OK (v151 full ALL OK, cold 162.5 s). 10-28 budget: 15 checks / 10 submits. v152 not checked (tie).
-  H100 d32 sl timeline (195 us): qkv 15, attn 19, o 7, pooler g30k 28 || router 20.5 + routing (ends 71), tk2f 97 (72-170), norm2,
-  unpool ends 23 us after tk2f, bnd -> glue is back to back; experts are the gap (moe LANE 6).
-night5 s8: **main = v150** = v148 + T=256 base {rg, twf_split 66} + T=16 full base bal (H100 REAL-routing A/Bs, 3 seeds: v32 sl
-  -1/-9/-10, full -13/-14/-5; d16 full -2.5/-4.0/-1.5 us) + TUNE[256] 36->9, TUNE[128] 22->10 (routing-sensitive options that lose or
-  flip sign on real inputs dropped: f824b925's tuner picked hot 24 on synthetic routing = v32 sl 378 us). validate ALL OK, cold 146.7 s.
-  check 73c50eea (v149) 2.1048x (v32 sl/full 2.095/2.089 = good draw / best of 4; not submitted). 10-28 budget: 16 checks / 10 submits.
-Older session summaries (night5 s1-s7, s85-s107): NOTES-layer.md.
+Older session summaries (night5 s1-s9, s85-s107): NOTES-layer.md.
 
 ## Per-load H200 us vs the s12 floor (board run 19ebde23 = v108; lead 05:07Z request; s74)
 Score %/us = gain in total score per us saved on that layer type (geomean of 6 loads x (46 sl + 16 full)).

@@ -2528,3 +2528,15 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   NORME_TRIG win (260.7; pre-v160 265-269); v16 full 349.3 best so far (357 before). H200 tuner T=8 full picked {g30n:o} (128.4
   -> 127.6, confirm 128.5 vs 127.5). Not submitted (< 2.1364x, 1% rule).
 - v162: T=8 full base += g30n:o; TUNE[8] {g30n:o True} dropped (no-op now).
+
+## night5 s18 (2026-10-28 06:26Z-, okc-night5 session 18): check of main v162
+- check 3e39a051 (v162 = b18c9a6 submission.py, unchanged) **2.1143x** [2.083, 2.146], judge prepare_s 88.9. us (ours / SGLang):
+  d1 66.9/170.7 76.7/181.2, d16 124.0/258.2 205.7/435.9, d32 **149.7**/254.4 **301.2**/606.9, v1 109.7/259.6 125.5/279.8,
+  v16 264.7/508.4 352.3/679.7, v32 **327.8**/683.4 510.6/1062.7. In absolute us v162 beats the board run (v153 3e3b9fd3) on
+  9/12 shapes (d16 sl -5.9, d32 sl -6.0, d32 full -7.0, v32 sl -7.9, v16 -1.9/-3.8); the ratio is lower because SGLang drew
+  fast this run (d32 sl 254 vs 262 there, v32 sl 683 vs ~700). Not submitted (< 2.1580x; the 2 '1% rule' submits of 10-28 are
+  used: 3e3b9fd3 + lead's 35af5031). Tuner picks: T=16 sl g30n:unpool, full g30n:unpool+qkv_gate, T=32 full tk2h 3, T=256 full
+  lt:o, rest default. 10-28 budget after it: 7 checks / 8 submits.
+- Re-checked (no build): T=256 _boundary has H32 off (h32 only at T <= ROUTER_FP32_MAX_TOKENS), ~24 MB/call vs 8.1 us H200 = near
+  its byte floor; T=256 unpool (26 us H200, 17 GFLOP) and FR pooler (32.5 us, 18 GFLOP) are compute-bound cuBLAS (s100-s105: g30
+  variants there dead). Layer-side lever list unchanged (STATE NEXT); experts (moe/proj) remain the gap.
