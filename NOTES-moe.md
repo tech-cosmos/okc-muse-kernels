@@ -2724,3 +2724,11 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   norm2 PDL n5s19, PSC s12, ring n5s15/n5s29/n5s30, structure n5s33). The board gain does NOT carry to the layer (in-layer d1/v1
   the fixed part already overlaps the pre-expert kernels by PDL; layer n5s23 d1 experts excess 12 us H100).
 - No new assignment from the lead since 10:20Z; lane ask stands (COORD Requests n5s36). Nothing built.
+
+## Night5 session 38 (2026-10-28 10:39Z - 10:45Z) -- no assignment; proj's H200 twm dq-free ceiling re-checked against the record
+- No lead line since 10:20Z (answered n5s36). proj n5s20 H200 DIAG a9fd9026 gives twm dq() free = -22.6 v16 / -23.8 v32 us,
+  above the 09:20Z 6 us bar, so I re-checked every way to get at it: dq is at the 8-op minimum (s27 exhaustive search, n5s35
+  SASS); moving work ALU->FMA pipe is dead (DQW n22: +3.5 v16 / +15.7 v32 H100; the consumer is latency-bound, not
+  pipe-bound); dq/tensor overlap is dead SM-wide (s18/s22/s27 microbenches: ALU work by OTHER warps does not overlap wgmma,
+  RS or SS); 4 warps/SMSP +3-6% best case (s28, moe_twq lost on the H200); scale-on-accumulator costs as many FFMA as the HMUL2
+  it saves (N8: 4 vs 4 per k16). => the ceiling can't be reached by any form on record or any new one I can name. No build, 0 judge runs, 0 Modal.
