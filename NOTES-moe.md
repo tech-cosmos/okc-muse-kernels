@@ -2414,3 +2414,16 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
       d1 29.9 / 33.5 / 29.9 / 33.1    d16 64.1 / 65.4 / 64.2 / 65.2    d32 84.6 / 85.4 / 84.6 / 85.4    v1 64.2 / 65.3 / 64.2 / 65.1
   => PDL norm2 LOSES every load (d1 +3.4..3.6 us, others +0.8..1.3), repeatable to 0.4 us; same verdict as s5 with tk2.
   Whole-run 2.2426x (DIAG build; board rows not comparable). Option kept off; do not retry.
+
+## n5s20 (2026-10-28 04:33Z - 04:55Z): no lane answer; audit only, no build; 0 runs
+- Lead has not answered the n5s18 lane request (COORD Requests). No proj/twm* branch exists yet to review (LANE 7).
+- Board: #1 pjmullin3 now 2.685x (5008 us/step; was 2.623x), ours 2.247x. Our decode shapes vs the TASK.md 4.8 TB/s floors
+  (febfcb1f): bs16 88.9/52.5, bs32 120.1/70.8, bs8 68.3/37.3; at the H200's measured practical rate for our pattern
+  (4.06 TB/s, n5s15) those floors become ~62/84/44 us, so the decode excess is ~14-36 us = the H200 fit's fixed 14.1 us +
+  4.4 us per extra 8-token group. Every piece of that has a measured dead end (fixed: routing 1.5 + first fill 2.1 =
+  data dependency/ring fill, FP producer self-routing lost in-layer s15; phase barrier absorbed by the ring n10; tail
+  spread 2.3 = grid-wide dependency of norm2; norm2 PDL n5s19 dead; extra groups n5s16-n5s18 dead; tk3 costed n5s18).
+- Re-checked the parked barrier-free d1 (split-I gemm13->gemm2 with FP32 partials): still <= ~0.6 us d1 (s25/n10 paper,
+  9 -> 8.73 row rounding only); not built.
+- So the gap to #1 on this board is most likely big-M (bs128/256: twm 197/235 us + moe_norm tail ~40 us vs floors
+  101/109), which is proj's lane since LANE 7. Request refreshed in COORD.

@@ -1,6 +1,6 @@
 # STATE-moe
 
-## NOW (n5s19, 2026-10-28 05:00Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
+## NOW (n5s20, 2026-10-28 04:55Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
 - n5s15: tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps); bytes-in-flight lever closed.
 - n5s16: H200 ORACLE: the extra 8-token groups cost d16 4.0 / d32 7.7 us (tk2f fit 14.1 + 6.97 E + 4.4 X us).
 - n5s16-n5s18: EVERY 16-token shared-dequant form on mma.sync tk2f is DEAD: inlined (i-cache), noinline (ABI), tk2h merged
@@ -15,6 +15,8 @@
   a 2-4 session kernel. tk2f extra-group lever CLOSED; lane request to lead (COORD Requests n5s18).
 - n5s19: norm2/norm3 as a PDL secondary of tk2f (NORM2_PDL, off) DEAD on the H200 (138051ec: d1 +3.5, d16/d32/v1 +0.8..1.2 us).
   No untried tk2f item left on my list; waiting for a lane answer (COORD Requests n5s18).
+- n5s20: audit only (NOTES n5s20): #1 now 2.685x; decode excess = fit's fixed 14.1 + 4.4/extra group, all pieces measured dead.
+  Gap to #1 is most likely big-M (proj's lane). Lane request refreshed (COORD Requests n5s20).
 - Big-M (bs128/256, twm) is proj's lane now (LANE 7); moe reviews proj/twm* before layer integrates.
 - Checks 10-28: moe 7/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec), 0 submits; attention 0/20.
 
