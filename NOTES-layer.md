@@ -2540,3 +2540,13 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Re-checked (no build): T=256 _boundary has H32 off (h32 only at T <= ROUTER_FP32_MAX_TOKENS), ~24 MB/call vs 8.1 us H200 = near
   its byte floor; T=256 unpool (26 us H200, 17 GFLOP) and FR pooler (32.5 us, 18 GFLOP) are compute-bound cuBLAS (s100-s105: g30
   variants there dead). Layer-side lever list unchanged (STATE NEXT); experts (moe/proj) remain the gap.
+
+## night5 s19 (2026-10-28 06:35Z-07:05Z, okc-night5 session 19): no build; 0 judge runs
+- Board: #36 at 2.1580x (3e3b9fd3); #1 pjmullin3 2.399x, #10 2.269x, #20 2.221x. 10-28 budget: 7 checks / 8 submits (09:28Z-rule
+  submits of 10-28 used). Board JSON has no per-shape times for other teams (only total value), so #1's per-shape split is unknown.
+- Candidate checked for a port: proj's twm KQ K-split (r-proj 9029938, TWM_KQ_M). Its "-2.8 v16 / -2.2 v32 us" is vs NO split;
+  vs the TWF_SPLIT 66 option the layer already tunes it is v16 176.6 vs 176.9 (o66) = -0.3 us (H200 e6416b6f): not worth a build.
+- Re-read moe n5s15/n5s20/n5s21, proj s50 (BF16 wgmma m16/m32 dead), ~/attn NOTES 711/4787 (scored page tables 0% consecutive):
+  no unmeasured lever >= 0.3% on the layer's side. Unchanged conclusion: the gap to #1 is in the expert kernels and attention.
+- Reminder for 10-29 00:00Z: v162 beats the board run v153 in absolute us on 9/12 shapes (3e39a051); it can go in under the
+  09:28Z rule only if a check of it lands within 1% of the board (>= 2.1364x); never resubmit unchanged code for luck.

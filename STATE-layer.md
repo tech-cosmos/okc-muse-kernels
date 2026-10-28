@@ -2,6 +2,7 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s19: no build, 0 runs; proj KQ K-split = -0.3 us vs the twf_split 66 we already tune (not ported). NOTES n5s19.
 night5 s18: check 3e39a051 (v162, unchanged main) **2.1143x**, prepare_s 88.9: abs us beat the board run v153 on 9/12 shapes
   (d32 sl 149.7 vs 155.7, d32 full 301.2 vs 308.2, v32 sl 327.8 vs 335.7, d16 sl 124.0 vs 129.9) but SGLang drew fast (ratio is per run).
   Not submitted. Re-checked: T=256 boundary writes no h32 (~24 MB/call = near floor); T=256 unpool/FR are ~compute-bound (cuBLAS).
