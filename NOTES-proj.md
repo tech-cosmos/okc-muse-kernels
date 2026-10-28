@@ -2430,3 +2430,23 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   lane 0 issues, shfl broadcast) or a per-call candidate list; (3) only then an H200 A/B (Modal or 1 moe-board check:
   verify 16 rows; proj has 6 of 8 moe checks left 10-28). Expected if overhead -> 0: H100 -2.5, H200 more (drain is the
   H200's problem: a763ccaf loss 20-25 us).
+## n5s18 (2026-10-28 08:59Z-09:55Z, okc-night5 session 18): TWS fixed, then measured DEAD on the H200; 1 moe-board DIAG check, 0 Modal
+- n5s17's "~3.5 us unexplained per-call overhead" was a bad control: n5s17 compared TWS against the SAME build with stw = 0, but
+  that build was itself +9 us v16 / +13 us v32 slower than moe's plain twm (r-moe cc1848f, identical base: reverse patch = 0 diff).
+  H100 bisect (compile-time gates, b.py layer routings): consumer K-loop changes 0, thief block 0, OWNER claim block +9/+15 even
+  when never executed. Cause: the owner logic sat inside the producer's per-chunk loop that every item runs; the producer has 40
+  registers (setmaxnreg 40/232) and spilled (STACK 40 -> 48, LDLs on the per-stage issue path). Misplaced #pragma unroll 1 (n5s17
+  put a declaration between it and the loop) fixed too, no effect.
+- Fix (muse_bf16_proj/tws/submission.py on branch proj/tws 4e472c7, n5s18/tws.diff vs r-moe cc1848f): stealable items get their own
+  loop copy, the else loop is byte-for-byte moe's; plus setmaxnreg 56/224 in moe_twm (consumers do not spill at 224: twm STACK 8).
+  H100 (DREP 120): TWS off = moe base (197.4 v16 / 218.6 v32); s160 195.9 vs 198.4 = -2.5 us (seeds 13/17/99 -4..-7, 7/11 +1..2.5);
+  static (no claims/steals) tie. 56/224 on moe's plain twm: no change on the H100 (197.4 / 218.6). Tests: n5s17/t.py 0 bad (12
+  routings x 4 cfgs x 4 reps, worst 0.0039), bench.py test PASS.
+- **H200 DIAG check 3670ae95 (moe board, 2.2525x, never submit; n5s18/diag_submission.py, output n5s18/diag_3670ae95.txt), layer
+  v16 routings, us:** twm 169.6 | s160 175.6 | s100 174.8 | b4 176.4 | twmb 168.7 => TWS LOSES +5.6..7.2 us on EVERY seed. v32
+  (TWS not enabled at 256) 5 variants 201.8-202.2 = noise floor. The H200 drain (20-25 us, a763ccaf) is not recoverable by
+  splitting: claims + dynamic consumer loop + partial round trips cost more there than the idle tail. TWS CLOSED. With s11 halves,
+  KQ, 3-WG model and cluster combine, every bs128 twm tail idea is now measured or bounded dead.
+- Prepare 162.8 s on the judge for the full moe file + DIAG.
+- Only consumer number >= 1% left near this lane: moe n5s34 twm dq() free = -10.7 v16 / -9.4 v32 us per sliding layer (H100,
+  FREE ceiling; cuts on record dead: moe s18-s30, s22 pingpong). Asked the lead for a lane (COORD Requests).
