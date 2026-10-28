@@ -2655,3 +2655,13 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   T=128/256 qkv 18.8/20.2 vs 12-bit 9.4 (g30 qkv forms dead n5s21, ~0.3% if it hit the floor); unpool+bnd T>=16 = proj n5s14's
   co-bound +1.0% ceiling for pooler+unpool together. No single layer-lane item reaches 1% of total score.
 - 0 judge checks, 1 submit (v163), 0 Modal min. Lane request posted in COORD.
+
+## night5 s24 (2026-10-28 07:52Z - 08:15Z): no build, 0 judge runs, 0 Modal min (lane request n5s23 still unanswered)
+- H100 timelines of main v163 (tools/timeline.py, seed 99): v1 sliding 144.1 us = g14 qkv 14.5 | vtk 7.5 | g30 o 13.1 | bnd | pr8 30.8
+  | rmsnorm | tk2f 84.0 (51.4-135.4; 8 experts = 214 MB at 2.54 TB/s) | nu8 ends +5.2 | bnd ends +3.5. d32 sliding 193.5 us = g30 qkv
+  15.3 | nds+combine 18 | o 6.8 | bnd | g30k pooler 28.0 || router_split 19.6 + routing | tk2f 98.0 | norm2 +3.6 | g30 unpool ends +18.6
+  (48 MB 12-bit = its H100 stream floor) | bnd +2.9. Every non-expert piece re-matched to a dead/bounded NOTES entry (unpool/pooler
+  W prefetch during attention: s61/nds-start PF zero-sum; QG/gate split s54; N2U_BOUNDARY s14; loop64k audit done, line ~2424).
+- New board seen: `muse_prefill_layer` (Prefill layer, T=753x4 / 16K chunks, SGLang 387.4 ms, #1 2.025x, 555 rows; we have no
+  row; 20 checks + 10 scored/day unused). The overall board still ranks exactly by muse_decode_layer speedup (top 45 checked,
+  /api/v1/leaderboard 'solved' max 4), so prefill does not count overall today. Flagged to lead under Requests.

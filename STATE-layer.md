@@ -6,6 +6,8 @@ night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (too
   (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
   unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 7 submits left after v163.
   Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
+night5 s24: no build, 0 runs: v1/d32 sliding H100 timelines re-matched to dead entries; new muse_prefill_layer board
+  (not in overall ranking) flagged to lead. Lane request n5s23 still open.
 night5 s23: v163 SCORED 7693598b 2.1311x (board best stays v153 2.1580x). H100 in-layer PREFIX ORACLE (tools/prefix_oracle.py,
   NOTES n5s23 table): experts = 45-65% of every sliding layer, excess over stream floor d1 12 / v1 15 / d16 15 / d32 20 / v16 40 /
   v32 41 us H100 = the only >= 1% items (moe/proj lanes); every layer-lane segment is <= ~0.5% from its floor. Lane request posted.
