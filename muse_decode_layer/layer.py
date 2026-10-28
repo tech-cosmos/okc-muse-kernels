@@ -852,7 +852,7 @@ G30N_DEFAULT_ON = set()  # (key, T) on without TUNE; otherwise TUNE option "g30n
 # (_g30_gx_tables), 4 escape warps TMA x boxes at the escape cols + an FP32 corr tile, WG1 writes d + corr. One-hot exact.
 # H200 (proj check 53639fe3, m32 after a 3 us PDL pred): qkv 12.0->10.9, pooler 15.6->14.5, unpool 14.7->13.1..14.1 us;
 # standalone tie/+0.6..1.0 (so not qkv, the graph's first op). TUNE option "g30gx:<key>" (with g30n:<key> on).
-G30GX_CFG = {("unpool", 32), ("o", 32), ("o", 16)}  # T=16 unpool dropped (H100 tie; cold prepare)
+G30GX_CFG = set()  # proj n5s8: dropped (2 builds, ~39 s each): H200 tuner 60f02748 + 3e3b9fd3 never picked g30gx (+-0.2 us)
 G30GX_DEFAULT_ON = set()
 _G30GX = {}
 # proj n5s7: the same in g30k (pooler T=16/32): one record per CTA (_g30k_gx_tables), the escape warps build each segment's
@@ -3061,11 +3061,9 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
              {"g27:o": False},  # s84: attention plan (full layers only)
              {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True},
-             {"g30n:o": True, "g30gx:o": True},  # proj n5s6 G30_GX
              {"g30n:o": True}, {"g30n:o": False}, {"g30n:o": False, "g27:o": False},  # n5s4 g30n o (base at 16 full); n5s3: moe pr32; night5 s1: g30n at T=16 (H100 tie: H200 decides); n5s3: qkv S3 built again (uneven K split)
              ),
-        32: ({}, {"g30gx:unpool": True}, {"g30gx:o": True}, {"g30gx:unpool": True, "g30gx:o": True}, {"g30kgx:pooler": True},
-             {"g30kgx:pooler": True, "g30gx:unpool": True, "g30gx:o": True},  # proj n5s6/n5s7 G30_GX {"g30n:o": False}, {"g30n:o": False, "lt:o": True}, {"g30n:qkv_gate": False}, {"g30n:unpool": False}, {"g30k:pooler": 0}, {"g30k:pooler": 120}, {"g30k:pooler": 0, "g30n:unpool": False, "g30n:qkv_gate": False}, {"pr32": True, "g30k:pooler": 0}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
+        32: ({}, {"g30kgx:pooler": False},  # proj n5s8: g30kgx pooler in TUNE_BASE[32] (H200 picked it in 3 of 4 tuner runs, -1.0..-1.3 us)
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
@@ -3104,8 +3102,8 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
              (8, True): {"nu8": True, "g14alt:qkv_gate": 3, "g30n:o": True, **_T8N}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1, **_T8N},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
              (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
-             (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
-             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
+             (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
+             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
              (256, True): {"hot": 32, "rg": True, "twf_split": 66}, (256, False): {"hot": 32, "rg": True, "twf_split": 66}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
 # n5s4: g30n o (T=32 sl+full, T=16 full; 12-bit o, W ring filled under PDL before the attention ends): H100 ab_flag TUNE {}, 4 rounds
 # x seeds 99/7 (3 runs): d32 sl -1.6/-1.5, -1.9/-1.8, full -2.2/-1.8; d16 full -2.4/-2.4, d16 sl +0.8/+0.7 (vs g27: option only).

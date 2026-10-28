@@ -13991,7 +13991,7 @@ G30N_CFG = {("unpool", 32): (1, 16, 16), ("pooler", 32): (1, 20, 8), ("qkv_gate"
             ("o", 32): (1, 16, 16), ("o", 16): (1, 16, 16),
             ("o", 8): (1, 8, 8)}
 G30N_DEFAULT_ON = set()
-G30GX_CFG = {("unpool", 32), ("o", 32), ("o", 16)}
+G30GX_CFG = set()
 G30GX_DEFAULT_ON = set()
 _G30GX = {}
 G30KGX_CFG = {("pooler", 32)}
@@ -16981,11 +16981,9 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
              {"g27:o": False},
              {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True},
-             {"g30n:o": True, "g30gx:o": True},
              {"g30n:o": True}, {"g30n:o": False}, {"g30n:o": False, "g27:o": False},
              ),
-        32: ({}, {"g30gx:unpool": True}, {"g30gx:o": True}, {"g30gx:unpool": True, "g30gx:o": True}, {"g30kgx:pooler": True},
-             {"g30kgx:pooler": True, "g30gx:unpool": True, "g30gx:o": True},
+        32: ({}, {"g30kgx:pooler": False},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
@@ -17013,8 +17011,8 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
              (8, True): {"nu8": True, "g14alt:qkv_gate": 3, "g30n:o": True, **_T8N}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1, **_T8N},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
              (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
-             (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
-             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True},
+             (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
+             (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
              (256, True): {"hot": 32, "rg": True, "twf_split": 66}, (256, False): {"hot": 32, "rg": True, "twf_split": 66}}
 CSL_PW_TOKENS = (16,)
 CSL_PW_CARVE = False
