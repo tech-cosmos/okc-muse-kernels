@@ -2510,3 +2510,21 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Next: v160 rides in every later check. Same pattern to look for: any PDL secondary with a pre-wait W prologue whose
   primary never triggers early (grep launch_dependents per chain). At T=256 the unpool is lt (no prologue); a PDL-capable
   m256 unpool would get the same ~20 us drain window (g30 MTOK 256 dead in s100: x ingest).
+
+## night5 s17 (2026-10-28 06:11Z-, okc-night5 session 17): v161 RF_TRIG_ALL + CB_TRIG, v162 T=8 full g30n:o base; 1 check
+- Audit (lead/STATE item 1b: PDL secondaries whose primary never triggers early). tools/timeline_all.py <file> all (new: all 12
+  scored shapes in one process, STMT='TUNE={}'). H100 v160: the only serial PDL hand-offs left are (a) batched _red_fin -> g30 o
+  at d16/d32 full (o starts exactly at red_fin's end: 140.3 / 261.2 us; attn_src gated RF_TRIG on batch == 1) and (b) _combine ->
+  o at v1 full (_combine never triggered; base o is g12, not a PDL secondary). Everything else overlaps (T<=32 chains, twm drain
+  since v160). T=128/256 qkv/o/FR pooler/unpool are cuBLAS (no PDL); the T=256 boundaries are at their FP32-stream byte floor
+  (~32 MB, 9 us H100); H200 v32 qkv 20.9 / FR 32.6 us are ~compute-bound at m256 (9.7 / 19.2 GFLOP).
+- attn_src: RF_TRIG_ALL (TRIG at every batch, still right after the wait) and CB_TRIG (_combine: launch_dependents right after
+  gdc_wait, both _combine launch sites of verify/decode-gluon + the one in _decode). No ordering change: dependents read x after
+  their own wait. H100 ab_flag (variants/n5s17.py = TUNE {}, 4 rounds, seeds 99/7), us:
+  d16 full -0.6/-0.2, d32 full -0.6/-0.75; v1 full base 156.15/129.57, g30n:o untriggered 156.67/129.56, g30n:o + CB_TRIG
+  156.17/128.79. d1 full noise.
+- v161 (17b925a) validate --quick ALL OK, cold 67.8 s. check 8f5427dc **2.1169x** [2.085, 2.149], judge prepare_s 88.8: d1 67.9/72.9,
+  d16 126.5/205.5, d32 154.0/304.7, v1 112.8/124.9, v16 262.6/**349.3**, v32 334.8/509.9. v16 sl 262.6 = 2nd H200 sample of v160's
+  NORME_TRIG win (260.7; pre-v160 265-269); v16 full 349.3 best so far (357 before). H200 tuner T=8 full picked {g30n:o} (128.4
+  -> 127.6, confirm 128.5 vs 127.5). Not submitted (< 2.1364x, 1% rule).
+- v162: T=8 full base += g30n:o; TUNE[8] {g30n:o True} dropped (no-op now).

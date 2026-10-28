@@ -3213,7 +3213,7 @@ TUNE = {1: ({}, {"g10alt:o": 1}),
         16: ({}, {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}),
         32: ({}, {"g30kgx:pooler": False}, {"g19:o": True}, {"tk2h": 3},
              {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}),
-        8: ({}, {"g30n:o": True}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}),
+        8: ({}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}),
         128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}),
         256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
 # n5s10 (lead 03:25Z: judge prepare_s <= 220 s; drop options the H200 tuner hasn't picked in the last 3 checks): TUNE lists
@@ -3231,10 +3231,12 @@ TUNE = {1: ({}, {"g10alt:o": 1}),
 # T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
 # n5s9: T=8 {nu8d/nu8x off, cslpw, pr8_npf 220}: H100 real routings (seeds 99/7/13/5, 4 rounds) v1 sl -0.4/-1.8/-2.7/-0.4,
 # full -0.3/-1.5/-0.8/-1.8 us (each half alone ~half of it); the H200 tuner picked one half or the other in 4937830f/133068b8.
+# n5s17 v162: T=8 full base += g30n:o (with attn CB_TRIG its W ring fills under _combine): H100 ab vs g12 o 0/-0.8 us (2 seeds),
+# H200 tuner 8f5427dc picked it (-0.8 / -1.0 us); {g30n:o True} option dropped (no-op at sl + full now).
 _T8N = {"cslpw": True, "pr8_npf": 220}  # n5s9 v152: nu8d/nu8x off back to a tuner option: H200 tuner (check bb8ea548) -1.1 sl / -1.6 full us with them ON
 _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
 TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True, "pr1_rb": 32},
-             (8, True): {"nu8": True, "g14alt:qkv_gate": 3, "g30n:o": True, **_T8N}, (8, False): {"nu8": True, "g14alt:qkv_gate": 3, **_T8N},
+             (8, True): {"nu8": True, "g14alt:qkv_gate": 3, "g30n:o": True, **_T8N}, (8, False): {"nu8": True, "g14alt:qkv_gate": 3, "g30n:o": True, **_T8N},
              (16, True): {"g19:o": True, "bal": True, "tk2fj": False, **_G24_ALL},
              (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
              (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},

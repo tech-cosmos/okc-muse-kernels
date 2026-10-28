@@ -2,7 +2,12 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-night5 s16: **main = v160** (9fa5164) = v158 + moe n5s24 norm ids/tw batch (v159, bitwise v16/v32) + NORME_TRIG (moe_norm's
+night5 s17: **main = v162** = v160 + attn RF_TRIG_ALL (batched _red_fin triggers after its wait) + CB_TRIG (_combine triggers after
+  its wait): the o GEMM's W ring now fills under the merge at d16/d32/v1 full (H100 -0.2..-0.8 us) + T=8 full base g30n:o (H200 tuner
+  picked it once CB_TRIG was in). check 8f5427dc (v161) 2.1169x, prepare_s 88.8; v16 sl 262.6 confirms v160 (2 H200 samples ~261 vs
+  265-269 before), v16 full 349.3 best. validate ALL OK (v162), cold 71.0 s. PDL audit (tools/timeline_all.py) found no other serial
+  PDL hand-off: T<=32 chains overlap, T>=128 GEMMs are cuBLAS. 10-28: 8 checks / 8 submits left.
+night5 s16: main = v160 (9fa5164) = v158 + moe n5s24 norm ids/tw batch (v159, bitwise v16/v32) + NORME_TRIG (moe_norm's
   NORM_EARLY path triggers PDL dependents at start: the T=128 g30 unpool's W prologue now runs under twm's drain; H100 v16 sl -1.9..-4.4,
   full -2.1..-2.3 us, 3 seeds). check aba95f63 2.1033x (noise: d1/v1 slow) but v16 sl 260.7 = best H200 (prev 265-269); g30 starts
   ~21 us earlier in the H200 profile. validate ALL OK, cold 69.7 s, judge prepare_s 89.6. Not submitted. 10-28: 9 checks / 8 submits.
@@ -68,7 +73,7 @@ Plateau: every kernel-level lever in NOTES s45-n5s7 is measured or bounded (dead
 interleaved A/Bs (tools/ab_flag.py), confirm on a check. Submit only > 2.1339x, or per the 09:28Z rule (>= 2.1126x +
 per-shape evidence). Open items, biggest first (none started):
 1. o+bnd+pr1 megakernel at T=1 (bound ~-3 us d1 = ~+0.5%; NOTES s45/s61/s74; moe n5s9 audit: post-attention chain <= 3-4.5 us).
-1b. DONE n5s16 (v159). Look for more PDL secondaries whose primary never triggers early (NORME_TRIG pattern).
+1b. DONE n5s16/n5s17 (v160, v161): no serial PDL hand-off left (timeline_all audit, NOTES n5s17).
 2. Any new Handoff from moe (attention lane) / proj: port as a TUNE option, validate, bundle into one check.
 T=16: every g30 option ties on 3 H200 checks (f824b925, 133068b8, 4937830f): don't add more g30 work at T=16.
 
