@@ -1819,8 +1819,8 @@ __device__ __forceinline__ bool tw_item(const char* smem, uint64_t* full, uint64
     for (int i = 0; i < NA; ++i) acc[r][i] = 0.f;
   uint32_t afA[KG][RT][4], afB[KG][RT][4];
   int pst = -1;
-#pragma unroll 1
   int lastv = 0, pcv = 0;
+#pragma unroll 1
   for (int kc = 0; kc < nkc; ++kc) {
     const char* sb = smem + st * (STRIDE ? STRIDE : C::STG);
     if (kc) mbar_wait(&full[st], ph);
@@ -2855,7 +2855,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     }
   };
   if (warp >= 8) {
-    asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 56;\n" ::: "memory");
     if (warp > 8 || lane != 0) return;
     int* counter = meta + 66;
     int st = 0, ph = 0, i = 0;
@@ -2944,39 +2944,59 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
         }
         asm volatile("fence.proxy.async.global;" ::: "memory");
       }
-      // n5s17 TWS owner: claim K chunks in batches; the last stage tells the consumers whether the item was stolen from
-      const bool stl = SNV && item >= sbase && g2 && cl == 0 && h < 0;
-      unsigned long long* sw = stl ? tws + (item - sbase) : nullptr;
-      int kend = k1, kbeg = k0;
-      unsigned long long nclaim = 0;
-      const bool nocl = (stw >> 22) & 1;  // debug ablation: dynamic consumer loop only, no claims (never stolen)
-      if (stl && !nocl) {
-        kend = SB_;
-        atomicExch(sw, (unsigned long long)SB_ | (64ull << 8) | (1ull << 16));
-      }
-      for (int kc = k0; kc < kend; ++kc, ++i) {
-        if (kc != k0 && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
-        char* sb = smem + st * STRIDE;
-        if (kc == k0) s_item[st] = stl && !((stw >> 23) & 1) ? item | (1 << 30) : item;  // bit 23: debug, consumer static
-        if (stl) {
+      // n5s17 TWS owner: claim K chunks in batches; the last stage tells the consumers whether the item was stolen from.
+      // n5s18: in its own loop copy; the plain loop (else branch) is exactly moe's: the claim logic inside it spilled the
+      // 40-register producer on EVERY item (+9 us v16 / +15 us v32 per call on the H100 with TWS off)
+      if (SNV && item >= sbase && g2 && cl == 0 && h < 0) {
+        unsigned long long* sw = tws + (item - sbase);
+        const bool nocl = (stw >> 22) & 1;  // debug ablation: dynamic consumer loop only, no claims (never stolen)
+        int kend = nocl ? 64 : SB_, kbeg = 0;
+        unsigned long long nclaim = 0;
+        if (!nocl) atomicExch(sw, (unsigned long long)SB_ | (64ull << 8) | (1ull << 16));
+        for (int kc = 0; kc < kend; ++kc, ++i) {
+          if (kc && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+          char* sb = smem + st * STRIDE;
+          if (!kc) s_item[st] = (stw >> 23) & 1 ? item : item | (1 << 30);  // bit 23: debug, consumer static
           int lst = 0;
           // the next batch's claim is issued at this batch's first chunk (pipelined: its round trip hides behind the
           // batch's stages), its result first used at the batch's last chunk
           if (nocl) lst = kc == 63;
-          else if (kc == kbeg) nclaim = atomicAdd(sw, (unsigned long long)SB_);
-          if (!nocl && kc == kend - 1) {
-            const unsigned long long o = nclaim;
-            const int lo = o & 255, hi = (o >> 8) & 255, np = (o >> 16) & 255;
-            kbeg = kend;
-            if (lo < hi) kend = min(lo + SB_, hi);  // next batch [lo = kend, ..): only the owner advances lo
-            else {
-              lst = np > 1 ? 2 : 1;
-              if (np == 1) atomicExch(sw, 0ull);  // unstolen: nobody else will touch the word
+          else {
+            if (kc == kbeg) nclaim = atomicAdd(sw, (unsigned long long)SB_);
+            if (kc == kend - 1) {
+              const unsigned long long o = nclaim;
+              const int lo = o & 255, hi = (o >> 8) & 255, np = (o >> 16) & 255;
+              kbeg = kend;
+              if (lo < hi) kend = min(lo + SB_, hi);  // next batch [lo = kend, ..): only the owner advances lo
+              else {
+                lst = np > 1 ? 2 : 1;
+                if (np == 1) atomicExch(sw, 0ull);  // unstolen: nobody else will touch the word
+              }
             }
           }
           s_last[st] = lst;
           s_pc[st] = (item - sbase) << 4;
+          mbar_expect_tx(&full[st], bytes);
+          tma2d(sb, map, kc * 64, off, &full[st]);
+#if TWM_L2H
+          {  // s21: evict_last if a later pass of this expert re-reads these weights, else evict_first
+            uint64_t pol;
+            if (off + PS < s_off[e + 1]) asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol));
+            else asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol));
+            bulk_g2s_h(sb + xo, wsrc + (size_t)kc * WB, wbytes, &full[st], pol);
+            bulk_g2s_h(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, &full[st], pol);
+          }
+#else
+          bulk_g2s(sb + xo, wsrc + (size_t)kc * WB, wbytes, &full[st]);
+          bulk_g2s(sb + xo + wbytes, ssrc + (size_t)kc * SB, sbytes, &full[st]);
+#endif
+          if (++st == NSTG) { st = 0; ph ^= 1; }
         }
+      } else
+      for (int kc = k0; kc < k1; ++kc, ++i) {
+        if (kc != k0 && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+        char* sb = smem + st * STRIDE;
+        if (kc == k0) s_item[st] = item;
         mbar_expect_tx(&full[st], bytes);
         tma2d(sb, map, kc * 64, off, &full[st]);
 #if TWM_L2H
@@ -2996,7 +3016,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     }
     return;
   }
-  asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory");
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 224;\n" ::: "memory");
   int st = 0, ph = 0;
 #if TWM_TL
   // s14 timeline (build with TWM_TL 1, order & 2): per CTA 64 u64 in part: [0] start, [1] items, 3 per item

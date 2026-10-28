@@ -1,0 +1,14 @@
+diag12 MEAN decode 1 sq: 30.0 us | seeds 27.4 34.2 27.1 27.4 34.0 | maxdiff 0
+diag12 MEAN decode 16 sq: 64.1 us | seeds 64.0 56.4 64.0 57.0 79.2 | maxdiff 0
+diag12 MEAN decode 32 sq: 83.8 us | seeds 86.4 92.1 85.2 75.2 80.0 | maxdiff 0
+diag12 MEAN verify 1 sq: 63.8 us | seeds 53.2 72.7 59.9 66.9 66.4 | maxdiff 0
+diag12 MEAN verify 16 twm: 169.6 us | seeds 174.0 167.4 177.2 164.6 165.1 | maxdiff 0
+diag12 MEAN verify 16 s160: 175.6 us | seeds 179.3 174.8 183.6 170.3 170.1 | maxdiff 0.00195
+diag12 MEAN verify 16 s100: 174.8 us | seeds 177.9 174.4 181.9 169.8 170.0 | maxdiff 0.00391
+diag12 MEAN verify 16 b4: 176.4 us | seeds 180.6 175.8 183.4 170.8 171.5 | maxdiff 0.00391
+diag12 MEAN verify 16 twmb: 168.7 us | seeds 173.0 167.3 176.5 162.8 163.8 | maxdiff 0
+diag12 MEAN verify 32 twm: 202.2 us | seeds 192.5 201.6 201.0 201.6 214.3 | maxdiff 0
+diag12 MEAN verify 32 s160: 202.1 us | seeds 192.7 202.3 200.9 201.1 213.5 | maxdiff 0
+diag12 MEAN verify 32 s100: 202.0 us | seeds 191.6 202.2 201.5 200.7 213.7 | maxdiff 0
+diag12 MEAN verify 32 b4: 202.0 us | seeds 192.3 202.1 201.1 201.4 213.4 | maxdiff 0
+diag12 MEAN verify 32 twmb: 201.8 us | seeds 192.7 201.6 200.7 201.1 213.0 | maxdiff 0
