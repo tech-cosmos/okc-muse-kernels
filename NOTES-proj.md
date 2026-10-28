@@ -2375,3 +2375,25 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
     at d16/d32); 5-bit needs more decode ops. Codes are 4.0 bits. No lossless expert-byte lever.
   * attention (orphaned since lead 01:45Z moved moe back to its board): moe s36-s45 closed every attention shape (STATE-moe).
 - Modal ledger 43.6/60 GPU-min for 10-28 (shared): not spent on re-confirming dead items. Lane ask refreshed in COORD.
+
+## n5s16 (2026-10-28 07:37Z-08:05Z, okc-night5 session 16): layer NEXT 3 'pr128' (T=128 one-launch pooler+router g30) measured DEAD on H100; 0 judge runs, 0 Modal
+- No lead answer to the lane ask, so I took layer STATE NEXT 3 (n5s21: pooler FP32-slab g30 + router hi/lo rows in one launch,
+  <= 132 CTAs, paper ~-3.4 us/v16 layer). The only way to fit 72 row tiles (4096 pooler + 512 router rows) x 2 K-halves on <= 132
+  CTAs is stream-K (some CTAs cross a tile boundary), so I timed r-layer's g30k (G30K_F32 slabs) at MTOK 128.
+- dev/n5s16/frk_bound.py (cold-L2 graph us, H100, judge weights; extra 512 rows = 12-bit pooler copies = LOWER bound, real lo rows
+  would be raw BF16) and dev/n5s16/g30k128.cu = g30_src.cu + G30K_RC (lean smem: WG1->WG0 reduce in RC chunks, FP32 out stored
+  straight from registers in 32 B sectors, no staging: 9-10 x stages fit at MTOK 128 instead of 7) + G30K_NOOUT (debug).
+  cuBLAS FR [4608] FP32 out 30.3-30.5, pooler-only cuBLAS 27.2.
+  | g30k form | N=4096 G128 | G132 | N=4608 G128 | G132 | best other G (N=4608) |
+  | stock g30k NS7 NW10 | 29.9 | 34.0 | 37.0 | 34.7 | NS6/NS5/NS8 worse |
+  | lean RC2 NS9 NW10 | 27.8 | 33.5 | 37.6 | 34.9 | G72 42.4, G88 42.1, G96 37.9, G104 39.1, G112 37.5 |
+  | lean RC4 NS10 NW9 | 28.7 | 33.7 | 37.4 | 35.6 | |
+- Mechanism (N=4096, lean, ablations): ESC=0 26.1 / 30.8 (G128/G132); no stores 26.8 / 32.1; neither 25.6 / 30.3, G120 30.7, G96
+  28.4. So the ~+4.7 us at G=132 is NOT the segment epilogue or escapes: CTAs whose K ranges are shifted against each other stream
+  slower (G=96 with 42.7 units/CTA beats G=132 with 31), i.e. g30 at T=128 likes CTA pairs reading the same x halves at once
+  (s102's aligned S2 grid). Stream-K at T=128 has a ~5 us tax on the H100.
+- Verdict: best fused form 34.7 vs FR 30.3 on the H100 (+4.4 us); the H200 favours g30 slabs by ~3.8 us more than the H100
+  (n5s21: slab -4.6 vs -0.8), so at best a tie BEFORE the raw-BF16 lo rows (+1.1 MB bytes, 2nd decode path), the 3-slab sum in
+  _routing and in the gathern. DEAD, and not worth Modal minutes (a tie can't pass). Told layer (COORD Requests).
+- Side note for g30k at T=32 (layer's pooler G104): the lean RC form (no stg32 staging) is a free smem cut there too, but T=32
+  isn't smem-bound (NS16 fits), so no expected gain; not pursued.
