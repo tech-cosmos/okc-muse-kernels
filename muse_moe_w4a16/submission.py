@@ -2756,8 +2756,8 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[2][32], s_ord[4], s_cost;
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
 #if TWM_REL
-  __shared__ __align__(8) uint64_t relb[2];
-  __shared__ int s_rel[2];
+  __shared__ __align__(8) uint64_t relb[4];
+  __shared__ int s_rel[4];
 #endif
   int* done = meta + 68;
   // s14: nsplit < 0 = no K split; instead the lightest (last) non-big experts whose RT 4 gemm2 items add up to
@@ -2794,7 +2794,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   if (tid == 0) {
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 8 * 32); }
 #if TWM_REL
-    mbar_init(&relb[0], 256); mbar_init(&relb[1], 256);
+    for (int i = 0; i < 4; ++i) mbar_init(&relb[i], 256);
 #endif
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
@@ -2919,13 +2919,22 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   if (warp >= 8) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
 #if TWM_REL
-    if (warp == 9) {  // n6s3 REL helper: releases finished gemm13 items (2 slots; items are >> the release latency apart)
+    if (warp == 9) {  // n6s3 REL helper: releases finished items (4 slots; items are >> the release latency apart)
+      // n6s4: gemm2 items too (NORM_EARLY flags). slot = e | g2 << 8 | slot a << 16, -1 = done. The mbarrier wait
+      // (acquire) + this thread's gpu fence (cumulative) order the consumers' stores before the count, as the
+      // bar.sync + thread-0 fence did. Consumers no longer wait for the fence (H200: twm is consumer-bound)
       if (lane == 0)
         for (int k = 0;; ++k) {
-          mbar_wait(&relb[k & 1], (k >> 1) & 1);
-          const int e = s_rel[k & 1];
-          if (e < 0) break;
+          mbar_wait(&relb[k & 3], (k >> 2) & 1);
+          const int v = s_rel[k & 3];
+          if (v < 0) break;
+          const int e = v & 255;
           __threadfence();
+#if NORM_EARLY
+          if (v & 256) {
+            if (atomicAdd(done + 32 + e, 1) == s_nd2[v >> 16] - 1) atomicAdd(done + 32 + e, 1 << 20);
+          } else
+#endif
           atomicAdd(done + e, 1);
         }
       return;
@@ -3012,8 +3021,8 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
 #endif
     if (item < 0) {
 #if TWM_REL
-      if (tid == 0) s_rel[nrel & 1] = -1;
-      mbar_arrive(&relb[nrel & 1]);
+      if (tid == 0) s_rel[nrel & 3] = -1;
+      mbar_arrive(&relb[nrel & 3]);
 #endif
       break;
     }
@@ -3055,8 +3064,8 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
       // release this item's inter rows to gemm2 producers on other SMs (their TMA reads them: async proxy)
       asm volatile("fence.proxy.async.global;" ::: "memory");
 #if TWM_REL  // n6s3/n6s4 REL: the helper warp 9 fences + counts (consumers go on to the next item)
-      if (tid == 0) s_rel[nrel & 1] = e;
-      mbar_arrive(&relb[nrel & 1]);
+      if (tid == 0) s_rel[nrel & 3] = e;
+      mbar_arrive(&relb[nrel & 3]);
       ++nrel;
 #else
       asm volatile("bar.sync 1, 256;" ::: "memory");
@@ -3068,11 +3077,17 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     }
 #if NORM_EARLY
     else {  // n4s1: Y rows of expert e complete after its last gemm2 item (a K-split's 2nd half writes Y before it counts)
+#if TWM_REL
+      if (tid == 0) s_rel[nrel & 3] = e | 256 | (a << 16);
+      mbar_arrive(&relb[nrel & 3]);
+      ++nrel;
+#else
       asm volatile("bar.sync 1, 256;" ::: "memory");
       if (tid == 0) {
         __threadfence();
         if (atomicAdd(done + 32 + e, 1) == s_nd2[a] - 1) atomicAdd(done + 32 + e, 1 << 20);
       }
+#endif
     }
 #endif
 #if TWM_TL
