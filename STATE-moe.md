@@ -30,6 +30,8 @@
   Small-kernel serial-load audit DONE (route/routegather/norm/norm2); nothing left there. proj/twm 3-WG self-declared dead.
 - n5s25: bs256 cost model (proj's H200 a763ccaf v32 timelines): HBM 156 + consumer excess ~21 (all per-weight levers dead) + drain 15-22
   (proj's KQ K-split covers T=256) + route/norm ~7. No moe bs256 build >= 5 us; lane question to lead (COORD Requests n5s25). 0 runs.
+- n5s26: DT pair rows without the REG cap: 168 is a HARDWARE cap at 288 threads (3 warps on one SMSP x 168 = 16K regs); DT at
+  __maxnreg__ 224 won't launch and still spills; DT loses +8..10 us even with no pair rows. DEAD (NOTES n5s26). 0 runs.
 - Checks 10-28: moe 11 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326, cefcc133, d3761aa5, e3bd482e), 2 submits (951c17e0, 4fb734c6); attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)

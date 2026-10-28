@@ -2505,3 +2505,17 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - => No bs256 build passes the lead's 5 us gate in moe's lane. Told the lead (COORD Requests n5s25) and proposed:
   moe takes over muse_attention_decode sliding batch-1 again or a layer gap, or works with proj on the drain (two different
   splits: proj = K pieces; moe could try ROW-split tail items without a combine, but TWM_TAIL row classes already lost s30).
+
+## n5s26 (2026-10-28 06:06Z - 06:55Z): tk2f DT pair rows without the 168-register cap = DEAD (hardware cap); 0 runs
+- No lead answer to n5s25. Took the last unbuilt tk2f item (n5s18: "pair rows without REG 168 spills").
+- Probe (/tmp copy, tools/n5s26: moe_tk2f with `__maxnreg__(TK2F_MAXR)` instead of __launch_bounds__(288,1); nvcc refuses both
+  on one kernel). MAXR 224 build: ptxas then gives many tk2f variants 170-224 regs (the 168 cap was binding on them), sq 161
+  (default 160), DT 224 regs + STILL 120 B stack.
+- H100 ncu (tools/n5s26/run.sh, 2 runs each, us): d16 s7 sq 81.1/82.2, dt 104.2/103.8; d16 s99 (no pair rows) sq 110.6/109.2,
+  dt 118.1/119.7; d32 s11 sq 120.5/121.7, dt 149.6/149.0. MAXR 224: sq unchanged (81.0/80.6, 108.6/108.7, 121.2/120.8);
+  DT at 224 regs NEVER LAUNCHES (ncu sees no moe_tk2f).
+- Why: 168 is a HARDWARE cap for 288-thread CTAs, not a ptxas choice: 9 warps -> one SMSP holds 3 warps, 3 x 32 x 168 =
+  16128 of its 16384 registers. Any 9-warp tk2f body is capped at 168. Over 168 needs 8 warps (producer folded into a consumer;
+  s15 inline producer was 2x slower in twm) or 12 warps + setmaxnreg (n4 note: ptxas budget follows the launch bound).
+- And even registers would not save DT: on s99 (no pair rows) it already loses +8..10 us (layout / moved gemm2 loop, n5s18),
+  and DT spills at 224 too. Extra-group (16-token) lever stays CLOSED. Nothing to hand off.
