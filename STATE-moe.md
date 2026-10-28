@@ -1,6 +1,10 @@
 # STATE-moe
 
-## NOW (n5s29, 2026-10-28 07:45Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
+## NOW (n5s32, 2026-10-28 09:10Z): lead 07:35Z = in-layer oracle -> build. tools/n5s32/oracles.py (r-layer copies, TUNE={}):
+- H100 in-layer: tk2f rows' STRUCTURE (zero bytes + zero math, ornc-orz) = d1 8.9/10.2, d16 20.4/23.5, d32 20.6/19.8, v1 17.5/17.6 us
+  (sl/full), ADDITIVE to the stream (why: ring = 1 row, or serial per-row chain; NOTES n5s32). ~9% score if free (H100).
+- NEXT: at 00:00Z Modal H200 base0/orz/ornc/orn (cmd in NOTES n5s32). If H200 structure >= ~5 us d1 / ~10 us d16-v1: BUILD overlapped rows
+  (x double-buffer, epilogue under next row's stages, ring slack); else close. orw/both invalid (L2 re-reads no faster).
 - n5s15: tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps); bytes-in-flight lever closed.
 - n5s16: H200 ORACLE: the extra 8-token groups cost d16 4.0 / d32 7.7 us (tk2f fit 14.1 + 6.97 E + 4.4 X us).
 - n5s16-n5s18: EVERY 16-token shared-dequant form on mma.sync tk2f is DEAD: inlined (i-cache), noinline (ABI), tk2h merged
@@ -22,10 +26,8 @@
   REG cap (168 = HW cap at 288 threads). Decode excess = fit's fixed 14.1 + 4.4/extra group, every piece measured dead.
 - n5s27: tk2f L2 row prefetch (PFL2, DIAG-only, off) DEAD on the H200 (979cb0ea: d1 +3..5, d16 +8..15, d32 +13..19, v1 +6..12 us;
   18 KB form loses least => request size is no lever; any HBM traffic beyond the 72 KB/SM ring slows tk2f). NOTES n5s27.
-- n5s28 TK2FN fused norm DEAD (H100 replay +2.6..5 us). - n5s29: Modal H200 HBM probe (tools/n5s29/ov/bwprobe.py): bulk copies are the fastest stream (4.42-4.57 TB/s contiguous at 280-560 MB),
   LDG never beats them (1 CTA/SM LDG -4..7%); tk2f's 72 KB/SM of 18 KB copies is within 0.5-2.5% of the best: load-method lever DEAD.
-- n5s31: no build; board JSON screened_speedup: #1 2.685 -> 2.584 screened (real gap ~14%).
-- n5s30: n5s15 ring variants (r5/r6/r8/k44/k45) re-audited with loop64k: no 64 KB loop crossing -> verdict stands, ring lever closed. Checks 10-28: moe 12 of its 12 used (+979cb0ea n5s27); was: 11 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326, cefcc133, d3761aa5, e3bd482e), 2 submits (951c17e0, 4fb734c6); attention 0/20.
+- n5s29 Modal HBM probe: bulk copies >= LDG, tk2f 4x18 KB ring within 0.5-2.5% of the stream ceiling. n5s28 TK2FN fused norm DEAD; n5s30 ring variants have no 64 KB crossing (ring verdict stands); n5s31 board #1 2.584x screened. Checks 10-28: moe 12 of its 12 used (+979cb0ea n5s27); 2 submits (951c17e0, 4fb734c6).
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
@@ -119,7 +121,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - s40 H200 DIAG d5bf959a (tools/s40/mkdiag.py): random-row gather ceiling ~4.1 TB/s (d32 floor 159, d16 79; dense 144/72).
   Decode full at 92-95% of it (headroom d32<=9, d16<=7 us). Verify full consumer-bound (all-L2 v32 170 / v16 93 vs main 188/102,
   floors 157/80): headroom only via a faster _gw_verify consumer. Full kernels at perfect overlap = ~-4% attention score max.
-- Checks used 2026-10-27: 13/20, scored 2/10.
 - s42/s43 (NOTES): T=128/256 GEMM prototypes xr3 / g31 / g32 / g33 all DEAD vs layer g30 / cuBLAS.
 - s45 (NOTES s45): re-audit, no untested lever on any attention shape; lane request to lead (COORD). 0 checks.
 ## Attention: H200 batch-1 full facts (s32 DIAG tool tools/s32/mkdiag.py; NOTES s32)
@@ -127,7 +128,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - Main: d1 full 12.2-13.0, v1 full 17.0-17.3. With ALL gathers in L2: d1 11.0, v1 16.7 -> NOT memory-bound.
 - Every plan knob loses (stages, splits 63-1023, BN, warps 8, pre/pf/fix, qk16, Gluon gw 127-263 +-gfuse, gbal).
 - Next: H200 per-program timeline of _attn_split (v1) / _gd_full (d1) via the diag hook; build only once it names the cost.
-## Attention: closed items (NOTES s31-s35: csl tail, v16 merge, v1 full CLOSED; s33 spec=True on main)
 ## Attention: d1 full (s35; NOTES s35)
 - ON MAIN 9855088: plan qf=True (query rows loaded before _gd_full's prologue copies): H200 -0.28 us (5/5 pairs, DIAGs
   95f8158e, 1259baad), H100 tie. Not yet in a scored run (rides with the next submit). Handoff to layer posted.

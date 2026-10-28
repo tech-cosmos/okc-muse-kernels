@@ -2598,3 +2598,37 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - Per-shape vs TASK floors (best runs): bs1 ~28/11.4 (3 experts: 13.5 us stream + the fit's 14 us fixed), bs8 ~68/37.3,
   bs16 ~93/52.5, bs32 ~128/70.8, bs128 ~200/101.3, bs256 ~243/108.9. Each item in the fixed part, the extra groups and the
   big-M consumer is already in NOTES (n5s15-n5s30) with an H200 dead end. Nothing to hand off.
+
+## n5s32 (2026-10-28 07:44Z - 09:10Z): IN-LAYER tk2f oracles (lead 07:35Z): rows' STRUCTURE is the biggest tk2f ceiling (H100); H200 run queued
+- Modal ledger 55.8/60 min today (a 2-variant run reserves 11) and moe's 12 board checks for 10-28 are used: H100 only today.
+- On-record H200 oracles in this lane (judge DIAGs): extra 8-token groups free d16 -4.0 / d32 -7.7 us (layer tk2h W3 has 2.8 of d32;
+  rest ~0.8% score, 5 dead forms); stream at the HBM ceiling (n5s15/n5s29); consumer math n10 1-4 us. None >= 1% left buildable.
+- NEW in-layer oracle generator tools/n5s32/oracles.py <r-layer submission.py> <outdir> (wrong output, timing only, TUNE = {} in all;
+  against r-layer da2bcd9): base0; orc (tk2f_consume/tk2g_row no dequant/mma); orw (producer re-reads each CTA's first 2 rows: L2);
+  both (orw+orc); orz (moe_tk2f rows emptied: a1=a0, b1=b0 -> routing + launch + norm2/n2u only); orn (producer issues NO copies,
+  plain arrive on full: zero-byte zero-latency ring, math kept); ornc (orn + orc = the rows' structure only).
+- H100 in-layer, r-layer bench.py bench, one run each (GPU shared), us sliding/full:
+            base0        orz          ornc         orn          both         orw          orc
+    d1    84.2/104.6   53.9/64.3    62.8/74.5    73.4/88.8    83.8/105.1   84.7/106.5   84.1/103.0
+    d16  190.0/293.2   86.5/205.6  106.9/229.1  149.5/262.7  183.4/279.7  192.2/284.6  187.7/291.9
+    d32  187.7/414.1   96.8/325.6  117.4/345.4  155.4/386.1  180.1/409.0  187.6/416.7  181.7/409.1
+    v1   142.0/158.4   66.2/80.5    83.7/98.1   109.6/124.2  129.5/144.6  135.0/150.4  140.6/156.7
+    (v16/v32 = twm path, controls: all within +-2.5)
+  Decomposition (sl/full): rows' STRUCTURE ornc-orz = d1 8.9/10.2, d16 20.4/23.5, d32 20.6/19.8, v1 17.5/17.6 us;
+  math with an instant ring orn-ornc = 10.7/14.3, 42.6/33.6, 38.0/40.7, 25.9/26.1; base0-orn = 10.8/15.8, 40.5/30.5, 32.3/28.0, 32.4/34.2.
+  d1: base0-ornc = 21.4 us ~= the d1 bytes at 3.1 TB/s (n5s9: ~71 MB -> 22.9) => tk2f d1 = structure (~9) + stream, ADDITIVE.
+  orw/both ~0 at d1/d16 sl => L2 re-reads were no faster than HBM here (orw not a valid stream-free oracle; use orn).
+- Reading: the per-row work that needs no bytes and no math (x LDGs at each segment start, s_red reduce + bar.sync 1 + output store per
+  row, gemm13 cnt add/fence, gemm2 cnt spin, the last row's tail) does NOT hide under the stream. HYPOTHESES (not yet shown): the ring
+  is 4 stages = exactly 1 row (NQ 4 at NC 8 x KPS 2), so once row r+1's 4 stages have landed during row r's epilogue the producer
+  stalls; or the consumer chain per row (wait -> LDS -> dq/mma -> reduce -> bar.sync -> store) is serial latency the stream can't hide.
+  A per-CTA timeline (tools/mktl_diag.py on ornc vs base0) would tell which. Upper bound if structure were free (H100 us x layer's H200 %/us table): d1 1.6+0.6,
+  d16 1.7+0.7, d32 1.2+0.4, v1 2.0+0.7 = ~9% score (H100 numbers; the H200 is NOT a proxy -> MUST be re-measured there).
+  Caveat vs n5s15 (deeper/larger rings lost on the H200 by 0.5-4.8 us): those kept the per-row structure; the lever here is to make
+  the structure itself cheaper or overlapped (e.g. epilogue/x-load of row r overlapped with row r+1's stages: x double-buffered in
+  registers/smem, reduce through smem without the full bar.sync, ring >= 1 row + epilogue slack).
+- QUEUED (00:00Z, ~15 GPU-min): from ~/r-layer: python ~/r-moe/tools/h200.py muse_decode_layer base=/tmp/n5s32/base0.py
+  cand=/tmp/n5s32/orz.py ornc=/tmp/n5s32/ornc.py orn=/tmp/n5s32/orn.py --cmd "python bench.py bench 2>&1 | grep -E ' us |geomean|rror'"
+  (regenerate /tmp/n5s32 with oracles.py first). If H200 ornc-orz >= ~5 us at d1 or >= ~10 at d16/d32/v1: BUILD the overlapped-row
+  tk2f (one CTA-local change, layer integrates); else close.
+- 0 judge runs, 0 Modal min.
