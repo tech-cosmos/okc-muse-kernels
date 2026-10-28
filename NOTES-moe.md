@@ -2343,3 +2343,34 @@ default build is unchanged. Every variant bitwise = main locally (maxdiff 0), ex
   tk2f, e.g. the last k CTAs) that runs only the 2-group segments with its own register-x body, concurrently with tk2f's 1-group
   rows -> one body per CTA role, no i-cache sharing. Not built; prize <= d32 ~5 (vs h3), d16 ~4 us.
 - Checks 10-28 used by moe: 6/20 (+ e19541a1, 8ed43995). 0 submits.
+
+## n5s17 (2026-10-28 03:16Z - 04:45Z): tk2f code LAYOUT probes (H100 ncu, layer routings); 0 checks
+Question: does a 2-group (TWO) body cost tk2f's 1-group rows ~5-12% just by EXISTING (n5s16 HYB lesson), so a separate
+CTA role is needed? All probes are DIAG-only template bits (default SASS unchanged; bench test 15/15 OK). Tools:
+tools/n5s17/ncu_r.py (VAR=... one tk2f call on a DIAG layer routing under ncu), tools/n5s17/loop64k.py <so> [regex] [min] [v|all]
+(lists innermost MMA loops that straddle a function-relative 64 KB boundary; v = print all MMA loops).
+ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
+- sq (cfg 84204 SQ)                          80.7 (109) / 107.8 (133)
+- r1 dead TWO body in a never-taken TOP-LEVEL branch BEFORE the main path   92.1 (1069) / 119.4 (981)   = +12%
+- r2 same dead branch AFTER the main path                                   81.4 (107) / 108.3 (125)   = free
+- p3..p8: r1 + 1..16 extra dead instrs (alignment)                          89.5..93.7  (all slow: not line alignment)
+- p9: default minus the dead tk2w_bound split code (hot loops 10 KB earlier) 79.4-79.7 / 106.5-108.6     = tie (no slope)
+- pad-only dead blocks before the main path: +2/+3/+4/+6 x 512 B: 79.9-81.1 (fast); +10 KB 81.0 (107);
+  +16 x 512 B (gemm2 loop ends 1 KB past 0x10000) 80.8 (277); +15.5 KB (gemm2 loop 8.7 KB past 0x10000) 84.7 (444) = +4.4%.
+  SASS: in r1 the gemm13 consumer loop sits at 0xd620-0x125a0 (crosses 0x10000); every fast build has no MMA loop crossing
+  a 64 KB boundary (the producer warp's loop crossing is harmless).
+=> RULE (H100, fits all plain-tk2f probes): a hot consumer loop straddling a function-relative 64 KB code boundary is slow
+  (+4% for ~9 KB past it, +12% for the gemm13 loop); dead code itself is free when it doesn't move the hot loops across.
+- BUT HYB (n5s16, GS16 3 bodies; its gemm2 loop 0xd150-0x162a0 crosses) padded so NO loop crosses (z3: dead 12 KB before
+  gemm2 -> 0x10190-0x192e0; w3: 14 KB): still slow: d16 s99 118.0/116.6 vs x3 114.0 vs sq 107.8; d16 s7 91.1/91.3 vs x3 93.5
+  vs 80.7; d32 s7 117.4/117.2 vs x3 117.8 vs 108.7 (no_instr 660-820 vs sq 110-150). HYB's per-row loop is 39 KB (1-group
+  64 + TWO 128 MMAs in ONE loop): that loop is slow on its own, crossing or not. So for HYB/GS16 the cost is the big
+  combined loop, not the 64 KB boundary. The old GS16 kernels also have crossing loops (loop64k), so they paid both.
+- loop64k over the moe lib: twm/twq inner loops do not cross; tk2h (MRG) does not cross. The layer's libs were not in this
+  cache (not scanned): layer could run the tool on its own builds.
+- Design consequence (NOT built): TWO rows must run in their OWN loop, placed AFTER the 1-group loops (r2 = free), e.g. per
+  CTA: [gemm13 1-group rows] [gemm13 TWO rows] [gemm2 1-group rows] [gemm2 TWO rows] with the TWO loop a single run-time-
+  gated call site (code after the main loops), separate row spaces (1-group space = odd leftover groups, TWO space = group
+  pairs), each split evenly over all CTAs (balanced without a weight), producer streaming in the same order. Unknowns: the
+  TWO loop's own rate in isolation (17 KB loop; tk2g TWO = ~1.15x a 1-group row by instruction count), and whether the
+  extra ordering/prologue eats the prize (H200 oracle: extra groups cost d16 4.0 / d32 7.7 us; layer's h3 at d32 gets 2.8).

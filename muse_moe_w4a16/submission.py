@@ -4807,7 +4807,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   int a0 = (int)((long long)n13 * blockIdx.x / gridDim.x), a1 = (int)((long long)n13 * (blockIdx.x + 1) / gridDim.x);
   int b0 = (int)((long long)n2 * blockIdx.x / gridDim.x), b1 = (int)((long long)n2 * (blockIdx.x + 1) / gridDim.x);
-  if (GS == 8 && !DYN && !FP && D > 0) {  // s12 weighted split (wE = D / 8 for extra-group rows), see tk2w_bound
+  if (GS == 8 && !DYN && !FP && !(PF & (1 << 25)) && D > 0) {  // (n5s17: PF bit 25 compiles it out) s12 weighted split (wE = D / 8 for extra-group rows), see tk2w_bound
     __shared__ int s_ab[4];
     if (warp == 0) {
       const int v0 = tk2w_bound(blockIdx.x, nact, D, 256, s_e, s_off), v1 = tk2w_bound(blockIdx.x + 1, nact, D, 256, s_e, s_off);
@@ -4885,6 +4885,12 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     if constexpr ((PF & 8192) != 0) {  // n5s16 HYB
       tk2x_consume<512, NC, NSTG, true, KPS, SA, (PF & 4) != 0, (PF & 16384) != 0, (PF & 32768) != 0>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt,
                                                               s_red, smem, s_x2, full, empty, st, ph, rb);
+      if constexpr (((PF >> 27) & 15) != 0) {  // n5s17 LAYOUT: dead pad of ((PF >> 27) & 15) KB so the gemm2 loop starts past 0x10000
+        if ((l2h >> 13) & 1) {                  // (a hot loop straddling a 64 KB code boundary costs 4-12%: NOTES n5s17)
+#pragma unroll
+          for (int i = 0; i < ((PF >> 27) & 15) * 64; ++i) asm volatile("membar.cta;" ::: "memory");
+        }
+      }
       tk2x_consume<256, NC, NSTG, false, KPS, SA, (PF & 4) != 0, (PF & 16384) != 0, (PF & 32768) != 0>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt,
                                                                s_red, smem, s_x2, full, empty, st, ph, rb);
       return;
@@ -4895,12 +4901,57 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
                                                 s_x2, full, empty, st, ph, rb);
     return;
   }
+  if constexpr ((PF & (1 << 26)) != 0) {  // n5s17 pad-only probe: a dead branch of ((PF >> 20) & 31) x 32 instructions
+    if ((l2h >> 13) & 1) {
+#pragma unroll
+      for (int i = 0; i < ((PF >> 20) & 31) * 32; ++i) asm volatile("membar.cta;" ::: "memory");
+      return;
+    }
+  }
+  if constexpr ((PF & 131072) != 0 && (PF & 262144) == 0) {  // n5s17 ROLE probe (DIAG): a never-taken top-level branch holding a TWO body
+    if ((l2h >> 13) & 1) {
+#pragma unroll
+      for (int i = 0; i < ((PF >> 20) & 31); ++i) asm volatile("membar.cta;" ::: "memory");  // n5s17 pad (dead code)
+      uint4 xf[64 / NC][2];
+#pragma unroll
+      for (int qq = 0; qq < 64 / NC; ++qq) {
+        xf[qq][0] = __ldg(reinterpret_cast<const uint4*>(X) + (qq * 64 + lane) * 2);
+        xf[qq][1] = __ldg(reinterpret_cast<const uint4*>(X) + (qq * 64 + lane) * 2 + 1);
+      }
+      const uint4* xs = smem + NSTG * NC * KPS * 72 + warp * (64 / NC * 2 * 32) + lane;
+      for (int R = a0; R < a1; ++R)
+        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, (PF & 4) != 0>(slut, xf, xs, inter, R & 255, s_off[R & 31], 16, 1.f,
+                                                                        s_red, smem, full, empty, st, ph, rb, true, s_srt);
+      for (int R = b0; R < b1; ++R)
+        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, (PF & 4) != 0>(slut, xf, xs, Y, R & 127, s_off[R & 31], 16, 1.f,
+                                                                        s_red, smem, full, empty, st, ph, rb, false, s_srt);
+      return;
+    }
+  }
   if (FP) asm volatile("bar.sync 3, %0;" ::"n"((NC + 1) * 32) : "memory");  // the producer initialized the ring
   if (FP && a0 >= a1) mbar_arrive(&xrdy);  // no gemm13 rows here: release the producer's gate at once
   tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
                                     empty, st, ph, rb, &xrdy);
   tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
                                      empty, st, ph, rb);
+  if constexpr ((PF & 262144) != 0) {  // n5s17 ROLE probe P2: the dead TWO branch AFTER the main path
+    if ((l2h >> 13) & 1) {
+      uint4 xf[64 / NC][2];
+#pragma unroll
+      for (int qq = 0; qq < 64 / NC; ++qq) {
+        xf[qq][0] = __ldg(reinterpret_cast<const uint4*>(X) + (qq * 64 + lane) * 2);
+        xf[qq][1] = __ldg(reinterpret_cast<const uint4*>(X) + (qq * 64 + lane) * 2 + 1);
+      }
+      const uint4* xs = smem + NSTG * NC * KPS * 72 + warp * (64 / NC * 2 * 32) + lane;
+      for (int R = a0; R < a1; ++R)
+        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, (PF & 4) != 0>(slut, xf, xs, inter, R & 255, s_off[R & 31], 16, 1.f,
+                                                                        s_red, smem, full, empty, st, ph, rb, true, s_srt);
+      for (int R = b0; R < b1; ++R)
+        tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, (PF & 4) != 0>(slut, xf, xs, Y, R & 127, s_off[R & 31], 16, 1.f,
+                                                                        s_red, smem, full, empty, st, ph, rb, false, s_srt);
+      return;
+    }
+  }
   if constexpr (FN) {
     s_rt[tid] = rt;
     s_rg[tid] = rg;
@@ -5038,6 +5089,33 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #if TK2X
     if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 60000 && cfg < 70000 && cfg % 1000 == 4)  // n5s16 HYB GS16 + PF4 on SQ stages
       return tk2f_go<8, 4, 2, false, false, true, 16, 0, 516 | 8192>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+    if (TK2X > 1 && sa && g_tk2f_l2h == TK2F_L2H && ((cfg >= 89204 && cfg < 100000) || (cfg >= 80204 && cfg <= 82204)) && cfg % 1000 == 204) {  // n5s17 pad probes
+      switch (cfg) {
+        case 89204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 131072 | (1 << 20)>(0, TK2F_ARGS0);
+        case 90204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 131072 | (2 << 20)>(0, TK2F_ARGS0);
+        case 91204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 131072 | (4 << 20)>(0, TK2F_ARGS0);
+        case 92204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 131072 | (6 << 20)>(0, TK2F_ARGS0);
+        case 93204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 131072 | (8 << 20)>(0, TK2F_ARGS0);
+        case 95204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | (1 << 25)>(0, TK2F_ARGS0);  // no tk2w code
+        case 96204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | (1 << 26) | (2 << 20)>(0, TK2F_ARGS0);
+        case 97204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | (1 << 26) | (3 << 20)>(0, TK2F_ARGS0);
+        case 98204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | (1 << 26) | (4 << 20)>(0, TK2F_ARGS0);
+        case 99204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | (1 << 26) | (6 << 20)>(0, TK2F_ARGS0);
+        case 80204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | (1 << 26) | (16 << 20)>(0, TK2F_ARGS0);
+        case 81204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | (1 << 26) | (31 << 20)>(0, TK2F_ARGS0);
+        case 82204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | (1 << 26) | (10 << 20)>(0, TK2F_ARGS0);
+        case 94204: return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 131072 | (16 << 20)>(0, TK2F_ARGS0);
+        default: break;
+      }
+    }
+    if (TK2X > 1 && sa && g_tk2f_l2h == TK2F_L2H && cfg >= 20004 && cfg < 25000 && cfg % 1000 == 4)  // n5s17 HYB W 0..4 + 12 KB pad
+      return tk2f_go<8, 4, 2, false, false, true, 16, 0, 516 | 8192 | (12 << 27)>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+    if (TK2X > 1 && sa && g_tk2f_l2h == TK2F_L2H && cfg >= 25004 && cfg < 29000 && cfg % 1000 == 4)  // n5s17 HYB W 0..3 + 14 KB pad
+      return tk2f_go<8, 4, 2, false, false, true, 16, 0, 516 | 8192 | (14 << 27)>(8 + (int)(cfg / 1000) % 10 - 5, TK2F_ARGS0);
+    if (TK2X > 1 && sa && g_tk2f_l2h == TK2F_L2H && cfg == 88204)  // n5s17 ROLE probe P2 (dead branch after the main path)
+      return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 262144>(0, TK2F_ARGS0);
+    if (TK2X > 1 && sa && g_tk2f_l2h == TK2F_L2H && cfg == 87204)  // n5s17 ROLE probe (= 84204 + a dead TWO branch)
+      return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 131072>(0, TK2F_ARGS0);
     if (TK2X > 1 && sa && g_tk2f_l2h == TK2F_L2H && cfg == 29004)  // n5s16 TK2S GS 8 (one rolled body, x in smem)
       return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 65536>(0, TK2F_ARGS0);
     if (TK2X > 1 && sa && g_tk2f_l2h == TK2F_L2H && cfg >= 10000 && cfg < 20000 && cfg % 1000 == 4)  // n5s16 TK2S GS 16
@@ -5887,6 +5965,8 @@ TK2F_SQ4_DIAG = False  # n5s15: k44/k45 lost on the H200 (ddfc1353);
 TK2F_SQ8_DIAG = False  # n5s15: KPS 1 SQ images for the k14/k16 DIAG variants (lost: 14ddda06)
 # n16: n14's KPS 4 SQ images in DIAG builds (dead; frees ~0.9 GB + prepare time)
 TK2H_SQ = 1  # n16: tk2h (TK2H_M, GS16 + PF4) on the TK2F_SQ single-copy stages (same smem image: bitwise = off)
+TK2XP_M = {}  # n5s17: HYB (= TK2X_M) + a dead pad before the gemm2 consumer (64 KB layout): {M: (W, P)}
+TK2R_M = {}  # n5s17: ROLE probe (cfg 87204 = 84204 + a never-taken top-level TWO branch): {M: 1}
 TK2S_M = {}  # n5s16: TK2S one-body consumer (x in smem, rolled stage loop): {M: W}, W < 0 = GS 8, else GS 16 weight W
 TK2X2_M = {}  # n5s16: HYB2 = HYB with the 2-group rows in a __noinline__ function (cfg 1005W004 SQ): {M: W}
 TK2X_M = {}  # n5s16: per-M HYB GS16 (tk2x_consume, SQ + PF4 -> moe_norm3) 2-group row weight W: {M: W}
@@ -5897,7 +5977,7 @@ def _tk2f_cfg(M, st):
     c = _tk2f_cfg0(M, st)
     rt = TK2F_L2H_RT is not None or TK2F_L2H2_RT is not None
     if TK2F_SQ and ("w13sq" in st or "w13s6" in st) and (not rt or DIAG) and (c in (100204, 184204) or (
-            TK2H_SQ and 140000 <= c < 150000 and c % 1000 == 4) or (150000 <= c < 180000 and c % 1000 == 4) or c == 129004 or (110000 <= c < 120000 and c % 1000 == 4) or (
+            TK2H_SQ and 140000 <= c < 150000 and c % 1000 == 4) or (150000 <= c < 180000 and c % 1000 == 4) or (120004 <= c < 129000 and c % 1000 == 4) or c in (129004, 187204, 188204, 189204, 190204, 191204, 192204, 193204, 194204, 195204, 196204, 197204, 198204, 199204, 180204, 181204, 182204) or (110000 <= c < 120000 and c % 1000 == 4) or (
             "w13sq4" in st and c in (100402, 100403, 184402, 184403, 100404, 100405, 184404, 184405)) or (
             DIAG and c in (100205, 100206, 100208, 184205, 184206, 184208, 100202, 100203, 184202, 184203, 101604, 185604)) or (
             "w13sq8" in st and c in (100104, 100106, 184104, 184106))):  # n14 SQ (SA, default configs; KPS 4 in DIAG)
@@ -5909,6 +5989,11 @@ def _tk2f_cfg(M, st):
 
 def _tk2f_cfg0(M, st):
     sa = 100000 if TK2SA and st["sa"] else 0
+    if M in TK2XP_M and sa:  # n5s17 HYB + layout pad: (W, P) P = 0: 12 KB, 1: 14 KB
+        W, P = TK2XP_M[M]
+        return sa + (20004, 25004)[P] + W * 1000
+    if M in TK2R_M and sa:  # n5s17 ROLE probe (1: dead branch first, 2: after the main path)
+        return sa + 86204 + 1000 * TK2R_M[M]
     if M in TK2S_M and sa:  # n5s16 TK2S: W < 0 = GS 8
         return sa + (29004 if TK2S_M[M] < 0 else 10004 + TK2S_M[M] * 1000)
     if M in TK2X2_M and sa:  # n5s16 HYB2

@@ -1,6 +1,6 @@
 # STATE-moe
 
-## NOW (n5s16, 2026-10-28 03:05Z): LANE DECISION 6 (lead 01:45Z): moe board = H200 A/B bench; tk2f bs16/32/8 first, then big-M
+## NOW (n5s17, 2026-10-28 04:45Z): LANE DECISION 6 (lead 01:45Z): moe board = H200 A/B bench; tk2f bs16/32/8 first, then big-M
 - n5s15 (4 DIAG checks): tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps; deeper/larger/
   shallower/nc16/grid-stride all lose). Lever (a) of 01:45Z closed. NOTES n5s15.
 - n5s16 (1 DIAG check): H200 ORACLE (tk2f without the extra 8-token groups): d16 61.0 vs 65.0, d32 76.0 vs 83.7 => the extra
@@ -11,6 +11,11 @@
   tk2f's consumer is critical on the H200. Every 16-token-sharing form so far loses (inlined body = i-cache, noinline = ABI,
   tk2h merged = +4%/row, rolled smem = +10%). Untried: a separate CTA role / kernel running ONLY the 2-group segments with
   its own register-x body (one body per CTA role). Prize <= d32 ~5 us vs the layer's h3, d16 ~4.
+- n5s17 (0 checks, H100 ncu): CODE LAYOUT: dead code is free unless it moves a hot consumer loop across a function-relative
+  64 KB boundary (+4..12%); a dead TWO body AFTER the main path costs nothing (r2). HYB padded to avoid crossings is STILL slow
+  (its combined 39 KB per-row loop is the problem). Tools: tools/n5s17/loop64k.py (crossing audit), ncu_r.py. NOTES n5s17.
+  NEXT (build): "deferred TWO" tk2f: per CTA [13 1-group rows][13 TWO rows][2 1-group rows][2 TWO rows], TWO = its own loop
+  placed after the main loops, separate 1-group / pair row spaces split evenly over CTAs; H100 ncu vs sq, then H200 DIAG.
 - Then big-M (twm drain ~20 us; 3-WG proposal weak: twq 16 warps ~50% issue).
 - Checks 10-28: moe 6/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995), 0 submits; attention 0/20.
 
