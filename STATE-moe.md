@@ -148,5 +148,3 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   2-group rows (worse at every weight); ld.global.cg / asm nc loads for inter (no help: the race was the ring).
 - (s9) Post-expert norm fused into tk2f (last-M-CTA tickets, one-pass register norm): judge bs1 +2 us (168fa04c).
   Also s7's grid-barrier version. A separate norm2 kernel is as cheap as any in-kernel tail on the H200.
-- (s7) norm fused into moe_tk2f behind a grid barrier (worse, bs1 +3 us); L2 bulk prefetch of next rows in tk2f
-  (much worse); memset node for counters (+2.6 us; keep counters in state, zeroed by norm2).
