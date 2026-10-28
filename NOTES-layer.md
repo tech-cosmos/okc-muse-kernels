@@ -2388,3 +2388,7 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - v155 = v154 + TUNE lists cut to those picks (+ escapes {g30kgx:pooler False}, {g30n:o False}, {g14alt 1}); base pins T=32
   g30kgx:pooler (sl+full), T=8 full g14alt 3. Old lists: git show 51acdef:muse_decode_layer/layer.py. test/scored/opt 0/42/fuzz OK,
   cold prepare **139.4 s** (v153 161.5 s). Builds that now serve no option (g19 qkv/o at T=32, g24sk2, lt alts ...) not yet pruned.
+- check cd6b3ba4 (v155) 2.1074x (CI 2.076-2.139), **judge prepare_s 176.7 s** (v153 189.0). us: d1 68.4/76.4, d16 123.1/205.9,
+  d32 147.2/302.1 (d16/d32 sl best ever), v1 109.0/121.2, v16 257.3/353.6, v32 343.8/519.9. d1 sl +2 us / v32 +8..13 vs 3e3b9fd3 =
+  run noise: the H200 tuner timed the same T=1 config (default 69.4 here vs 70.2 in 60f02748) and T=256 options tie within 0.5 us.
+  Picks: mostly default (T=16 g30n unpool(+qkv), T=128 sl ltalt:pooler 2, T=256 sl lt all). Not submitted (< 2.1580x). main = v155.
