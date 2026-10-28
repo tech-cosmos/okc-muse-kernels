@@ -17,15 +17,12 @@ with fewer kernels:
   unpooler                 cuBLAS (this GPU's 1024-row slice up to 8 tokens)
   boundary 2               one Triton kernel: post-FFN norm (the all-gather's zero columns implicit), residual gate,
                            next layer's pre-attention norm"""
-
 from typing import TypedDict
-
 import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
 from triton.language.extra.cuda import gdc_wait, gdc_launch_dependents
-
 try:
     from sgl_kernel.scalar_type import scalar_types
     from sglang.kernels.ops.activation.activation import silu_and_mul
@@ -39,27 +36,17 @@ try:
     HAVE_SGL = True
 except ImportError:
     HAVE_SGL = False
-
-# s68: every JIT build (attention csl/nvs/nds, moe, g10, lt, g24) runs at once on this pool from import on; prepare()
-# joins them (cold H100: serial import 97 s + prepare 217 s). Each build has its own name/dir; a build that fails on the
-# pool is retried serially in prepare (attention: Triton fallback as before).
 import concurrent.futures as _cf
 _BUILD_POOL = _cf.ThreadPoolExecutor(8)
-
-
 class _LazyBuild:
     def __init__(self, fut, name):
         self.fut, self.name = fut, name
-
     def get(self):
         try:
             return self.fut.result()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print(f"{self.name} build failed, using Triton:", e)
             return None
-
-
-# ---- attention (attn_src.py) ----
 """Gated attention decode in two Triton launches.
 
 1. _attn_split: one program per (split of the context, request, KV head). It normalizes (and
@@ -70,16 +57,13 @@ class _LazyBuild:
    causally from registers.
 2. _combine: one program per (token, KV head). It merges the splits, then applies the
    per-head RMSNorm and sigmoid(gate)."""
-
 from typing import TypedDict
-
 import os
 import torch
 import triton
 import triton.language as tl
 from triton.language.extra.cuda import gdc_launch_dependents, gdc_wait
-
-try:  # Gluon (Triton's low-level dialect, ships with triton 3.8): the verify full-layer kernel.
+try:
     from triton.experimental import gluon
     from triton.experimental.gluon import language as gl
     from triton.experimental.gluon.language.nvidia.hopper import (fence_async_shared, mbarrier, warpgroup_mma,
@@ -89,53 +73,37 @@ try:  # Gluon (Triton's low-level dialect, ships with triton 3.8): the verify fu
     HAVE_GLUON = True
 except ImportError:
     HAVE_GLUON = False
-
-
 from triton.runtime.jit import constexpr_function as _constexpr_function
-
-
 @_constexpr_function
 def _np2_jit(n):
     return 1 << max(0, int(n) - 1).bit_length()
-
-
 class Config(TypedDict):
-    batch: int            # B
-    q_len: int            # L: 1 for decode, 8 for a speculative verify block (causal inside it)
-    num_q_heads: int      # Hq: 16 per GPU under TP8
-    num_kv_heads: int     # Hkv: 2; each serves Hq / Hkv query heads
-    head_dim: int         # 64
-    page_size: int        # 1 in the scored cases (as SGLang serves Muse on H200), 64 in some tests
-    window: int           # 2048 on sliding-window layers (a token and the 2,047 before it); 0 = all
-    rope_theta: float     # 500000 on sliding-window layers; 0 = no RoPE
+    batch: int
+    q_len: int
+    num_q_heads: int
+    num_kv_heads: int
+    head_dim: int
+    page_size: int
+    window: int
+    rope_theta: float
     qk_scale_factor: float
-    sm_scale: float       # 1/8
-    kv_scale: float       # the cache scales' value: 1 in the scored cases (SGLang leaves them unset)
-
-
+    sm_scale: float
+    kv_scale: float
 class Inputs(TypedDict):
-    qkv: torch.Tensor          # bfloat16 [B, L, (2*Hq + 2*Hkv)*64], 2304 under tp8: per token q (Hq*64),
-                               # then the block's keys before norm and RoPE (Hkv*64), values
-                               # (Hkv*64) and the output gate's logits (Hq*64)
-    positions: torch.Tensor    # int64 [B*L], each new token's position (seq_lens[b] + i)
-    cache_loc: torch.Tensor    # int64 [B*L], each new token's flat cache row (page * page_size + offset)
-    cache_seqlens: torch.Tensor  # int32 [B], seq_lens + L: what each request attends over
-    cu_seqlens_q: torch.Tensor   # int32 [B+1], 0, L, 2L, ...: the block's query offsets
-    scheduler_metadata: torch.Tensor | None  # int32, FA3's tile schedule (get_scheduler_metadata) on
-                                             # full-attention decode steps, else None
-    k_cache: torch.Tensor     # float8_e4m3fn [pages, page_size, Hkv, 64], written in place
-    v_cache: torch.Tensor     # float8_e4m3fn [pages, page_size, Hkv, 64], written in place
-    k_scale: torch.Tensor     # float32 [], key = e4m3 * k_scale
-    v_scale: torch.Tensor     # float32 [], value = e4m3 * v_scale
-    page_table: torch.Tensor  # int32 [B, max_pages], physical page of each logical page (-1 unused)
-    seq_lens: torch.Tensor    # int32 [B], cached tokens per request; the block starts at this position
+    qkv: torch.Tensor
+    positions: torch.Tensor
+    cache_loc: torch.Tensor
+    cache_seqlens: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+    scheduler_metadata: torch.Tensor | None
+    k_cache: torch.Tensor
+    v_cache: torch.Tensor
+    k_scale: torch.Tensor
+    v_scale: torch.Tensor
+    page_table: torch.Tensor
+    seq_lens: torch.Tensor
     config: Config
-
-
-# Decode sliding layers at batch 1: one native kernel (tools/s72/csl.cu), a 16-CTA cluster per request whose split
-# partials merge through distributed shared memory (st.async + mbarrier), instead of _attn_split + a merge kernel.
-# Built once at import; the Triton path is the fallback if the build fails.
-def _load_inline(**kw):  # s68: built on layer's _BUILD_POOL, resolved in prepare (_join_builds)
+def _load_inline(**kw):
     from torch.utils.cpp_extension import load_inline
     return _LazyBuild(_BUILD_POOL.submit(load_inline, **kw), kw['name'])
 _CSL_SRC = r'''// Batch-1-style decode sliding attention as ONE kernel: per (request, KV head) one 16-CTA thread-block cluster
@@ -862,17 +830,11 @@ try:
                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t);",
         cuda_sources=_CSL_SRC, functions=["csl_decode", "vtk_verify"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
-except Exception as _e:  # noqa: BLE001
+except Exception as _e:
     print("csl build failed, using Triton:", _e)
     _CSL = None
-VTK_MAX_BATCH = 1  # verify sliding on vtk (one cluster per (request, token, KV head)): H100 B1 7.7 -> 6.45 us
-CSL_MAX_BATCH = 16  # decode sliding up to this batch on the cluster kernel (H100 paired: B1 4.70 -> 3.84, B16 10.61 -> 9.14 us; B32 15.84 -> 15.94)
-
-# agent2 s3: native verify-sliding attention (tools/a2/nvs.cu): one CTA per (request, key split), a producer warpgroup
-# gathering both KV heads' 128-B rows with cp.async (+ the FA3-style FP8 V transpose) and one consumer warpgroup per
-# KV head (FP8 wgmma QK^T, online softmax with FA3's offset-8 E4M3 P, RS wgmma P@V, QK(i) overlapping PV(i-1)). The
-# last split's consumers first attend the block's 8 new tokens as one causal tensor-core tile (and store them in the
-# cache) while the cached tiles' gathers are in flight. FP32 partials in _attn_split's layout, merged by _combine_hb.
+VTK_MAX_BATCH = 1
+CSL_MAX_BATCH = 16
 _NVS_SRC = r'''// agent2 nvs: native verify-SLIDING attention (L 8, G 8, D 64, HKV 2, page 1), from tools/s71/nverify.cu.
 // One CTA per (split, request): warpgroup 0 gathers both KV heads' K/V rows (128-B lines) with cp.async and
 // transposes V to FP8 V^T; warpgroups 1/2 (KV head 0/1) normalize + RoPE their queries, run QK^T (FP8 wgmma),
@@ -1514,13 +1476,10 @@ try:
                     "int64_t, int64_t, int64_t, int64_t);",
         cuda_sources=_NVS_SRC, functions=["nvs"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
-except Exception as _e:  # noqa: BLE001
+except Exception as _e:
     print("nvs build failed, using Triton:", _e)
     _NVS = None
 NVS_HALF = '#define NV_HALF 1' in _NVS_SRC
-# moe s31 (r-moe 6c4fee3, agent2 halfpfkr): verify-32 sliding nvs with the 2 splits of each (request, KV head) as one
-# 2-CTA cluster merged over DSMEM (writes out; no _combine_hb). H200 standalone v32 sl 15.51 -> 14.07/14.39 us (moe checks
-# 362ff219/18cf3bfb). BF16 qkv, no O_PF / QSS: used by _verify_nvs only when both are off (their T=256 defaults).
 _NVSCL_SRC = r'''// agent2 nvs: native verify-SLIDING attention (L 8, G 8, D 64, HKV 2, page 1), from tools/s71/nverify.cu.
 // One CTA per (split, request): warpgroup 0 gathers both KV heads' K/V rows (128-B lines) with cp.async and
 // transposes V to FP8 V^T; warpgroups 1/2 (KV head 0/1) normalize + RoPE their queries, run QK^T (FP8 wgmma),
@@ -2258,14 +2217,12 @@ try:
                     "int64_t, torch::Tensor, int64_t);",
         cuda_sources=_NVSCL_SRC, functions=["nvs"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
-except Exception as _e:  # noqa: BLE001
+except Exception as _e:
     print("nvscl build failed:", _e)
     _NVSCL = None
 assert '#define NV_HALF 1' in _NVSCL_SRC and '#define NV_STAMP 0' in _NVSCL_SRC
-NVS_CL_BATCH = 32  # cl from this batch on (S 2)
-NVS_MIN_BATCH = 16  # verify sliding from this batch on nvs (verify 32: H100 paired -1.66 us, H200 16.64 -> 15.28/15.07;
-# verify 16 with 8 splits: H100 paired -0.38 us in s9 (6/7), but the H200 tied 12.63 vs 12.63 in check baea7057)
-
+NVS_CL_BATCH = 32
+NVS_MIN_BATCH = 16
 _NDS_SRC = r'''#define NV_NS 3
 #define NV_MAXR 96
 #define NV_PREGS 40
@@ -2873,47 +2830,32 @@ try:
                     "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
         cuda_sources=_NDS_SRC, functions=["nds"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
-except Exception as _e:  # noqa: BLE001
+except Exception as _e:
     print("nds build failed, using Triton:", _e)
     _NDS = None
-# Decode sliding from this batch on nds (agent2 s10: nvs's producer + ONE consumer warpgroup for both KV heads, 8
-# splits, 2 CTAs/SM at 96 launch registers): H100 decode 32 sliding 15.2 -> ~14.1 us. Batch 16 stays on csl.
 NDS_MIN_BATCH = 32
-
-
 RMS_EPS = 1e-5
 LOG2E = 1.4426950408889634
 ROPE_POSITIONS = 1 << 21
 _ROPE = {}
 _SMS = {}
 _COUNTERS = {}
-# The MMA input precision for P@V (and QK^T without qk8). FP16 holds every E4M3 value exactly and
-# converts from it in one instruction (BF16 takes two); P in [0, 1] keeps more bits than in BF16.
-# A test hook too: Triton's CPU interpreter can't multiply 16-bit floats.
 DOT_DTYPE = tl.float16
-# Programmatic dependent launch of the merge kernel (off in the CPU interpreter).
 USE_PDL = True
-LZ = 10  # _gw_verify softmax: 10 = fixed reference after LZ_PK exact tiles + REDO (s105), 3 = exact per-warp lazy max (s79), 0 = per-tile row max + rescale
-CB_HB_TRIG = False  # layer n5s4: _combine_hb triggers its PDL dependents at start (the o GEMM waits on it)
-MERGE1 = True  # one-pass merges issue the accumulator loads before the max reduction
-USE_GDEC = True  # decode full layers at batch * hkv > 2 on the Gluon kernel (_gd_full)
-USE_GSLIDE = False  # batched sliding decode on _gd_full too (H100 win, H200 loss)
-# s103: plan red (in-grid FP32 atomic merge, s95) on batched decode full too, with BNR replicas per request (H100
-# paired vs _combine / _combine_bal: decode 16 full -0.94, decode 32 full -1.18 us, 8/8; BNR 2 -0.02 / -0.70,
-# 4 +0.75 / -0.65, 8 +3.4 / +1.1: fewer distinct atomic lines win here, unlike batch 1's 511-way contention).
+LZ = 10
+CB_HB_TRIG = False
+MERGE1 = True
+USE_GDEC = True
+USE_GSLIDE = False
 BRED = True
 BNR = 1
-USE_GD1 = True  # decode full at batch * hkv == 2 on _gd_full too (511 splits, 8-warp one-pass merge); unchecked on H200
-ATT_PLAN = {}  # layer s84: plan overrides for the Gluon full-layer kernels (set per call by the layer's tuner option aplan)
-ATT_DIAG = 0  # layer s84: DIAG probe code for full-layer attention (set per call by the layer's tuner; 0 = real kernels)
-NT_AFTER = True  # gbal: _new_tokens launched after _gw_verify (it blocked 2nd gw CTAs on its SMs; s125)
-USE_GBAL = True  # verify full from 16 KV head pairs: balanced splits over the whole batch (_gw_bal); unchecked on H200
-# Split partials' accumulator dtype (plan key pdt). FP32 only: SGLang's FA3 keeps its split partials in
-# FP32, and the rules forbid computing at lower precision than SGLang where they don't say otherwise.
+USE_GD1 = True
+ATT_PLAN = {}
+ATT_DIAG = 0
+NT_AFTER = True
+USE_GBAL = True
 _PDT = {"f32": torch.float32}
 print(f"env: torch {torch.__version__}, triton {triton.__version__}", flush=True)
-
-
 def _cos_sin(theta, d, device):
     """[2^21, d] float32 cos | sin, built as SGLang's RotaryEmbedding (and the reference) do."""
     cache = _ROPE.get(theta)
@@ -2922,8 +2864,6 @@ def _cos_sin(theta, d, device):
         ang = torch.arange(ROPE_POSITIONS, dtype=torch.float, device=device)[:, None] * inv_freq
         cache = _ROPE[theta] = torch.cat((ang.cos(), ang.sin()), dim=-1).contiguous()
     return cache
-
-
 def _counters(n, device, tag=""):
     """Zeroed int32 arrival counters for the fused merges; each call leaves them zeroed again (the Gluon
     merge's generation words, tag "g", just count up)."""
@@ -2931,30 +2871,18 @@ def _counters(n, device, tag=""):
     if buf is None or buf.numel() < n:
         buf = _COUNTERS[(device, tag)] = torch.zeros(max(n, 4096), dtype=torch.int32, device=device)
     return buf
-
-
 def _red_buf(n, device, tag="red"):
     """Zeroed FP32 sums for plan red's in-grid merge; each call leaves them zeroed again."""
     buf = _COUNTERS.get((device, tag))
     if buf is None or buf.numel() < n:
         buf = _COUNTERS[(device, tag)] = torch.zeros(n, dtype=torch.float32, device=device)
     return buf
-
-
 def _num_sms(device):
     if device.type != "cuda":
         return 132
     if device.index not in _SMS:
         _SMS[device.index] = torch.cuda.get_device_properties(device).multi_processor_count
     return _SMS[device.index]
-
-
-# ---- Verify blocks on full layers (Gluon, warp-specialized) ----
-# One program per (split, request, KV head pair), FA3 style: a 4-warp producer gathers the pair's
-# 128-byte K and V rows (page indices, cp.async) into an NS-slot shared ring and signals `ready`
-# (cp.async.mbarrier.arrive); one consumer warpgroup per KV head runs QK^T (FP8 wgmma on its 64-byte
-# half of each row), stages its V half as FP16, frees the slot (`empty`), and does the online softmax
-# and P@V. The extra split S holds the block's new tokens (normalized, stored as FP8, attended causally).
 if HAVE_GLUON:
     @gluon.jit
     def _gw_producer(pt_row, kbase, vbase, k_ring, v_ring, ready, empty, lo, hi, ntiles,
@@ -2968,14 +2896,12 @@ if HAVE_GLUON:
         for i in range(ntiles):
             s = i % NS
             off = ((pg.to(gl.int64) * PAGE + t % PAGE) * ROW_W)[:, None] + c_g[None, :]
-            # Next tile's page indices before waiting for the slot.
             t = gl.maximum(gl.minimum(lo + (i + 1) * BN + n_g, hi - 1), 0)
             pg = gl.load(pt_row + t // PAGE)
             mbarrier.wait(empty.index(s), ((i // NS) & 1) ^ 1)
             cp.async_copy_global_to_shared(k_ring.index(s), kbase + off)
             cp.async_copy_global_to_shared(v_ring.index(s), vbase + off)
             cp.mbarrier_arrive(ready.index(s), increment_count=False)
-
     @gluon.jit
     def _gw_store(pacc_ptr, pml_ptr, b, hh, split, m_i, l_i, acc, HKV: gl.constexpr, SP: gl.constexpr,
                   M: gl.constexpr, D: gl.constexpr, R_L: gl.constexpr, A_L: gl.constexpr):
@@ -2987,7 +2913,6 @@ if HAVE_GLUON:
         parts = ((b * HKV + hh) * SP + split) * M + rs
         gl.store(pml_ptr + parts * 2, m_i)
         gl.store(pml_ptr + parts * 2 + 1, l_i)
-
     @gluon.jit
     def _gw_merge_rows(qkv_ptr, b, h, split, HQ: gl.constexpr, HKV: gl.constexpr, G: gl.constexpr,
                        L: gl.constexpr, M: gl.constexpr, D: gl.constexpr, RS: gl.constexpr, R_PAD: gl.constexpr):
@@ -3005,7 +2930,6 @@ if HAVE_GLUON:
         col = (hh * G + r % G)[:, None] * D + c[None, :]
         gate = gl.load(qkv_ptr + tok[:, None] * QKV_W + (HQ + 2 * HKV) * D + col).to(gl.bfloat16).to(gl.float32)
         return hh, r, c, ok, tok, col, gate
-
     @gluon.jit
     def _gw_merge(pacc_ptr, pml_ptr, out_ptr, vs, b, hh, r, c, ok, tok, col, gate, HQ: gl.constexpr,
                   HKV: gl.constexpr, S: gl.constexpr, M: gl.constexpr, D: gl.constexpr, R_PAD: gl.constexpr):
@@ -3028,7 +2952,6 @@ if HAVE_GLUON:
         o = o * gl.rsqrt(gl.sum(o * o, 1) / D + 1e-5)[:, None]
         o = o / (1.0 + gl.exp2(gate * -1.4426950408889634))
         gl.store(out_ptr + tok[:, None] * (HQ * D) + col, o.to(gl.bfloat16), mask=ok[:, None])
-
     @gluon.jit
     def _gw_consumer(q, k_ring, v_ring, vh, ready, empty, lo, hi, ntiles, scale, pacc_ptr, pml_ptr, b, hh,
                      split, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, loc_ptr,
@@ -3066,7 +2989,6 @@ if HAVE_GLUON:
             a_tok = warpgroup_mma(p16, vh, acc, is_async=True)
             acc, p16 = warpgroup_mma_wait(0, deps=[a_tok, p16])
         _gw_store(pacc_ptr, pml_ptr, b, hh, split, m_i, l_i, acc, HKV, S + 1, M, D, gl.SliceLayout(1, S_L), O_L)
-
     @gluon.jit
     def _gw_producer_cv(pt_row, kbase, vbase, k_ring, v_ring, vh0, vh1, ready, empty, lo, hi, ntiles,
                         PAGE: gl.constexpr, ROW_W: gl.constexpr, BN: gl.constexpr, C: gl.constexpr,
@@ -3096,9 +3018,7 @@ if HAVE_GLUON:
                 vh0.index(sj).store(vt.slice(0, D, 1).load(VL).to(gl.float16))
                 vh1.index(sj).store(vt.slice(D, D, 1).load(VL).to(gl.float16))
                 fence_async_shared()
-                # (mbarrier.arrive syncs the partition before its elected arrive.)
                 mbarrier.arrive(ready.index(sj))
-
     @gluon.jit
     def _gw_consumer_cv(q, k_ring, vh, ready, empty, lo, hi, ntiles, scale, pacc_ptr, pml_ptr, b, hh, split,
                         HEAD: gl.constexpr, HKV: gl.constexpr, S: gl.constexpr, M: gl.constexpr, D: gl.constexpr,
@@ -3113,8 +3033,6 @@ if HAVE_GLUON:
         acc = gl.zeros([M, D], gl.float32, layout=O_L)
         n_s = gl.arange(0, BN, layout=gl.SliceLayout(0, S_L))
         if LSUM:
-            # Row sums kept per thread ([M, 8]: the 8 columns of each 8-wide group a quad holds), reduced
-            # across the quad once at the end, as FA3 does.
             l8 = gl.sum(gl.reshape(gl.zeros([M, BN], gl.float32, S_L), [M, BN // 8, 8]), 1)
         for i in range(ntiles):
             s = i % NS
@@ -3123,7 +3041,6 @@ if HAVE_GLUON:
                                   gl.zeros([M, BN], gl.float32, S_L), use_acc=False, is_async=True)
             sc = warpgroup_mma_wait(0, deps=[s_tok])
             if PEEL:
-                # Only a chunk's last tile can run past its keys.
                 if lo + (i + 1) * BN > hi:
                     sc = gl.where((lo + i * BN + n_s < hi)[None, :], sc, float("-inf"))
             else:
@@ -3145,15 +3062,9 @@ if HAVE_GLUON:
         if LSUM:
             l_i = gl.convert_layout(gl.sum(l8, 1), gl.SliceLayout(1, S_L))
         _gw_store(pacc_ptr, pml_ptr, b, hh, split, m_i, l_i, acc, HKV, S + 1, M, D, gl.SliceLayout(1, S_L), O_L)
-
-    # ---- Balanced splits (plan gbal): the batch's key tiles cut into equal ranges, one per program ----
-    # Program p (of P per KV head pair) takes tiles [p * T // P, (p + 1) * T // P) of the requests' tiles laid
-    # end to end, so a range can span requests: one segment per request it touches, each stored at partial
-    # id p + b (unique: moving to the next segment bumps p or b). Ids P + B + b hold the new tokens.
     @gluon.jit
     def _gw_bal(seq_ptr, p, B: gl.constexpr, B_PAD: gl.constexpr, P: gl.constexpr, BN: gl.constexpr,
                 NW: gl.constexpr):
-        # All B_PAD lengths in each warp (replicated across warps): the scan and sums stay inside a warp.
         LY: gl.constexpr = gl.BlockedLayout([max(1, B_PAD // 32)], [32], [NW], [0])
         idx = gl.arange(0, B_PAD, layout=LY)
         seqv = gl.load(seq_ptr + idx, mask=idx < B, other=0).to(gl.int32)
@@ -3166,14 +3077,6 @@ if HAVE_GLUON:
         b_end = gl.sum(((incl - tiles < end) & (idx < B)).to(gl.int32), 0)
         nseg = gl.where(end > start, b_end - b_first, 0)
         return idx, seqv, tiles, start, end, b_first, nseg
-
-    # Lazy-max softmax for one [64, 64] S tile of a consumer warpgroup (S_L layout: pack slot j of a thread is row
-    # r + 8 * ((j >> 1) & 1) of its quad's two rows; tools/s79/order.py). Operands: out p[32], m_new[32]; in s[32],
-    # m[32] (row maxima broadcast), scale[32] (broadcast). Each thread exponentiates against the running maxima
-    # (no row max, no rescale); since P >= 0, all its partial row sums <= 2^15 implies every P <= 2^15 (FP16-safe,
-    # same relative precision, no lost range). A warp where any thread fails (first tile: maxima -1e30 -> inf; a row
-    # grew by > 15 binades; NaN) recomputes its rows with the usual update (row max over the quad by shuffles), which
-    # is per-warp legal: every row's elements live in one quad. Exact either way.
     def _lz_asm():
         a = ["{", ".reg .f32 q<32>, sa, sb, na, nb, xa, xb, t;", ".reg .pred ok, all;",
              "neg.f32 na, $96;", "neg.f32 nb, $98;"]
@@ -3199,15 +3102,10 @@ if HAVE_GLUON:
         a += ["LZ_DONE:"] + [f"mov.f32 ${j}, q{j};" for j in range(32)]
         a += [f"mov.f32 ${32 + j}, {'xb' if j & 2 else 'xa'};" for j in range(32)] + ["}"]
         return "\n".join(a)
-
     def _lz_asm2():
-        # LZ 2: decide before exponentiating, from each thread's own row maxima (no shuffles): if every thread of
-        # the warp has max(s) * scale - m <= 15 on both rows (so P <= 2^15), exponentiate against the stale maxima;
-        # else the usual update for the warp's rows. The scores are dead once P is computed (no spills).
         a = ["{", ".reg .f32 q<32>, na, nb, xa, xb, t;", ".reg .pred ok, all;"]
         ra = [j for j in range(32) if not j & 2]
         rb = [j for j in range(32) if j & 2]
-        # (Serial chains: a depth-4 tree measured +0.8 us all-L2.)
         a += [f"max.f32 xa, ${64 + ra[0]}, ${64 + ra[1]};", f"max.f32 xb, ${64 + rb[0]}, ${64 + rb[1]};"]
         a += [f"max.f32 xa, xa, ${64 + j};" for j in ra[2:]] + [f"max.f32 xb, xb, ${64 + j};" for j in rb[2:]]
         a += ["fma.rn.f32 t, xa, $128, 0fC1700000;", "setp.le.f32 ok, t, $96;",
@@ -3225,31 +3123,25 @@ if HAVE_GLUON:
         a += [f"mov.f32 ${j}, q{j};" for j in range(32)]
         a += [f"mov.f32 ${32 + j}, {'xb' if j & 2 else 'xa'};" for j in range(32)] + ["}"]
         return "\n".join(a)
-
     def _lz_acc_asm():
-        # acc *= alpha (per row; same slot pattern in O_L), skipped when the whole warp has alpha == 1 (LZ 3).
         a = ["{", ".reg .pred p, any;", "setp.neu.f32 p, $128, 0f3F800000;", "setp.neu.or.f32 p, $130, 0f3F800000, p;",
              "vote.sync.any.pred any, p, 0xffffffff;"]
         a += [f"mov.f32 ${j}, ${64 + j};" for j in range(64)] + ["@!any bra LZ_SKIP;"]
         a += [f"mul.f32 ${j}, ${j}, {'$130' if j & 2 else '$128'};" for j in range(64)] + ["LZ_SKIP:", "}"]
         return "\n".join(a)
-
-    LZ_PK = gl.constexpr(4)  # LZ 10: exact tiles per segment
-    LZ_DELTA = gl.constexpr(14.0)  # LZ 10: FP16 headroom (binades)
+    LZ_PK = gl.constexpr(4)
+    LZ_DELTA = gl.constexpr(14.0)
     LZ_ACC = gl.constexpr(_lz_acc_asm())
     LZ_ACC_CON = gl.constexpr(",".join(["=f"] * 64 + ["f"] * 128))
     LZ_ASM = gl.constexpr(_lz_asm())
     LZ_ASM2 = gl.constexpr(_lz_asm2())
     LZ_CON = gl.constexpr(",".join(["=f"] * 64 + ["f"] * 96))
-
     @gluon.jit
     def _gw_pick(a, b):
         return a
-
     @gluon.jit
     def _gw_add(a, b):
         return a + b
-
     @gluon.jit
     def _gw_seg(idx, seqv, tiles, start, end, b, BN: gl.constexpr):
         """Segment of request b in tile range [start, end): its keys [lo, hi) and tile count."""
@@ -3261,7 +3153,6 @@ if HAVE_GLUON:
         lo = t0 * BN
         hi = gl.minimum(t1 * BN, sb)
         return lo, hi, gl.maximum(t1 - t0, 0)
-
     @gluon.jit
     def _gw_producer_bal(seq_ptr, pt_ptr, kbase, vbase, k_ring, v_ring, vh0, vh1, ready, empty, p,
                          B: gl.constexpr, B_PAD: gl.constexpr, P: gl.constexpr, MAX_PAGES: gl.constexpr,
@@ -3311,7 +3202,6 @@ if HAVE_GLUON:
                         fence_async_shared()
                         mbarrier.arrive(ready.index(sj))
             it += ntiles
-
     @gluon.jit
     def _gw_consumer_bal(qkv_ptr, q_s, k_ring, vh, ready, empty, seq_ptr, pid, h, scale, pacc_ptr, pml_ptr,
                          HEAD: gl.constexpr, HQ: gl.constexpr, HKV: gl.constexpr, G: gl.constexpr, L: gl.constexpr,
@@ -3344,13 +3234,6 @@ if HAVE_GLUON:
             acc = gl.zeros([M, D], gl.float32, layout=O_L)
             l8 = gl.sum(gl.reshape(gl.zeros([M, BN], gl.float32, S_L), [M, BN // 8, 8]), 1)
             if LZ == 10:
-                # Fixed-reference softmax (session 105): the first LZ_PK tiles run the exact update against their
-                # row maxima + LZ_DELTA binades; later tiles exponentiate against that fixed reference (no row max,
-                # no alpha, no acc rescale, no vote: the s78 no-max loop). FP16 P overflows only if a row's scores
-                # grow > 16 + LZ_DELTA binades past the first tiles' max (scored inputs: <= 23.2 at LZ_PK 4, 7 seeds,
-                # tools/s105/growth.py); such rows end with a non-finite acc, store m = +inf, and _combine_bal REDO
-                # recomputes them exactly. Precision: with the max P at 2^-LZ_DELTA the FP16 (subnormal) step is
-                # 2^(LZ_DELTA - 25) of the max, still >= 2x finer than E4M3 P against the exact max (FA3, SGLang).
                 for i in range(gl.minimum(ntiles, LZ_PK)):
                     s = (it + i) % NS
                     mbarrier.wait(ready.index(s), ((it + i) // NS) & 1)
@@ -3389,7 +3272,6 @@ if HAVE_GLUON:
                         s = (it + i) % NS
                         mbarrier.wait(ready.index(s), ((it + i) // NS) & 1)
                         mbarrier.arrive(empty.index(s))
-                # (x - x != 0 exactly for inf and NaN.)
                 asum = gl.convert_layout(gl.sum(acc, 1), gl.SliceLayout(1, S_L))
                 m_i = gl.where(asum - asum == 0.0, m_i, float("inf"))
             else:
@@ -3429,29 +3311,18 @@ if HAVE_GLUON:
             l_i = gl.convert_layout(gl.sum(l8, 1), gl.SliceLayout(1, S_L))
             _gw_store(pacc_ptr, pml_ptr, 0, h + HEAD, pid + b, m_i, l_i, acc, HKV, NID, M, D, gl.SliceLayout(1, S_L),
                       O_L)
-
-    # ---- Decode steps (q_len 1) on full layers at batch * hkv > 2 (Gluon, one warp per program) ----
-    # Like _attn_split's hpp-2 programs (one split of one request's keys for a KV head pair, block-diagonal
-    # queries [2G, 2D] against whole 128-byte rows), but QK^T runs as FP8 mma.sync (Triton's MMAv2 path upcasts
-    # every K byte to FP16 on sm_90), V is read from shared memory 16 bytes at a time, and the pair's new token is
-    # written and attended by the last split into its own partial slot S (no separate launch). Same bytes, ~15-20%
-    # less work per key (H100, all reads from L2: decode 16/32 full 84/157 -> 69/132 us), which pays where
-    # per-SM bandwidth is higher (tools/emu.py: 137/261 -> 132/249 us; H100 itself: a tie).
     @gluon.jit
     def _gqld(p, QSS: gl.constexpr):
-        # proj s22 (QSS): qkv as 2 FP32 split-K slabs QSS elements apart: add them in FP32 (then the caller rounds to BF16)
         x = gl.load(p)
         if QSS != 0:
             x = x + gl.load(p + QSS)
         return x
-
     @gluon.jit
     def _gqldm(p, m, QSS: gl.constexpr):
         x = gl.load(p, mask=m, other=0.0)
         if QSS != 0:
             x = x + gl.load(p + QSS, mask=m, other=0.0)
         return x
-
     @gluon.jit
     def _gd_full_body(seq_in, SEQ_IN: gl.constexpr, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale,
                  cs_ptr, HQ: gl.constexpr, HKV: gl.constexpr, G: gl.constexpr, D: gl.constexpr, PAGE: gl.constexpr,
@@ -3462,15 +3333,8 @@ if HAVE_GLUON:
                  NID: gl.constexpr = 1, RED: gl.constexpr = False, red_ptr=None, rcnt_ptr=None, out_ptr=None,
                  NR: gl.constexpr = 4, epi=True, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0, DX: gl.constexpr = 0,
                  QF: gl.constexpr = False):
-        # DX (layer s84 DIAG probes, wrong results, tuner timing only): 1 = no math after tile 0 (gathers only),
-        # 2 = every tile re-gathers the same rows (all-L2).
         h = gl.program_id(2) * 2
         if BAL:
-            # Length-proportional splits (plan dbal, full layers): the NP programs of a KV head pair go to the
-            # requests in proportion to their tiles, request b taking ids [c_b, c_b+1) with
-            # c_b = b + (NP - B) * excl_b // T (at least one each), so every program gets about T / (NP - B)
-            # tiles and none spans requests. Partials by id: key partial p at p + b, new token at NP + B + b
-            # (_combine_bal's layout).
             pid = gl.program_id(0)
             LY: gl.constexpr = gl.BlockedLayout([max(1, B_PAD // 32)], [32], [1], [0])
             idx = gl.arange(0, B_PAD, layout=LY)
@@ -3488,7 +3352,6 @@ if HAVE_GLUON:
             split = gl.program_id(0)
             b = gl.program_id(1)
             nsp = S
-        # Let the merge kernel launch now (programmatic dependent launch); it waits for this grid.
         gl.inline_asm_elementwise("griddepcontrol.launch_dependents;", "=r", [], dtype=gl.int32, is_pure=False,
                                   pack=1)
         C: gl.constexpr = 2 * D
@@ -3502,15 +3365,12 @@ if HAVE_GLUON:
         VB: gl.constexpr = gl.DotOperandLayout(operand_index=1, parent=MMA, k_width=2)
         VA: gl.constexpr = gl.DotOperandLayout(operand_index=0, parent=MMA, k_width=2)
         PB: gl.constexpr = gl.DotOperandLayout(operand_index=1, parent=MMA, k_width=2)
-        # 16 bytes per thread. (Converting FP8 queries into QA from a [1, 4]-per-thread layout gave wrong values.)
         BL: gl.constexpr = gl.BlockedLayout([1, 16], [4, 8], [1, 1], [1, 0])
         SH: gl.constexpr = gl.SwizzledSharedLayout(16, 1, 8, [1, 0])
-
         if SEQ_IN:
             seq = seq_in
         else:
             seq = gl.load(seq_ptr + b)
-        # Each request's cached keys (sliding layers: the last WINDOW - 1) in S equal tile-aligned chunks.
         if WINDOW > 0:
             base = gl.maximum(seq - (WINDOW - 1), 0)
         else:
@@ -3531,15 +3391,13 @@ if HAVE_GLUON:
         hp = r // G
         q_ok = (c_g // D)[None, :] == hp[:, None]
         if QF:
-            # moe s35 qf: the query rows before the first copies (a load issued behind the gathers waits for them).
             xq = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], q_ok, QSS)
-        # The first NS - 1 tiles in flight (cp.async zero-fills rows past hi instead of reading them).
         for j in gl.static_range(NS - 1):
             t = lo + j * BN + n_g
             ok = t < hi
             pg = gl.load(pt_row + t // PAGE, mask=ok, other=0)
             if SEQ_IN:
-                pg = gl.maximum(pg, 0)  # speculative length: entries past the real one are -1
+                pg = gl.maximum(pg, 0)
             off = ((pg.to(gl.int64) * PAGE + t % PAGE) * ROW_W)[:, None] + c_g[None, :]
             cp.async_copy_global_to_shared(k_ring.index(j), kbase + off, mask=ok[:, None] & all_c)
             cp.async_copy_global_to_shared(v_ring.index(j), vbase + off, mask=ok[:, None] & all_c)
@@ -3547,10 +3405,7 @@ if HAVE_GLUON:
         t = lo + (NS - 1) * BN + n_g
         pg = gl.load(pt_row + t // PAGE, mask=t < hi, other=0)
         if SEQ_IN:
-            pg = gl.maximum(pg, 0)  # speculative length: entries past the real one are -1
-
-        # Block-diagonal queries: row r is query head (h + r // G) * G + r % G, nonzero only in its own KV head's
-        # D columns. RMSNorm, then E4M3.
+            pg = gl.maximum(pg, 0)
         if QF:
             x = xq.to(gl.bfloat16).to(gl.float32)
         else:
@@ -3559,7 +3414,6 @@ if HAVE_GLUON:
         x = gl.where(q_ok, x, 0.0)
         rs = gl.rsqrt(gl.sum(x * x, 1) / D + 1e-5)[:, None]
         if ROPE:
-            # Interleaved RoPE at position seq (the norm commutes with the rotation).
             xp = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + ((c_g % D) ^ 1)[None, :],
                         q_ok, QSS).to(gl.bfloat16).to(gl.float32)
             cs_off = seq * D + (c_g % D) // 2
@@ -3569,25 +3423,16 @@ if HAVE_GLUON:
         x8 = (x * rs).to(gl.float8e4nv)
         q = gl.convert_layout(x8, QA)
         if Q16:
-            # Queries as FP16 once (exact E4M3 values) and K upcast per tile: on sm_90 ptxas lowers the FP8 mma.sync
-            # to FP16 HMMAs (+ FADDs), re-converting the loop-invariant queries every tile. Bit-identical results,
-            # 13% fewer instructions (H100 all-L2 decode 16/32 full 69.2/133.8 -> 67.7/129.1 us, real -0.4/-0.7).
             q = q.to(gl.float16)
         k_scale = gl.load(ks_ptr)
         scale = qk_scale * k_scale
-
         m_i = gl.full([M], -1.0e30, gl.float32, layout=gl.SliceLayout(1, MMA))
         l_i = gl.zeros([M], gl.float32, layout=gl.SliceLayout(1, MMA))
         if TPV:
-            # Transposed P@V per head: O^T [D, G] += V^T [D, BN] @ P^T [BN, G] (only the diagonal blocks: half the
-            # MMAs and accumulator registers of the block-diagonal form). V staged once per tile as FP16.
             vh = gl.allocate_shared_memory(gl.float16, [BN, C], gl.SwizzledSharedLayout(8, 1, 8, [1, 0]))
             acc0 = gl.zeros([D, G], gl.float32, layout=MMA)
             acc1 = gl.zeros([D, G], gl.float32, layout=MMA)
         elif KST:
-            # Heads stacked along the P@V reduction: acc [M, D] = P_0 @ V_0 + P_1 @ V_1, P_j = P with the other
-            # head's rows zeroed. Same MMAs as the block-diagonal form, half the accumulator and alpha multiplies.
-            # Bit-identical; H100 all-L2 decode 16/32/64 full 66.7/126.7/253.9 -> 63.4/120.4/241.8 us, real tie.
             acc = gl.zeros([M, D], gl.float32, layout=MMA)
             row0 = (gl.arange(0, M, layout=gl.SliceLayout(1, PA)) < G)[:, None]
         else:
@@ -3597,7 +3442,7 @@ if HAVE_GLUON:
             sj = (i + NS - 1) % NS
             ok = t < hi
             off = ((pg.to(gl.int64) * PAGE + t % PAGE) * ROW_W)[:, None] + c_g[None, :]
-            gl.barrier()  # slot sj was read last iteration
+            gl.barrier()
             cp.async_copy_global_to_shared(k_ring.index(sj), kbase + off, mask=ok[:, None] & all_c)
             cp.async_copy_global_to_shared(v_ring.index(sj), vbase + off, mask=ok[:, None] & all_c)
             cp.commit_group()
@@ -3605,7 +3450,7 @@ if HAVE_GLUON:
                 t = t + BN
             pg = gl.load(pt_row + t // PAGE, mask=t < hi, other=0)
             if SEQ_IN:
-                pg = gl.maximum(pg, 0)  # speculative length: entries past the real one are -1
+                pg = gl.maximum(pg, 0)
             cp.wait_group(NS - 1)
             gl.barrier()
             if (i == 0) | (DX != 1):
@@ -3633,8 +3478,6 @@ if HAVE_GLUON:
                 elif KST:
                     acc = acc * alpha[:, None]
                     ph = gl.convert_layout(p.to(gl.float16), PA)
-                    # The FP16 V tile as one B operand, then split per head in registers (loading the two [BN, D] halves
-                    # from smem separately costs register shuffles: all-L2 +3%).
                     v = gl.convert_layout(v_ring.index(s).load(BL).to(gl.float16), VB)
                     v0, v1 = gl.split(gl.permute(gl.reshape(v, [BN, 2, D]), (0, 2, 1)))
                     v0 = gl.convert_layout(v0, VB)
@@ -3646,8 +3489,6 @@ if HAVE_GLUON:
                     v = gl.convert_layout(v_ring.index(s).load(BL).to(gl.float16), VB)
                     acc = mma_v2(gl.convert_layout(p.to(gl.float16), PA), v, acc)
         cp.wait_group(0)
-
-        # Partials [B, HKV, S + 1, G, D]: each row's own head's D columns of acc.
         ro = gl.arange(0, M, layout=gl.SliceLayout(1, MMA))
         co = gl.arange(0, C, layout=gl.SliceLayout(0, MMA))
         if BAL:
@@ -3655,19 +3496,12 @@ if HAVE_GLUON:
         else:
             part = ((b * HKV + h + ro // G) * (S + 1) + split) * G + ro % G
         own = (co // D)[None, :] == (ro // G)[:, None]
-        # SEP: an extra program (split S) only handles the new token; it stores no key partial.
         keyp = split < nsp
         own = own & keyp
         if RED:
-            # The merge in this grid (plan red, batch 1, one KV head pair): every program adds its partial into
-            # FP32 sums relative to the fixed reference max 0 (exact while its max m is in [-60, 100]: no
-            # overflow, nothing it contributes falls below FP32's normal range); out-of-range programs store
-            # their partial instead and the last program merges those exactly.
             bad = (l_i > 0.0) & ((m_i > 100.0) | (m_i < -60.0))
             flg = gl.max(bad.to(gl.int32), 0) > 0
             keyp = keyp & flg
-            # Batched (s103): request b's sums and out-of-range list (RCW words) at its own offsets; listed entries
-            # are partial slots (BAL: ids).
             if RCW > 0:
                 red_ptr = red_ptr + b * (NR * M * (D + 1))
                 rcnt_ptr = rcnt_ptr + b * RCW
@@ -3692,8 +3526,6 @@ if HAVE_GLUON:
         gl.store(pml_ptr + part * 2, m_i, mask=keyp)
         gl.store(pml_ptr + part * 2 + 1, l_i, mask=keyp)
         if split == (nsp if SEP else nsp - 1):
-            # The step's new token for both KV heads: normalize K, store K and V as FP8 at cache_loc (row 0 of
-            # each head's block), and write its one-key partial (max = its score, sum = 1, acc = V) to slot S.
             loc = gl.load(loc_ptr + b)
             zero = gl.zeros([M, C], gl.float32, BL)
             kx = gl.where(q_ok, _gqld(qkv_ptr + b * QKV_W + (HQ + h) * D + c_g, QSS)[None, :].to(gl.bfloat16).to(gl.float32) + zero, 0.0)
@@ -3733,7 +3565,6 @@ if HAVE_GLUON:
         if RED:
             if epi:
                 _gd_red_add(acc, m_i, l_i, flg, split, kid, red_ptr, rcnt_ptr, M, D, NR)
-
     @gluon.jit
     def _gd_red_add(acc, m_i, l_i, flg, split, kid, red_ptr, rcnt_ptr, M: gl.constexpr, D: gl.constexpr,
                     NR: gl.constexpr):
@@ -3747,16 +3578,12 @@ if HAVE_GLUON:
             gl.store(rcnt_ptr + 2 + gl.atomic_add(rcnt_ptr + 1, 1, sem="relaxed", scope="gpu"), kid)
         else:
             f = gl.where(l_i > 0.0, gl.exp2(m_i), 0.0)
-            # 4 consecutive floats per thread: v4 atomics, half the L2 atomic operations of the mma layout's pairs.
             av = gl.convert_layout(acc * f[:, None], ML)
             r4 = gl.arange(0, M, layout=gl.SliceLayout(1, ML))
             c4 = gl.arange(0, D, layout=gl.SliceLayout(0, ML))
             gl.atomic_add(red_ptr + ((rep * M + r4) * D)[:, None] + c4[None, :], av, sem="relaxed", scope="gpu")
             gl.atomic_add(red_ptr + NR * M * D + rep * M + ro, l_i * f, sem="relaxed", scope="gpu")
-
-    # The rare redo path of _gd_full's SPEC, out of line.
     _gd_full_redo = gluon.jit(noinline=True)(_gd_full_body.fn)
-
     @gluon.jit
     def _gd_full(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale,
                  cs_ptr, HQ: gl.constexpr, HKV: gl.constexpr, G: gl.constexpr, D: gl.constexpr, PAGE: gl.constexpr,
@@ -3767,8 +3594,6 @@ if HAVE_GLUON:
                  NID: gl.constexpr = 1, SPEC: gl.constexpr = 0, RED: gl.constexpr = False, red_ptr=None,
                  rcnt_ptr=None, out_ptr=None, NR: gl.constexpr = 4, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0,
                  DX: gl.constexpr = 0, QF: gl.constexpr = False):
-        # SPEC > 0 (batch 1, page 1): seq = table width - 1 known from the shape (SGLang slices the page table to the
-        # batch's longest length); start on it, redo with the real length if it differs (as in _attn_split).
         if SPEC > 0:
             real = gl.load(seq_ptr + gl.program_id(1))
             _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW, QSS, DX, QF)
@@ -3776,7 +3601,6 @@ if HAVE_GLUON:
                 _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF)
         else:
             _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF)
-
     @gluon.jit
     def _gw_verify(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale,
                    HQ: gl.constexpr, HKV: gl.constexpr, G: gl.constexpr, L: gl.constexpr, D: gl.constexpr,
@@ -3792,7 +3616,6 @@ if HAVE_GLUON:
         split = gl.program_id(0)
         b = gl.program_id(1)
         h = gl.program_id(2) * 2
-        # Let the merge kernel launch now (programmatic dependent launch); it waits for this grid.
         gl.inline_asm_elementwise("griddepcontrol.launch_dependents;", "=r", [], dtype=gl.int32, is_pure=False, pack=1)
         QKV_W: gl.constexpr = (2 * HQ + 2 * HKV) * D
         ROW_W: gl.constexpr = HKV * D
@@ -3801,15 +3624,12 @@ if HAVE_GLUON:
         SH16: gl.constexpr = gl.NVMMASharedLayout(swizzle_byte_width=128, element_bitwidth=16, rank=2)
         VSH: gl.constexpr = gl.SwizzledSharedLayout(1, 1, 1, [1, 0])
         SQ: gl.constexpr = gl.NVMMASharedLayout(swizzle_byte_width=64, element_bitwidth=8, rank=2)
-
         seq = gl.load(seq_ptr + b)
-        # Each request's cached keys in S equal tile-aligned chunks.
         chunk = gl.cdiv(gl.cdiv(seq, S), BN) * BN
         lo = split * chunk
         hi = gl.minimum(lo + chunk, seq)
         ntiles = gl.cdiv(gl.maximum(hi - lo, 0), BN)
         pt_row = pt_ptr + b.to(gl.int64) * MAX_PAGES
-
         k_ring = gl.allocate_shared_memory(gl.float8e4nv, [NS, BN, C], SH8)
         v_ring = gl.allocate_shared_memory(gl.float8e4nv, [NS, BN, C], VSH)
         if LAG:
@@ -3827,7 +3647,6 @@ if HAVE_GLUON:
         cq = gl.arange(0, D, layout=gl.SliceLayout(0, QL))
         q_off = (b * L + r // G)[:, None] * QKV_W + (h * G + r % G)[:, None] * D + cq[None, :]
         if BAL:
-            # (Each consumer loads its segments' queries.)
             q0 = gl.allocate_shared_memory(gl.float8e4nv, [M, D], SQ)
             q1 = gl.allocate_shared_memory(gl.float8e4nv, [M, D], SQ)
         else:
@@ -3871,12 +3690,6 @@ if HAVE_GLUON:
                             PAGE, ROW_W, BN, C, NS, PW)),
         ], [4, PW], [CREGS, PREGS])
         if FUSE:
-            # The merge, in this grid: once all S programs of this (request, KV head pair) have stored their
-            # partials, each merges a slice of the rows. One counter word per pair: arrivals in the low 16
-            # bits, a generation above; the last arrival clears the arrivals and bumps the generation, which
-            # the others wait on (so each call leaves the arrivals at 0). The plan keeps this grid to one
-            # wave, so every program waited for is resident. (Fences as cooperative groups' grid sync: the
-            # partition barrier, then the acq_rel atomics.)
             hh, r, c, ok, tok, col, gate = _gw_merge_rows(qkv_ptr, b, h, split, HQ, HKV, G, L, M, D, RS, R_PAD)
             vs = gl.load(vs_ptr)
             cnt = cnt_ptr + b * (HKV // 2) + gl.program_id(2)
@@ -3888,13 +3701,9 @@ if HAVE_GLUON:
                 while ((gl.load(cnt, volatile=True) ^ old) >> 16) == 0:
                     pass
             gl.inline_asm_elementwise("fence.acq_rel.gpu;", "=r", [], dtype=gl.int32, is_pure=False, pack=1)
-        # This grid was launched alongside _new_tokens (which needs nothing from it); finish (or merge) only
-        # after it, so the merge sees slot S too.
         gl.inline_asm_elementwise("griddepcontrol.wait;", "=r", [], dtype=gl.int32, is_pure=False, pack=1)
         if FUSE:
             _gw_merge(pacc_ptr, pml_ptr, out_ptr, vs, b, hh, r, c, ok, tok, col, gate, HQ, HKV, S, M, D, R_PAD)
-
-
 @triton.jit
 def _norm_rope_ld(ptr, off, ok, c, pos, cs_ptr, ROPE: tl.constexpr, D: tl.constexpr):
     """_norm_rope's loads, to issue them before other work."""
@@ -3909,8 +3718,6 @@ def _norm_rope_ld(ptr, off, ok, c, pos, cs_ptr, ROPE: tl.constexpr, D: tl.conste
         cos = x.to(tl.float32)
         sin = cos
     return x, xp, cos, sin
-
-
 @triton.jit
 def _norm_rope_fin(x, xp, cos, sin, c, ROPE: tl.constexpr, D: tl.constexpr, HPP: tl.constexpr):
     x = x.to(tl.float32)
@@ -3926,8 +3733,6 @@ def _norm_rope_fin(x, xp, cos, sin, c, ROPE: tl.constexpr, D: tl.constexpr, HPP:
         sign = tl.where(c % 2 == 0, -1.0, 1.0)
         x = x * cos + sign[None, :] * xp.to(tl.float32) * sin
     return x * r
-
-
 @triton.jit
 def _norm_rope(ptr, off, ok, c, pos, cs_ptr, ROPE: tl.constexpr, D: tl.constexpr, HPP: tl.constexpr):
     """[R, HPP*D] rows of HPP heads at ptr + off: per-head rmsnorm (no weight), then interleaved
@@ -3949,8 +3754,6 @@ def _norm_rope(ptr, off, ok, c, pos, cs_ptr, ROPE: tl.constexpr, D: tl.constexpr
         sign = tl.where(c % 2 == 0, -1.0, 1.0)
         x = x * cos + sign[None, :] * xp * sin
     return x * r
-
-
 @triton.jit
 def _tile(t, hi, pt_row, kc_ptr, vc_ptr, q, pos, c, m_i, l_i, acc, scale, hp0, MASKED: tl.constexpr,
           PAGE: tl.constexpr, ROW_W: tl.constexpr, D: tl.constexpr, WINDOW: tl.constexpr, QK8: tl.constexpr,
@@ -3959,14 +3762,13 @@ def _tile(t, hi, pt_row, kc_ptr, vc_ptr, q, pos, c, m_i, l_i, acc, scale, hp0, M
     """One tile of cached keys at positions t through the online softmax. MASKED: some t >= hi.
     MIF (with MASKED): the score masks run only if the runtime scalar `need` says this tile has masked keys."""
     if MASKED:
-        # Past the end, gather the last valid row again (no load masks); the scores are masked.
         t_ok = t < hi
         t_ld = tl.minimum(t, hi - 1)
     else:
         t_ld = t
     page = tl.load(pt_row + t_ld // PAGE)
     if CL:
-        page = tl.maximum(page, 0)  # SPEC's speculative length: entries past the real one are -1
+        page = tl.maximum(page, 0)
     row = (page.to(tl.int64) * PAGE + t_ld % PAGE) * ROW_W + hp0 * D
     k = tl.load(kc_ptr + row[:, None] + c[None, :])
     v = tl.load(vc_ptr + row[:, None] + c[None, :])
@@ -3985,20 +3787,16 @@ def _tile(t, hi, pt_row, kc_ptr, vc_ptr, q, pos, c, m_i, l_i, acc, scale, hp0, M
     elif WINDOW > 0:
         s = tl.where(t[None, :] > pos[:, None] - WINDOW, s, float("-inf"))
     if FIXED:
-        # Fixed reference m_i (set before the loop): no row max, alpha or rescale.
         p = tl.exp2(tl.fma(s, scale, -m_i[:, None]))
         l_i = l_i + tl.sum(p, 1)
         acc = acc + tl.dot(p.to(DOT), v.to(DOT))
         return m_i, l_i, acc
-    # The scale (> 0) goes into the row maxima and the exponent's FMA, not every score.
     m_new = tl.maximum(m_i, tl.max(s, 1) * scale)
     alpha = tl.exp2(m_i - m_new)
     p = tl.exp2(tl.fma(s, scale, -m_new[:, None]))
     l_i = l_i * alpha + tl.sum(p, 1)
     acc = acc * alpha[:, None] + tl.dot(p.to(DOT), v.to(DOT))
     return m_new, l_i, acc
-
-
 @triton.jit
 def _new(split, b, seq, j, q, m_i, l_i, acc, hp0, c, scale, k_scale, qkv_ptr, cs_ptr, kc_ptr,
          vc_ptr, vs_ptr, loc_ptr, HQ: tl.constexpr, HKV: tl.constexpr, HPP: tl.constexpr,
@@ -4009,7 +3807,6 @@ def _new(split, b, seq, j, q, m_i, l_i, acc, hp0, c, scale, k_scale, qkv_ptr, cs
     QKV_W: tl.constexpr = (2 * HQ + 2 * HKV) * D
     ROW_W: tl.constexpr = HKV * D
     if split == (S if SEP else 0):
-        # The block's own tokens: normalize, store as FP8, attend causally.
         jn = tl.arange(0, L_PAD)
         jn_ok = jn < L
         tok = b * L + jn
@@ -4030,21 +3827,15 @@ def _new(split, b, seq, j, q, m_i, l_i, acc, hp0, c, scale, k_scale, qkv_ptr, cs
         l_i = l_i * alpha + tl.sum(p, 1)
         acc = acc * alpha[:, None] + tl.dot(p.to(DOT), vq.to(DOT))
         m_i = m_new
-
     return m_i, l_i, acc
-
-
 @triton.jit
 def _finish(split, b, j, m_i, l_i, acc, hp0, hp, rr, r_ok, q_ok, c, pacc_ptr, pml_ptr, HKV: tl.constexpr,
             MG: tl.constexpr, D: tl.constexpr, S: tl.constexpr, SEP: tl.constexpr = False):
     """Every split writes its partial (max, sum, accumulator) for KV heads hp0 .. hp0 + HPP - 1."""
-    # Partials [B, HKV, S, MG]: each row's own head's D columns of acc.
     part = ((b * HKV + hp0 + hp) * (S + SEP) + split) * MG + rr
     tl.store(pml_ptr + part * 2, m_i, mask=r_ok)
     tl.store(pml_ptr + part * 2 + 1, l_i, mask=r_ok)
     tl.store(pacc_ptr + part[:, None] * D + (c % D)[None, :], acc.to(pacc_ptr.dtype.element_ty), mask=q_ok)
-
-
 @triton.jit
 def _range(split, b, seq, pt_ptr, WINDOW: tl.constexpr, BALANCE: tl.constexpr, S: tl.constexpr, BLOCK_N: tl.constexpr,
            CHUNK: tl.constexpr, MAX_PAGES: tl.constexpr):
@@ -4054,7 +3845,6 @@ def _range(split, b, seq, pt_ptr, WINDOW: tl.constexpr, BALANCE: tl.constexpr, S
     else:
         base = seq * 0
     if BALANCE:
-        # Each request's own context in S equal tile-aligned chunks: every program does the same work.
         chunk = tl.cdiv(tl.cdiv(seq - base, S), BLOCK_N) * BLOCK_N
     else:
         chunk = CHUNK
@@ -4063,8 +3853,6 @@ def _range(split, b, seq, pt_ptr, WINDOW: tl.constexpr, BALANCE: tl.constexpr, S
     pt_row = pt_ptr + b.to(tl.int64) * MAX_PAGES
     n = tl.arange(0, BLOCK_N)
     return lo, hi, pt_row, n
-
-
 @triton.jit
 def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr,
                 pacc_ptr, pml_ptr, cnt_ptr, out_ptr, qk_scale,
@@ -4083,20 +3871,13 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
     [rows, HPP*D] x [HPP*D, N] product scores every head against its own keys."""
     split = tl.program_id(0)
     b = tl.program_id(1)
-    # DUAL (with HPP 1): the program also runs KV head hp0 + 1 as a second, independent chain.
     hp0 = tl.program_id(2) * (2 if DUAL else HPP)
     if PDL:
-        # Let the merge kernel launch now; it waits on-device for this grid to finish.
         gdc_launch_dependents()
     QKV_W: tl.constexpr = (2 * HQ + 2 * HKV) * D
     ROW_W: tl.constexpr = HKV * D
     C: tl.constexpr = HPP * D
-
     if PF:
-        # Full layers: touch the page-table lines of this split's chunk (one entry per 128-byte line) before the
-        # query load stalls the warps, so the pipeline prologue's page loads hit L2. The sum is used only at the
-        # end. (Also touching the first tile's cache rows ties; on sliding layers, whose chunk starts at the
-        # window, it loses: decode 1 sliding +0.26 us.)
         PF_N: tl.constexpr = _np2_jit(CHUNK // PAGE // 32 + 2)
         pf_p = tl.minimum(split * CHUNK // PAGE + tl.arange(0, PF_N) * 32, MAX_PAGES - 1)
         pf = tl.sum(tl.load(pt_ptr + b.to(tl.int64) * MAX_PAGES + pf_p), 0)
@@ -4106,11 +3887,6 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
         seq = tl.load(seq_ptr + b)
     c = tl.arange(0, C)
     if PRE > 0:
-        # L2 prefetch of the K/V rows of the split's first PRE tiles, issued before the query norm (and RoPE), so
-        # those trips overlap the qkv/cos/sin ones; the pipelined loop then gathers them from L2. Verify 1 full
-        # (with pf): H100 paired PRE 1 -0.45 us (20/20), PRE 2 another -0.48 (19/20), PRE 4 +1.06 vs 2. Batch-1
-        # sliding ties (one tile per split); batched sliding loses (+0.2..+0.7), as does a register-held first
-        # tile instead of the prefetch (decode sliding +1..+2.5 us).
         lo, hi, pt_row, n = _range(split, b, seq, pt_ptr, WINDOW, BALANCE, S, BLOCK_N, CHUNK, MAX_PAGES)
         t0 = tl.maximum(tl.minimum(lo + tl.arange(0, PRE * BLOCK_N), hi - 1), 0)
         row0 = (tl.maximum(tl.load(pt_row + t0 // PAGE), 0).to(tl.int64) * PAGE + t0 % PAGE) * ROW_W + hp0 * D
@@ -4118,15 +3894,13 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
                                   [kc_ptr + row0, vc_ptr + row0], dtype=tl.int32, is_pure=False, pack=1)
     r = tl.arange(0, M_PAD)
     hp = r // MG
-    rr = r % MG  # token rr // G, query head (hp0 + hp) * G + rr % G
+    rr = r % MG
     r_ok = r < HPP * MG
     j = rr // G
     pos = seq + j
     q_off = (b * L + j)[:, None] * QKV_W + ((hp0 + hp) * G + rr % G)[:, None] * D + (c % D)[None, :]
     q_ok = r_ok[:, None] & ((c // D)[None, :] == hp[:, None])
     if PREQ > 0:
-        # PREQ: the L2 prefetch of the first PREQ tiles' K/V rows after the query/cos/sin loads are issued, before
-        # the norm and RoPE math, so the K/V trip overlaps it (PRE, above, puts the prefetch first).
         qx, qxp, qcos, qsin = _norm_rope_ld(qkv_ptr, q_off, q_ok, c, pos, cs_ptr, ROPE, D)
         lo, hi, pt_row, n = _range(split, b, seq, pt_ptr, WINDOW, BALANCE, S, BLOCK_N, CHUNK, MAX_PAGES)
         t0 = tl.maximum(tl.minimum(lo + tl.arange(0, PREQ * BLOCK_N), hi - 1), 0)
@@ -4137,7 +3911,6 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
     else:
         q = _norm_rope(qkv_ptr, q_off, q_ok, c, pos, cs_ptr, ROPE, D, HPP)
     if QK8:
-        # Queries rounded to E4M3 (as FA3 does with an FP8 cache): QK^T runs on the FP8 cache as is.
         q = q.to(tl.float8e4nv)
     else:
         q = q.to(DOT)
@@ -4146,8 +3919,7 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
         q1 = _norm_rope(qkv_ptr, q_off + G * D, q_ok, c, pos, cs_ptr, ROPE, D, HPP)
         q1 = q1.to(tl.float8e4nv) if QK8 else q1.to(DOT)
     k_scale = tl.load(ks_ptr)
-    scale = qk_scale * k_scale  # log2 units, applied to q . k_fp8
-
+    scale = qk_scale * k_scale
     m_i = tl.full([M_PAD], -1.0e30, tl.float32)
     l_i = tl.zeros([M_PAD], tl.float32)
     acc = tl.zeros([M_PAD, C], tl.float32)
@@ -4157,19 +3929,10 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
     if DUAL:
         m1, l1, acc1 = _new(split, b, seq, j, q1, m1, l1, acc1, hp0 + 1, c, scale, k_scale, qkv_ptr, cs_ptr,
                             kc_ptr, vc_ptr, vs_ptr, loc_ptr, HQ, HKV, HPP, L, L_PAD, MG, D, ROPE, S, QK8, DOT, SEP)
-
     if PRE == 0 and PREQ == 0:
-        # (Computed here, after the queries, unless PRE needs it first: moving it up costs decode 1 sliding +0.2 us.)
         lo, hi, pt_row, n = _range(split, b, seq, pt_ptr, WINDOW, BALANCE, S, BLOCK_N, CHUNK, MAX_PAGES)
-    # Whole tiles need no bounds masks; full layers need no masks at all there. The tail is masked.
-    # Only for single-token decode: with a verify block's 64 rows the second copy costs registers.
-    # Cached keys start at base = seq - (WINDOW - 1) (or 0), so a decode query (position seq) needs no window mask on
-    # them (H100 paired decode 16 sliding -0.1 us, 11/15 and 13/15 both orders; decode 1/32 tie). A verify row j masks
-    # keys below base + j (split 0's first tile only); handling that tile apart lost (+0.2..+1.7 us).
     WIN: tl.constexpr = 0 if L == 1 else WINDOW
     if FIX > 0:
-        # Fixed reference: the row maxima of the first FIX tiles' scores (QK^T only) + FDELTA binades; every tile
-        # then exponentiates against it (no row max / alpha / rescale in the loop).
         mref = tl.full([M_PAD], -1.0e30, tl.float32)
         for fs in tl.range(lo, tl.minimum(lo + FIX * BLOCK_N, hi), BLOCK_N, num_stages=1):
             ft = fs + n
@@ -4196,32 +3959,24 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
             m1, l1, acc1 = _tile(start + n, hi, pt_row, kc_ptr, vc_ptr, q1, pos, c, m1, l1, acc1, scale, hp0 + 1,
                                  False, PAGE, ROW_W, D, WIN, QK8, DOT, CL=SEQ_IN)
     for start in tl.range(full_end, hi, BLOCK_N, num_stages=STAGES):
-        # MIF: one loop, masks only on the tiles that need them (window start for verify rows, or past hi).
         need = (start + BLOCK_N > hi) | (start <= seq + (L - 1) - WIN) if WIN > 0 else start + BLOCK_N > hi
         m_i, l_i, acc = _tile(start + n, hi, pt_row, kc_ptr, vc_ptr, q, pos, c, m_i, l_i, acc, scale, hp0,
                               True, PAGE, ROW_W, D, WIN, QK8, DOT, MIF, need, FIXED=FXD, CL=SEQ_IN)
         if DUAL:
             m1, l1, acc1 = _tile(start + n, hi, pt_row, kc_ptr, vc_ptr, q1, pos, c, m1, l1, acc1, scale, hp0 + 1,
                                  True, PAGE, ROW_W, D, WIN, QK8, DOT, MIF, need, CL=SEQ_IN)
-
     if PF:
         m_i += tl.where(pf == -7, 1.0, 0.0) * 0.0
     if FIX > 0:
-        # A row whose scores grew > 16 + FDELTA binades past the reference overflowed FP16 P: flag it (m = +inf,
-        # x - x != 0 exactly for inf and NaN) for _combine's exact REDO.
         asum = tl.sum(acc, 1) + l_i
         m_i = tl.where(asum - asum == 0.0, m_i, float("inf"))
     _finish(split, b, j, m_i, l_i, acc, hp0, hp, rr, r_ok, q_ok, c, pacc_ptr, pml_ptr, HKV, MG, D, S, SEP)
     if DUAL:
         _finish(split, b, j, m1, l1, acc1, hp0 + 1, hp, rr, r_ok, q_ok, c, pacc_ptr, pml_ptr, HKV, MG, D, S, SEP)
-
     if FUSE:
-        # The last of this (request, head pair)'s S programs to finish merges the partials and
-        # writes the output, then resets the counter for the next call.
         cnt = cnt_ptr + b * (HKV // HPP) + hp0 // HPP
         if tl.atomic_add(cnt, 1, sem="acq_rel") == S - 1:
             first = ((b * HKV + hp0 + hp) * S) * MG + rr
-            # All splits' maxima and sums at once: [S_PAD, M_PAD].
             si = tl.arange(0, S_PAD)
             at = first[None, :] + si[:, None] * MG
             ok2 = (si < S)[:, None] & r_ok[None, :]
@@ -4229,7 +3984,6 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
             m_max = tl.max(m, 0)
             denom = tl.sum(tl.exp2(m - m_max[None, :]) * tl.load(pml_ptr + at * 2 + 1, mask=ok2, other=0.0,
                                                                   cache_modifier=".cg"), 0)
-            # Unrolled, so every split's accumulator load is in flight at once.
             o = tl.zeros([M_PAD, C], tl.float32)
             for i in tl.static_range(S):
                 at1 = first + i * MG
@@ -4239,12 +3993,7 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
             _norm_gate_store(o / tl.where(r_ok, denom, 1.0)[:, None] * tl.load(vs_ptr), qkv_ptr, out_ptr,
                              b * L + j, (hp0 + hp) * G + rr % G, c, q_ok, HQ, HKV, D)
             tl.atomic_xchg(cnt, 0)
-
-
-# The rare redo path of _attn_split's SPEC, out of line so it doesn't disturb the hot path's code.
 _attn_body_redo = triton.jit(noinline=True)(_attn_body.fn)
-
-
 @triton.jit
 def _attn_split(qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr,
                 pacc_ptr, pml_ptr, cnt_ptr, out_ptr, qk_scale,
@@ -4262,8 +4011,6 @@ def _attn_split(qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr
     page-table and cos/sin loads skip one DRAM trip) and redo the split with the real length if it differs."""
     if SPEC > 0:
         real = tl.load(seq_ptr + tl.program_id(1))
-        # One copy of the body in a loop (a second, out-of-line copy for the redo lost ~2 us on the H200 judge, s86):
-        # the first pass runs on the constant, a second one only if the real length differs.
         seq = tl.full([], SPEC, tl.int32)
         go = True
         while go:
@@ -4272,8 +4019,6 @@ def _attn_split(qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr
             seq = real
     else:
         _attn_body(0, False, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, cnt_ptr, out_ptr, qk_scale, HQ, HKV, HPP, G, L, MG, M_PAD, L_PAD, D, PAGE, MAX_PAGES, WINDOW, ROPE, S, CHUNK, BLOCK_N, STAGES, FUSE, S_PAD, QK8, PDL, DOT, PEEL, DUAL, BALANCE, SEP, PF, PRE, MIF, PREQ, FIX, FDELTA)
-
-
 @triton.jit
 def _new_tokens(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale,
                 HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, MG: tl.constexpr,
@@ -4299,16 +4044,11 @@ def _new_tokens(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, seq_ptr, loc_ptr, pacc_
     m_i, l_i, acc = _new(0, b, seq, j, q, m_i, l_i, acc, hp0, c, qk_scale * k_scale, k_scale, qkv_ptr, qkv_ptr,
                          kc_ptr, vc_ptr, vs_ptr, loc_ptr, HQ, HKV, 1, L, L_PAD, MG, D, False, S, True, DOT)
     if NID:
-        # Balanced splits (gbal): partials [HKV, NID, MG, D], this request's new tokens at id NBASE + b.
         _finish(NBASE + b, 0, j, m_i, l_i, acc, hp0, 0, rr, rr < MG, q_ok, c, pacc_ptr, pml_ptr, HKV, MG, D, NID)
         if WAIT:
-            # (NT_AFTER: launched after _gw_verify, which it doesn't read; end only after it, so the merge that
-            # waits on this grid sees both.)
             gdc_wait()
     else:
         _finish(S, b, j, m_i, l_i, acc, hp0, 0, rr, rr < MG, q_ok, c, pacc_ptr, pml_ptr, HKV, MG, D, S + 1)
-
-
 @triton.jit
 def _norm_gate_store(o, qkv_ptr, out_ptr, tok, head, c, ok, HQ: tl.constexpr, HKV: tl.constexpr,
                      D: tl.constexpr):
@@ -4319,17 +4059,12 @@ def _norm_gate_store(o, qkv_ptr, out_ptr, tok, head, c, ok, HQ: tl.constexpr, HK
     col = head[:, None] * D + (c % D)[None, :]
     gate = tl.load(qkv_ptr + tok[:, None] * QKV_W + (HQ + 2 * HKV) * D + col, mask=ok, other=0.0).to(tl.bfloat16).to(tl.float32)
     tl.store(out_ptr + tok[:, None] * HQ * D + col, (o * tl.sigmoid(gate)).to(tl.bfloat16), mask=ok)
-
-
 @triton.jit
 def _qld(p, QSS: tl.constexpr):
-    # proj s22 (QSS): qkv as 2 FP32 split-K slabs QSS elements apart: add them in FP32 (then the caller rounds to BF16)
     x = tl.load(p)
     if QSS != 0:
         x = x + tl.load(p + QSS)
     return x
-
-
 @triton.jit
 def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
              HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, M: tl.constexpr,
@@ -4344,15 +4079,12 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     d = tl.arange(0, D)
     gate = _qld(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + head * D + d, QSS).to(tl.bfloat16).to(tl.float32)
     if PDL:
-        # Launched early (programmatic dependent launch): wait here for _attn_split's partials.
         gdc_wait()
-    # This head's row in each split's partial: [S] maxima and sums, [S, D] accumulators.
     row = (b * HKV + h) * S * M + (tok % L) * G + head % G
     s = tl.arange(0, S_PAD)
     m = tl.load(pml_ptr + (row + s * M) * 2, mask=s < S, other=-1.0e30)
     l = tl.load(pml_ptr + (row + s * M) * 2 + 1, mask=s < S, other=0.0)
     if S_PAD <= SB and ONE:
-        # One pass: every load issued before the max reduction (one L2 round trip on the critical path).
         a = tl.load(pacc_ptr + (row + s * M)[:, None] * D + d[None, :], mask=(s < S)[:, None],
                     other=0.0).to(tl.float32)
         m_max = tl.max(m, 0)
@@ -4372,9 +4104,6 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
             acc += tl.sum(w[:, None] * a, 0)
     if REDO:
         if tl.max(m, 0) == float("inf"):
-            # Cold path: an _attn_split FIX partial overflowed (m = +inf; never seen on the scored data). Merge again,
-            # recomputing each flagged split's keys [s * CHUNK, ..) exactly (same FP8 query and scale, FP32 P). The
-            # new tokens' slot (tsep) is exact and never flagged.
             ROW_W: tl.constexpr = HKV * D
             BK: tl.constexpr = 8
             x = _qld(qkv_ptr + tok * QKV_W + head * D + d, QSS).to(tl.bfloat16).to(tl.float32)
@@ -4417,8 +4146,6 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     o = acc / denom * tl.load(vs_ptr)
     o = o * tl.rsqrt(tl.sum(o * o, 0) / D + 1e-5)
     tl.store(out_ptr + tok * HQ * D + head * D + d, (o * tl.sigmoid(gate)).to(tl.bfloat16))
-
-
 @triton.jit
 def _combine_hb(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
                 HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, M: tl.constexpr,
@@ -4427,7 +4154,7 @@ def _combine_hb(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     """_combine for HB adjacent query heads of one KV head per program: their partial rows are
     contiguous in every split, so each split's [HB, D] block is one contiguous read. Faster on
     sliding layers (fewer, fuller programs); full layers keep _combine."""
-    if TRIG:  # layer n5s4: the PDL o GEMM (g30n: W ring streams before its griddepcontrol.wait) may launch now
+    if TRIG:
         gdc_launch_dependents()
     tok = tl.program_id(0)
     head0 = tl.program_id(1) * HB
@@ -4440,7 +4167,7 @@ def _combine_hb(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     gate = _qld(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + col, QSS).to(tl.bfloat16).to(tl.float32)
     if PDL:
         gdc_wait()
-    row = (b * HKV + h) * S * M + (tok % L) * G + head0 % G + hb  # [HB] rows in split 0
+    row = (b * HKV + h) * S * M + (tok % L) * G + head0 % G + hb
     s = tl.arange(0, S_PAD)
     at = row[None, :] + (s * M)[:, None]
     m = tl.load(pml_ptr + at * 2, mask=(s < S)[:, None], other=-1.0e30)
@@ -4467,8 +4194,6 @@ def _combine_hb(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     o = acc / denom[:, None] * tl.load(vs_ptr)
     o = o * tl.rsqrt(tl.sum(o * o, 1) / D + 1e-5)[:, None]
     tl.store(out_ptr + tok * HQ * D + col, (o * tl.sigmoid(gate)).to(tl.bfloat16))
-
-
 @triton.jit
 def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
                  HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, M: tl.constexpr,
@@ -4492,19 +4217,16 @@ def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     tt = tl.maximum(tl.sum(tiles, 0), 1)
     excl = tl.sum(tl.where(idx < b, tiles, 0), 0)
     incl = excl + tl.sum(tl.where(idx == b, tiles, 0), 0)
-    # Programs p with start(p) < incl, end(p) > excl, end(p) > start(p) (a superset range, then the test).
     p_lo = tl.maximum((excl + 1) * P // tt - 1, 0)
     p_hi = tl.minimum((incl * P) // tt + 1, P - 1)
     if PROP:
-        # _gd_full's length-proportional splits (plan dbal): request b owns programs [c_b, c_b+1) exactly.
         p_lo = b + (P - B) * excl // tt
         p_hi = b + (P - B) * incl // tt
     gdc_wait()
-    row = (h * NID + b) * M + (tok % L) * G + head0 % G + hb  # [HB] rows at id b (p = 0)
+    row = (h * NID + b) * M + (tok % L) * G + head0 % G + hb
     nrow = row + (P + B) * M
     sb = tl.arange(0, SB)
     if ONE:
-        # One online pass: each chunk's maxima, sums and accumulators load together (one L2 round trip per chunk).
         m_max = tl.load(pml_ptr + nrow * 2)
         denom = tl.load(pml_ptr + nrow * 2 + 1)
         acc = tl.load(pacc_ptr + nrow[:, None] * D + d[None, :]).to(tl.float32)
@@ -4556,11 +4278,8 @@ def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
             acc += tl.sum(w[:, :, None] * a, 0)
     if REDO:
         if tl.max(m_max, 0) == float("inf"):
-            # Cold path: a _gw_verify LZ 10 partial of these rows overflowed (m = +inf: a row's scores grew by > 30
-            # binades past its segment's first tiles; never seen on the scored data). Recompute the rows' attention over all the
-            # request's cached keys exactly (same FP8 queries and scale, FP32 P), then add the new tokens' partial.
             ROW_W: tl.constexpr = HKV * D
-            BK: tl.constexpr = 8  # (small: wider tiles cost this kernel registers on the hot path)
+            BK: tl.constexpr = 8
             x = _qld(qkv_ptr + tok * QKV_W + col, QSS).to(tl.bfloat16).to(tl.float32)
             q8 = (x * tl.rsqrt(tl.sum(x * x, 1) / D + 1e-5)[:, None]).to(tl.float8e4nv).to(tl.float32)
             scale = qk_scale * tl.load(ks_ptr)
@@ -4587,8 +4306,6 @@ def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     o = acc / denom[:, None] * tl.load(vs_ptr)
     o = o * tl.rsqrt(tl.sum(o * o, 1) / D + 1e-5)[:, None]
     tl.store(out_ptr + tok * HQ * D + col, (o * tl.sigmoid(gate)).to(tl.bfloat16))
-
-
 def _plan(cfg, max_pages, device):
     """Launch parameters from shapes only, tuned on an H100 over the scored shapes: splits per
     (request, KV head group), tile size, warps, pipeline stages, KV heads per program (hpp),
@@ -4599,131 +4316,58 @@ def _plan(cfg, max_pages, device):
     pairs = heads // 2
     if cfg["window"] and length == 1 and pairs >= 12 and HAVE_GLUON and USE_GSLIDE and hkv % 2 == 0 \
             and cfg["num_q_heads"] // hkv == 8 and cfg["head_dim"] == 64:
-        # Batched sliding decode on the Gluon one-warp kernel (FP8 QK^T mma; a dedicated program per KV head
-        # pair for the new token, so the S key splits stay tile-aligned), up to ~800 programs (H100 decode
-        # 16/32 sliding 10.6/15.6 -> 9.3/13.9 us, B64 27.7 -> 23.2; at batch <= 8 it loses by 0.2-1.8 us).
-        # Off: on the H200 (check f3e099c1) decode 16/32 sliding went 10.4/14.6 -> 13.6/15.4 us.
         splits = 32 if pairs * 32 <= 800 else (16 if pairs * 16 <= 800 else 8)
         return dict(gdec=True, sep=True, splits=splits, block_n=32, stages=2, pdt="f32", hb=2)
     if cfg["window"]:
-        # Sliding layers: at most 2,047 cached keys; latency-bound.
-        # The merge takes 2 query heads per one-warp program (hb, cw) and every split in one pass (sb):
-        # each further pass is another serial L2 round trip on the critical path.
         splits = 32 if heads <= 4 else (16 if heads <= 32 and length == 1 else 8)
-        # Partials stay FP32 everywhere (human decision 2026-10-24; BF16 was -0.5 us at verify 16/32 sliding).
         pdt = "f32"
         if heads <= 32:
-            # tsep (batch 1-2): the block's new tokens in their own program instead of split 0, the critical path,
-            # with 2 stages (one tile per split). H100 paired: verify 1 sliding tsep -0.14 us (8/9 rounds twice),
-            # + stages 2 -0.11 (9/15); decode 1 sliding tsep alone and stages 2 alone ties, both -0.35 (15/15).
-            # Batched sizes lose with tsep (+0.6-2.7 us).
             tiny = heads <= 4
             return dict(splits=splits, block_n=64, warps=4, stages=2 if tiny else (5 if length > 1 else 3),
                         hpp=1, fuse=False, qk8=True, hb=2, sb=splits, cw=1, pdt=pdt, tsep=tiny,
                         **({"spec": True, "pre": 2} if tiny and batch == 1 and length > 1 else {}),
-                        # Verify (agent2 s1): mif (score masks only on the window-start / tail tiles) H100 paired
-                        # verify 16 sliding -0.24 us (10/11), + preq 1 (first tile's K/V L2 prefetch between the
-                        # query loads and their norm/RoPE) another -0.13 (9/11).
                         **({"mif": True, "preq": 1} if length > 1 and not tiny else {}))
-            # (spec + pre 2 for verify 1 sliding, s85: H100 paired -0.30 us, but H200 check f51b8c4b judged 9.55 vs
-            # ~7.2 us with unchanged profiled kernels (5.5 us): off. _attn_split keeps the SPEC code for that study.)
-        # Large batches: smaller, deeply pipelined programs.
-        # (hpp 2 for batched sliding decode, e405425/6fb74be/652aafe, won on the H100 but lost on the H200: scored
-        # 56fca423 decode 16/32 sliding 10.3/14.3 -> 11.1/15.4 us vs abd67ae2. Reverted 2026-10-24.)
         if length > 1 and heads >= 64:
-            # Verify from batch 32: 4 splits of 64-key tiles instead of 8 of 32, a quarter of the programs (256 at
-            # batch 32) with the same per-program chain, and half the FP32 partials for the merge to read. Paired
-            # H100 verify 32/40/48/64 sliding -1.6/-5.8/-6.7/-7.5 us (7/7 or 9/9 each); batch 20 +0.9, 24 -0.2.
             return dict(splits=4, block_n=64, warps=4, stages=5, hpp=1, fuse=False, qk8=True, hb=2, sb=4, cw=1,
-                        pdt=pdt, mif=True)  # mif (agent2 s1): verify 32 sliding H100 paired -0.61 us (11/11)
+                        pdt=pdt, mif=True)
         return dict(splits=splits, block_n=32, warps=2 if length == 1 else 4, stages=5, hpp=1, fuse=False,
                     qk8=True, peel=length > 1, hb=2, sb=splits, cw=1, pdt=pdt)
-    # Full layers: partials stay FP32 too (BF16 had been -1.0/-1.5 us at decode 16/32 full, -0.4 at verify 1 full).
     if heads == 2 and length == 1 and HAVE_GLUON and USE_GDEC and USE_GD1 and cfg["num_q_heads"] // hkv == 8 \
             and cfg["head_dim"] == 64:
-        # Batch-1 decode full on the Gluon one-warp kernel: 511 key splits + the new token's slot (512 BF16
-        # partials, about 4 per SM), merged in one pass by 8-warp programs. H100 17.5 -> 15.7 us (attention
-        # alone 15.3 -> 12.4, near the 11.5 us gather floor; the 512-way merge costs 3.2 us vs 2.2).
-        # red (s95): the merge as FP32 atomic adds at reference max 0 into 4 replicas inside _gd_full, then one
-        # 4-warp _red_fin program (reads 16 KB instead of 512 x 2 KB slots): H100 paired 14.55 -> 13.85 us (8/8).
         return dict(gdec=True, splits=511, block_n=32, stages=2, pdt="f32", csb=512, cw=8,
-                    spec=True,  # seq from the table width (see _gd_full): H100 paired -0.59 us (13/13)
-                    qf=True,  # moe s35: query rows before the first copies: H200 DIAG -0.28 us (5/5 pairs), H100 tie
+                    spec=True,
+                    qf=True,
                     red=True)
     if heads <= (2 if length == 1 else 4):
-        # (Session 18's hpp 2 / block_n 64 for decode 1 full won on the H100, 18.0 -> 17.4 us, but lost on the
-        # H200: check f3e099c1 decode 1 full 15.2 -> 17.6 us.)
-        # Verify 1 full: tsep as on sliding layers (H100 paired -0.11 us, 9/11 rounds), with 127 splits so the merge
-        # sees at most 128 slots in one pass (-0.08, 8/11); then block_n 64 with 8 stages (-0.62, 9/11; emulated H200
-        # 25.9 -> 20.3). Unchecked on the H200: if verify 1 full is worse there, revert block_n/stages first.
         if length > 1:
-            # pf: the split's page-table lines touched before the query load (H100 paired -0.35 us, 10/11 and 8/11).
-            # fix 1 (s106): fixed-reference softmax (reference = tile 0's row max + 14 binades; no row max / alpha /
-            # rescale in the loop; overflowing rows -> _combine REDO, exact). H100 paired cold -0.19 us (9/9), warm-L2
-            # -0.4 (7/7; -1.1 with pre 0).
-            # spec (moe s33): seq from the table width (batch 1; redo if the real length differs): H200 DIAG -0.63/-0.70 us
-            # standalone (4/4 pairs, checks 4fe17fa9/28658e59), bitwise = before.
             return dict(splits=127, block_n=64, warps=4, stages=8, hpp=1, fuse=False, qk8=True, pdt="f32", tsep=True,
                         pf=True, pre=2, fix=1, spec=True)
         return dict(splits=128, block_n=128, warps=4, stages=6, hpp=1, fuse=False, qk8=True, pdt="f32")
     if length == 1:
         if HAVE_GLUON and USE_GDEC and hkv % 2 == 0 and cfg["num_q_heads"] // hkv == 8 and cfg["head_dim"] == 64:
-            # Gluon one-warp programs (FP8 QK^T mma, new token in the last split): 1024 programs (one wave),
-            # S + 1 partial slots a power of two for the merge, BF16 partials.
-            # Merge in one-warp programs up to 128 slots (H100 batch 8-48 -1.0..-2.1 us, decode 16/32 full
-            # -1.7/-1.7; 256-512 slots lose 0.7-1.0 us). Likely residency: 8 attention programs at 242 registers
-            # leave an SM 2048 registers for PDL-launched merge programs (capping the merge's registers loses).
             splits = max(4, 2048 // heads - 1)
-            # s103: with plan red's merge (no _combine_bal), dbal wins at batch 16 too: H100 paired decode 16 full
-            # -1.54 us (10/10) vs equal splits + red (dprogs 768: -0.63 more at 16 but +3.5 at 32; 512/1536 lose).
             if heads >= (32 if BRED else 48) and 2048 // hkv >= 8 * batch:
-                # dbal: 2048 / hkv programs per KV head pair shared out in proportion to the requests' lengths (the
-                # agentic lengths differ by up to 15%, and equal splits per request leave the longest ones setting
-                # the time), merged by _combine_bal (one head, 64 slots per 2-warp program: its 2-head 32-slot form
-                # costs +1.3 us of merge tail). H100 paired, seed-7 data, decode 24/32/48/64 full: real
-                # -3.5/-3.5/-3.7/+0.5 us, all-L2 -6.6/-7.5/-16.6/-14.5; on the bench's data decode 32 full real +0.4,
-                # all-L2 -4.9 (the H200 sits between). Batch 4-16 lose (real +0.8..+3.2).
                 return dict(gdec=True, splits=splits, block_n=32, stages=2, pdt="f32", dbal=True, dprogs=2048 // hkv,
                             hb=1, sb=64, cw=2, red=BRED)
             return dict(gdec=True, splits=splits, block_n=32, stages=2, pdt="f32", red=BRED,
                         **({"cw": 1} if splits < 128 else {}))
-        # Many small one-warp programs with deep pipelines keep the most scattered row reads in flight.
         return dict(splits=max(8, 2048 // heads), block_n=16, warps=1, stages=5 if heads <= 32 else 6, hpp=2,
                     fuse=False, qk8=True, pdt="f32")
-    # Verify blocks: each program runs both KV heads as two independent 64-row chains (dual), which
-    # hides latency better than more programs; 3 fit per SM (160 registers), or 4 when capped at 128
-    # (no spills). The splits fill exactly one wave, and each request's context is cut into equal
-    # chunks (balance) so none idles. 4 per SM wins from 6 pairs up (batch 32: 303 -> 292 us, 64:
-    # 593 -> 568 on an H100); below that only where it fills the wave better (batch 3-4 lose 2-4%).
     pairs = batch * max(1, hkv // 2)
     sms = _num_sms(device)
     if HAVE_GLUON and pairs >= 6 and hkv % 2 == 0 and length * cfg["num_q_heads"] // hkv == 64 \
             and cfg["head_dim"] == 64:
-        # The warp-specialized Gluon kernel: 2 programs per SM (384 threads). One wave of programs unless
-        # two fill the slots clearly better (H100, ctx 80K: batch 16 155 -> 145 us with 16 splits instead
-        # of 32, batch 12 124 -> 116; batch 40 keeps two waves, 344 vs 332).
         slots = 2 * sms
         fill = {w: (w * slots // pairs) * pairs / (w * slots) for w in (1, 2)}
         waves = 2 if fill[2] > fill[1] + 0.05 else 1
         splits = max(2, waves * slots // pairs)
-        # The merge: with up to 32 partials, one-warp programs over 2 heads (H100 verify 16 full 139 -> 137.5 us).
         merge = dict(hb=2, cw=1) if splits + 1 <= 32 and (cfg["num_q_heads"] // hkv) % 2 == 0 else {}
-        # gfuse: the merge runs in the same grid (each program merges a slice of rows once its request's
-        # programs have all stored; H100 verify 16/32 full 136.8 -> 136.0 / 257.2 -> 256.2 us). The separate
-        # merge (hb/cw) remains for two-wave plans.
-        # gbal (from 16 pairs): the programs instead share the batch's key tiles equally (ranges may span
-        # requests; the agentic lengths differ by up to 15%), as many as fill the slots; merged by _combine_bal.
-        # H100 all-L2 (compute-bound, as the H200 mostly is) verify 16/32 full 110.0/212.4 -> 104.1/195.9 us,
-        # real 136.4/255.4 -> 138.8/250.7, batch 40/48/64 real -8.8/-7.1/-8.4. Below 16 pairs the lost in-grid
-        # merge (gfuse) costs more than the balance gains (batch 8: +4 us real).
         return dict(gluon=True, splits=splits, block_n=64, stages=3, lag=1, gpeel=True, pw=4,
                     pregs=40, cregs=96, maxnreg=80, lsum=True, gfuse=True, gbal=USE_GBAL and pairs >= 16, **merge)
     fill = {per: max(4, per * sms // pairs) * pairs / (per * sms) for per in (3, 4)}
     per = 4 if pairs >= 6 or fill[4] > fill[3] else 3
     return dict(splits=max(4, per * sms // pairs), block_n=32, warps=4, stages=5, hpp=1, fuse=False,
                 qk8=True, peel=True, dual=True, balance=True, maxnreg=128 if per == 4 else None, pdt="f32")
-
-
 @triton.jit
 def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ: tl.constexpr, HKV: tl.constexpr,
              G: tl.constexpr, D: tl.constexpr, M: tl.constexpr, S: tl.constexpr, NR: tl.constexpr,
@@ -4746,7 +4390,7 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
     gate = _qld(qkv_ptr + (HQ + 2 * HKV) * D + col, QSS).to(tl.bfloat16).to(tl.float32)
     vs = tl.load(vs_ptr)
     gdc_wait()
-    if TRIG:  # layer s27 RF_TRIG: the o GEMV (PDL secondary, W preload before its wait) launches only now
+    if TRIG:
         gdc_launch_dependents()
     a = tl.zeros([M, D], tl.float32)
     l = tl.zeros([M], tl.float32)
@@ -4754,7 +4398,7 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
         a += tl.load(red_ptr + k * M * D + col)
         l += tl.load(red_ptr + NR * M * D + k * M + r)
     nf = tl.load(rcnt_ptr + 1)
-    tl.debug_barrier()  # every thread's copies loaded before one of them zeroes the replicated l and count words
+    tl.debug_barrier()
     for k in tl.static_range(NR):
         tl.store(red_ptr + k * M * D + col, tl.zeros([M, D], tl.float32))
         tl.store(red_ptr + NR * M * D + k * M + r, tl.zeros([M], tl.float32))
@@ -4780,17 +4424,15 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
     o = a / l[:, None] * vs
     o = o * tl.rsqrt(tl.sum(o * o, 1) / D + 1e-5)[:, None]
     tl.store(out_ptr + col, (o * tl.sigmoid(gate)).to(tl.bfloat16))
-
-
 def _verify_nvs(data, cfg):
     """Verify sliding (L 8, G 8, D 64, HKV 2, page 1) on the native nvs kernel + _combine_hb."""
     batch, length, hq, hkv, d = cfg["batch"], cfg["q_len"], cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     qkv, device = data["qkv"], data["qkv"].device
-    if NVS_HALF:  # CTA (request, KV head, split), 2 halves per split merged in the CTA
+    if NVS_HALF:
         S = 2 if batch >= 32 else 4
         chunk = triton.cdiv(triton.cdiv(cfg["window"], S), 128) * 128
     else:
-        S = 4 if batch >= 32 else 8  # ~128 CTAs, one per SM
+        S = 4 if batch >= 32 else 8
         chunk = triton.cdiv(triton.cdiv(cfg["window"], S), 64) * 64
     rows = length * (hq // hkv)
     pacc = torch.empty((batch, hkv, S, rows, d), dtype=torch.float32, device=device)
@@ -4801,7 +4443,7 @@ def _verify_nvs(data, cfg):
         _NVSCL.nvs(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], data["k_scale"],
                    data["v_scale"], data["cache_loc"], data["page_table"], data["seq_lens"], pacc, pml,
                    cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], out, 1)
-        return out  # the 2-CTA clusters merged the 2 splits and wrote out
+        return out
     _NVS.nvs(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], data["k_scale"],
              data["v_scale"], data["cache_loc"], data["page_table"], data["seq_lens"], pacc, pml,
              cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], *data.get("o_pf", (0, 0)),
@@ -4811,13 +4453,11 @@ def _verify_nvs(data, cfg):
         HQ=hq, HKV=hkv, G=hq // hkv, L=length, M=rows, D=d, S=S, S_PAD=triton.next_power_of_2(S), SB=S, HB=2,
         ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
     return out
-
-
 def _decode_nds(data, cfg):
     """Decode sliding (L 1, G 8, D 64, HKV 2, page 1) on the native nds kernel + _combine_hb."""
     batch, hq, hkv, d = cfg["batch"], cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     qkv, device = data["qkv"], data["qkv"].device
-    S = 8  # 256 CTAs at batch 32, 2 per SM (s34: 4 and 16 lose on H100)
+    S = 8
     chunk = triton.cdiv(triton.cdiv(cfg["window"], S), 64) * 64
     rows = hq // hkv
     pacc = torch.empty((batch, hkv, S, rows, d), dtype=torch.float32, device=device)
@@ -4832,8 +4472,6 @@ def _decode_nds(data, cfg):
         HQ=hq, HKV=hkv, G=rows, L=1, M=rows, D=d, S=S, S_PAD=S, SB=S, HB=2,
         ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
     return out
-
-
 def attn_kernel_fn(data: Inputs) -> torch.Tensor:
     cfg = data["config"]
     batch, length = cfg["batch"], cfg["q_len"]
@@ -4845,7 +4483,7 @@ def attn_kernel_fn(data: Inputs) -> torch.Tensor:
     max_pages = page_table.shape[1]
     nvs_ok = (_NVS is not None and cfg["window"] == 2048 and length == 8 and batch >= NVS_MIN_BATCH and hq == 16
               and hkv == 2 and d == 64 and cfg["page_size"] == 1 and cfg["rope_theta"])
-    if data.get("qkv_ss", 0) and not (length == 1 and batch >= NDS_MIN_BATCH or nvs_ok):  # proj s22: csl/vtk: summed slabs (s72: nvs loads them)
+    if data.get("qkv_ss", 0) and not (length == 1 and batch >= NDS_MIN_BATCH or nvs_ok):
         qkv = data["qkv_slabs"].sum(0).view(qkv.shape)
         data = {**data, "qkv": qkv, "qkv_ss": 0}
     if _CSL is not None and cfg["window"] == 2048 and length == 1 and batch <= CSL_MAX_BATCH and hq == 16 \
@@ -4869,9 +4507,9 @@ def attn_kernel_fn(data: Inputs) -> torch.Tensor:
             and hkv == 2 and d == 64 and cfg["page_size"] == 1 and cfg["rope_theta"]:
         return _decode_nds(data, cfg)
     plan = _plan(cfg, max_pages, device)
-    if ATT_PLAN and (plan.get("gluon") or plan.get("gdec")):  # layer s84: H200 tuner plan overrides (full layers)
+    if ATT_PLAN and (plan.get("gluon") or plan.get("gdec")):
         plan = {**plan, **ATT_PLAN}
-    if data.get("qkv_ss", 0) and not (plan.get("gdec") and not plan.get("gluon")):  # proj s22: paths without QSS loads
+    if data.get("qkv_ss", 0) and not (plan.get("gdec") and not plan.get("gluon")):
         qkv = data["qkv_slabs"].sum(0).view(qkv.shape)
         data = {**data, "qkv": qkv, "qkv_ss": 0}
     if plan.get("gluon"):
@@ -4889,11 +4527,8 @@ def attn_kernel_fn(data: Inputs) -> torch.Tensor:
     dual = plan.get("dual", False) and hpp == 1 and hkv % 2 == 0
     rope = bool(cfg["rope_theta"])
     cs = _cos_sin(cfg["rope_theta"], d, device) if rope else qkv
-
-    fuse = plan["fuse"] and splits <= 64 and not dual  # the fused merge unrolls over splits
-    # tsep: the block's new tokens in an extra program (partial slot S) instead of split 0.
+    fuse = plan["fuse"] and splits <= 64 and not dual
     sep = int(bool(plan.get("tsep")) and not fuse)
-    # fix (full layers, merged by _combine with its exact REDO): fixed-reference softmax in the key loop.
     fix = plan.get("fix", 0) if sep and not rope and not cfg["window"] and not dual and not plan.get("balance") \
         and plan.get("hb", 1) == 1 else 0
     pacc = torch.empty((batch, hkv, splits + sep, rows, d), dtype=_PDT[plan.get("pdt", "f32")], device=device)
@@ -4929,14 +4564,11 @@ def attn_kernel_fn(data: Inputs) -> torch.Tensor:
     _combine[(batch * length, hq)](
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=group, L=length, M=rows, D=d, S=splits, S_PAD=triton.next_power_of_2(splits),
-        # Up to 128 splits in one pass, so every partial's load is in flight at once.
         SB=min(128, triton.next_power_of_2(splits)), ONE=MERGE1, PDL=USE_PDL, num_warps=4 if splits > 32 else 2,
         REDO=fix > 0, seq_ptr=data["seq_lens"], kc_ptr=data["k_cache"], vc_ptr=data["v_cache"], ks_ptr=data["k_scale"],
         pt_ptr=page_table, qk_scale=cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, MAX_PAGES=max_pages,
         PAGE=cfg["page_size"], CHUNK=chunk, launch_pdl=USE_PDL)
     return out
-
-
 def _verify_gluon(data, cfg, plan):
     batch, length = cfg["batch"], cfg["q_len"]
     hq, hkv, d = cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
@@ -4952,7 +4584,6 @@ def _verify_gluon(data, cfg, plan):
         return _verify_bal(data, cfg, plan, out, qk_scale)
     pacc = torch.empty((batch, hkv, splits + 1, rows, d), dtype=_PDT[plan.get("pdt", "f32")], device=device)
     pml = torch.empty((batch, hkv, splits + 1, rows, 2), dtype=torch.float32, device=device)
-    # The in-grid merge (gfuse) needs every program resident at once (one wave).
     pairs = batch * (hkv // 2)
     fuse = plan.get("gfuse", False) and splits * pairs <= 2 * _num_sms(device) \
         and splits < 0xFFFF
@@ -4984,8 +4615,6 @@ def _verify_gluon(data, cfg, plan):
         SB=min(128, triton.next_power_of_2(s)), ONE=MERGE1, PDL=USE_PDL, num_warps=plan.get("cw", 4 if s > 32 else 2),
         launch_pdl=USE_PDL)
     return out
-
-
 def _verify_bal(data, cfg, plan, out, qk_scale):
     """_verify_gluon with balanced splits (plan gbal): the programs of each KV head pair index share the batch's
     key tiles equally; partials [HKV, NID, rows, D] by id (see _gw_bal); merged by _combine_bal."""
@@ -4996,7 +4625,6 @@ def _verify_bal(data, cfg, plan, out, qk_scale):
     qkv = data["qkv"]
     device = qkv.device
     page_table = data["page_table"]
-    # Programs per KV head pair: as many as fill the slots (2 per SM), or the plan's splits per request.
     progs = 2 * _num_sms(device) // (hkv // 2) if plan.get("fill", True) else plan["splits"] * batch
     nid = progs + 2 * batch
     b_pad = plan.get("bpad", max(32, triton.next_power_of_2(batch)))
@@ -5031,8 +4659,6 @@ def _verify_bal(data, cfg, plan, out, qk_scale):
         pt_ptr=page_table, qk_scale=qk_scale, MAX_PAGES=page_table.shape[1], PAGE=cfg["page_size"],
         num_warps=plan.get("cw", 1), launch_pdl=USE_PDL)
     return out
-
-
 def _red_bufs(batch, group, d, sl, device):
     """plan red's sums and out-of-range lists (batch 1 keeps its s95 buffers; batched ones are per batch size)."""
     if batch == 1:
@@ -5040,27 +4666,17 @@ def _red_bufs(batch, group, d, sl, device):
     rcw = sl + 2
     return (_red_buf(batch * BNR * 2 * group * (d + 1), device, f"red{batch}"),
             _counters(batch * rcw, device, f"r{batch}"), rcw)
-
-
 def _red_args(batch, group, d, sl, device, out):
     red, rcnt, rcw = _red_bufs(batch, group, d, sl, device)
     return dict(RED=True, red_ptr=red, rcnt_ptr=rcnt, out_ptr=out, NR=4 if batch == 1 else BNR, RCW=rcw)
-
-
-# _red_fin warps: batch 1 (decode 1 full) 16 instead of 4 (fewer loads per thread on the post-wait L2 trip): H100 paired
-# -0.27/-0.34 us (15/15 twice), bit-identical; 8 -0.14..-0.28, 32 tie, 1-2 +0.6..+1.7. Batched decode full: 8/16 tie/lose.
 RF_NW1 = 16
-RF_TRIG = True  # layer s27 (TUNE option rf_trig at T=1; H100 d1 full -1.5..-3.1 us): batch 1: trigger the dependents right after the wait (s4's +2.5 us was a trigger at entry)
+RF_TRIG = True
 RF_NW = 4
-
-
 def _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, sl, bal):
     red, rcnt, rcw = _red_bufs(batch, group, d, sl, qkv.device)
     _red_fin[(batch,)](qkv, red, rcnt, pacc, pml, data["v_scale"], out, HQ=hq, HKV=hkv, G=group, D=d, M=2 * group,
                        S=splits, NR=4 if batch == 1 else BNR, SL=0 if batch == 1 else sl, RCW=rcw, BAL=bal, num_warps=RF_NW1 if batch == 1 else RF_NW, launch_pdl=True,
                        TRIG=RF_TRIG and batch == 1, QSS=data.get("qkv_ss", 0))
-
-
 def _decode_gluon(data, cfg, plan):
     batch, hq, hkv, d = cfg["batch"], cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     group = hq // hkv
@@ -5072,8 +4688,6 @@ def _decode_gluon(data, cfg, plan):
     s = splits + 1
     red = plan.get("red", False) and hkv == 2
     if plan.get("dbal"):
-        # Length-proportional splits: the plan's splits * batch programs per KV head pair (or as many as fit, 8 per
-        # SM), shared out by request length; merged by _combine_bal.
         progs = plan.get("dprogs", splits * batch)
         nid = progs + 2 * batch
         b_pad = max(32, triton.next_power_of_2(batch))
@@ -5129,9 +4743,6 @@ def _decode_gluon(data, cfg, plan):
         SB=plan.get("csb", min(128, triton.next_power_of_2(s))), ONE=MERGE1, PDL=USE_PDL,
         QSS=qss, num_warps=plan.get("cw", 4 if s > 32 else 2), launch_pdl=USE_PDL)
     return out
-
-# ---- layer ----
-# ---- experts (moe_src.py, names prefixed _moe_) ----
 """Routed experts, NVFP4 W4A16, own CUDA kernels (moe agent).
 
 Four launches per call:
@@ -5146,23 +4757,17 @@ Four launches per call:
   gemm2 : the same kernel on w2, writes y bf16 per route.
   norm  : per token, (1 + w) * y, RMSNorm, weighted sum over its local slots (FP32) -> bf16.
 """
-
 import hashlib
 from typing import TypedDict
-
 import torch
-
-
 class _moe_Weights(TypedDict):
-    w13: torch.Tensor          # uint8 [256, 2I, H/2], gate rows [0, I) then up rows [I, 2I), packed E2M1
-    w13_sf: torch.Tensor       # float8_e4m3fn [256, 2I, H/16]
-    w13_gs: torch.Tensor       # float32 [256]
-    w2: torch.Tensor           # uint8 [256, H, I/2]
-    w2_sf: torch.Tensor        # float8_e4m3fn [256, H, I/16]
-    w2_gs: torch.Tensor        # float32 [256]
-    post_norm_w: torch.Tensor  # bfloat16 [H], the post-expert RMSNorm's weight (applied as 1 + w)
-
-
+    w13: torch.Tensor
+    w13_sf: torch.Tensor
+    w13_gs: torch.Tensor
+    w2: torch.Tensor
+    w2_sf: torch.Tensor
+    w2_gs: torch.Tensor
+    post_norm_w: torch.Tensor
 class _moe_Config(TypedDict):
     bs: int
     d_hidden: int
@@ -5172,21 +4777,16 @@ class _moe_Config(TypedDict):
     local_count: int
     top_k: int
     sharding: str
-
-
 class _moe_Inputs(TypedDict):
-    hidden_states: torch.Tensor  # bfloat16 [M, H]
-    topk_ids: torch.Tensor       # int32 [M, 8]
-    topk_weights: torch.Tensor   # float32 [M, 8]
+    hidden_states: torch.Tensor
+    topk_ids: torch.Tensor
+    topk_weights: torch.Tensor
     config: _moe_Config
-
-
 _moe_H = 4096
 _moe_I = 4096
 _moe_TOP_K = 8
 _moe_LOCAL = 32
 _moe_POST_NORM_EPS = 1e-8
-
 _moe_CUDA_SRC = r"""
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
@@ -9654,8 +9254,6 @@ int64_t moe_norm3_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw,
       (__nv_bfloat16*)out.data_ptr(), (int*)zc.data_ptr());
 }
 """
-
-
 def _moe__gen_wgmma():
     out = ["template <int N> __device__ __forceinline__ void wgmma_bf16(float* d, const uint32_t* a, uint64_t desc);"]
     for n in list(range(8, 104, 8)) + [128]:
@@ -9670,10 +9268,7 @@ def _moe__gen_wgmma():
             f'    : {outs}\n'
             f'    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(desc), "r"(1));\n}}')
     return "\n".join(out)
-
-
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace("//@@WGMMA@@", _moe__gen_wgmma())
-
 _moe__LIB = None
 _moe__CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor);"
@@ -9721,8 +9316,6 @@ _moe__CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::T
         "int64_t moe_set_hot(int64_t);"
         "int64_t moe_hot_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
         "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t);")
-
-
 def _moe__lib():
     global _moe__LIB
     if _moe__LIB is None:
@@ -9735,35 +9328,25 @@ def _moe__lib():
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
-
-
-# ---- prepare-time repacking (lossless: same bits, new order) ----
-
 def _moe__unpack_codes(packed):
     """uint8 [..., K/2] -> uint8 codes [..., K] (element 2i = low nibble)."""
     lo = packed & 0x0F
     hi = packed >> 4
     return torch.stack((lo, hi), dim=-1).flatten(-2)
-
-
-# bit positions (lo element, hi element) of (sign, e1, e0, m) for the 4 outputs, see dq().
 _moe__POS = [
     ((15, 8, 7, 6), (31, 24, 23, 22)),
-    ((5, 30, 29, 28), (21, 14, 13, 12)),  # rotl 10
-    ((2, 27, 26, 25), (18, 11, 10, 9)),   # rotl 13
-    ((1, 0, 4, 3), (17, 16, 20, 19)),     # (q & 0x001B001B) * (2^3 + 2^8 + 2^14)
+    ((5, 30, 29, 28), (21, 14, 13, 12)),
+    ((2, 27, 26, 25), (18, 11, 10, 9)),
+    ((1, 0, 4, 3), (17, 16, 20, 19)),
 ]
-
-
 def _moe__pack_weight(packed):
     """One expert's uint8 [N, K/2] -> int32 [N/16, K/64, 32 lanes, 4] in A-fragment order."""
     N = packed.shape[0]
     K = packed.shape[1] * 2
-    c = _moe__unpack_codes(packed).to(torch.int32)  # [N, K]
-    # row = rt*16 + h*8 + g ; k = kc*64 + t*16 + j*4 + sb*2 + lohi
-    c = c.view(N // 16, 2, 8, K // 64, 4, 4, 2, 2)  # rt h g kc t j sb lohi
-    c = c.permute(0, 3, 2, 4, 5, 6, 1, 7)          # rt kc g t j sb h lohi
-    c = c.reshape(N // 16, K // 64, 32, 4, 8)       # slot = (sb*2 + h)*2 + lohi = r*2 + lohi
+    c = _moe__unpack_codes(packed).to(torch.int32)
+    c = c.view(N // 16, 2, 8, K // 64, 4, 4, 2, 2)
+    c = c.permute(0, 3, 2, 4, 5, 6, 1, 7)
+    c = c.reshape(N // 16, K // 64, 32, 4, 8)
     word = torch.zeros(c.shape[:-1], dtype=torch.int64, device=c.device)
     for r in range(4):
         for lohi in range(2):
@@ -9773,18 +9356,14 @@ def _moe__pack_weight(packed):
             word |= ((code >> 2) & 1) << pe1
             word |= ((code >> 1) & 1) << pe0
             word |= (code & 1) << pm
-    return (word - ((word >> 31) << 32)).to(torch.int32)  # same 32 bits, as int32
-
-
+    return (word - ((word >> 31) << 32)).to(torch.int32)
 def _moe__pack_scales(sf):
     """One expert's e4m3 [N, K/16] -> uint8 [N/16, K/512, 32 lanes, 16]."""
     N = sf.shape[0]
     K = sf.shape[1] * 16
-    b = sf.view(torch.uint8).view(N // 16, 2, 8, K // 512, 8, 4)  # rt h g kg kcl t
-    b = b.permute(0, 3, 2, 5, 4, 1)                                # rt kg g t kcl h
+    b = sf.view(torch.uint8).view(N // 16, 2, 8, K // 512, 8, 4)
+    b = b.permute(0, 3, 2, 5, 4, 1)
     return b.reshape(N // 16, K // 512, 32, 16).contiguous()
-
-
 def _moe__sq_pack(wq, s2, nq=4):
     """layer s68 (moe n14 SQ): wq int32 [E, NRT, 64, 32, 4] + s2 int32 [E, NRT/2, 64, 32] -> int32 [E, NRT/2, nq, 2 * W + S]: per
     (row-tile pair lr, k quarter q) the tk2f stage image {tile lr kc q*16.., tile lr + NRT/2 same kc, scales}."""
@@ -9792,32 +9371,26 @@ def _moe__sq_pack(wq, s2, nq=4):
     w = wq.reshape(E, 2, nrt // 2, nq, -1)
     sc = s2.reshape(E, nrt // 2, nq, -1)
     return torch.cat((w[:, 0], w[:, 1], sc), dim=-1).contiguous()
-
-
 def _moe__s6_pack(wq, s2, nq=4):
     """layer s73 (moe n20 S6): as _sq_pack, but the stage's scales as 6-bit codes c = e4m3 byte - 80 (caller checked
     80 <= byte <= 0x7E): per (lr, q) {tile lr, tile lr + NRT/2, nibbles int32 [8 warps][32 lanes], high bits int16
     [8][32]}; lane word bits 4k / 2k hold code k = 4 h + r. 17920 B/stage (lossless)."""
     E, nrt = wq.shape[0], wq.shape[1]
     w = wq.reshape(E, 2, nrt // 2, nq, -1)
-    c = s2.contiguous().view(torch.uint8).reshape(E, nrt // 2, nq, 2, 8, 32, 4).long() - 80  # E lr q h warp lane r
-    c = c.permute(0, 1, 2, 4, 5, 3, 6).reshape(E, nrt // 2, nq, 8, 32, 8)                     # ... warp lane k
+    c = s2.contiguous().view(torch.uint8).reshape(E, nrt // 2, nq, 2, 8, 32, 4).long() - 80
+    c = c.permute(0, 1, 2, 4, 5, 3, 6).reshape(E, nrt // 2, nq, 8, 32, 8)
     k = torch.arange(8, device=c.device)
     nib = ((c & 15) << (4 * k)).sum(-1)
     hi = ((c >> 4) << (2 * k)).sum(-1)
     nib = (nib - ((nib >> 31) << 32)).to(torch.int32).reshape(E, nrt // 2, nq, 256)
     hi = (hi - ((hi >> 15) << 16)).to(torch.int16).reshape(E, nrt // 2, nq, 256).view(torch.int32)
     return torch.cat((w[:, 0], w[:, 1], nib, hi), dim=-1).contiguous()
-
-
 def _moe__pair_scales(ps):
     """_pack_scales output [NRT, K/512, 32, 16] -> uint8 [NRT/2, K/64, 32 lanes, 4]: per (row-tile pair rp, k chunk)
     each lane's 4 bytes (tile rp rows g, g+8, tile rp + NRT/2 rows g, g+8)."""
     n = ps.shape[0]
     v = ps.view(n, ps.shape[1], 32, 8, 2).permute(0, 1, 3, 2, 4).reshape(n, ps.shape[1] * 8, 32, 2)
     return torch.cat((v[: n // 2], v[n // 2:]), dim=-1).contiguous()
-
-
 def _moe__tb_pack(wq, ws, gated, rt):
     """moe_tb layout: weights [E][rb][kc][warp][RT][lane] uint4, scales [E][rb][kc][warp][lane][RT] u16.
     Gated: warp w of block rb owns gate tiles rb*8*H + w*H + (0..H) and the matching up tiles (H = RT/2)."""
@@ -9834,21 +9407,17 @@ def _moe__tb_pack(wq, ws, gated, rt):
     tile = tile.to(wq.device)
     W, S = [], []
     for e in range(E):
-        we = wq[e].reshape(nrt, 64, 128)[tile]                                   # rb w r kc lane*4
+        we = wq[e].reshape(nrt, 64, 128)[tile]
         W.append(we.permute(0, 3, 1, 2, 4).contiguous())
         se = ws[e].view(torch.int16).reshape(nrt, 8, 32, 8).permute(0, 1, 3, 2).reshape(nrt, 64, 32)[tile]
-        S.append(se.permute(0, 3, 1, 4, 2).contiguous())                         # rb kc w lane r
+        S.append(se.permute(0, 3, 1, 4, 2).contiguous())
     return torch.stack(W), torch.stack(S)
-
-
 def _moe__scale_lut(device):
     """e4m3 byte -> bf16x2 of (value * 2^118), both halves."""
     v = torch.arange(256, dtype=torch.int32).to(torch.uint8).view(torch.float8_e4m3fn).float() * (2.0 ** 118)
     bits = v.to(torch.bfloat16).view(torch.int16).to(torch.int32) & 0xFFFF
     word = bits | (bits << 16)
     return word.to(device)
-
-
 def _moe_prepare(weights):
     lib = _moe__lib()
     dev = weights["w13"].device
@@ -9867,18 +9436,17 @@ def _moe_prepare(weights):
     st["w2q"] = torch.stack(w2q)
     st["w2s"] = torch.stack(w2s)
     del w13q, w13s, w2q, w2s
-    # layer s73 (moe n20 S6): needs every block scale byte in [80, 0x7E] (positive normal, value >= 8), else 8-bit SQ
     s6 = _moe_TK2F_SQ and _moe_TK2F_S6 and all(bool(((b >= 80) & (b <= 0x7E)).all()) for b in (
         st["w13s2"].view(torch.uint8), st["w2s2"].view(torch.uint8)))
     if s6:
         st["w13s6"] = _moe__s6_pack(st["w13q"], st["w13s2"])
         st["w2s6"] = _moe__s6_pack(st["w2q"], st["w2s2"])
-        for a_, b_ in (("w13s6", "w13s2"), ("w2s6", "w2s2")):  # lossless round trip
+        for a_, b_ in (("w13s6", "w13s2"), ("w2s6", "w2s2")):
             assert torch.equal(_moe__s6_unpack(st[a_]), st[b_].reshape(st[b_].shape[:4])), a_
-    if _moe_TK2F_SQ and (not s6 or _moe_TK2F_S6_KEEPSQ):  # layer s68 (moe n14): tk2f single-copy stage images (lossless repack of w13q/w2q + w13s2/w2s2)
+    if _moe_TK2F_SQ and (not s6 or _moe_TK2F_S6_KEEPSQ):
         st["w13sq"] = _moe__sq_pack(st["w13q"], st["w13s2"])
         st["w2sq"] = _moe__sq_pack(st["w2q"], st["w2s2"])
-    if _moe_TK2F_DIAG:  # layer s81: KPS 4 (36 KB) single-copy stage images for the DIAG probes
+    if _moe_TK2F_DIAG:
         st["w13sq4"] = _moe__sq_pack(st["w13q"], st["w13s2"], 2)
         st["w2sq4"] = _moe__sq_pack(st["w2q"], st["w2s2"], 2)
     if _moe_TW_CFG:
@@ -9892,12 +9460,11 @@ def _moe_prepare(weights):
     st["gs13"] = weights["w13_gs"][:_moe_LOCAL].float().contiguous()
     st["gs2"] = weights["w2_gs"][:_moe_LOCAL].float().contiguous()
     st["lut"] = _moe__scale_lut(dev)
-    # SA decode (s9) needs every block scale positive and normal (e4m3 exponent field 1..15, not NaN)
     sfb = [weights[k][:_moe_LOCAL].contiguous().view(torch.uint8) for k in ("w13_sf", "w2_sf")]
     st["sa"] = all(bool((((b & 0x80) == 0) & ((b & 0x78) != 0) & (b != 0x7F)).all()) for b in sfb)
     del sfb
-    st["cnt"] = torch.zeros(128, dtype=torch.int32, device=dev)  # moe_tk2f counters (zero between calls)
-    st["tk"] = torch.zeros(1024, dtype=torch.int32, device=dev)  # moe_twf split-item tickets (self-resetting)
+    st["cnt"] = torch.zeros(128, dtype=torch.int32, device=dev)
+    st["tk"] = torch.zeros(1024, dtype=torch.int32, device=dev)
     st["w1"] = (1.0 + weights["post_norm_w"].float()).contiguous()
     torch.cuda.synchronize()
     global _moe__DIAG_DONE
@@ -9905,76 +9472,58 @@ def _moe_prepare(weights):
         _moe__DIAG_DONE = True
         _moe__diag(st)
     return st
-
-
 _moe__DIAG_DONE = False
-
-
-# (R, G) per batch size for gemm13 / gemm2: R row tiles (x16 rows) per item, G token groups of 8 per pass.
 def _moe__plan(M):
     if M == 1:
         return 10, 10
     if M <= 32:
         return 11, 11
     return 118, 118
-
-
 _moe_PLAN_OVERRIDE = None
-# PDL / row order are set once in the library (g_pdl = 4: big-M kernels only, g_blk = 0); moe_set_pdl / moe_set_blk
-# change them for experiments. Judge s5: decode PDL (gemm2 or norm2) and tk2_map blk 2 at bs32 lose on the H200.
-_moe_TB_RT = 0  # big-M moe_tb on (1) or off (0: old moe_big path)
-_moe_TB_CFG = 48  # RT*10 + stages
-_moe_TW_CFG = 418  # big-M wgmma kernel moe_tw: RT*100 + KG*10 + stages (0: off)
-_moe_TWF_RT = 4  # s11: 2 = moe_twf with RT 2 / 64-token passes (prepare then packs w13b2/w2b2): judge 7dda218c bs128 224.5,
-# bs256 267.0 us (RT 4: ~200 / ~247): worse when experts have <= 32 tokens; H100 layer v16 -5, v32 -7 us (H100 misleads)
-_moe_TWF_MIX = 1  # s11: 1 = moe_twm (RT 2 / 64-token passes for experts with > 32 tokens, RT 4 for the rest)
-_moe_TWF_RT_M = {}  # s11: per-M override, e.g. {256: 2} for the layer's verify 32 (hot experts with 90+ tokens: 34 vs 24 passes)
-_moe_TWM_TAIL = 0  # s14: moe_twm runs the gemm2 of the lightest experts (up to this many RT 4 items) at RT 2 / 32-token passes
-_moe_TWM_TAIL_M = {}  # s14: per-M override of TWM_TAIL
-_moe_TWM_TAIL13 = 0  # s14: same for the gemm13 items of the lightest experts (RT 4 gemm13 item budget)
+_moe_TB_RT = 0
+_moe_TB_CFG = 48
+_moe_TW_CFG = 418
+_moe_TWF_RT = 4
+_moe_TWF_MIX = 1
+_moe_TWF_RT_M = {}
+_moe_TWM_TAIL = 0
+_moe_TWM_TAIL_M = {}
+_moe_TWM_TAIL13 = 0
 _moe_TWM_TAIL13_M = {}
-_moe_TWM_ORDER = 0  # s14: moe_twm item order (bits, see moe_twm): 76 = pass-minor + multi-pass experts' items merged evenly
-#   over both phases (H100 layer v32 248.8 -> 239.9 us without TWM_TAIL (with it: 247), v16 = 0); 2 = timeline stamps
-_moe_TWM_ORDER_M = {256: 76}  # s14: per-M override
-_moe_HOT_M = {}  # s29: {M: grid}: moe_hot (65..128-token experts, one N 128 pass) on that many CTAs before moe_twm
-_moe_TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
-_moe_TWM_HOT_M = {}  # s17: per-M override
-_moe_TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline,
-#   bit 3 = pass-minor item order; use 4 for plain on)
-_moe_TWQ_M = {}  # s17: per-M override, e.g. {128: 4} (proxy: v16 -6.5 proxy-us, v32 +4.6)
-_moe_TWF = 1  # big-M (TW_CFG 418): gemm13 + gemm2 in one persistent launch (moe_twf)
-_moe_TB_PACK = ()  # RT values packed in prepare for moe_tb (and moe_twf RT 2)
+_moe_TWM_ORDER = 0
+_moe_TWM_ORDER_M = {256: 76}
+_moe_HOT_M = {}
+_moe_TWM_HOT = 0
+_moe_TWM_HOT_M = {}
+_moe_TWQ = 0
+_moe_TWQ_M = {}
+_moe_TWF = 1
+_moe_TB_PACK = ()
 _moe__CFGS = (10, 11, 22, 118)
-_moe_SK_CFG = 3088  # decode kernel cfg: 2DM = moe_sk (D, MB); 3[NC][NSTG] = moe_tk
-_moe_TK2_MAX = 32  # M above this: big-M path
-_moe_TK2F_DYN = 84204  # M > 1 cfg. s13: 84204 = 204 + y32 in route-slot order pre-scaled + moe_norm3 (bitwise = 204; H200 diag adfb897e d16 -0.45, d32 -0.75 us). M = 1 (TK2F) stays 204: the layer's n2u reads the old y32 order. 5402 = DYN row tail (D = 4): judge no gain (b890d69b)
-_moe_TWSA = 1  # s9: same for moe_twf (big-M)
-_moe_TK2SA = 1  # s9: arithmetic e4m3 scale decode in moe_tk2f (when prepare() found all scales positive normal)
-_moe_TK2FN = 0  # s9: 1 = post-expert norm fused into moe_tk2f (moe_tk2fn_launch): judge bs1 +2 us (check 168fa04c), dead
-_moe_TK2G_W = 0  # s10: GS16 2-group row weight = (8 + TK2G_W) / 8 in the static row split
-_moe_TK2G_MIN = 17  # s10: GS16 only from this M (H100: GS16 is slower on the layer routings; A/B on the judge)
-_moe_TK2G = 0  # s10: 1 = 16-token segments in moe_tk2f (2 token groups share each dequantized weight fragment): judge bs32 +7 us (check b25182e8), H100 layer routings +6..18 us: off
+_moe_SK_CFG = 3088
+_moe_TK2_MAX = 32
+_moe_TK2F_DYN = 84204
+_moe_TWSA = 1
+_moe_TK2SA = 1
+_moe_TK2FN = 0
+_moe_TK2G_W = 0
+_moe_TK2G_MIN = 17
+_moe_TK2G = 0
 _moe_TWF_DBG = 0
-_moe_TWF_SPLIT_M = {}  # s11 per-M override of TWF_SPLIT; judge c1659443 {128: 132, 256: 66}: tie (tail -12 us, twf +10 us)
-_moe_NORM_EARLY = 1  # n4s1: moe_norm after moe_twm waits per token on its experts' gemm2 flags (needs #define NORM_EARLY 1)
-_moe_TWF_SPLIT = 0  # s11: moe_twf runs its last TWF_SPLIT gemm2 items as 2 K halves (FP32 partials, ticket): shorter tail
-_moe_TK2F = 204  # decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
-_moe_TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
-_moe_SK_ZERO = 64  # CTAs zeroing Acc13 in route2
-
-
-# s12 DIAG (print only; never submit with DIAG on): H200 timing of expert variants on the LAYER's routings
-# (r-layer reference front + top-k, 5 seeds per load; /tmp/moe10/routes.pt), cold L2, CUDA-graph replay medians.
+_moe_TWF_SPLIT_M = {}
+_moe_NORM_EARLY = 1
+_moe_TWF_SPLIT = 0
+_moe_TK2F = 204
+_moe_TK2_NSTG = 8
+_moe_SK_ZERO = 64
 _moe_DIAG = 0
 _moe__DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('decode 1', 17, 1), ('decode 1', 99, 1), ('decode 16', 7, 16), ('decode 16', 11, 16), ('decode 16', 13, 16), ('decode 16', 17, 16), ('decode 16', 99, 16), ('decode 32', 7, 32), ('decode 32', 11, 32), ('decode 32', 13, 32), ('decode 32', 17, 32), ('decode 32', 99, 32), ('verify 1', 7, 8), ('verify 1', 11, 8), ('verify 1', 13, 8), ('verify 1', 17, 8), ('verify 1', 99, 8), ('verify 16', 7, 128), ('verify 16', 11, 128), ('verify 16', 13, 128), ('verify 16', 17, 128), ('verify 16', 99, 128), ('verify 32', 7, 256), ('verify 32', 11, 256), ('verify 32', 13, 256), ('verify 32', 17, 256), ('verify 32', 99, 256)]
 _moe__DIAG_R = "eNqVXIt22zgOLc02laBVxDpQorWm/v+/5IpvAASdWZ8zjSVRJAjicXFJj0cfPmC9X66/7+HC+a940//zy9+vP+fD589b/jc/f/L71/XbW7z7T338ljosLUjL699P2qdnnZHr55/wb5Buy//5/Hfx/ee6b1uzMJ9w+f5gt/22pakm4ZZHfcA6In/a59ejjbvlx0sR75f3jzDQdv0J9+zmtW62dqONvbVpRbFdnUGQHUK3J5Yeyheg3eabc3rgvMX03IkpnL71A/Haso4c8kHit0uyP0L8J2lhpZ7se3nwWFRNvodb12sumpezVbj0Vm7O1xhDd67czCM8sqoeW7+CmHtbiJCPjUmzcfU9sOjrbI/o7H7FRw8i2Pb+S5mgLT1es/zjiDarUUS548UfFNIslwFVleQ21ULCajw80RebEBXjGfrxuBE9Vjd4T3PZ4oToZ0mmvHRzt6z3M+leeMwmNBVuvNcGT6LpoIZ7bbjprif850lXs3VcvD4tRnlkPVn8rci8EL+N7dsMHBMgrl9aZpcWxD6T2i0WPYXLLU0q+v2SXl2ez63zibMp+EF96+yn/i5eoM3lx8SnkFtAnYUr75l8v/PQue9axhfTX7ApIaCUVGt3je/qeJcshkQuaIOa6yuWu45KvGalhEiFZe2t78w+3/TvinsLQ/b2Mbbcak+a3s/O2avBpuZoy92lBZ4lW0m8ezkXjVZbZ3yhp0eV9X2jcgAN/DPRV/zSWh4ip8rP33D7M7vgNdr+VR9dmfkrdv6b6+6enD7k93vUw80L9W7nnek6NPqntPrKDvv3tyLO1+Xdf6+/v5O4X2F4Y7KkX8yqMkwxv4m81+e/faf3T2bcCzc5U2cQb9ySWp3/WZfxBlXnWD3J/+AGNVM1YMxldRWm+mAfOHBLtqfmp1qGr8O7OFwexDSdH8SgoMSD9RIUOjgABV+okabiDOxCUhgkmR1IOUsUuiS6h/tLeu8mBwBPTSjIPxPhPsMVSi0BN/MEds66qCeXBUkwxE6d6dYHuX2IGKZow5LbRg4EqQtEEKuI/XKTqZ8lanA/j1dmdlyUs5dsDs2AWOVMMchk6LqffYTGFpzDBV+nWcz/1uaN10PrcWStrBtso8KwcRF/Ap/AAWSJMdsUComkhOkFdGrCMw1mcsCbRONaMUHNezHvml/7hOD0ROGa8xttukAAeOvAscQyl9SpDwFxAItrjwik35AMy/NFSK7P2xyXFYnwwsIdm4BNygV93bVlpR4JuoGEr2u6uLebLiEtBy2gYrPl90tFU+rkYGPNbNyls8W4kDxCOtTj3nkkOW5eACna3l2NLuELWozPQDcYrGWz/zClGyzrXq0JWgy4lyura+6q9GgGqrjY8nWO9t+tjqG9xTQXE8smIPH1bVbWMiKz2MqxBAcsVYCmsUvKo93HIour8566uGA6J4CJY3fg2bbgSSAh52Qhg+W9fZgAkUwo6JDmUdfbve30kPoxpR4PRSYLC3tejIXkizfuS1aJrfAKdFdHWcVs1uvLPWeSHf9FmWF7m4GcLWEQF3ei5T09tzTulW6vNpMkKPznQI5bTCNzfDG89BdikD0tC5QyO9z04IQpd9WMcFMn7L4pwGzyq0/q9HgWF8aILkoHZx7+TeJy5EH/4PK62q3z33ygY3ssyzb7oIJUjMfYnUYiJzTiOGUQVoH2VKiNo0zP+mHYHz5Jzv2x54kRUA2OIZZa57ZyMVgduRXzrGkNapx1bORY6c/Q8WvQgW+UrMFSGhy6ehn8zP7yR3FqL6Y/zKdTWW8sdjV/Zx4V/8CrsiSE5sYcOu4GwNeSKMWghgBWP/ZN010CntyOgQ+R/GDVJtuiy/zSPyRdkaA3qupAQZ2Y+mev5pNHM/MrOAgZpKBm/nvB5RsCf7ZKSBk9yd0KTgcdBMf3kM2vAczBKky5s0nXG7ZYsrZYYr0+T2/1oOIowzyJoIwvcWNgA5rCsMPRA54jp3UFt6/e1mpzfoVd1fszc+nDxS2UbhITtyOx9MaTsngrSC6B77mlPC+lXDX2IHvYLAc5kfKEfWY4qAId5/xvnTJJFYcfAzCqBvhZpo1r9CvOwqk0n9UMATFhDzIIipeLwSNZKaOtJKSciDlw717zkrMkEEfhw67tw3SG8iG9GE5hHzcbZcTYPVaY+1/rXwE+zcyGdV9DbY6KM7N9ilaOup64QE8Beh5wsv1AqT6De1PHvWMAXB+HjIr5Dhk70uo6A9/CiNpi3ULvQONy0qybR/6eQItJi5UgYnwf7TeAJQxnOgAuZXxWy+jzxC74JNsqRHXUFkgzDQAvsZVImUugSqJ6Uky2rBwTAcH1Bn7z345W8Cca5nSOaxtpploo8hUCJUGmxukBawzfIcww0d0TFOMSdIVJr152Hq0BB1FcxOhVwB+ejjX0Y19rsvVg2SrMaf3L3FfVPCWbGdYb7/TWWax+h5yeQTE3I3P5PmURkOXwxlbsfVFIUQNIn5yR2c08kdSU39g5iwGyI4YO2teqmSn2jPPATNB0KSBlOmTRH1LOhlmHepZ2cvRJhWzfDILKmtXV3JwkMEkvb1NlJhrbn+313hHhGnWK/jVfU9PAUYSDQHhx+NUWuVZ8qkmfvNtpGE1rIVbqh2ZPwJkN1zKhcZHvmZXRiTJbV7b09paUfIVnCzTs7LkesUWiAvWB69Ni22whLIkn0Q4alXrWplbqfveqCccCiXtgC5Ib5QsiPzKz/dQRYLAj3HuT2cR1Kmym2rZdIrRfG1PGz5IAjrO1axU5sAHMnbTjFmxQIhzsaZ5qSE5SnvN3OILgOxJ3b76Hpr1f5Y0YZJAY/WsAx9UV1GoNjeFiB7Dt+6YlcAPoPCpkUBqUih9Nozvw1CjBblvmIBXV+hIvRaO+Auxz1wOA3G3rduYYr0K52LU8NoRPwKQprgbzmlebid296ZotVkf42PiChQ5JN9mfOKjIU5PJ66xrejyxPtn+y6yts9isXL2gB/4dOwc7Schz4Imwpu098KlmXDSnZ06nvKDZ45FdjJAYli4vMv9TT8KtSDf3K/+PrPpvrKzghGRc56+CHy2bmK9bi1uizqdsCycFzKgeMSJuGV7obTruG3KAtDh1g0g8ZdLCCQ2APBsIqqIKvgYZZXg+sv1Wfb5l2lSRxQHUAmU583QChU/gvX+xVK1e+IEa30vjD+YUoFETN7Xuto1dBgbCuf3X8G1rcLHXsmjISwlMH/kUhlImIGPWavwLGPYoIXNt/D3QebvqEfNglUHFka6/iTp/Hjr/zXFtlXpl893GUSlRWxNKGCDi5cKeHyXcg+bfHU/NDTecEDq6l49xwJy/42VAxASnzvZGCkkveCjmlgqv/4vCRUjbXk4Mv8iiXDZoEZGfbGL70tNIbcpCN35OxaFHOpfslKZWSzFLY1sCZfKDByjUVB8Pca0gyNnqPvYbHrjbMMhbMoASt3TbnuLvqtAB1g9LsGE0ONamZqpuZIFKXwtgS2qr5WKfOl6kmtuQP69j9IdgwOnOw0KK4haW2H1BZTX+Tx1+Y/Vx4RUnhS0j9f9cUwWyJRrPsj80hcN3LtnXth9I6XHr1W7MS4pNDww12prINzqe/6zw95vSM/qTnWjJfpZO2SDZcDb/H/ZgcWUp0zWzLDKbQ2WK7Bw4pdUKKsfKkiJuefzGqW01XyH8hwBtpCi8/mbBpjBgqrpRLacm48mpDNT9G4p5HpUdcR/dvk/DtROvQ2DgReM9tp+J5c0s8sLkmYV9SjfZdaxqYZAQ23k6b90RG995Ac2A5YRkT4HnI8GLOO7/TpKuTo/i7duPXAqIjX1yrDqhhsO2h0+p0gop04683RsfZEHZBHKtAFXP+UKa5ylpMxobul1BpvlSrwtiHGOZ+Iz8I0jcw6GXspAfHUMo+ZZY/HC2T+7fWZoTQU1rt+rL0AHn0PaoYR+VzTUm35gRsTx4AM84DhT2qzdp5L8ikvBJzRgfr89rQF1VltR5hxT9r2T+kM/LsbM7u6KYU2rrGDBarN2c7Q5eMMbKxofx9ugZM2TVnaHHytLCmfYdi3u9AQGKcf267d1ZWuAq5YNBKj+0Thi/Ho7eGq9Xz0nhuyBsHeNsxYElJvi80Sh4sEVypK5zCs7u9O/4OtDtXcqkQasV+DnzLixBy2Tl3o1Y/G3MHa2DWlzkrFqcEZbjI294mKmrm0WEBwWRQVNcf/7nxvSk/sDS/u394Wy4AQn650fpFX44jPNZTMuy+OA4ydWZ6dkZJWp2ioUC1OpDJ36wRd3lGXcqioYc2ZSbXEcseLqZL8FJJL78LpZDHtM/m0tN4F7CaWVX22lpjZxXLAHqlADAarL49KuZpbwP/Mj7mbb/QxJfSydA92+Qkj4SqHjPCaAsnlPr+XVKmwbl9WOQHW4Kj3pmRGt/oOCvQHp6+ZWS06BEOoDvBHDubcbW7VK2fpFfQKs4oxv9zsh/VKC6vqqtgHtt5oAmBVV4ti/i+e9rjtfVW/628v2mQjVapXXx8FlYqNMyTDOEE6gdr7yAcS92mOpB7vQSysdhf8C20yTsTC2WLz9v7X7k6o50mrq2fc5ZWwaBRVNfdzAbAUTzb95QWf03p0MWFZ7PBO+psPg2XDs0r8BU3bzCgkVhkudGtrmdTb9mOA/XriZV/lNMuekxSfO3GbS5UdHc9v4+6rqj8PMSb6BhCm2vmzGwqIA40HAa89xZhjTs8/osVfTmxa+ebOsind3XkVO8fygIm+9Bv13LfKCWjBLM3erPPySfkc71oFqT5pEj7HA6QrGy8i/4s56aQfa/LLDgfnUra/Lbqd1uSZweni+D0QH63r0qc4lt2+jkOwJiH1rYtPXphxadNc9KFVoTcwvstz6UNQTC9msO4s/YfvzCp/jRR3V3NPl/km4/FJo9ffsf7xy7jA=="
-_moe_DIAG_VARIANTS = {  # s14 queued: H200 A/B of the twm item orders (H100: o76 v32 -9 us vs main, v16 0)
+_moe_DIAG_VARIANTS = {
     "dec": [("gs8", {})],
     "big": [("main", {})] + [(f"o{o}", {"TWM_ORDER": o, "TWM_TAIL_M": {}}) for o in (0, 76, 12, 28, 92)]
            + [("o76t", {"TWM_ORDER": 76}), ("mainb", {})],
 }
-
-
 def _moe__diag(st):
     import zlib, base64
     g = globals()
@@ -10034,11 +9583,7 @@ def _moe__diag(st):
                     _moe__diag_tl(st, data, f"{load} s{seed}", o)
     del flush
     torch.cuda.synchronize()
-
-
-_moe_DIAG_TL = ()  # s14: twm item orders to timeline in the diag (needs TWM_TL 1 in the CUDA source: diag copies only)
-
-
+_moe_DIAG_TL = ()
 def _moe__diag_tl(st, data, name, order):
     """s14: per-CTA moe_twm timeline (TWM_TL build): exit spread, HBM-rate estimate per 10 us, item durations by kind."""
     import collections
@@ -10103,30 +9648,20 @@ def _moe__diag_tl(st, data, name, order):
     print(f"diagtl {name} o{order} HBM TB/s per 10us: " + " ".join(f"{v / 10:.2f}" for v in hb), flush=True)
     print(f"diagtl {name} o{order} kinds (g2 big reuse N: n mean): " + "; ".join(
         f"{k[0]}{k[1]}{int(k[2])} {k[3]}: {len(v)} {sum(v) / len(v):.1f}" for k, v in sorted(kinds.items())), flush=True)
-
-
-_moe_TK2H = 0  # s12: merged-phase tk2f consumer (one main-loop body, i-cache): 8 = GS 8, 16 = GS 16 (from M >= TK2H_MIN16)
+_moe_TK2H = 0
 _moe_TK2H_MIN16 = 1
-_moe_TK2H_MIN = 1  # n4s5: TK2H applies from this M (below: the main tk2f cfg); 9 = only calls that can have 2-group rows
-_moe_TK2W = 0  # s12: weighted static row split for M > 1 (extra-group rows weigh TK2W / 8; 0 = by count), cfg + 70000
-_moe_TK2H_PSC = 0  # s12: 1 = per-segment gemm13 -> gemm2 counters (cnt[64 + seg]) instead of the global one
-_moe_TK2H_PF4 = 0  # n6: 1 = tk2h writes y32 like tk2f PF 4 (slot order, pre-scaled) -> moe_norm3 (cfg + 4; kinds 3/4 only)
-_moe_TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
-_moe_TK2H_M = {}  # layer s58: {M: W + 1}: tk2h GS16 + PF4 (SA only) at that M, 2-group weight (8 + W) / 8
-
-
-_moe_TK2F_BAL_M = set()  # moe n8 BAL: M values whose tk2f (84204 / NU8 85204, SA) runs balanced (cfg + 1000000)
-
-
+_moe_TK2H_MIN = 1
+_moe_TK2W = 0
+_moe_TK2H_PSC = 0
+_moe_TK2H_PF4 = 0
+_moe_TK2H_W = 0
+_moe_TK2H_M = {}
+_moe_TK2F_BAL_M = set()
 def _moe__tk2f_cfg(M, st):
     return _moe__tk2f_cfg0(M, st) + (1000000 if M in _moe_TK2F_BAL_M and _moe_TK2SA and st["sa"] else 0)
-
-
-_moe_TK2F_S6 = 0  # layer s73 (moe n20, r-moe 4a87466): 6-bit scale-code SQ stages when every scale byte is in [80, 0x7E]. OFF: H200 moe diag 13b528a8 tk2f d16 +0.7..1.0, d32 +2.9, tk2h W3 d32 +1.6 us (H100 -1..-3 = DRAM-bound artefact)
-_moe_TK2F_S6_ON = True  # run tk2f / tk2h on them (False: the 8-bit SQ stages; needs TK2F_S6_KEEPSQ)
-_moe_TK2F_S6_KEEPSQ = False  # also build the 8-bit SQ images when S6 is on (A/B tests)
-
-
+_moe_TK2F_S6 = 0
+_moe_TK2F_S6_ON = True
+_moe_TK2F_S6_KEEPSQ = False
 def _moe__s6_unpack(p):
     """inverse of _s6_pack's scale part -> int32 view of the paired scales (prepare-time round-trip check)."""
     E, rpe, nq = p.shape[0], p.shape[1], p.shape[2]
@@ -10134,28 +9669,20 @@ def _moe__s6_unpack(p):
     nib = t[..., :256].reshape(E, rpe, nq, 8, 32, 1).long() & 0xFFFFFFFF
     hi = t[..., 256:].contiguous().view(torch.int16).reshape(E, rpe, nq, 8, 32, 1).long() & 0xFFFF
     k = torch.arange(8, device=p.device)
-    c = ((nib >> (4 * k)) & 15) | (((hi >> (2 * k)) & 3) << 4)                 # E lr q warp lane k(= 4h + r)
-    c = (c + 80).reshape(E, rpe, nq, 8, 32, 2, 4).permute(0, 1, 2, 5, 3, 4, 6)  # E lr q h warp lane r
+    c = ((nib >> (4 * k)) & 15) | (((hi >> (2 * k)) & 3) << 4)
+    c = (c + 80).reshape(E, rpe, nq, 8, 32, 2, 4).permute(0, 1, 2, 5, 3, 4, 6)
     return c.to(torch.uint8).contiguous().view(torch.int32).reshape(E, rpe, nq * 16, 32)
-
-
-_moe_TK2F_SQ = 1  # layer s68 (moe n14, H200 d32 -1.5, d16 -0.55 us, bitwise = off): 184204 (+ BAL) on the _sq_pack buffers
-
-
+_moe_TK2F_SQ = 1
 def _moe__tk2f_w(c, st):
     """(cfg, w13, w2) for moe_tk2f_launch: SA 84204 (+ BAL) -> + 10000000 on the single-copy buffers (SQ)."""
-    sq = c % 1000000 == 184204 or (140000 <= c % 1000000 < 150000 and c % 1000 == 4)  # 84204 (+ BAL) / moe n16 tk2h
-    if _moe_TK2F_SQ and sq and _moe_TK2F_S6_ON and "w13s6" in st:  # layer s73 (moe n20 S6)
+    sq = c % 1000000 == 184204 or (140000 <= c % 1000000 < 150000 and c % 1000 == 4)
+    if _moe_TK2F_SQ and sq and _moe_TK2F_S6_ON and "w13s6" in st:
         return c + 20000000, st["w13s6"], st["w2s6"]
     if _moe_TK2F_SQ and sq and "w13sq" in st:
         return c + 10000000, st["w13sq"], st["w2sq"]
     return c, st["w13q"], st["w2q"]
-
-
-_moe_TK2F_DIAG = False  # layer s81: build the tk2f DIAG probes (DIAG check copies only; sed to True)
-_moe_TK2X_M = {}  # layer s81 DIAG: M -> probe code (tuner timing only): 1 nm204, 2 sq402, 3 sq403, 4 nm402, 5 nm403, 6 plain SQ 204
-
-
+_moe_TK2F_DIAG = False
+_moe_TK2X_M = {}
 def _moe__tk2x(c, st, code):
     """layer s81 DIAG: (cfg, w13, w2) of probe `code` (c = the SQ 184204 cfg) -- wrong outputs for the nm codes."""
     assert _moe_TK2F_DIAG and c == 10184204, c
@@ -10164,8 +9691,6 @@ def _moe__tk2x(c, st, code):
     if code == 1:
         return 10184214, st["w13sq"], st["w2sq"]
     return 10000000 + (184402, 184403, 184412, 184413)[code - 2], st["w13sq4"], st["w2sq4"]
-
-
 def _moe__tk2f_cfg0(M, st):
     sa = 100000 if _moe_TK2SA and st["sa"] else 0
     if _moe_TK2H_M.get(M) and sa:
@@ -10175,8 +9700,6 @@ def _moe__tk2f_cfg0(M, st):
     if _moe_TK2H and M >= _moe_TK2H_MIN:
         return sa + (40000 + _moe_TK2H_W * 1000 if _moe_TK2H == 16 and M >= _moe_TK2H_MIN16 else 30000) + 20000 * _moe_TK2H_PSC + 4 * (_moe_TK2H_PF4 and not _moe_TK2H_PSC)
     return (_moe_TK2F_DYN if M > 1 else _moe_TK2F) + sa + (10000 + _moe_TK2G_W * 1000 if _moe_TK2G and M >= _moe_TK2G_MIN else 0)
-
-
 def _moe_kernel_fn(data, st):
     cfg = data["config"]
     assert cfg["local_start"] == st["start"] and cfg["local_count"] == st["count"]
@@ -10186,7 +9709,7 @@ def _moe_kernel_fn(data, st):
     tw = data["topk_weights"].float().contiguous()
     M = x.shape[0]
     dev = x.device
-    meta = torch.empty(132, dtype=torch.int32, device=dev)  # [100, 132): NORM_EARLY gemm2 flags
+    meta = torch.empty(132, dtype=torch.int32, device=dev)
     sroutes = torch.empty(M * _moe_TOP_K, dtype=torch.int32, device=dev)
     inter = torch.empty((M * _moe_TOP_K, _moe_I), dtype=torch.bfloat16, device=dev)
     y = torch.empty((M * _moe_TOP_K, _moe_H), dtype=torch.bfloat16, device=dev)
@@ -10201,12 +9724,12 @@ def _moe_kernel_fn(data, st):
             return out
         if _moe_TK2F:
             c, w13_, w2_ = _moe__tk2f_w(_moe__tk2f_cfg(M, st), st)
-            if _moe_TK2X_M.get(M):  # layer s81 DIAG
+            if _moe_TK2X_M.get(M):
                 c, w13_, w2_ = _moe__tk2x(c, st, _moe_TK2X_M[M])
             lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
             c5 = c % 1000000 % 100000
-            if (80000 < c5 < 100000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
+            if (80000 < c5 < 100000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):
                 lib.moe_norm3_launch(y32, ids, tw, st["w1"], st["start"], st["count"], _moe_POST_NORM_EPS, out, st["cnt"])
                 return out
             lib.moe_norm2_launch(y32, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], _moe_POST_NORM_EPS, out,
@@ -10232,14 +9755,13 @@ def _moe_kernel_fn(data, st):
     p13, p2 = _moe_PLAN_OVERRIDE(M) if _moe_PLAN_OVERRIDE else _moe__plan(M)
     assert p13 in _moe__CFGS and p2 in _moe__CFGS, (p13, p2)
     rg = bool(data.get("rg")) and _moe_TW_CFG and data.get("gather_norm") is not None and data.get("bucket") is None
-    if rg:  # layer s52: route + gathern in one launch below
+    if rg:
         pass
     elif data.get("bucket") is None:
         lib.moe_route_launch(ids, st["start"], st["count"], meta, sroutes)
-    else:  # layer s27: bucketed on the layer's router stream (meta, sroutes of moe_route_launch)
+    else:
         meta, sroutes = data["bucket"]
     if _moe_TW_CFG:
-        # inter here holds gemm2's B in the K-permuted order (see moe_tw)
         rt = 2 if _moe_TW_CFG >= 1000 else _moe_TW_CFG // 100
         xg = torch.empty((M * _moe_TOP_K, _moe_H), dtype=torch.bfloat16, device=dev)
         if rg:
@@ -10247,7 +9769,7 @@ def _moe_kernel_fn(data, st):
             lib.moe_routegathern_launch(ids, st["count"], x, *data["gather_norm"], meta, sroutes, xg, data["gather_eps"])
         elif data.get("gather_norm") is None:
             lib.moe_gather_launch(x, meta, sroutes, xg)
-        else:  # layer s27 GNORM: x = the pooler output; the pre-expert rmsnorm happens in the gather
+        else:
             lib.moe_gathern_launch(x, *data["gather_norm"], meta, sroutes, xg, data["gather_eps"])
         if _moe_TWF and rt == 4:
             trt = _moe_TWF_RT_M.get(M, _moe_TWF_RT)
@@ -10257,11 +9779,11 @@ def _moe_kernel_fn(data, st):
             part = (torch.full if _moe_TWF_DBG else torch.empty)((max(66 if ns >= 1022 else ns, 1) * 32768,), *((float("nan"),) if _moe_TWF_DBG else ()), dtype=torch.float32, device=dev)
             if _moe_TWQ_M.get(M, _moe_TWQ):
                 q = _moe_TWQ_M.get(M, _moe_TWQ)
-                qs, qk = (q >> 8) & 255, (q >> 16) & 3  # n21: K-split tail in the flags: q | items << 8 | log2 parts << 16
+                qs, qk = (q >> 8) & 255, (q >> 16) & 3
                 if qs and qk and not _moe_DIAG_TL:
                     part = torch.empty((qs << qk) * 16384, dtype=torch.float32, device=dev)
                 if _moe_DIAG_TL and _moe_TWM_ORDER_M.get(M, _moe_TWM_ORDER) & 2: st["_tl"] = (part, meta); q |= 2
-                hq = (q >> 24) & 127  # moe s23: q | grid << 24 = moe_hot<NH 64> on grid CTAs first; moe_twq skips its experts
+                hq = (q >> 24) & 127
                 q &= (1 << 24) - 1
                 if hq:
                     lib.moe_set_hot(4)
@@ -10273,13 +9795,13 @@ def _moe_kernel_fn(data, st):
             elif _moe_TWF_MIX and "w2b2" in st:
                 tl = _moe_TWM_TAIL_M.get(M, _moe_TWM_TAIL) + 4096 * _moe_TWM_TAIL13_M.get(M, _moe_TWM_TAIL13) + (_moe_TWM_ORDER_M.get(M, _moe_TWM_ORDER) << 24)
                 tl += (1 << 23) if _moe_TWM_HOT_M.get(M, _moe_TWM_HOT) else 0
-                if tl and ns:  # s19: K-split tail together with order / hot (tail classes off)
+                if tl and ns:
                     tl = (tl & ~((1 << 23) - 1)) + (1 << 22) + 4096 * min(ns, 1023)
                 ns = -tl if tl else ns
                 if _moe_DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)
                 hg = _moe_HOT_M.get(M, 0)
                 lib.moe_set_hot(1 if hg else 0)
-                if hg:  # s29: experts with 65..128 tokens in one N 128 pass, moe_twm (PDL secondary) skips them
+                if hg:
                     lib.moe_hot_launch(st["w13b2"], st["w13sb2"], st["gs13"], st["w2b2"], st["w2sb2"], st["gs2"], st["lut"],
                                        xg, meta, sroutes, inter, y, hg)
                 lib.moe_twm_launch(st["w13b4"], st["w13sb4"], st["gs13"], st["w2b4"], st["w2sb4"], st["gs2"], st["w13b2"],
@@ -10308,69 +9830,59 @@ def _moe_kernel_fn(data, st):
     lib.moe_gemm2(p2, st["w2q"], st["w2s"], st["gs2"], st["lut"], inter, meta, sroutes, y)
     lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], _moe_POST_NORM_EPS, out)
     return out
-
-# ---- layer ----
-
-
 class Weights(TypedDict):
-    qkv_gate: torch.Tensor            # bfloat16 [2304, 8192]: q 16x64, k 2x64, v 2x64, output gate 16x64
-    o: torch.Tensor                   # bfloat16 [8192, 1024]
-    attn_residual_gate: torch.Tensor  # bfloat16 [8192], the post-attention residual gate's weight
-    pre_ffn_norm: torch.Tensor        # bfloat16 [8192] (applied as 1 + w)
-    router: torch.Tensor              # float32 [256, 8192]
-    router_bias: torch.Tensor         # float32 [256], added to the scores only to choose experts
-    pooler: torch.Tensor              # bfloat16 [4096, 8192]
-    pre_expert_norm: torch.Tensor     # bfloat16 [4096] (applied as 1 + w)
-    w13: torch.Tensor                 # uint8 [32, 8192, 2048]: this GPU's experts, gate then up rows, packed E2M1
-    w13_sf: torch.Tensor              # float8_e4m3fn [32, 8192, 256]
-    w13_gs: torch.Tensor              # float32 [32]
-    w2: torch.Tensor                  # uint8 [32, 4096, 2048]
-    w2_sf: torch.Tensor               # float8_e4m3fn [32, 4096, 256]
-    w2_gs: torch.Tensor               # float32 [32]
-    post_expert_norm: torch.Tensor    # bfloat16 [4096] (applied as 1 + w, before normalizing)
-    unpooler: torch.Tensor            # bfloat16 [8192, 4096]; up to 8 tokens only rows 0-1023 (this GPU's slice)
-    post_ffn_norm: torch.Tensor       # bfloat16 [8192] (applied as 1 + w, before normalizing)
-    ffn_residual_gate: torch.Tensor   # bfloat16 [8192]
-    next_pre_attn_norm: torch.Tensor  # bfloat16 [8192], the next layer's input norm (applied as 1 + w)
-
-
+    qkv_gate: torch.Tensor
+    o: torch.Tensor
+    attn_residual_gate: torch.Tensor
+    pre_ffn_norm: torch.Tensor
+    router: torch.Tensor
+    router_bias: torch.Tensor
+    pooler: torch.Tensor
+    pre_expert_norm: torch.Tensor
+    w13: torch.Tensor
+    w13_sf: torch.Tensor
+    w13_gs: torch.Tensor
+    w2: torch.Tensor
+    w2_sf: torch.Tensor
+    w2_gs: torch.Tensor
+    post_expert_norm: torch.Tensor
+    unpooler: torch.Tensor
+    post_ffn_norm: torch.Tensor
+    ffn_residual_gate: torch.Tensor
+    next_pre_attn_norm: torch.Tensor
 class Config(TypedDict):
-    batch: int            # B sequences
-    q_len: int            # L: 1 for decode, 8 for a verify block (causal inside it)
-    tokens: int           # T = B * L, request-major
-    hidden: int           # 8192
-    num_q_heads: int      # 16 per GPU under TP8
-    num_kv_heads: int     # 2
-    head_dim: int         # 64
-    page_size: int        # 1 in the scored cases, 64 in some tests
-    window: int           # 2048 on sliding-window layers; 0 = all
-    rope_theta: float     # 500000 on sliding-window layers (interleaved RoPE); 0 = no RoPE
+    batch: int
+    q_len: int
+    tokens: int
+    hidden: int
+    num_q_heads: int
+    num_kv_heads: int
+    head_dim: int
+    page_size: int
+    window: int
+    rope_theta: float
     qk_scale_factor: float
-    sm_scale: float       # 1/8
-    kv_scale: float       # the cache scales' value: 1 in the scored cases
-    n_experts: int        # 256
-    top_k: int            # 8
-    local_experts: int    # 32
-
-
+    sm_scale: float
+    kv_scale: float
+    n_experts: int
+    top_k: int
+    local_experts: int
 class Inputs(TypedDict):
-    stream: torch.Tensor      # float32 [T, 8192], the residual stream
-    attn_input: torch.Tensor  # bfloat16 [T, 8192]
-    k_cache: torch.Tensor     # float8_e4m3fn [pages, page_size, 2, 64], written in place
-    v_cache: torch.Tensor     # float8_e4m3fn [pages, page_size, 2, 64], written in place
-    positions: torch.Tensor   # int64 [T]
-    cache_loc: torch.Tensor   # int64 [T]
-    cache_seqlens: torch.Tensor  # int32 [B], seq_lens + L
-    cu_seqlens_q: torch.Tensor   # int32 [B+1]
+    stream: torch.Tensor
+    attn_input: torch.Tensor
+    k_cache: torch.Tensor
+    v_cache: torch.Tensor
+    positions: torch.Tensor
+    cache_loc: torch.Tensor
+    cache_seqlens: torch.Tensor
+    cu_seqlens_q: torch.Tensor
     scheduler_metadata: torch.Tensor | None
-    k_scale: torch.Tensor     # float32 []
-    v_scale: torch.Tensor     # float32 []
-    page_table: torch.Tensor  # int32 [B, max_pages]
-    seq_lens: torch.Tensor    # int32 [B]
-    local_start: torch.Tensor # int32 [1]
+    k_scale: torch.Tensor
+    v_scale: torch.Tensor
+    page_table: torch.Tensor
+    seq_lens: torch.Tensor
+    local_start: torch.Tensor
     config: Config
-
-
 HIDDEN = 8192
 D_EXPERT = 4096
 RMS_EPS = 1e-5
@@ -10380,35 +9892,22 @@ TOP_K = 8
 LOCAL_EXPERTS = 32
 ROUTER_MULTIPLIER = 0.1767766952966369
 ROUTE_EPS = 1e-15
-ROUTER_FP32_MAX_TOKENS = 8  # MuseSpark1xRouter: FP32 F.linear up to here, BF16 hi/lo GEMMs above
+ROUTER_FP32_MAX_TOKENS = 8
 SLICED_UNPOOL_MAX_TOKENS = 8
 UNPOOL_SLICE = HIDDEN // 8
 BLOCK_SIZE_M_CANDIDATES = (8, 16, 32, 48, 64)
 RESIDUAL_TEMPERATURE = 0.3
 RESIDUAL_GATE_EPS = 1e-3
-# SGLang's fused_post_expert_norm_weighted_sum runs ~14 torch kernels up to 8 tokens (judge diag f5fdc570):
-# our one-kernel version up to here (H100: 4.8 us at T<=8, 5.2 at 32 vs SGLang's Triton kernel 4.1 on H200 at 32).
 OWN_WSUM_MAX_TOKENS = 16
 GLUE_PDL = False
-GEMV_PDL = True  # gemv10/12 trigger their dependents at start; glue after them launches with PDL (PDL_TOKENS)
+GEMV_PDL = True
 PDL_TOKENS = (1, 8)
-# At T=1 the unpool GEMV launches as a PDL secondary of moe_norm2 (patched to trigger at its start), so its first
-# weight loads overlap norm2 (norm2 reads ~128 KB: little HBM contention).
 UNPOOL_PDL = True
-# GEMVs launched as PDL secondaries (they load W, then griddepcontrol.wait), per (tokens, sliding layer). H100:
-# T=1 o (after csl, patched to trigger) -1..-3 us, unpool (after norm2) -3; T=8 o after sliding attention -1.9,
-# after full attention +1.3; T=8 unpool tie.
-# tokens -> split-K slabs: the pooler as a strided batched GEMM with FP32 out, summed in the rmsnorm (no cuBLAS
-# split-K reduce kernel). H100 standalone m16/m32: 25.8/26.1 vs F.linear 28.0/28.1 us.
 POOLER_BMM = {16: 2, 32: 2}
 GEMV_PDL_SECONDARY = {(1, True): ("unpool_slice", "o"), (1, False): ("unpool_slice", "o"), (8, True): ("o", "unpool_slice"),
                       (8, False): ("unpool_slice",)}
-BND_SPLIT = {(1, 1): 4, (1, 2): 4, (8, 1): 2, (8, 2): 2, (16, 1): 4, (16, 2): 4, (32, 1): 2, (32, 2): 2}  # s33: (tokens, 1 | 2 = first | second boundary) -> programs per row (each stores N / SPL columns)
-LOCAL_FALLBACK = False  # no SGLang: also build the dequantizing reference experts (tests of the Marlin-side glue)  # PDL after a cuBLAS producer: no gain (H100 o GEMM + boundary 12.64 vs 12.74 us)
-
-
-# ---- boundaries: post-norm of the branch, residual gate, pre-norm of the new stream ----
-
+BND_SPLIT = {(1, 1): 4, (1, 2): 4, (8, 1): 2, (8, 2): 2, (16, 1): 4, (16, 2): 4, (32, 1): 2, (32, 2): 2}
+LOCAL_FALLBACK = False
 @triton.jit
 def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr, h_ptr, h32_ptr,
               NB: tl.constexpr, N: tl.constexpr, BGAIN: tl.constexpr, H32: tl.constexpr,
@@ -10438,15 +9937,14 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
     cols = tl.arange(0, N)
     in_b = cols < NB
     mine = (cols // (N // SPL)) == tl.program_id(0) % SPL
-    # Weights and the incoming stream first: with PDL they load while the branch's producer finishes.
     alpha = tl.load(alpha_ptr + cols)
     beta = tl.load(beta_ptr + cols)
     gain = tl.load(gain_ptr + cols, mask=mine, other=0.0)
     if BGAIN:
         bgain = tl.load(bgain_ptr + cols, mask=in_b, other=0.0)
     s = tl.load(s_ptr + row * N + cols)
-    if SEP:  # s57: the sliced branch (NB < N) as its own [NS, NB] tile over all threads (the N-wide masked load ran on the
-        jb = tl.arange(0, NB)  # ~2 warps covering cols < NB: 8 slabs there cost ~2 us at T=8)
+    if SEP:
+        jb = tl.arange(0, NB)
         mine_b = (jb // (N // SPL)) == tl.program_id(0) % SPL
         alpha_b = tl.load(alpha_ptr + jb)
         beta_b = tl.load(beta_ptr + jb)
@@ -10454,7 +9952,7 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
         s_b = tl.load(s_ptr + row * N + jb)
         if BGAIN:
             bgain_b = tl.load(bgain_ptr + jb)
-        if SC:  # the routing (pr8's, complete long before nu8 ran) before the wait; [8, NB] tiles of per-slot values
+        if SC:
             sl8 = row * 8 + tl.arange(0, 8)[:, None] + jb[None, :] * 0
             e8 = tl.load(ids_ptr + sl8)
             loc8 = (e8 >= 0) & (e8 < SC_LOCAL)
@@ -10462,7 +9960,7 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
         if PDL:
             gdc_wait()
         ks = tl.arange(0, NS)
-        if SC:  # [8 slots, NB] tiles (masked to the local slots); per-slot scalars as broadcast tiles (no layout change)
+        if SC:
             ssq = tl.load(sc_ptr + sl8, mask=loc8, other=1.0)
             sf = tl.where(loc8, tw8 * tl.rsqrt(ssq / SC_K + SC_EPS), 0.0)
             bb = tl.sum(tl.load(br_ptr + sl8 * NB + jb[None, :], mask=loc8, other=0.0) * sf, 0)
@@ -10490,7 +9988,7 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
     b = tl.load(br_ptr + row * NB + cols, mask=in_b, other=0.0)
     for i in tl.static_range(1, NS):
         b += tl.load(br_ptr + i * SS + row * NB + cols, mask=in_b, other=0.0)
-    if RB:  # FP32 branch (gemv19): round to the BF16 the GEMM would return
+    if RB:
         b = b.to(tl.bfloat16)
     b = b.to(tl.float32)
     if BGAIN:
@@ -10503,8 +10001,6 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
     tl.store(h_ptr + row * N + cols, h.to(tl.bfloat16), mask=mine)
     if H32:
         tl.store(h32_ptr + row * N + cols, h, mask=mine)
-
-
 @triton.jit
 def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, PDL: tl.constexpr,
                   TRIG: tl.constexpr, XS: tl.constexpr = 0, ROUND: tl.constexpr = False, NS: tl.constexpr = 1,
@@ -10522,20 +10018,20 @@ def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, 
     gain = tl.load(gain_ptr + cols)
     if PDL:
         gdc_wait()
-    if TRIG2:  # s27 TK2FX: the dependent (moe_tk2f) reads pr1's routing before its own wait: trigger only after ours
+    if TRIG2:
         gdc_launch_dependents()
     if ZN > 0:
         if tl.program_id(0) == 0:
             tl.store(z_ptr + tl.arange(0, ZN), tl.zeros((ZN,), tl.float32))
-    if ZR > 0:  # n5s2: zero row `row` of G24X's persistent qkv out (ZR wide) when unpool is not g24 (no trailing zero_)
+    if ZR > 0:
         zc = tl.arange(0, ZRP)
         tl.store(zr_ptr + row * ZR + zc, tl.zeros((ZRP,), tl.float32), mask=zc < ZR)
-    if ZL > 0:  # s59 NU8D: zero this token's local slots' rows of nu8 D's red.add output (ids: the routing, complete)
+    if ZL > 0:
         sl8 = row * 8 + tl.arange(0, 8)
         e8 = tl.load(ids_ptr + sl8)
         loc8 = (e8 >= 0) & (e8 < ZL)
         tl.store(zl_ptr + sl8[:, None] * ZW + tl.arange(0, ZW)[None, :], tl.zeros((8, ZW), tl.float32), mask=loc8[:, None])
-        tl.store(z_ptr + sl8, tl.zeros((8,), tl.float32), mask=loc8)  # and their sums of squares
+        tl.store(z_ptr + sl8, tl.zeros((8,), tl.float32), mask=loc8)
     x = tl.load(x_ptr + row * (XS if XS else N) + cols)
     for i in tl.static_range(1, NS):
         x += tl.load(x_ptr + i * SS + row * (XS if XS else N) + cols)
@@ -10544,10 +10040,6 @@ def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, 
     x = x.to(tl.float32)
     r = tl.rsqrt(tl.sum(x * x, 0) / N + EPS)
     tl.store(out_ptr + row * N + cols, (x * r * gain).to(tl.bfloat16))
-
-
-# ---- router: split-K logits, then routing ----
-
 @triton.jit
 def _router_split(h_ptr, w_ptr, wlo_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr,
                   BT: tl.constexpr, BE: tl.constexpr, BK: tl.constexpr, KS: tl.constexpr, HILO: tl.constexpr,
@@ -10575,8 +10067,6 @@ def _router_split(h_ptr, w_ptr, wlo_ptr, part_ptr, T, K: tl.constexpr, E: tl.con
         else:
             acc = tl.dot(h, w, acc, input_precision="ieee")
     tl.store(part_ptr + (ks * T + t[:, None]) * E + e[None, :], acc, mask=t_ok[:, None])
-
-
 @triton.jit
 def _router_fma(h_ptr, w_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr, BT: tl.constexpr, BE: tl.constexpr,
                 BK: tl.constexpr, KS: tl.constexpr):
@@ -10594,8 +10084,6 @@ def _router_fma(h_ptr, w_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr, BT:
         h = tl.load(h_ptr + t[:, None] * K + k[None, :], mask=t_ok[:, None], other=0.0)
         acc += tl.sum(h[:, None, :] * w[None, :, :], 2)
     tl.store(part_ptr + (ks * T + t[:, None]) * E + e[None, :], acc, mask=t_ok[:, None])
-
-
 @triton.jit
 def _routing(part_ptr, bias_ptr, ls_ptr, ids_ptr, lids_ptr, wts_ptr, T, E: tl.constexpr, KS: tl.constexpr,
              TOPK: tl.constexpr, LOCAL: tl.constexpr, MULT: tl.constexpr, REPS: tl.constexpr,
@@ -10611,7 +10099,7 @@ def _routing(part_ptr, bias_ptr, ls_ptr, ids_ptr, lids_ptr, wts_ptr, T, E: tl.co
     e = tl.arange(0, E)
     logit = tl.zeros((E,), dtype=tl.float32)
     for ks in tl.static_range(KS):
-        if ST:  # partial ks of token t at ks * SKS + t * ST (the fused pooler/router GEMM's FP32 output)
+        if ST:
             logit += tl.load(part_ptr + ks * SKS + t * ST + e)
         else:
             logit += tl.load(part_ptr + (ks * T + t) * E + e)
@@ -10634,17 +10122,13 @@ def _routing(part_ptr, bias_ptr, ls_ptr, ids_ptr, lids_ptr, wts_ptr, T, E: tl.co
     tl.store(ids_ptr + t * TOPK + j, ids)
     tl.store(lids_ptr + t * TOPK + j, loc)
     tl.store(wts_ptr + t * TOPK + j, wts)
-
-
 def _router_plan(tokens):
     """(BT, BE, BK, KS, warps) for the split-K router."""
-    if tokens <= ROUTER_FP32_MAX_TOKENS:  # H100 T=1: 5.8 us (cuBLAS FP32 8.1, 23.6 at T=8)
+    if tokens <= ROUTER_FP32_MAX_TOKENS:
         return triton.next_power_of_2(tokens), 2, 1024, 8, 4
     if tokens <= 64:
         return 16 if tokens <= 16 else 32 if tokens <= 32 else 64, 32, 64, 16, 4
     return 64, 64, 64, 8, 4
-
-
 def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     bt, be, bk, ks, warps = _router_plan(tokens)
     dev = h.device
@@ -10652,7 +10136,7 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     lib = _G10.get("lib") if fp32 and tokens in ROUTER3_CFG else None
     pr3 = _G10.get("lib") if not fp32 and tokens in PR3_CFG else None
     if lib is not None or pr3 is not None:
-        ks = 1  # no split K: part = the logits
+        ks = 1
     rpdl = ((pr3 is not None or not fp32 and lib is None and tokens in ROUTE_PDL_SPLIT_TOKENS)
             and _opt(state, tokens, "route_pdl", ROUTE_PDL))
     part = torch.empty((ks, tokens, N_EXPERTS), dtype=torch.float32, device=dev)
@@ -10674,10 +10158,6 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
                         TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, PDL=rpdl,
                         num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2, launch_pdl=rpdl)
     return ids, lids, wts
-
-
-# ---- experts ----
-
 @triton.jit
 def _post_expert_wsum(y_ptr, wts_ptr, lids_ptr, nw_ptr, out_ptr, D: tl.constexpr, TOPK: tl.constexpr,
                       EPS: tl.constexpr):
@@ -10694,8 +10174,6 @@ def _post_expert_wsum(y_ptr, wts_ptr, lids_ptr, nw_ptr, out_ptr, D: tl.constexpr
     r = tl.rsqrt(tl.sum(z * z, 1) / D + EPS)
     acc = tl.sum(z * (wt * r)[:, None], 0)
     tl.store(out_ptr + t * D + cols, acc.to(tl.bfloat16))
-
-
 def _marlin_bank(weights):
     """The local experts in Marlin's layout, via SGLang's own loader step."""
     import types
@@ -10719,8 +10197,6 @@ def _marlin_bank(weights):
         "size_n": layer.intermediate_size_per_partition,
         "workspace": marlin_make_workspace(device, max_blocks_per_sm=4),
     }
-
-
 def _experts_marlin(x, topk_weights, local_ids, state):
     """MuseSpark1xFp4Experts._marlin_expert_outputs and its post-expert-norm finalize; local_ids -1 off this GPU."""
     bank = state["bank"]
@@ -10756,32 +10232,18 @@ def _experts_marlin(x, topk_weights, local_ids, state):
     _post_expert_wsum[(num_tokens,)](y, topk_weights, local_ids, state["post_expert_w"], out, D=size_k, TOPK=TOP_K,
                                      EPS=POST_NORM_EPS, num_warps=16)
     return out
-
-
-# The moe agent's NVFP4 experts (moe_src.py) at these token counts, SGLang's Marlin path elsewhere. Their board
-# (H200, us, SGLang incl. its torch post-norm at small T / theirs): bs1 77.3/42.5, bs8 143/106, bs16 196/159,
-# bs32 204/211, bs128 466/340, bs256 617/471.
-GNORM_DEFAULT = True  # s27 GNORM (H100 ab_files 4 rounds: v16 309.2/457.9 -> 309.3/455.1, v32 400.5/649.6 -> 398.4/647.6): T > 32 pre-expert rmsnorm fused into moe_gather (moe_gathern)
-ROUTING_WARPS_1_MIN_TOKENS = 33  # s39: _routing on 1 warp (shuffle-only reductions) above this T: bit-identical, H100 -0.4 us per call (2.84 vs 3.26 us
-# standalone); in the layer d16/d32 sliding lost 1.3/2.2 us with 1 warp (side stream, beside the g19 pooler): 2 warps there
-ROUTE_PDL = True  # s39: moe_route as a PDL secondary of _routing at T > 32 (see the moe_route patch); _routing as a PDL
-# secondary of the router (pr3 at T=128; _router_split at ROUTE_PDL_SPLIT_TOKENS)
+GNORM_DEFAULT = True
+ROUTING_WARPS_1_MIN_TOKENS = 33
+ROUTE_PDL = True
 ROUTE_PDL_SPLIT_TOKENS = (16, 32)
-RG_DEFAULT = False  # s52: T > 32 with GNORM: route + gathern in one launch (moe_routegathern; moe s33 RG); TUNE option "rg" at
-# T=256 (H100 ab v32 sl/full with twf_split 1022: -4.6/-7.1, with 66: -5.5/-8.3 us; alone ~tie). T=128: +1.8 us (the
-# bucketing is hidden on the side stream there; RG puts it on the main path)
-BKT_DEFAULT = True  # s27 (H100 ab_files 4 rounds: v32 404.2/652.6 -> 401.2/649.5, v16 tie; H200 router ends ~14 us before the pooler): T > 32: moe_route on the router's stream (before the join); moe_src kernel_fn takes data["bucket"]
-BUCKET_SIDE_MAX_TOKENS = 16  # side-stream bucketing won at T<=8 on the judge (c17d1581); T=128/256 unproven
-TK2_MAX_TOKENS = 32  # moe's TMA decode kernel (moe_tk2: route fused into gemm13, 3 launches) at T <= this
-# T > 32: moe's kernel_fn = route, gather, wgmma moe_tw gemm13/gemm2, norm (r-moe c39a176)
-TW_TOKENS = ()  # moe_tw at decode T: dead (s5 H100 d16 +14, d32 +29 us vs tk2)
-MARLIN_TOKENS = ()  # moe 6a1cda0 at T=32 beat Marlin on the judge: decode 32 sliding 218.3 (fc3e60d0) vs 225.0 (440361a9)
-
-
+RG_DEFAULT = False
+BKT_DEFAULT = True
+BUCKET_SIDE_MAX_TOKENS = 16
+TK2_MAX_TOKENS = 32
+TW_TOKENS = ()
+MARLIN_TOKENS = ()
 def _use_moe(tokens):
     return not HAVE_SGL or tokens not in MARLIN_TOKENS
-
-
 def _moe_bucket(state, local_ids, pdl=False):
     """moe_src's route kernel: this GPU's routes bucketed by expert (meta, sorted route ids). pdl (s39 ROUTE_PDL): as a
     PDL secondary of the routing kernel just before it (which triggers at its start)."""
@@ -10790,8 +10252,6 @@ def _moe_bucket(state, local_ids, pdl=False):
     sroutes = torch.empty(local_ids.numel(), dtype=torch.int32, device=dev)
     (state["moe"]["lib"].moe_route_pdl_launch if pdl else state["moe"]["lib"].moe_route_launch)(local_ids, 0, LOCAL_EXPERTS, meta, sroutes)
     return meta, sroutes
-
-
 def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
     """moe_src's route -> gemm13 -> gemm2 -> norm, on local ids (-1 off this GPU: skipped as out of range)."""
     st = state["moe"]
@@ -10811,41 +10271,41 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
         return out
     if (m <= TK2_MAX_TOKENS and _moe_TK2_NSTG) or (m > 32 and _moe_TW_CFG):
         upf = UPF3.get(m) if m <= TK2_MAX_TOKENS else None
-        if upf and upf[0] == "unpool":  # the first upf[1] bytes of every row of the BF16 unpooler (cuBLAS reads k ascending)
+        if upf and upf[0] == "unpool":
             u = state["unpool"]
             lib.moe_set_upf(u.data_ptr(), u.shape[0], u.shape[1] * u.element_size(), upf[1])
-        elif upf:  # "g19": the first upf[1] bytes of gemv19's stage-major unpool pack (k slab outermost)
+        elif upf:
             e = state.get("g19", {}).get(("unpool", m))
             if e is None:
                 upf = None
             else:
                 lib.moe_set_upf(e[0].data_ptr(), min(upf[1], e[0].numel()) >> 16, 1 << 16, 1 << 16)
-        _moe_TWM_ORDER_M.clear()  # s25: moe_twm item order as a TUNE option (H200 judge v43 vs moe's proxy disagree at T=256)
+        _moe_TWM_ORDER_M.clear()
         if _opt(state, m, "twm_order", 0):
             _moe_TWM_ORDER_M[m] = _opt(state, m, "twm_order", 0)
         _moe_TWM_TAIL_M.clear()
-        if _opt(state, m, "twm_tail", 0):  # moe s14: H200 diag 20d0b9c5 tail 32: v32 -3 us (clashes with order 76)
+        if _opt(state, m, "twm_tail", 0):
             _moe_TWM_TAIL_M[m] = _opt(state, m, "twm_tail", 0)
         _moe_TWQ_M.clear()
-        if _opt(state, m, "twq", 0):  # moe s17: moe_twq (16 consumer warps x RT 2) instead of moe_twm; proxy v16 -4.7 H200 us
+        if _opt(state, m, "twq", 0):
             _moe_TWQ_M[m] = _opt(state, m, "twq", 0)
         _moe_TWM_HOT_M.clear()
-        if _opt(state, m, "twm_hot", 0):  # moe s17: moe_twm one-pass class for 65..96-token experts; proxy v32 -3..5 H200 us
+        if _opt(state, m, "twm_hot", 0):
             _moe_TWM_HOT_M[m] = 1
         _moe_HOT_M.clear()
-        if _opt(state, m, "hot", 0):  # moe s29: moe_hot (65..128-token experts in one N128 pass) on that many CTAs before moe_twm
+        if _opt(state, m, "hot", 0):
             _moe_HOT_M[m] = _opt(state, m, "hot", 0)
         _moe_TK2F_BAL_M.clear()
-        if _opt(state, m, "bal", TK2F_BAL_DEFAULT):  # moe n8 BAL (balanced tk2f phases, per-segment counters) at T=8/16/32
+        if _opt(state, m, "bal", TK2F_BAL_DEFAULT):
             _moe_TK2F_BAL_M.add(m)
         _moe_TK2X_M.clear()
-        if _opt(state, m, "tk2x", 0):  # s81 DIAG probes (tuner timing only, never selected)
+        if _opt(state, m, "tk2x", 0):
             _moe_TK2X_M[m] = _opt(state, m, "tk2x", 0)
         _moe_TK2H_M.clear()
-        if _opt(state, m, "tk2h", 0):  # s58: moe n6 tk2h (GS16 merged consumer + PF4) at T=16/32, value = 2-group weight W + 1
+        if _opt(state, m, "tk2h", 0):
             _moe_TK2H_M[m] = _opt(state, m, "tk2h", 0)
         _moe_TWF_SPLIT_M.clear()
-        if _opt(state, m, "twf_split", 0):  # moe s19: K-split tail of moe_twm (light experts only; combinable with order)
+        if _opt(state, m, "twf_split", 0):
             _moe_TWF_SPLIT_M[m] = _opt(state, m, "twf_split", 0)
         out = _moe_kernel_fn({"hidden_states": x, "topk_ids": local_ids, "topk_weights": topk_weights,
                               "config": {"local_start": 0, "local_count": LOCAL_EXPERTS},
@@ -10868,8 +10328,6 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
     lib.moe_gemm2(p2, st["w2q"], st["w2s"], st["gs2"], st["lut"], inter, meta, sroutes, y)
     lib.moe_norm_launch(y, local_ids, topk_weights, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, out)
     return out
-
-
 def _experts_local(x, topk_weights, local_ids, state):
     """Local test fallback (no SGLang): every local expert on every token from BF16 copies made in prepare,
     each output post-normed (scale, round to BF16, RMSNorm) and kept by its routing weight."""
@@ -10883,23 +10341,17 @@ def _experts_local(x, topk_weights, local_ids, state):
     _post_expert_wsum[(tokens,)](y, topk_weights, local_ids, state["post_expert_w"], out, D=D_EXPERT, TOPK=TOP_K,
                                  EPS=POST_NORM_EPS, num_warps=8)
     return out
-
-
-# ---- prepare / kernel_fn ----
-
 def _residual(gate):
     w = gate.float() / RESIDUAL_TEMPERATURE
     beta = torch.sigmoid(w)
     alpha = torch.sqrt(torch.clamp(torch.sigmoid(-w) * (1.0 + beta), min=RESIDUAL_GATE_EPS))
     return alpha.contiguous(), beta.contiguous()
-
-
 def _join_builds():
     """Wait for the import-time JIT builds (s68); resolve the attention extensions."""
     for f in _PREBUILD:
         try:
             f.result()
-        except Exception as e:  # noqa: BLE001  (retried serially below / at first use)
+        except Exception as e:
             print("layer prebuild failed (retrying serially):", e)
     for d in (_G10, _LT, _G22, _G24, _G27):
         if d.get("lib", 0) is None:
@@ -10908,8 +10360,6 @@ def _join_builds():
     for n in ("_CSL", "_NVS", "_NDS", "_NVSCL"):
         if isinstance(g.get(n), _LazyBuild):
             g[n] = g[n].get()
-
-
 def _own_stream(dev, priority=0):
     """n5s2: a CUDA stream outside PyTorch's stream pool. torch.cuda.Stream() hands out 32 pooled streams per priority
     round-robin, so a harness's capture stream (torch.cuda.Stream() / torch.cuda.graph's own pool stream) can be the SAME
@@ -10923,29 +10373,25 @@ def _own_stream(dev, priority=0):
             h = ctypes.c_void_p()
             if rt.cudaStreamCreateWithPriority(ctypes.byref(h), ctypes.c_uint(1), ctypes.c_int(priority)) == 0 and h.value:
                 return torch.cuda.ExternalStream(h.value, device=dev)
-    except Exception as ex:  # noqa: BLE001
+    except Exception as ex:
         print("layer own stream failed (pool stream instead):", ex)
     return torch.cuda.Stream(dev, priority=priority)
-
-
 def prepare(weights):
     router = weights["router"].contiguous()
     hi = router.to(torch.bfloat16)
     lo = (router - hi.float()).to(torch.bfloat16)
-    gain = lambda name: (1.0 + weights[name].float()).contiguous()  # noqa: E731
+    gain = lambda name: (1.0 + weights[name].float()).contiguous()
     state = {
         "dense": {name: weights[name].contiguous() for name in ("qkv_gate", "o", "pooler")},
         "unpool_slice": weights["unpooler"][:UNPOOL_SLICE].contiguous(),
         "unpool": weights["unpooler"].contiguous(),
         "router": router, "router_hi": hi.contiguous(), "router_lo": lo.contiguous(),
-        "router_hl2": torch.stack([hi, lo]).contiguous(),  # [2, 256, k] for pj_router3
-        # [pooler; router hi; router lo]: one GEMM of h for both above 8 tokens (FUSED_ROUTER_TOKENS)
+        "router_hl2": torch.stack([hi, lo]).contiguous(),
         "pool_router": torch.cat([weights["pooler"], hi, lo]).contiguous() if FUSED_ROUTER_TOKENS or FR_TUNE else None,
         "router_bias": weights["router_bias"].float().contiguous(),
         "res1": _residual(weights["attn_residual_gate"]), "res2": _residual(weights["ffn_residual_gate"]),
         "pre_ffn": gain("pre_ffn_norm"), "post_ffn": gain("post_ffn_norm"), "next_pre_attn": gain("next_pre_attn_norm"),
         "pre_expert": gain("pre_expert_norm"),
-        # MuseSpark1xFp4Experts binds the post-expert norm's effective (1 + w) weight in BF16.
         "post_expert_w": (1.0 + weights["post_expert_norm"].float()).to(torch.bfloat16),
         "side_stream": _own_stream(weights["qkv_gate"].device),
         "hi_stream": _own_stream(weights["qkv_gate"].device, priority=-1),
@@ -10970,10 +10416,6 @@ def prepare(weights):
     torch.cuda.synchronize()
     _tune(state)
     return state
-
-
-# ---- BF16 GEMV at 1 token: the proj agent's gemv10 (g10_src.cu = r-proj d894f4e, inlined by build.py) ----
-
 _G10_SRC = r'''// r-proj d894f4e muse_bf16_proj/submission.py _G10_SRC (proj agent's gemv10), copied verbatim
 // gemv10: grid-stride GEMV for small m, W plain row-major BF16 [n, KK], KK <= U*2048.
 // The flat W is cut into chunks of U*256*8 elements (U*4 KB), each a whole number of rows. A block is NV groups
@@ -11085,24 +10527,17 @@ void g10_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t u, in
 if UNPOOL_PDL:
     _i = _moe_CUDA_SRC.index("{\n", _moe_CUDA_SRC.index("__global__ void __launch_bounds__(512) moe_norm2(")) + 2
     _moe_CUDA_SRC = _moe_CUDA_SRC[:_i] + '  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + _moe_CUDA_SRC[_i:]
-# moe_tk2 (decode experts, T <= 32) as PDL secondaries: gemm13 (TK2_PDL13) launches while _rmsnorm_gain (patched
-# to trigger at its start) runs; its producer warp streams the first weight stages and does the in-kernel routing
-# before the consumers' griddepcontrol.wait (right before their first x read). gemm2 (TK2_PDL2) waits at entry.
-POOLER_HI_PRIORITY = ()  # s5 dead: pooler first, but the router starves beside it (tie/worse)
-# boundary 1 L2-prefetches the FP32 router weight (8 MB) from extra programs at these token counts
-ROUTER_L2_PF_TOKENS = ()  # judge f8e06892: d1 -2% (noise?); off. Was (1,): H100: d1 -0.8 us; T=8 +0.9 (the T=8 router is issue-bound, not HBM)
-ROUTER_AFTER_POOLER = ()  # s5: tie/worse (router starved beside the pooler); token counts: pooler first, router its PDL secondary (see kernel_fn)
-# above 8 tokens: pooler + SGLang's hi/lo BF16 router in one cuBLAS GEMM (FP32 out), no side stream. s7 H100: tie
-# (d32 GEMM 30.8 + splitK reduce 2.1 + routing 3.4 vs pooler || router 38.3 us; v32 -2..-10, v16 full +5): the fused
-# GEMM is the pooler + 3 us (router bytes at HBM rate), same as the overlap. Needs a better GEMM config to win (lt FP32 out).
-FUSED_ROUTER_TOKENS = (256,)  # s37: + moe_gathern on its strided FP32 rows; H100 ab_files v32 sl/full -2.4/-2.5, -5.4/-4.4 us (2 runs); T=128 +3.5/0
-FR_TUNE = (128, 256)  # s37: T where TUNE option "fr" (fused pooler+router GEMM, default T in FUSED_ROUTER_TOKENS) exists
-TK2_PDL13 = False  # s5: H100 tie (d1 +1, v1 -1, d32 -1 us): rmsnorm is only 1.7 us and the safe join loses its own PDL
+POOLER_HI_PRIORITY = ()
+ROUTER_L2_PF_TOKENS = ()
+ROUTER_AFTER_POOLER = ()
+FUSED_ROUTER_TOKENS = (256,)
+FR_TUNE = (128, 256)
+TK2_PDL13 = False
 TK2_PDL2 = False
 if TK2_PDL13 or TK2_PDL2:
     _i0 = _moe_CUDA_SRC.index("__global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2(")
     _i1 = _moe_CUDA_SRC.index("static int launch_tk2(", _i0)
-    _k = _moe_CUDA_SRC[_i0:_i1]  # the moe_tk2 kernel
+    _k = _moe_CUDA_SRC[_i0:_i1]
     _a = "  uint4 xf[NQ][2];\n"
     assert _k.count(_a) == 1
     _k = _k.replace(_a, _a + '  if (GATED) asm volatile("griddepcontrol.wait;" ::: "memory");\n')
@@ -11260,10 +10695,6 @@ void g12_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tensor
     TORCH_CHECK(false, "g12: no config");
 }
 '''
-# proj's gemv13 (m = 1) / gemv14 (m = 8) over losslessly compressed 12-bit BF16 weights (g13_src.cu / g14_src.cu =
-# r-proj 3f173eb: bit-exact escape headers, inlined by build.py; _compress/_pack13/_pack14 below = proj's). Only where the weight compresses
-# (else gemv10/12 as before). H200 (proj judge): pooler m1 17.8 -> 15.5, qkv m1 11.5 -> 11.0, pooler m8 18.8 -> 16.3,
-# qkv m8 13.9 -> 13.0 us.
 _G13_SRC = r'''// gemv13: gemv10 (grid-stride GEMV, m = 1) over losslessly compressed BF16 weights: 12 bits per weight.
 // prepare() splits W [n, KK] into a sign|mantissa byte plane (flat, row-major) and a 4-bit exponent code plane:
 // code c = e - base (base = max exponent - 15), so the decoded exponent is 112 | c (exact power-of-2 rescale of the
@@ -13670,18 +13101,12 @@ void g30k_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tens
 }
 #endif  // G30K_ON
 '''
-# s100 g30 (g30_src.cu = layer s99 dev/s99_g30.cu + PDL + proj s91's in-fragment escape patch): T=128 wgmma GEMM over the 12-bit
-# weights decoded into register A-fragments (H100 cold-L2 unp 8192x4096 22.4 vs cuBLAS 25.6 us; in-layer ab_flag 4 rounds x 3 seeds
-# v16 sl -4.1..-5.2, full -4.5..-5.5 us; G30_TRIG another -0.6..-1.5). In TUNE_BASE[128]; TUNE option {g30:unpool: False}.
-G30_KEYS = ("unpool", "o")  # o: H100 standalone 10.2 vs cuBLAS 10.5 us (tie): TUNE option g30:o only
-# s101 DEAD: qkv on a split-K g30 (dev/s101_g30split.cu: uneven K ranges, FP32 slabs, ticket, last CTA sums; bit-exact):
-# S3 standalone 21.4 vs cuBLAS 20.0 us (MMA part 16.4, reduce chain +5), in-layer v16 sl +2.5..4.1, full +0.1..2.5 us.
+G30_KEYS = ("unpool", "o")
 G30_TOKENS = 128
-G30_PDL = 1  # launch g30 as a PDL secondary (W streams before griddepcontrol.wait)
-
+G30_PDL = 1
 PR32_TOKENS = (16, 32)
-PR32_DEFAULT = False  # moe n5s1: one launch for the T=16/32 pooler (g30n S2) + router (hi/lo) + routing
-PR32_CFG = {16: (8, 16), 32: (8, 16)}  # T: (NW, NS)
+PR32_DEFAULT = False
+PR32_CFG = {16: (8, 16), 32: (8, 16)}
 _GPR32_SRC = r'''#include <cuda.h>
 #include <cuda_runtime.h>
 #include <cudaTypedefs.h>
@@ -14285,8 +13710,6 @@ void pr32_launch(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Te
 }
 '''
 _PR32 = {}
-
-
 def _pr32_build(c):
     """c = (MTOK, NW, NS) -> the pr32 lib (moe n5s1, pr32_src.cu) or None."""
     if c not in _PR32:
@@ -14299,18 +13722,14 @@ def _pr32_build(c):
                 cpp_sources="void pr32_launch(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale, torch::Tensor rw, torch::Tensor part, torch::Tensor logits, torch::Tensor cnt, torch::Tensor bias, torch::Tensor ls, torch::Tensor ids, torch::Tensor lids, torch::Tensor wts, double mult, double reps, int64_t local, int64_t pdl, torch::Tensor tl);",
                 cuda_sources=_GPR32_SRC, functions=["pr32_launch"],
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer pr32 build failed:", c, ex)
             _PR32[c] = None
     return _PR32[c]
-
-
 def _pr32_builds():
     if _GPR32_SRC is None:
         return []
     return [(lambda c=(m, *PR32_CFG[m]): _pr32_build(c)) for m in PR32_TOKENS]
-
-
 def _pr32_prepare(state):
     state["pr32"] = {}
     if _GPR32_SRC is None:
@@ -14329,47 +13748,17 @@ def _pr32_prepare(state):
         if lib is None:
             continue
         state["pr32"][m] = (lib, e[1], rw)
-
-G30_TRIG = True  # the second boundary is g30's PDL secondary (g30 triggers at start)
+G30_TRIG = True
 _G30 = {}
-# proj s96 g30n (proj s95, r-proj dev/s95: G30_MTOK 32/16 + G30_S cluster split-K, DSMEM reduce in rank 0, BF16 out): T=16/32
-# unpool/pooler/qkv on g30. One build per (MTOK, S, NW, NS); NW >= 16 keeps 1 CTA/SM (2 CTAs/SM under PDL +5 us). H100 standalone
-# after a 3 us PDL pred vs g24: d32 unp 17.3 vs 20.3, pool 18.9 vs 21.5, qkv 12.3 vs 13.4; d16 unp 17.2 vs 18.7, pool 18.4 vs 18.75.
 G30N_CFG = {("unpool", 32): (1, 16, 16), ("pooler", 32): (1, 20, 8), ("qkv_gate", 32): (3, 16, 16),
             ("unpool", 16): (1, 16, 16), ("pooler", 16): (1, 16, 16), ("qkv_gate", 16): (3, 16, 16),
-            ("o", 32): (1, 16, 16), ("o", 16): (1, 16, 16),  # (S, NW, NS); n5s4: o (K 1024: each CTA's W share ~ its ring)
-            ("o", 8): (1, 8, 8)}  # n5s5: G30_MTOK 8 (m64n8k16), T=8 o (v1); NW 8 (half the W ring) so CTAs co-reside with vtk
-G30N_DEFAULT_ON = set()  # (key, T) on without TUNE; otherwise TUNE option "g30n:<key>"
-# s96 H100 in-layer (TUNE off, 3 rounds x seeds 99/7): unpool T=32 -1.2..-2.1 us (2 runs); pooler S2 +9..11 (128 cluster CTAs vs the
-# side-stream router), S1 d16 sl +2.5..3.3 full -0.8; T=16 unpool / qkv S3 tie. TUNE option: T=32 g30n:unpool (validate tuner: sl picks it -1.0..-1.4 us, full +9 us -> default; T=16 g30n:pooler sl +14 us, dropped).
+            ("o", 32): (1, 16, 16), ("o", 16): (1, 16, 16),
+            ("o", 8): (1, 8, 8)}
+G30N_DEFAULT_ON = set()
 _G30N = {}
-# proj s99 g30k (g30_src.cu, G30K_ON): g30 at T=16/32 as a stream-K GEMM on G CTAs (<= 108 leaves SMs to the side-stream
-# router, which g30n's 128 cluster CTAs starved: pooler +9..11 us in-layer). The (64-row tile, 128-k) units are split evenly over
-# G CTAs; each CTA writes the FP32 partial of every tile piece it computed into slab[piece][T][N] (piece = its index among the
-# tile's CTAs) of a persistent zeroed buffer: (tile, slab) pairs no CTA owns stay zero (static: shapes + G), so the pooler's
-# rmsnorm sums the NS slabs like the bmm path's (no reduce kernel, no tickets; deterministic). H100 standalone after a 3 us
-# PDL pred (dev/s99, r-proj): pooler m32 G108 19.9-20.1 us vs g30n S2 (128 CTAs) 19.2, cuBLAS 28.2; one-hot bit-exact.
-# H100 in-layer (TUNE off, seeds 99/7, 4 rounds, d32 vs g24 pooler): G 80 +1, 88 -0.2..0.8, 96 -0.6..1.7, 104 -1.1..2.0 (sl) /
-# -1.5..1.7 (full), 112 -0.5..+0.8, 120/132 +14 us (the side-stream router starves). d16 G108: sl +2.4, full -0.3..1.2.
-# TUNE option "g30k:<key>": <G> (one prepared entry per G in the tuple; the H200's router is ~3x faster than the H100's).
-G30K_CFG = {("pooler", 32): ((104, 120), 16, 16), ("pooler", 16): ((104,), 16, 16)}  # (key, T) -> (grids, NW, NS)
-G30K_DEFAULT = {}  # (key, T) -> G used without TUNE (0 = off)
-# proj s100: T=32 rings NW16/NS16 (was 20/8) for g30n unpool and g30k pooler: H200 standalone (proj check 7ad5148c) unp m32
-# 19.42 vs 21.12, g30n S2 pool m32 19.97 vs 21.86 us; H100 in-layer tie (r-proj dev/s100/ringab.py); GEMM bitwise identical.
+G30K_CFG = {("pooler", 32): ((104, 120), 16, 16), ("pooler", 16): ((104,), 16, 16)}
+G30K_DEFAULT = {}
 _G30K = {}
-# proj s57 gemv27 (g27_src.cu = r-proj muse_bf16_proj/dev/s57/gemv27.cu): o at T=16/32 without cross-block split-K: a
-# block owns RGB whole 16-row groups, its warps split k (KQ), partials summed in smem, plain FP32 stores (no out zeroing,
-# fence, epoch barrier or atomics; deterministic); ns >= 100 = PD: each warp's whole W slice (ns - 100 atoms) is streamed
-# and DECODED into registers before griddepcontrol.wait, so after the wait only x + mma + the block sum remain.
-# Config (m, KQ, AP, ns, RGB, bf16 out). Same 12-bit pack as g24 (_pack24 with kc = k / KQ). Takes ZN like g24 (zeroes the
-# next g24's out) and never needs a zeroed out itself. proj H100 standalone after a 3 us PDL pred (us): o m16 PD 4.8-5.4
-# vs g24 6.2-6.9 vs cuBLAS 7.8; m32 PD 6.2-7.0 vs 6.9-7.2. TUNE option g27:<key> (bool); default on where G27_ON.
-# H200 (proj check c7b58683, after a 3 us PDL pred): o m16 PD 5.25 vs g24 6.43 vs cuBLAS 6.75 vs lt 7.20; m32 6.69 vs
-# cuBLAS 6.43 (and H100 layer d32 +1.1..1.8): T=16 only. H100 layer ab_flag (TUNE {}, 4 rounds x seeds 7,11,99): d16 sl
-# -0.6..-0.9, full -0.1..-0.3 us vs g24 o.
-# proj s58: g27_src.cu = r-proj dev/s58/gemv27.cu, G27_MC 1 (x by spread bulk copies): H100 layer d16 sl -1.8 full -1.05 us
-# vs s57; H200 (proj check a4962d70): o m16 4.42 (s57 5.28, g24 6.59); m32 6.27 vs g24 7.33 / lt 6.72 / cuBLAS 6.98 ->
-# T=32 as TUNE option g27:o (H100 tie).
 G27_CFG = {("o", 16): (16, 4, 4, 108, 4, 0), ("o", 32): (32, 4, 4, 108, 4, 0)}
 G27_ON = {("o", 16)}
 _G27 = {}
@@ -15359,76 +14748,35 @@ void ob8_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor s, torch::Tensor a
     TORCH_CHECK(false, "ob8: no config");
 }
 '''
-# proj's gemv19 (g19_src.cu = r-proj dev/gemv19.cu @6996d0c): m = 16/32 GEMM over the 12-bit weights, FP32 out zeroed
-# in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
-# kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
-# npre, xb), proj's H100 picks (r-proj BF16_G19). Consumers round the FP32 out to BF16 (= the GEMM's BF16 output).
 G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2),
-           # s15 (proj s15 handoff, with its escape-fixup rework): T=32 pooler/unpool, T=16 qkv (FP32 out + cast)
            ("pooler", 32): (32, 1024, 8, 2, 2, 1), ("unpool", 32): (32, 1024, 8, 2, 2, 1),
            ("qkv_gate", 16): (16, 1024, 4, 4, 4, 2),
-           # s19: H200-tuned in prepare (TUNE): qkv T=32 and o T=16/32 on g19 (configs already built for other picks)
            ("qkv_gate", 32): (32, 1024, 8, 2, 2, 1), ("o", 16): (16, 1024, 4, 4, 2, 2), ("o", 32): (32, 1024, 8, 2, 2, 1),
-           # s38: M = 8 (g19 with one n8 token group) for T=8 (verify 1) qkv / o / pooler, TUNE options g19:<key>
            ("qkv_gate", 8): (8, 1024, 4, 4, 4, 2), ("o", 8): (8, 1024, 4, 4, 2, 2), ("pooler", 8): (8, 1024, 8, 3, 3, 1)}
-# proj's H200 diag (after a 3 us PDL predecessor): m16 pooler AP8 15.7 vs 19.0, unpool tie, o +0.8, every m32 loses
-# (+1.5..5): m32 stays on cuBLAS / the bmm pooler. Was (H100 picks, s10 v35): pooler m16 (16, 1024, 4, 4, 2, 2),
-# m32 (32, 1024, 4, 4, 2, 1), unpool the same, o m16 (16, 512, 4, 3, 2, 2).
-G19_BUILD = [(16, 1024, 4, 4, 2, 2)]  # also compiled (A/B)
-# proj s53 gemv24 (g24_src.cu = r-proj dev/s53/gemv24.cu): g19's interface (FP32 out zeroed in the kernel, epoch counter,
-# PDL dependent streaming W before its wait, npre bit 16 = trigger at start) with per-warp TMA rings (no producer warp /
-# stage barriers). TUNE option g24:<key> (replaces g19 / cuBLAS at that call site). (m, kc, ap, ns, wpb, xb, r).
-# proj H200 proxy (H100 G72, after a 3 us pred; g24 | g19): m32 pool 24.8|26.6, unp 23.9|24.7, o 8.7|9.9, qkv 16.1|16.4.
+G19_BUILD = [(16, 1024, 4, 4, 2, 2)]
 G24_CFG = {("pooler", 16): (16, 1024, 4, 3, 12, 2, 1), ("unpool", 16): (16, 1024, 2, 4, 16, 2, 1),
            ("qkv_gate", 16): (16, 1024, 2, 4, 16, 2, 1), ("o", 16): (16, 512, 2, 4, 16, 2, 1),
            ("pooler", 32): (32, 512, 4, 3, 12, 2, 1), ("unpool", 32): (32, 512, 4, 3, 12, 2, 1),
            ("qkv_gate", 32): (32, 512, 4, 3, 12, 2, 1), ("o", 32): (32, 512, 4, 3, 12, 2, 1)}
-# proj s54: stream-K g24 (r | 256: each warp an equal contiguous range of ring stages, partial flushes at task boundaries);
-# TUNE option g24sk:<key> (bool) runs these configs instead (overrides g24/g19/cuBLAS at that call site). proj H200 proxy
-# (H100 G88/G108 standalone, after a 3 us pred; SK | static): qkv m16 11.4 | 11.8, m32 13.9 | 14.9; pool m32 21.1 | 21.5;
-# unp m32 21.3 | 22.1; pool m16 at G108 19.5 | 21.5 (static 4,3,12 19.1); o loses (+0.4..0.9).
-# proj s56 H200 diag (check 636c89fc, standalone after a 3 us PDL pred, us): pooler m16 G108 (4,3,12) 15.36 vs (2,4,16)
-# 18.34; pooler m32 G108 SK (4,3,12) 20.00 vs SK (2,4,16) 21.15; qkv m16 SK 9.89 vs static 10.53;
-# qkv m32 SK 13.15 vs lt 13.92 (first op at T=32: tuner only); unpool/o: g24 configs in use are best or tie.
-# H100 layer ab_files A B B A: pooler T=16 (4,3,12): d16 sl -0.9, full -0.4 (default); pooler T=32 SK (4,3,12) d32 +1.2..1.7
-# and qkv T=16 SK +0..0.6 on the H100: not default (g24sk:qkv_gate stays a TUNE[16] candidate).
 G24_SKCFG = {("pooler", 16): (16, 1024, 2, 4, 16, 2, 257), ("unpool", 16): (16, 1024, 2, 4, 16, 2, 257),
              ("qkv_gate", 16): (16, 1024, 2, 4, 16, 2, 257), ("pooler", 32): (32, 512, 2, 4, 16, 2, 257),
              ("unpool", 32): (32, 512, 2, 4, 16, 2, 257), ("qkv_gate", 32): (32, 512, 2, 4, 16, 2, 257)}
-# proj s69: stream-K g24 with (4,3,12) at T=32 pooler/unpool (TUNE option g24sk2:<key>, checked before g24sk). proj H100
-# G88 H200 proxy (after a 3 us pred, 2 reps): pool m32 23.9-24.1 vs SK (2,4,16) 24.7-24.9, unp 22.0 vs 22.8-22.9; consumer-only
-# (G24_NOW, G108) pool 17.6 vs 18.4-18.7, unp 17.2 vs 17.9-18.2. proj s56 H200 diag: pool m32 SK (4,3,12) 20.00 vs (2,4,16) 21.15.
-# H100 in-layer it lost (+1.2..1.7 us d32, W-bound there): H200 tuner only.
 G24_SK2CFG = {("pooler", 32): (32, 512, 4, 3, 12, 2, 257), ("unpool", 32): (32, 512, 4, 3, 12, 2, 257)}
 _G24 = {}
-# proj s56 EZ/ZN: within one layer call, each gemv24 zeroes the NEXT gemv24's FP32 out (preallocated, kept in _G24_ZN until
-# that call) as its warps finish; the next one then skips its own zeroing + fence + grid epoch barrier (npre bit 17).
-# Needs every kernel launched in between to execute griddepcontrol.wait (or no PDL) so completion is transitive.
-# H100 standalone (graph pred + gemm, us/call): qkv/o/pool/unp m16 -0.4..-1.4; proxy G88 -0.5..-1.3; ZN side +0..0.3.
 G24_ZCHAIN = {"qkv_gate": "o", "o": "pooler", "pooler": "unpool"}
-G24Z_TOKENS = {16}  # T=32: H100 in-layer d32 +1..2.5 us (pooler m32 ZN stores +0.6..1.5, EZ unpool +0.5..1): off
-G24_EZUSE = True  # A/B knob: False = the ZN stores happen but the consumer still zeroes itself
-G24_EZPF = False  # True: the zeroed-ahead out is L2-prefetched before the consumer's griddepcontrol.wait (H100 d16/d32 tie: off)
-_G24_ZN = {}  # (key, m) -> zeroed out for that call; cleared at every kernel_fn start
-# proj s59 G24X (cross-call EZ for the graph's first op): qkv's FP32 out at T in G24X_TOKENS is a persistent buffer
-# (state["g24x"][T], zeros from prepare) that the qkv g24 consumes as EZ (no zero + fence + grid epoch barrier); the
-# call's g24 unpool zeroes it again as its ZN (qkv's out is dead after attention). If unpool did not (other path),
-# kernel_fn zeroes it at its end: invariant = the buffer is zero between calls. H100 standalone first-op qkv m16
-# 18.5 -> 17.6 us, m32 21.1 -> 19.2. H100 layer ab_files (TUNE {}, A B B A, 8 rounds) d16 sl -1.56, full -0.68 us;
-# T=32 (only when the tuner picks g24:qkv_gate, a TUNE[32] option): g24 qkv -0.5/-0.9 us vs without G24X (6 rounds).
+G24Z_TOKENS = {16}
+G24_EZUSE = True
+G24_EZPF = False
+_G24_ZN = {}
 G24X_TOKENS = {16, 32}
-_G24X = []  # the pending buffer of this call (unpool's ZN target)
-ZR_ON = True  # n5s2: g30n unpool -> the pre-expert rmsnorm zeroes the G24X buffer (see _kernel_fn)
-# proj s63 G24P (TUNE option "g24p", T in G24P_TOKENS): the same cross-call EZ for the POOLER's FP32 out (persistent
-# state["g24p"][T], zero between calls): the pooler g24 runs EZ on it (no zero + fence + grid epoch barrier; H200 diag61
-# EZ bound pool m32 G108 -1.0..-1.5 us), and the call's g24 unpool zeroes it again as its ZN (pooled is dead after
-# the rmsnorm) when G24X does not use that slot. Fallback: kernel_fn zeroes it at its end.
+_G24X = []
+ZR_ON = True
 G24P_TOKENS = {32}
 _G24P = []
-BOUNDARY_TRIG = True  # the first boundary triggers its dependents at start when the gemv19 pooler follows
-G19_ON = {"pooler", "unpool", "qkv_gate", "o"}  # o: H100 tie (cuBLAS after attention)
-G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32), ("qkv_gate", 8), ("o", 8), ("pooler", 8)}  # prepared, used only if TUNE picks them (H100: tie/+3 us)
-G19_GRID = {("pooler", 16): 108, ("pooler", 32): 108, ("pooler", 8): 108}  # (key, T) -> blocks (default: all SMs): the pooler leaves SMs to the side-stream router (H100 d16, AP8 + BOUNDARY_TRIG: 104 213.2, 112 214.9, 120 221.4, 132 220.2; bmm 219.3 us)
+BOUNDARY_TRIG = True
+G19_ON = {"pooler", "unpool", "qkv_gate", "o"}
+G19_DEFAULT_OFF = {("qkv_gate", 32), ("o", 16), ("o", 32), ("qkv_gate", 8), ("o", 8), ("pooler", 8)}
+G19_GRID = {("pooler", 16): 108, ("pooler", 32): 108, ("pooler", 8): 108}
 _G19_SMS = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count if torch.cuda.is_available() else 132
 _GPR3_SRC = r'''// Router at m >= 9 as SGLang's BF16 hi + lo split with FP32 accumulation, in ONE GEMM kernel: split-K tensor-core
 // GEMM (mma.sync m16n8k16, x = A, W rows = B), hi and lo MMAs into the same FP32 accumulators (sharing x fragments).
@@ -15588,48 +14936,31 @@ void pj_router3(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mt,
     TORCH_CHECK(false, "pj_router3: no config");
 }
 '''
-KV_PF = True  # s9: the qkv gemv13 L2-prefetches the window's KV rows for csl (d1 sliding; H100 csl 6.1-7.3 -> ~4 us)
-G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}  # (u, nv, minb, pf, blocks), k = 8192
-# s33 (proj): o at T=1 on gemv13 (12-bit W, 12.6 vs 16.8 MB) as a PDL secondary: W prologue (.nc) before
-# griddepcontrol.wait, x (__ldcg) after. k = 1024. TUNE option "g13o" at T=1 (H100 d1 full -1.0..-1.3 us, sliding
-# +-0.3: attention and o share HBM, so W bytes moved before the wait slow csl about as much as they save; NOTES-proj s33).
-G13_O = (2, 1, 4, 1, 528)  # (u, nv, minb, pf, blocks); None = no o pack
+KV_PF = True
+G13_CFG = {"qkv_gate": (2, 4, 1, 1, 132), "pooler": (2, 4, 1, 1, 132)}
+G13_O = (2, 1, 4, 1, 528)
 G13_K = {"o": 1024}
-# s21/s22: alternative GEMV configs, used only where TUNE picks them (option "<kind>alt:<key>" = index into the list, 1-based)
-G13_ALT = {"qkv_gate": [(2, 4, 1, 2, 132)]}  # s21: T=1 PF 2 (2 rows in flight per virtual block; H100 +1.3/+2 us)
-G10_ALT = {"o": [(1024, 4, 4, 1, 1, 132)]}  # s22: T=1 o (PDL secondary of csl): U 4 on 132 blocks (PF 2 on 264: H100 +11 us, dropped)
-# s22: T=8 qkv: proj s16 (r-proj 2480c53 BF16_G14) without split-K: kcu 8 (own pack), 96 blocks of 3 row groups (H100
-# standalone 15.2-15.6 vs 16.8 us). (2, 2, 8, 32, 1) / (2, 2, 4, 48, 1): H100 in-layer ties, dropped.
+G13_ALT = {"qkv_gate": [(2, 4, 1, 2, 132)]}
+G10_ALT = {"o": [(1024, 4, 4, 1, 1, 132)]}
 G14_ALT = {"qkv_gate": [(8, 8, 4, 96, 1), (8, 8, 4, 96, 2), (8, 8, 8, 96, 1)]}
 _ALTS = {"g10": G10_ALT, "g13": G13_ALT, "g14": G14_ALT}
-
-
 def _cfg(state, tokens, kind, key, cfg):
     """key's config for that GEMV kind, or the TUNE-picked alternative."""
     i = int(_opt(state, tokens, kind + "alt:" + key, 0)) if key in _ALTS[kind] else 0
     return _ALTS[kind][key][i - 1] if i else cfg[key]
-G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}  # (kcu, wg, pf, bk, xp), m = 8
-# s11: proj pr1 (r-proj dev/pr1.cu@149d115): T=1 pooler (gemv13 body) + FP32 router + routing top-8 in ONE launch,
-# PDL secondary of the boundary (which triggers at start). (u, nv, minb, r, rb, blocks, npf). H100 d1 sliding 95.1 -> 92.5.
-PR1_TOKENS = (1, 8)  # 8: proj pr8 (r-proj dev/pr8.cu@3be546b): gemv14 pooler blocks also take a router item, an extra
-# finisher block sums the K slices + routes. H100 v1 158.1/172.4 -> 157.0/171.0 us (proj). cfg (kcu, wg, pf, bk, xp, npf)
+G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}
+PR1_TOKENS = (1, 8)
 PR8_CFG = {8: (8, 8, 4, 128, 1, 212)}
-# s88: light pr8 (TUNE pr8l): 2 row groups per block = 512 thr, 256 blocks, 2/SM (~107 KB smem: x as a 2-of-4-piece ring,
-# xp = XP | XR << 4), so blocks co-reside with the o GEMM's tail and start their W ramp earlier.
-PR8L_ALTS = []  # s88 DEAD (H100): light/ring alts, e.g. (8, 8, 4, 256, 4 | 1 << 4, 212) = 512 thr 2/SM (v1 sl tie, +0.6..0.9 us), (8, 8, 4, 128, 4 | 2 << 4, 212) heavy ring +1.3; with OB8 +1.1..1.6. TUNE pr8l: 1-based index
-
-
-def _pr8_cfg(state, tokens):  # s91: TUNE pr8_npf = pr8's bulk L2 prefetch depth (runtime arg; W only, so pre-wait 1xx is safe too)
+PR8L_ALTS = []
+def _pr8_cfg(state, tokens):
     c = PR8L_ALTS[_opt(state, tokens, "pr8l", 0) - 1] if _opt(state, tokens, "pr8l", 0) else PR8_CFG[tokens]
     return (*c[:5], _opt(state, tokens, "pr8_npf", c[5]))
-PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 0)}  # s35: npf 4 -> 0 (H200 tuner picked npf 0 at T=1 sliding in both logged checks: -0.8/-2.3 us)
-PR1_PF_ALT = (2,)  # s23: pr1 pooler PF (rows in flight per virtual block) alternatives, TUNE option "pr1_pf" (H200 GEMVs ~2.5 TB/s)
-OB8_LATE = False  # s86: ob8 triggers pr8 after its W loop (else at start)
-OB8 = False  # s86 DEAD: T=8 o GEMM (gemv12 body) with the first boundary fused into its epilogue (ob8_src.cu, grid barrier), pr8 its PDL secondary. H100 ab_flag v1 sl +2.2..2.5, full +0.3..0.7 us: pr8 (1024 thr x 64 regs = a whole SM) cannot co-reside with o blocks; the barrier holds all 128 SMs to the last block, so pr8 loses the pre-wait W ramp it gets behind the 16-program boundary
-PR1_BND = False  # s11: the boundary fused into pr1 as a per-block prologue (each block re-reads 144 KB: H100 d1 +1.2/+0.3 us even with s/alpha/beta/gain loaded before the wait): off
-G13_ESC = 8  # escapes per row (gemv13.cu / gemv14.cu ESC)
-
-
+PR1_CFG = {1: (2, 4, 1, 4, 26, 132, 0)}
+PR1_PF_ALT = (2,)
+OB8_LATE = False
+OB8 = False
+PR1_BND = False
+G13_ESC = 8
 def _compress(w):
     """Lossless 12-bit BF16 (gemv13/gemv14): sign|mantissa byte and 4-bit exponent code c = e - base per weight
     (base = max exponent - 15; decoded exponent 112 | c, so sums are rescaled by scale = 2^(base - 112)); weights below
@@ -15648,15 +14979,13 @@ def _compress(w):
     code = torch.where(esc, 0, code)
     sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F))
     scale = 2.0 ** (base - 112)
-    # empty slots: col 0, value 2^-15 (the kernels add x[col] * (value - 2^-15): exactly 0)
     hdr = torch.zeros(n, G13_ESC, 2, dtype=torch.float32, device=w.device)
     hdr[:, :, 1] = 2.0 ** -15
-    rows, cols = esc.nonzero(as_tuple=True)  # row-major order
+    rows, cols = esc.nonzero(as_tuple=True)
     if len(rows):
         slot = torch.arange(len(rows), device=w.device) - torch.searchsorted(rows, rows)
         hdr[rows, slot, 0] = cols.int().view(torch.float32)
-        hdr[rows, slot, 1] = w[rows, cols].float() / scale  # BF16 over a power of two: exact in FP32
-    # round trip: every weight decodes to its original bits (else no compression for this weight)
+        hdr[rows, slot, 1] = w[rows, cols].float() / scale
     dec = torch.where(esc, 0, (((sm & 0x80) << 8) | ((code + base) << 7) | (sm & 0x7F)))
     dec = dec.to(torch.int32).where(dec < 32768, dec - 65536).to(torch.int16).view(torch.bfloat16)
     if len(rows):
@@ -15669,15 +14998,11 @@ def _compress(w):
     if not torch.equal(dec.view(torch.int16), w.contiguous().view(torch.int16)):
         return None
     return code, sm, hdr, scale
-
-
 def _nib(code):
     """Codes [..., 8] -> int32 words: weight 2p + h at bits 4p + 16h."""
     sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=code.device)
     v = (code.long() << sh).sum(-1)
     return torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
-
-
 def _dec3(sm, code):
     """s35 DEC3 layout over groups of 8 weights (last dim = the kernels' dec8 unit: 8 bytes + 1 word): byte = c0 << 7 |
     mantissa; word: weight 2P + h's sign, c1, c2, c3 at bits (15, 8, 9, 10) + 16h + (0, -4, -8, 4)[P] (mod 32). Kernels
@@ -15689,13 +15014,11 @@ def _dec3(sm, code):
     bits = [(sm >> 7) & 1, (code >> 1) & 1, (code >> 2) & 1, (code >> 3) & 1]
     v = sum(b << q for b, q in zip(bits, pos)).sum(-1)
     b3 = ((code & 1) << 7) | (sm & 0x7F)
-    back = [(v.unsqueeze(-1) >> q) & 1 for q in pos]  # round trip: every bit lands in its own place
+    back = [(v.unsqueeze(-1) >> q) & 1 for q in pos]
     if not (torch.equal(back[0], bits[0]) and torch.equal(back[1] | back[2] << 1 | back[3] << 2, code >> 1)
             and torch.equal(b3 >> 7, code & 1) and torch.equal(b3 & 0x7F, sm & 0x7F)):
         raise RuntimeError("DEC3 packing round trip failed")
     return b3.to(torch.uint8), torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
-
-
 def _pack13(w):
     """gemv13 layout: flat byte plane, code words over 8 consecutive weights."""
     c = _compress(w)
@@ -15704,8 +15027,6 @@ def _pack13(w):
     code, sm, hdr, scale = c
     s3, n3 = _dec3(sm.flatten().view(-1, 8), code.flatten().view(-1, 8))
     return s3.flatten().contiguous(), n3.contiguous(), hdr, scale
-
-
 def _pack14(w, kc):
     """gemv14 layout: gemv12's atom order [ks][rg][atom][lane][8] for bytes and codes."""
     c = _compress(w)
@@ -15716,24 +15037,16 @@ def _pack14(w, kc):
     perm = lambda t: t.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
     s3, n3 = _dec3(perm(sm), perm(code))
     return s3, n3.contiguous(), hdr, scale
-# (k, u, nv, minb, pf, blocks) per weight, m = 1, chosen by proj on the H100 (dev/g10.py)
 G10_CFG = {"qkv_gate": (8192, 4, 4, 1, 1, 132), "pooler": (8192, 4, 4, 1, 1, 132), "o": (1024, 2, 4, 2, 1, 264),
            "unpool_slice": (4096, 2, 4, 1, 1, 132)}
 _G10 = {}
-G10_PFL2 = {}  # DEAD on H200 too (diag b1ee542c: d1 sliding no gain); s15: {sliding: keys} whose gemv10 (PDL secondary) bulk-prefetches its W into L2 before griddepcontrol.wait. H100 d1 {True: ("o",), False: ("o",)}: +1.8/+1.8 us (csl slowed); H200 untested
-
-
-# (kcu, wg, pf, bk) per weight, m = 8 (verify 1): the proj agent's gemv12 (g12_src.cu = r-proj e71d015), its H100 picks
+G10_PFL2 = {}
 G12_CFG = {"qkv_gate": (2, 2, 4, 32), "pooler": (8, 8, 4, 128), "o": (1, 2, 8, 128), "unpool_slice": (4, 4, 4, 32)}
 G12_TOKENS = 8
-
-
 def _pack12(w, kc):
     """proj's gemv12 layout: [k-chunk][8-row group][kc/32 atoms][lane][8] (atom = 8 rows x 32 k), lossless."""
     n, k = w.shape
     return w.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
-
-
 def _g10_lib():
     if "lib" not in _G10:
         _G10["lib"] = None
@@ -15743,15 +15056,13 @@ def _g10_lib():
             cases = " ".join("G10_CASE(1,%d,%d,%d,%d,%d)" % c[:5] for c in sorted(set(G10_CFG.values()) | {a for v in G10_ALT.values() for a in v}))
             cases12 = " ".join("G12_CASE(%d,%d,%d,%d)" % ((G12_TOKENS,) + c[:3]) for c in sorted(set(G12_CFG.values())))
             src = _G10_SRC.replace("G10_CONFIGS", cases) + "\n" + _G12_SRC.replace("G12_CONFIGS", cases12)
-            if UNPOOL_PDL:  # gemv10 may launch as a PDL secondary: its first W loads issue before griddepcontrol.wait
+            if UNPOOL_PDL:
                 anchor = "    for (int i = threadIdx.x; i < M * K8; i += 256 * NV) xs[i] = __ldg(x + i);"
                 launch = ("        g10::gemv<M_, U_, V_, B_, K_, P_><<<blocks, 256 * V_, sm, s>>>((const uint4*)w.data_ptr(), "
                           "(const uint4*)x.data_ptr(), \\\n        (__nv_bfloat16*)out.data_ptr(), n); return; }")
                 sig = "int64_t blocks) {"
                 for x_ in (anchor, launch, sig):
                     assert src.count(x_) == 1, x_
-                # s15: pdl == 2: first bulk-prefetch this thread group's W chunks into L2 (ptxas sinks the register W
-                # loads above below the wait: SASS showed only the first stage before ACQBULK); x by __ldcg (no .nc)
                 src = src.replace(anchor, '    if (pfl2)\n'
                                   '        for (long j = t; c + j * G < nch; j += 256)\n'
                                   '            asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }" :: "l"(W + (c + j * G) * (CE / 8)), "r"(CE * 2) : "memory");\n'
@@ -15766,7 +15077,7 @@ def _g10_lib():
                     "        la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0; \\\n"
                     "        cudaLaunchKernelEx(&lc, g10::gemv<M_, U_, V_, B_, K_, P_>, (const uint4*)w.data_ptr(), \\\n"
                     "                           (const uint4*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), (int)n, (int)(pdl >= 2)); return; }"))
-            if UNPOOL_PDL:  # gemv12 too: as a PDL secondary it L2-prefetches its W slice, then griddepcontrol.wait
+            if UNPOOL_PDL:
                 reps = [
                     ("int* __restrict__ cnt, int n, int nrg_all, int k, int bk) {",
                      "int* __restrict__ cnt, int n, int nrg_all, int k, int bk, int pdl) {"),
@@ -15789,7 +15100,7 @@ def _g10_lib():
                 for x_, y_ in reps:
                     assert src.count(x_) == 1, x_
                     src = src.replace(x_, y_)
-            if GEMV_PDL:  # let the next kernel (boundary / rmsnorm, launched with PDL) start its prologue early
+            if GEMV_PDL:
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src.count(anchor) == 1, anchor
                     src = src.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
@@ -15801,9 +15112,6 @@ def _g10_lib():
                 for anchor in ("    const int t = threadIdx.x & 255, vg", "    const int t = threadIdx.x, lane"):
                     assert src13.count(anchor) == 1, anchor
                     src13 = src13.replace(anchor, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + anchor)
-            # KV_PF: gemv13 (the qkv GEMV at 1 token) also L2-prefetches the attention's KV rows: thread i of the grid
-            # reads page-table entry pft[i] (i < pfn) after issuing its W prologue and prefetches that K and V row
-            # (pfrb bytes apart per page). csl (d1 sliding) then gathers from L2 instead of HBM.
             reps = [
                 ("__nv_bfloat16* __restrict__ out, int n, float scale) {",
                  "__nv_bfloat16* __restrict__ out, int n, float scale,\n"
@@ -15844,8 +15152,6 @@ def _g10_lib():
                 assert src13.count(x_) == 1, x_
                 src13 = src13.replace(x_, y_)
             src = src + "\n" + src13 + "\n" + _R3_SRC.replace("R3_CONFIGS", " ".join("R3_CASE(%d,%d,%d)" % c for c in sorted(set(ROUTER3_CFG.values()))))
-            # s39 ROUTE_PDL: pr3::router lets its PDL dependent (_routing, which waits before reading the logits) launch
-            # once its MMA part is done (the wait for the zero kernel, before the atomics)
             _a = '    asm volatile("griddepcontrol.wait;\\n" ::: "memory");  // out zeroed\n'
             assert _GPR3_SRC.count(_a) == 1
             src = src + "\n" + _GPR3_SRC.replace(_a, '    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n' + _a).replace("PR3_CONFIGS", " ".join("PR3_CASE(%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(PR3_CFG.values()) | set(PR3_BUILD))))
@@ -15861,7 +15167,7 @@ def _g10_lib():
                     src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
             else:
                 src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
-            if _GOB8_SRC is not None and OB8:  # s86: dead (H100), built only when forced on
+            if _GOB8_SRC is not None and OB8:
                 src = src + "\n" + _GOB8_SRC.replace("OB8_CONFIGS", "OB8_CASE(%d)" % G12_CFG["o"][2])
             else:
                 src = src + "\nvoid ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t) {}\n"
@@ -15893,21 +15199,12 @@ def _g10_lib():
                 cuda_sources=src, functions=["ob8_gemm", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
                 + (["pr8_launch"] if _GPR1_SRC is not None and _GPR8_SRC is not None else []),
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print("layer: gemv10/12 build failed, cuBLAS:", e)
     return _G10["lib"]
-
-
-# FP32 router up to 8 tokens without split K (r3_router; proj's router2 r-proj e605717 with FP32 x, tokens split over
-# blockIdx.y in groups of M so x fits in registers): tokens -> (M, rows per block, threads). H100 cold L2 m8: 8.74 us vs
-# _router_fma 11.52 (+ its 8 split partials); m1 6.91 vs 7.10 (tie: not used).
 ROUTER3_CFG = {8: (4, 2, 512)}
-# Router above 8 tokens = SGLang's BF16 hi/lo split in ONE split-K mma kernel (proj's router3, r-proj a1f0af7 dev/router3.cu
-# = pr3_src.cu): FP32 atomics into its output (zeroed by a tiny PDL-primary kernel). tokens -> (MT, NT, WM, WN, KC, NS).
-# proj H200 standalone: T16 7.38 -> 5.55, T32 8.66 -> 6.36, T128 10.24 -> 9.00 us.
-# Layer H100: T=128 (v16) -4.5 us; T=16/32 +1..3 us (its 72 KB-smem CTAs crowd the pooler bmm beside it): off there.
 PR3_CFG = {128: (128, 64, 4, 4, 256, 4)}
-PR3_BUILD = [(16, 64, 1, 4, 256, 4)]  # also compiled (A/B at T=16/32)
+PR3_BUILD = [(16, 64, 1, 4, 256, 4)]
 _R3_SRC = r'''// router3: proj's router2 (no split K, x in registers, W float4 loads issued up front) with FP32 x; tokens split over
 // blockIdx.y in groups of M so that x fits in registers.
 namespace r3 {
@@ -15974,13 +15271,6 @@ void r3_router(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mp, 
     TORCH_CHECK(false, "r3: no config");
 }
 '''
-
-
-
-# BF16 unpool slice (n = 1024, K = 4096) at 1 and 8 tokens: proj's gemv17 (r-proj dev/gemv17.cu @405439e: R whole rows
-# per block, x in registers, no split K; judge H200 m1 4.67 -> 3.75 us, m8 6.50 -> 5.99 vs gemv10/gemv12). Layer
-# changes: W loads are issued before griddepcontrol.wait (PDL secondary of moe_norm2), and it triggers its dependents.
-# tokens -> (M, rows per block, threads)
 G17_CFG = {1: (1, 4, 512), 8: (8, 4, 256)}
 G17_KEYS = ("unpool_slice",)
 _G17_SRC = r'''namespace g17 {
@@ -16074,22 +15364,11 @@ void g17_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mp, i
     TORCH_CHECK(false, "g17: no config");
 }
 '''
-
-
-# T = 1: moe_norm2 (post-expert norm + weighted sum, moe_src) fused into the unpool-slice GEMV (gemv17 structure,
-# 512 threads, thread t owns k = 8t..8t+7, which is also moe_norm2's layout): every block recomputes the norm of the
-# token's local expert outputs (y32 FP32 from moe_tk2f, <= 8 x 16 KB, L2) while its W rows are in flight, rounds it to
-# BF16 (as moe_norm2's output) and dots it with its R rows. Bitwise the same as moe_norm2 -> gemv17. Block 0 zeroes
-# moe_tk2f's segment counters (moe_norm2's other job). Saves the norm2 launch + its serial latency.
 N2U_TOKENS = (1,)
-N2U_PFW = True  # s14: n2u bulk-prefetches its W rows into L2 before griddepcontrol.wait (see n2u)
-N2U_SLOT = True  # s14: tk2f at T=1 with PF & 4 (84204: y32 in slot order, pre-scaled; bitwise = 204) + n2u<8, SLOT>
-N2U_CFG = (8, 1)  # rows per block, PDL secondary of moe_tk2f (s13: which triggers at its CTAs' gemm2 rows, TK2F_LATE_TRIG)
-N2U_BOUNDARY = False  # the last block also does the second boundary: H100 d1 +2.7 us vs the PDL _boundary (dead, s8)
-# s13: TK2F_LATE_TRIG (T = 1 tk2f instantiation only, PF == 0): 0 = trigger PDL dependents at the kernel's start (moe's),
-# 1 = at each CTA's end (after its last gemm2 row), 2 = when a CTA starts its gemm2 rows, 3 = as 2 in every tk2f
-# instantiation (T <= 32) + moe_norm2/3 as PDL secondaries (g_pdl 6). With N2U_CFG[1] = 1 n2u then
-# launches onto the SMs freed by drained tk2f CTAs and streams its W rows before griddepcontrol.wait.
+N2U_PFW = True
+N2U_SLOT = True
+N2U_CFG = (8, 1)
+N2U_BOUNDARY = False
 TK2F_LATE_TRIG = 3
 if TK2F_LATE_TRIG:
     _a = '  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");\n  {  // routing, as moe_tk2 GATED'
@@ -16101,16 +15380,12 @@ if TK2F_LATE_TRIG:
           "s_red, smem, full,\n                                     empty, st, ph, rb);\n")
     assert _moe_CUDA_SRC.count(_a) == 1
     _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a + _t if TK2F_LATE_TRIG == 1 else _t + _a)
-    if TK2F_LATE_TRIG == 3:  # 3: all instantiations trigger at their gemm2 rows, and moe_norm2/3 launch as PDL secondaries
+    if TK2F_LATE_TRIG == 3:
         _a = "static int g_pdl = 4,"
         assert _moe_CUDA_SRC.count(_a) == 1
         _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "static int g_pdl = 6,")
-# s15 UPF3: at T in UPF3, every moe_tk2f CTA bulk-prefetches (default L2 policy) the first UPF3[T] bytes of each of its
-# rows of the full unpooler W into L2 after its last gemm2 row (the cuBLAS unpool after moe_norm2/3 then starts with
-# that part in L2; HBM is mostly idle in the CTA drain + norm). Pointer via moe_set_upf() before the launch (a host
-# static read at launch/capture time; reset to null after).
-UPF3 = {}  # DEAD on H200 too (diag b1ee542c: d32 -4%, d16 -1.5%); s15: {T: ("unpool", bytes per row) or ("g19", bytes)}, e.g. {32: ("unpool", 3072), 16: ("g19", 16 << 20)}; H100 d32: AT 0 tie (unpool -4, tk2f +7.8), AT 1 +1..2, AT 2 +1..2 (H200 untested)
-UPF3_AT = 0  # 0: tk2f CTA end (H100 d32: unpool -4 us but tk2f +7.8: the stragglers lose bandwidth), 1: moe_norm2/3 after its wait
+UPF3 = {}
+UPF3_AT = 0
 _a = "int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a + "\nstatic const char* g_upf = nullptr;\nstatic int g_upf_rows = 0, g_upf_rb = 0, g_upf_seg = 0;\n"
@@ -16129,7 +15404,7 @@ if UPF3_AT == 0:
     _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a + "  if (upf != nullptr && tid < 32)\n"
                                           "    for (int r = blockIdx.x + gridDim.x * tid; r < upf_rows; r += gridDim.x * 32)\n"
                                           "      asm volatile(\"{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }\" :: \"l\"(upf + (long)r * upf_rb), \"r\"(upf_seg) : \"memory\");\n")
-else:  # in moe_norm2/3 right after its griddepcontrol.wait (moe_tk2f complete: no competition with its stream)
+else:
     _i = _moe_CUDA_SRC.index("__global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y")
     _a = "int count, float eps, __nv_bfloat16* __restrict__ out, int* zc) {"
     _j = _moe_CUDA_SRC.index(_a, _i)
@@ -16138,11 +15413,11 @@ else:  # in moe_norm2/3 right after its griddepcontrol.wait (moe_tk2f complete: 
     _a = "  asm volatile(\"griddepcontrol.wait;\" ::: \"memory\");  // PDL secondary of gemm2\n"
     _j = _moe_CUDA_SRC.index(_a, _i)
     assert _j - _i < 2000
-    if UPF3_AT == 1:  # bulk (the CTA retires only after its bulk prefetches complete: H100 norm +5.6, unpool -4)
+    if UPF3_AT == 1:
         _pf = ("  if (upf != nullptr)\n"
                "    for (int r = blockIdx.x + gridDim.x * tid; r < upf_rows; r += gridDim.x * 512)\n"
                "      asm volatile(\"{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }\" :: \"l\"(upf + (long)r * upf_rb), \"r\"(upf_seg) : \"memory\");\n")
-    else:  # 2: per-line prefetch.global.L2 (fire and forget), lines spread over the grid
+    else:
         _pf = ("  if (upf != nullptr) {\n"
                "    const int lpr = upf_seg >> 7, nl = upf_rows * lpr;\n"
                "    for (int l = blockIdx.x * 512 + tid; l < nl; l += gridDim.x * 512)\n"
@@ -16153,10 +15428,6 @@ else:  # in moe_norm2/3 right after its griddepcontrol.wait (moe_tk2f complete: 
     assert _moe_CUDA_SRC.count(_a) == 2, _moe_CUDA_SRC.count(_a)
     _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "      (__nv_bfloat16*)out.data_ptr(), (int*)zc.data_ptr(), g_upf, g_upf_rows, g_upf_rb, g_upf_seg);\n}")
 _moe__CPP = _moe__CPP + "int64_t moe_set_upf(int64_t, int64_t, int64_t, int64_t);"
-# s26 NU8 (T = 8): moe_tk2f PF 20 (= 4 | 16; cfg 85204) also accumulates each route slot's post-norm sum of squares
-# sum_k (y w1)^2 (moe_norm3's tot) by atomics into float row 64 of y32 (zeroed by the pre-expert _rmsnorm_gain), so the
-# layer's nu8 kernel can do norm3 + the unpool slice split over k (no norm3 launch, W in smem before its wait).
-# w1 via moe_set_ss() (a host static read at launch / capture time, as moe_set_upf).
 _a = "                                             int& ph, int& rb) {\n  constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * ((PF & 1024) ? 1120 : 1152);"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("int& ph, int& rb) {", "int& ph, int& rb, const float* w1x = nullptr, float* ssx = nullptr) {")
@@ -16199,11 +15470,6 @@ _a = "\nstatic const char* g_upf = nullptr;"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "\nstatic const float* g_ssw1 = nullptr;\nint64_t moe_set_ss(int64_t p) { g_ssw1 = (const float*)p; return 0; }" + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_set_ss(int64_t);"
-# s27 TK2FX (T = 1 / 8, pr1 paths: no side stream): moe_tk2f as a PDL secondary of the pre-expert _rmsnorm_gain, which
-# triggers right after its own griddepcontrol.wait (so pr1, which wrote ids, has completed): tk2f's routing and its
-# producer's first weight stages overlap the rmsnorm + launch gap; the consumers wait before their first x read (x =
-# the rmsnorm's output, read with __ldcg: __ldg/.nc gets hoisted above griddepcontrol.wait, NOTES s14). Without the
-# PDL launch attribute the wait is a no-op. Host static g_tk2fpdl (moe_set_tk2fpdl) read by tk2f_go at launch/capture.
 _a = ("  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,\n")
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, '  asm volatile("griddepcontrol.wait;" ::: "memory");  // s27 TK2FX: x is the PDL predecessor\'s output\n' + _a)
@@ -16220,9 +15486,6 @@ _a = "\nstatic const char* g_upf = nullptr;"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "\nstatic int g_tk2fpdl = 0;\nint64_t moe_set_tk2fpdl(int64_t v) { g_tk2fpdl = (int)v; return 0; }" + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_set_tk2fpdl(int64_t);"
-# s27 GNORM (T > 32): the pre-expert rmsnorm fused into moe_gather: each gathered row (expert order, K-permuted as
-# moe_gather) normalizes its source token from the pooler output itself (FP32 input rounded to BF16 first, as
-# _rmsnorm_gain ROUND; r = rsqrt(mean(x^2) + eps), out = BF16(x * r * gain)): one launch and the p round trip fewer.
 _a = "int64_t moe_gather_launch(torch::Tensor x, torch::Tensor meta, torch::Tensor sroutes, torch::Tensor xg) {"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, r"""template <bool F32>
@@ -16283,11 +15546,6 @@ int64_t moe_gathern_launch(torch::Tensor x, torch::Tensor gain, torch::Tensor me
 }
 """ + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_gathern_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double);"
-# s52 RG (moe s33 moe_routegather, r-moe 7ac1069) merged with GNORM: moe_route + moe_gathern in ONE launch, one CTA per
-# token. Every CTA counts all routes per local expert (and those of earlier tokens) itself, so a route's sorted position
-# = base[e] + #earlier routes to e (stable (expert, route) order, no cross-CTA sync); CTA 0 writes meta (= moe_route's
-# fields); each CTA normalizes its token's row ONCE (moe_gathern's numerics) and writes it to each of its routes' slots.
-# ids / X are PDL-producer data: __ldcg only (NOTES s14: .nc loads get hoisted above griddepcontrol.wait).
 _a = "int64_t moe_gathern_launch(torch::Tensor x, torch::Tensor gain, torch::Tensor meta, torch::Tensor sroutes,"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, r"""template <bool F32>
@@ -16405,9 +15663,6 @@ int64_t moe_routegathern_launch(torch::Tensor ids, int64_t count, torch::Tensor 
 }
 """ + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_routegathern_launch(torch::Tensor, int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double);"
-# s39 ROUTE_PDL: moe_route as a PDL secondary of the routing (which triggers at its start): its launch and smem setup
-# overlap the routing. It waits before reading ids, read with __ldcg (an __ldg/.nc load gets hoisted above the wait,
-# NOTES s14). Without the PDL attribute (moe_src's own paths) the wait is a no-op.
 _a = """  if (tid < 32) { cnt[tid] = 0; fill[tid] = 0; }
   __syncthreads();
   for (int i = tid; i < nroutes; i += blockDim.x) {
@@ -16428,13 +15683,11 @@ _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, """int64_t moe_route_pdl_launch(torch:
 }
 """ + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_route_pdl_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor);"
-
-
-def _moe__lib():  # = moe_src's _lib() + moe_set_upf
+def _moe__lib():
     global _moe__LIB
     if _moe__LIB is None:
         from torch.utils.cpp_extension import load_inline
-        src = _moe_CUDA_SRC.replace("#define TK2F_DIAG 0", "#define TK2F_DIAG 1") if _moe_TK2F_DIAG else _moe_CUDA_SRC  # s81
+        src = _moe_CUDA_SRC.replace("#define TK2F_DIAG 0", "#define TK2F_DIAG 1") if _moe_TK2F_DIAG else _moe_CUDA_SRC
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
         _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=src,
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
@@ -16445,8 +15698,6 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
                                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                                 extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
-
-
 _N2U_SRC = r'''namespace n2u {
 // SLOT (s14, moe_tk2f PF & 4): y32 row = route slot s, pre-scaled by gs2 * 256 (no inv / gs loads); the routing (ids, tw:
 // pr1's, complete before tk2f passed its own griddepcontrol.wait) is read before griddepcontrol.wait, so only the y32
@@ -16901,35 +16152,17 @@ void nu8_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw, torch::T
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 '''
-
-# ---- cuBLASLt with explicit algo configs (lt_src.cu = r-proj dev/lt.cu @f7b1c8b) at T >= 16 ----
-# (layer, tokens): cfg (algo, tile, stages, split k, reduction, swizzle, custom option, cluster), proj's prepare-time
-# picks on the judge's H200 (r-proj profiles/submission.22109e72563f4cc3.log), us vs F.linear: pooler m16 22.0/24.3,
-# m32 22.2/24.6, m128 26.0/29.7, m256 28.2/34.4; qkv m128 18.9/20.0, m256 21.0/22.9. Not pooler m256: beside the
-# router (side stream) in the layer it is 60.7 vs F.linear 49.2 us (H100, verify 32 sliding).
-# Judge check f8e06892 (pooler m16/m32 too): d16 +0.7%, d32 -2.6% vs v15 (noise ~2%): m16/m32 not used.
 LT_CFG = {("pooler", 128): (66, 143, 35, 1, 0, 0, 0, 2),
           ("qkv_gate", 128): (66, 92, 35, 1, 0, 0, 0, 5), ("qkv_gate", 256): (66, 124, 35, 1, 0, 0, 0, 2),
-          # s23: proj's H200 tuner winners (r-proj judge logs, median of 30: us F.linear -> lt, standalone incl. launch):
-          # qkv m16 17.48 -> 16.83, m32 17.82 -> 17.25, o m16 10.04 -> 9.77, m32 10.30 -> 9.98, m128 10.94 -> 10.73,
-          # m256 12.80 -> 12.54, unpooler m128 23.21 -> 22.96. Used only where TUNE picks them (LT_DEFAULT_OFF).
           ("qkv_gate", 16): (66, 394, 35, 3, 2, 0, 5, 4), ("qkv_gate", 32): (66, 16, 35, 3, 2, 0, 7, 4),
           ("o", 16): (66, 394, 35, 1, 0, 0, 7, 4), ("o", 32): (66, 16, 35, 1, 0, 0, 5, 4),
           ("o", 128): (66, 17, 35, 1, 0, 0, 4, 2), ("o", 256): (66, 20, 35, 1, 0, 0, 5, 2),
           ("unpool", 128): (66, 18, 35, 1, 0, 0, 6, 5),
-          # pooler/unpool at T=16/32 instead of g19 (proj diag19, H200 after a 3 us PDL predecessor: pooler m32 lt 20.3 vs
-          # g19 21.6, unpool m32 19.3 vs 20.3; m16 g19 wins standalone)
           ("pooler", 16): (66, 312, 35, 1, 0, 0, 1, 4), ("pooler", 32): (66, 13, 35, 1, 0, 0, 1, 4),
           ("unpool", 16): (66, 394, 35, 1, 0, 0, 7, 4), ("unpool", 32): (66, 397, 35, 1, 0, 0, 5, 4),
-          # s24: proj s16 H200 tuner (Handoffs 10:10Z, standalone, tuner us lt vs F.linear): pooler m256 28.6-28.9 vs
-          # 32.9-36.0 (other algo than the s5 m256 pick that lost beside the router), unpooler m256 -0.2
           ("pooler", 256): (66, 18, 35, 1, 0, 0, 0, 2), ("unpool", 256): (66, 20, 35, 1, 0, 0, 6, 5)}
 LT_DEFAULT_OFF = {("qkv_gate", 16), ("qkv_gate", 32), ("o", 16), ("o", 32), ("o", 128), ("o", 256), ("unpool", 128),
                   ("pooler", 16), ("pooler", 32), ("unpool", 16), ("unpool", 32), ("pooler", 256), ("unpool", 256)}
-# s24: alternative cuBLASLt configs, TUNE option "ltalt:<key>" = 1-based index (implies lt): proj s16 H200 qkv m32
-# 17.2-17.3 vs F.linear 17.7-18.1 tuner us.
-# proj s68 (Handoffs; H200 full algo-66 screen, check f45aa794, standalone graph, cold L2): pooler m128
-# (66,124,..,0,4) 24.06 vs LT_CFG 26.75 / (66,15,..,2,5) 25.22 us; in-layer the router runs beside it: tuner decides.
 LT_ALT = {("qkv_gate", 32): [(66, 27, 35, 3, 2, 0, 2, 4)],
           ("pooler", 128): [(66, 124, 35, 1, 0, 0, 0, 4), (66, 15, 35, 1, 0, 0, 2, 5)]}
 _LT_SRC = r'''// cuBLASLt BF16 GEMM with an explicit algo config: out[m,n] = x[m,k] @ W[n,k]^T, FP32 compute and accumulation.
@@ -17003,8 +16236,6 @@ int64_t lt_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tens
 }
 '''
 _LT = {}
-
-
 def _lt_build():
     if not LT_CFG or _LT_SRC is None:
         return
@@ -17016,11 +16247,9 @@ def _lt_build():
                 cpp_sources="int64_t lt_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::vector<int64_t>);",
                 cuda_sources=_LT_SRC, functions=["lt_gemm"], extra_ldflags=["-lcublasLt"], extra_cuda_cflags=["-O3"],
                 verbose=False)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print("layer cuBLASLt build failed, F.linear instead:", e)
             _LT["lib"] = None
-
-
 def _lt_prepare(state):
     """Build the cuBLASLt wrapper; keep the configs that launch on this GPU and match F.linear."""
     state["lt_ok"] = {}
@@ -17057,13 +16286,7 @@ def _lt_prepare(state):
                 state["lt_alt_ok"][(key, m, i)] = cfg
             else:
                 print("layer cuBLASLt alt config dropped:", key, m, cfg, st)
-
-
-# s20: proj's gemv22 (g22_src.cu = r-proj dev/gemv22.cu @a17318c): m = 128/256 swap-AB wgmma GEMM over the 12-bit
-# weights, tile-major stream-K, escapes packed per stage; FP32 out (zero kernel + red.add; consumers round to BF16).
-# (key, T) -> (m, ap, ns, E). H100 standalone (cold L2): qkv m128 21.9 vs cuBLAS 21.1, pooler 30.9/27.5, unpool
-# 28.8/27.3, o 14.9/10.2; m256 all +10 us (compute-bound there: not built). Used only where TUNE picks it (H200).
-G22_CFG = {}  # s22: off (proj H200 check fb2fe4ee: g22 loses every m128/m256 shape); was {("qkv_gate", 128): (128, 4, 3, 32), ("pooler", 128): ..., ("unpool", 128): ...}
+G22_CFG = {}
 _G22_SRC = r'''// gemv22: GEMM for m = 128 / 256 tokens (the layer's T=128/256: verify 16 / 32) over lossless 12-bit BF16 weights
 // (gemv19's packed atoms, 4-bit exponent codes + per-row escape headers), FP32 output [m, n].
 // Swap-AB wgmma: W rows = the wgmma M (64 per warpgroup, A decoded into registers), tokens = N (128 or 256, B = x by a
@@ -17417,8 +16640,6 @@ void g22_gemm(torch::Tensor wp, double scale, torch::Tensor x, torch::Tensor out
 }
 '''
 _G22 = {}
-
-
 def _pack22(c, ap, E):
     """proj's _pack22: tile-major gemv22 stages + E escapes per stage (int32 row | k << 8, true / scale bits); None
     if a stage has more than E escapes."""
@@ -17441,8 +16662,6 @@ def _pack22(c, ap, E):
         EV[u, rank, 0] = ((rows % 128) | ((col % kc) << 8)).int()
         EV[u, rank, 1] = hy.view(torch.int32)
     return torch.cat([P, EV.view(torch.uint8).view(ks * ntr, -1)], 1).contiguous()
-
-
 def _g22_build():
     if not G22_CFG or _G22_SRC is None:
         return
@@ -17455,11 +16674,9 @@ def _g22_build():
                 name="layer_g22_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g22_gemm(torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
                 cuda_sources=src, functions=["g22_gemm"], extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             print("layer gemv22 build failed:", e)
             _G22["lib"] = None
-
-
 def _g22_prepare(state):
     """gemv22 packs per (key, T), each checked once against F.linear (dropped -> the default path)."""
     state["g22"] = {}
@@ -17490,7 +16707,7 @@ def _g22_prepare(state):
             torch.cuda.synchronize()
             ref = F.linear(x, w[key]).float()
             ok = ((out.bfloat16().float() - ref).norm() / ref.norm()).item() < 1e-2
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer gemv22 failed:", key, m, ex)
             ok = False
         if ok:
@@ -17498,14 +16715,12 @@ def _g22_prepare(state):
         else:
             print("layer gemv22 config dropped:", key, m, c)
     del comp
-
-
 def _pack19(c, kc, ap, tm=0, dec3=True):
     """proj's pack19 (r-proj dev/g19_lib.py): _compress output -> stage-major uint8 [stages, 8 * ap * 768]."""
     code, sm, hdr, scale = c
     n, k = code.shape
-    perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()  # noqa: E731
-    if dec3:  # s43: proj s35 DEC3 layout (g19); gemv22 keeps the old one
+    perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()
+    if dec3:
         S, N = _dec3(perm(sm).reshape(k // kc, n // 16, kc // 32, 32, 2, 8), perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8))
         S, N = S.reshape(k // kc, n // 16, kc // 32, 32, 16), N.contiguous()
     else:
@@ -17514,12 +16729,10 @@ def _pack19(c, kc, ap, tm=0, dec3=True):
         N = (perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8).long() << sh).sum(-1)
         N = torch.where(N >= 2 ** 31, N - 2 ** 32, N).int().contiguous()
     ks, ntr, spk = k // kc, n // 128, kc // 32 // ap
-    pm = (1, 0, 3, 2, 4) if tm else (0, 1, 3, 2, 4)  # tm: tile-major stages (tile, ks, st) for gemv22
+    pm = (1, 0, 3, 2, 4) if tm else (0, 1, 3, 2, 4)
     S = S.view(ks, ntr, 8, spk, ap * 512).permute(*pm).reshape(ks * ntr * spk, 8 * ap * 512)
     N = N.view(torch.uint8).view(ks, ntr, 8, spk, ap * 256).permute(*pm).reshape(ks * ntr * spk, 8 * ap * 256)
     return torch.cat([S, N], 1).contiguous()
-
-
 def _g19_prepare(state):
     """gemv19 packs per (key, T) (shared when kc/ap match) + one epoch counter per call site; each pick is checked
     once against F.linear (dropped -> cuBLAS)."""
@@ -17549,7 +16762,7 @@ def _g19_prepare(state):
             torch.cuda.synchronize()
             ref = F.linear(x, w[key]).float()
             ok = ((out.bfloat16().float() - ref).norm() / ref.norm()).item() < 1e-2
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer gemv19 failed:", key, m, ex)
             ok = False
         if ok:
@@ -17562,21 +16775,17 @@ def _g19_prepare(state):
     _pr32_prepare(state)
     _g30k_prepare(state, w, comp, g)
     del comp
-
-
 def _pack24(c, kc, ap):
     """gemv24 stages (pack19 with one 16-row group per stage): stage (ks, row group, st) = [ap atoms x 32 lanes x 16 B
     sign|mantissa][ap x 32 x 8 B codes], DEC3."""
     code, sm, hdr, scale = c
     n, k = code.shape
-    perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()  # noqa: E731
+    perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()
     S, N = _dec3(perm(sm).reshape(k // kc, n // 16, kc // 32, 32, 2, 8), perm(code).reshape(k // kc, n // 16, kc // 32, 32, 2, 8))
     U = (k // kc) * (n // 16) * (kc // 32 // ap)
     S = S.reshape(U, ap * 512)
     N = N.contiguous().view(torch.uint8).reshape(U, ap * 256)
     return torch.cat([S, N], 1).contiguous()
-
-
 def _g24_build():
     if not G24_CFG or _G24_SRC is None:
         return
@@ -17590,11 +16799,9 @@ def _g24_build():
                             "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
                 cuda_sources=_G24_SRC.replace("G24_CONFIGS", " ".join("G24_CASE(%d,%d,%d,%d,%d,%d,%d)" % c for c in sorted(set(G24_CFG.values()) | set(G24_SKCFG.values()) | set(G24_SK2CFG.values())))),
                 functions=["g24_gemm"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer gemv24 build failed:", ex)
             _G24["lib"] = None
-
-
 def _g24_prepare(state, w, comp, g):
     state["g24"] = {}
     state["g24sk"] = {}
@@ -17624,7 +16831,7 @@ def _g24_prepare(state, w, comp, g):
             torch.cuda.synchronize()
             ref = F.linear(x, w[key]).float()
             ok = ((out.bfloat16().float() - ref).norm() / ref.norm()).item() < 1e-2
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer gemv24 failed:", key, m, ex)
             ok = False
         if ok:
@@ -17636,8 +16843,6 @@ def _g24_prepare(state, w, comp, g):
         else:
             print("layer gemv24 config dropped:", key, m, c)
     _g27_prepare(state, w, comp, g, packs)
-
-
 def _g30_build():
     if not G30_KEYS or _G30_SRC is None:
         return
@@ -17650,11 +16855,9 @@ def _g30_build():
                 cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
                 cuda_sources=_G30_SRC, functions=["g30_gemm"],
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"], extra_ldflags=["-lcuda"])
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer g30 build failed:", ex)
             _G30["lib"] = None
-
-
 def _g30n_build(c):
     """c = (MTOK, S, NW, NS) -> the g30 lib built with those defines (None on failure)."""
     if c not in _G30N:
@@ -17667,12 +16870,10 @@ def _g30n_build(c):
                 cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
                 cuda_sources=_G30_SRC, functions=["g30_gemm"],
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer g30n build failed:", c, ex)
             _G30N[c] = None
     return _G30N[c]
-
-
 def _g30k_build(c):
     """c = (MTOK, NW, NS) -> the g30k (stream-K, FP32 slab out) lib (None on failure)."""
     if c not in _G30K:
@@ -17686,37 +16887,28 @@ def _g30k_build(c):
                             "torch::Tensor, torch::Tensor, int64_t);",
                 cuda_sources=_G30_SRC, functions=["g30k_gemm"],
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer g30k build failed:", c, ex)
             _G30K[c] = None
     return _G30K[c]
-
-
 def _g30k_builds():
     if _G30_SRC is None:
         return []
     return [(lambda c=c: _g30k_build(c)) for c in sorted({(m, v[1], v[2]) for (k, m), v in G30K_CFG.items()})]
-
-
 def _g30n_builds():
     if _G30_SRC is None:
         return []
     return [(lambda c=c: _g30n_build(c)) for c in sorted({(m, *v) for (k, m), v in G30N_CFG.items()})]
-
-
 def _pack30(code, sm):
     """[N, K] codes / sign|mantissa bytes -> [N/64][K/64][6144 B] stages: DEC3 bytes [2][128 thr][16], words [128][4]
     (thread = (w, gq, q) of the wgmma A fragment; layer s99 dev/s99_g30.py pack30)."""
     n, k = code.shape
     G, KS = n // 64, k // 64
-    # row = 16 w + 8 rr + gq ; k = 16 j + 8 kh + 2 q + h ; element e = (kh, rr, h) ; thread = (w, gq, q)
-    perm = lambda t: t.view(G, 4, 2, 8, KS, 4, 2, 4, 2).permute(0, 4, 1, 3, 7, 5, 6, 2, 8).reshape(G, KS, 128, 4, 8)  # noqa: E731
+    perm = lambda t: t.view(G, 4, 2, 8, KS, 4, 2, 4, 2).permute(0, 4, 1, 3, 7, 5, 6, 2, 8).reshape(G, KS, 128, 4, 8)
     b3, v = _dec3(perm(sm), perm(code))
     Sb = b3.view(G, KS, 128, 2, 16).permute(0, 1, 3, 2, 4).reshape(G, KS, 4096)
     Nb = v.contiguous().view(torch.uint8).view(G, KS, 2048)
     return torch.cat([Sb, Nb], 2).contiguous()
-
-
 def _g30_prepare(state, w, comp, g):
     state["g30"] = {}
     if not G30_KEYS or _G30_SRC is None:
@@ -17734,7 +16926,7 @@ def _g30_prepare(state, w, comp, g):
         code, sm, hdr, scale = comp[key]
         v = hdr[:, :, 1]
         if not torch.equal(v.bfloat16().float(), v) or bool(((v != 0) & (v.abs() < 2.0 ** -126)).any()):
-            print("layer g30 dropped (escape value not exact in BF16):", key)  # g30 patches escapes as BF16 A halves
+            print("layer g30 dropped (escape value not exact in BF16):", key)
             continue
         e = (_pack30(code, sm), hdr.contiguous(), scale)
         x = torch.randn((G30_TOKENS, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
@@ -17744,15 +16936,13 @@ def _g30_prepare(state, w, comp, g):
             torch.cuda.synchronize()
             ref = F.linear(x, w[key]).float()
             ok = ((out.float() - ref).norm() / ref.norm()).item() < 1e-2
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer g30 failed:", key, ex)
             ok = False
         if ok:
             state["g30"][key] = e
         else:
             print("layer g30 dropped:", key)
-
-
 def _g30n_prepare(state, w, comp, g):
     state["g30n"] = {}
     packs = dict(state.get("g30", {}))
@@ -17763,7 +16953,7 @@ def _g30n_prepare(state, w, comp, g):
         if key not in packs:
             if key not in comp:
                 comp[key] = _compress(w[key])
-            if comp[key] is None or w[key].shape[0] % 64 or w[key].shape[1] % 128 or w[key].shape[1] // 64 < 4 * S:  # n5s3: uneven S split ok (i0/i1)
+            if comp[key] is None or w[key].shape[0] % 64 or w[key].shape[1] % 128 or w[key].shape[1] // 64 < 4 * S:
                 continue
             code, sm, hdr, scale = comp[key]
             v = hdr[:, :, 1]
@@ -17779,21 +16969,18 @@ def _g30n_prepare(state, w, comp, g):
             torch.cuda.synchronize()
             ref = F.linear(x, w[key]).float()
             ok = ((out.float() - ref).norm() / ref.norm()).item() < 1e-2
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer g30n failed:", key, m, ex)
             ok = False
         if ok:
             state["g30n"][(key, m)] = (lib, e, w[key].shape[0])
         else:
             print("layer g30n dropped:", key, m)
-
-
 def _g30k_slabs(n, k, G):
     """(slabs the kernel may address, slabs any tile uses) for an [n, k] weight on G CTAs (g30k's split)."""
     kp = k // 128
     p = n // 64 * kp
-
-    def cta(u):  # = sk_cta in g30_src.cu
+    def cta(u):
         c = u * G // p
         while (c + 1) * p // G <= u:
             c += 1
@@ -17802,8 +16989,6 @@ def _g30k_slabs(n, k, G):
         return c
     used = max(cta(t * kp + kp - 1) - cta(t * kp) + 1 for t in range(n // 64))
     return kp // (p // G) + 2, used
-
-
 def _g30k_prepare(state, w, comp, g):
     state["g30k"] = {}
     packs = dict(state.get("g30", {}))
@@ -17837,15 +17022,13 @@ def _g30k_prepare(state, w, comp, g):
                 ref = F.linear(x, w[key]).float()
                 out = buf[:ns].sum(0)
                 ok = ((out - ref).norm() / ref.norm()).item() < 1e-2 and not bool(buf[ns:].any())
-            except Exception as ex:  # noqa: BLE001
+            except Exception as ex:
                 print("layer g30k failed:", key, m, G, ex)
                 ok = False
             if ok:
                 state["g30k"].setdefault((key, m), {})[G] = (lib, e, buf, ns, G)
             else:
                 print("layer g30k dropped:", key, m, G)
-
-
 def _g27_build():
     if not G27_CFG or _G27_SRC is None:
         return
@@ -17858,11 +17041,9 @@ def _g27_build():
                 cpp_sources="void g27_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, torch::Tensor);",
                 cuda_sources=_G27_SRC.replace("G27_CONFIGS", " ".join("G27_CASE(%d,%d,%d,%d,%d,%s)" % (c[:5] + ("true" if c[5] else "false",)) for c in sorted(set(G27_CFG.values())))),
                 functions=["g27_gemm"], extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"])
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer gemv27 build failed:", ex)
             _G27["lib"] = None
-
-
 def _g27_prepare(state, w, comp, g, packs):
     state["g27"] = {}
     if not G27_CFG or _G27_SRC is None:
@@ -17893,25 +17074,16 @@ def _g27_prepare(state, w, comp, g, packs):
             torch.cuda.synchronize()
             ref = F.linear(x, w[key]).float()
             ok = ((out.float() - ref).norm() / ref.norm()).item() < 1e-2
-        except Exception as ex:  # noqa: BLE001
+        except Exception as ex:
             print("layer gemv27 failed:", key, m, ex)
             ok = False
         if ok:
             state["g27"][(key, m)] = e
         else:
             print("layer gemv27 config dropped:", key, m, c)
-
-
-# (s18/s19) Choices where the H100 and the judge's H200 may disagree, tuned in prepare(): the whole layer is timed
-# (CUDA graph replays, cold L2, interleaved, median) on synthetic decode/verify inputs (shapes only, random data) with
-# each candidate option set; the fastest set per (T, sliding) is kept in state["tune"][(T, sliding)] (full layers at
-# ctx 80000 like the scored ones). Options (defaults = no entry):
-# g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
-# kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); rg (bool) RG (s52); tk2h (int) moe n6 tk2h GS16+PF4 at T=16/32, 2-group weight W + 1 (s58); nu8d (bool) NU8_D (s59); pr1bnd (bool) PR1_BND at T=1 (s74); bspl1 / bspl2 (int) BND_SPLIT of the first / second boundary (s74); bal (bool) moe n8 BAL tk2f (s61); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
-# s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
 TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}, {"pr1_rb": 32}, {"g13alt:qkv_gate": 1},
             {"g10alt:o": 1}, {"pr1_pf": 2}, {"pr1_pf": 2, "pr1_rb": 32}, {"tk2fx": False},
-            {"rf_trig": False}, {"g13o": False}, {"g13o": False, "pr1_rb": 20}, {"g13o": False, "kv_pf": False}),  # s77: base {g13o, pr1_rb 32}  # s74: pr1bnd / bspl1 / bspl2 options removed (H200 check 4bf626fa: pr1bnd +0.6..1.4 us, bspl noise)
+            {"rf_trig": False}, {"g13o": False}, {"g13o": False, "pr1_rb": 20}, {"g13o": False, "kv_pf": False}),
         16: ({}, {"g30k:pooler": 104}, {"g24z": False}, {"g24x": False}, {"g19:qkv_gate": False}, {"g19:o": True}, {"g19:o": False}, {"g19:qkv_gate": False, "lt:qkv_gate": True}, {"lt:o": True},
              {"g19:qkv_gate": False, "lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"tk2fj": False}, {"qf32": False}, {"g19trig": False},
@@ -17919,9 +17091,9 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24:pooler": False, "g24:unpool": False, "g24:o": False, "g24:qkv_gate": False}, {"g24:pooler": False, "g24:unpool": False},
              {"g24:o": False}, {"g24:qkv_gate": False},
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
-             {"g27:o": False},  # s84: attention plan (full layers only)
+             {"g27:o": False},
              {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"pr32": True},
-             {"g30n:o": True}, {"g30n:o": False}, {"g30n:o": False, "g27:o": False},  # n5s4 g30n o (base at 16 full); n5s3: moe pr32; night5 s1: g30n at T=16 (H100 tie: H200 decides); n5s3: qkv S3 built again (uneven K split)
+             {"g30n:o": True}, {"g30n:o": False}, {"g30n:o": False, "g27:o": False},
              ),
         32: ({}, {"g30n:o": False}, {"g30n:o": False, "lt:o": True}, {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"pr32": True}, {"pr32": True, "g30n:unpool": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"g30k:pooler": 104}, {"g30k:pooler": 120}, {"g30k:pooler": 104, "g30n:unpool": True}, {"g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
@@ -17934,19 +17106,18 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g27:o": True}, {"tk2h": 4, "g24:qkv_gate": True}, {"tk2h": 4, "lt:o": True, "g24:qkv_gate": True},
              {"g24sk2:pooler": True}, {"g24sk2:unpool": True}, {"g24sk2:pooler": True, "g24sk2:unpool": True},
              {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "g24:qkv_gate": True},
-             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}, {"tk2h": 0, "g24:qkv_gate": False},),  # s84: aplan  # s76: old base  # proj s69: g24sk2 = SK (4,3,12)  # s73: g24p options removed (H200 check c755dcc3: +0.6..2 us)
+             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}, {"tk2h": 0, "g24:qkv_gate": False},),
         8: ({}, {"g14alt:qkv_gate": 0}, {"g14alt:qkv_gate": 1}, {"g14alt:qkv_gate": 2}, {"g14alt:qkv_gate": 3},
             {"nu8": False}, {"nu8d": False}, {"nu8d": False, "nu8x": False}, {"nu8": False, "g14alt:qkv_gate": 0}, {"tk2fx": False},
             {"tk2fx": False, "g14alt:qkv_gate": 1}, {"g19:qkv_gate": True},
             {"cslpw": True},
             {"cslpw": True, "g14alt:qkv_gate": 3}, {"cslpw": True, "g14alt:qkv_gate": 2},
             {"cslpw": True, "pr8_npf": 206}, {"cslpw": True, "pr8_npf": 220}, {"cslpw": True, "pr8_npf": 112},
-            {"g30n:o": True}),  # n5s5: g30n MTOK 8 o: H100 ab_flag v1 sl -0.3..-0.8, full +1.0..1.6 us (pr8 is the long pole): H200 decides  # s91: pr8 bulk PF depth on the H200 (H100 can't judge it)  # s87: all {pr1: False} options removed (never picked on 22 H200 logs, +1.7..5.8 us; latent nu8d race path, lead 11:50Z)  # s77: sliding base g14alt 3
+            {"g30n:o": True}),
         128: ({}, {"g30:unpool": False}, {"g30:unpool": False, "twf_split": 66, "lt:o": True, "lt:unpool": True}, {"g30:o": True}, {"g30:o": True, "twf_split": 66}, {"lt:pooler": False}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:unpool": True}, {"lt:o": True, "lt:unpool": True},
               {"twm_order": 76}, {"bkt": False}, {"gnorm": False}, {"twf_split": 66}, {"twf_split": 1022}, {"o_pf": 0}, {"fr": False},
               {"twf_split": 66, "lt:o": True, "lt:unpool": True}, {"gnorm": False, "lt:unpool": True},
-              {"ltalt:pooler": 1}, {"ltalt:pooler": 2}, {"ltalt:pooler": 1, "twf_split": 66, "lt:o": True, "lt:unpool": True},),  # s84: aplan  # s77: fr in the base (tuner 10/10 both types)  # s76: every twq option removed at T=128 (moe 07:25Z: twq ~+5 us vs twm in-layer on 16 judge runs; HOTQ check baae0e41 sl +3..9)
-              # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
+              {"ltalt:pooler": 1}, {"ltalt:pooler": 2}, {"ltalt:pooler": 1, "twf_split": 66, "lt:o": True, "lt:unpool": True},),
         256: ({}, {"nvscl": False, "sl": True}, {"lt:qkv_gate": False}, {"lt:o": True}, {"lt:pooler": True}, {"lt:unpool": True},
               {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76}, {"twm_order": 76, "lt:unpool": True},
               {"twm_order": 4}, {"twm_tail": 32}, {"twq": 4}, {"twq": 12}, {"twm_hot": 1}, {"twm_hot": 1, "twm_order": 76},
@@ -17956,10 +17127,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
               {"fr": False, "twm_order": 76}, {"fr": False, "twm_order": 76, "lt:unpool": True}, {"hot": 0}, {"hot": 24}, {"hot": 40},
               {"rg": True}, {"rg": True, "twf_split": 1022}, {"rg": True, "twf_split": 66},
               {"rg": True, "twf_split": 66, "lt:o": True}, {"rg": True, "twf_split": 66, "lt:unpool": True},
-              {"rg": True, "twf_split": 1022, "lt:pooler": True, "lt:unpool": True, "lt:o": True},)}  # s84: aplan  # s77 stacks
-# s35: per-(T, sliding) defaults under the tuner (the tune pick overrides them; {} = these): the picks both logged H200
-# tuners of 909010f (0f065691, 703d3a7e) agreed on, so a noisy judge tuner can't fall back to the slower setting.
-# T=8 full {nu8, g14alt 1}: -2.0/-2.1 us both; T=8 sliding nu8 -1.7 / g14alt 1 -1.3; T=16 sliding g19:o -0.4/-0.7.
+              {"rg": True, "twf_split": 1022, "lt:pooler": True, "lt:unpool": True, "lt:o": True},)}
 _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
 TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True, "pr1_rb": 32},
              (8, True): {"nu8": True, "g14alt:qkv_gate": 3}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1},
@@ -17967,74 +17135,39 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
              (128, True): {"fr": True, "g30:unpool": True}, (128, False): {"fr": True, "g30:unpool": True},
              (16, False): {**_G24_ALL, "g30n:o": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True},
              (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True},
-             (256, True): {"hot": 32}, (256, False): {"hot": 32}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
-# n5s4: g30n o (T=32 sl+full, T=16 full; 12-bit o, W ring filled under PDL before the attention ends): H100 ab_flag TUNE {}, 4 rounds
-# x seeds 99/7 (3 runs): d32 sl -1.6/-1.5, -1.9/-1.8, full -2.2/-1.8; d16 full -2.4/-2.4, d16 sl +0.8/+0.7 (vs g27: option only).
-# Escape options {g30n:o: False} (+ lt:o) in TUNE[16]/TUNE[32]: g30n is checked before g27/g24/lt for o, so lt:o/g27:o options need it off.
-# s76: T=32 {tk2h 4, g24:qkv_gate} (proj s66 combo) in the base: both H200 tuners of checks baae0e41 / 1b9a63fb picked it (+-lt:o):
-# sl -1.4 / -4.5, full -3.8 / -5.3 us vs the old base. Options that set tk2h / g24:qkv_gate override it.
-# proj s54: T=32 pooler+unpool on stream-K g24 (g24sk): H100 ab_flag 5 rounds x 2 seeds d32 sl -1.3/-1.9, full -1.5/-1.1 us;
-# g24sk at T=16 +0.4..0.9 and qkv at T=32 +1..1.5 on the H100 (W-bound): TUNE candidates only.
-# H100 ab_flag 4 rounds x 3 seeds, TUNE {}: d16 sl/full -2.9/-3.0 us, d32 sl/full -1.5/-1.8 (o on g24 at T=32 sl +2.3; qkv tie/-1)
-# s69: T=32 tk2h 4 (W3, now on SQ stages) stays a tuner option: as TUNE_BASE (check 71f451bb) the H200 tuner measured
-# {tk2h 0} sl 169.4 vs 172.4, full 348.2 vs 348.3 us in the layer (moe-only said -1.7); {tk2h 3} +8..10.
-# tk2h dropped from TUNE[16] (moe n13 H200: every tk2h loses +3..5 us at T=16).
-# s61: T=16 sliding moe n8 BAL (H100 real routings 4 seeds -2.6 us mean); s44: moe s29 moe_hot G32 at T=256 (H100 v32 sl -8 us)
-# s62: tokens where decode sliding csl is a PDL secondary of the qkv GEMM (TUNE option cslpw). H100 ab_flag 5-6 rounds x
-# 3 seeds: d16 sliding -0.7..-1.0 us (csl CTAs still wait for g19's SMs: launch + prologue overlap only); d1 +1.3..1.7 (off);
-# T=8 (vtk after g14, TUNE[8] option): v1 sliding -0.3..+0.0 (6 rounds x 3 seeds).
-# SAFETY (s63 audit, NOTES s63): the pre-wait loads read only inputs (page_table, seq_lens, cache_loc, k/v scales, K/V cache
-# rows at positions < seq_lens) and the config-derived cos/sin table; the only cache writer is csl/vtk itself (the new
-# rows, at positions >= seq_lens, taken from smem). This holds ONLY while the qkv GEMM is the graph's first kernel: never
-# put a kernel that writes the K/V cache (or triggers early after writing an input) before it. tools/pw_race.py: 0 diffs.
+             (256, True): {"hot": 32}, (256, False): {"hot": 32}}
 CSL_PW_TOKENS = (16,)
-CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem carveout so 1 csl CTA/SM fits beside it from
-# the start (H100: csl starts at 2.8 us, but its gathers slow g19 17.3 -> 20.6 us: d16 sl +0.3..0.6 net; xb 1 qkv: same)
-if _moe_TK2F_DIAG:  # s81: DIAG check copies only: the tk2f probes (+ the defaults) at T = 1/16/32, no other tuning
+CSL_PW_CARVE = False
+if _moe_TK2F_DIAG:
     _TK2X = [{"tk2x": k, "diag": True} for k in (6, 1, 2, 3, 4, 5)]
     TUNE = {1: ({}, *_TK2X), 16: ({}, *[dict(o, bal=False) for o in _TK2X]), 32: ({}, {"tk2h": 0, "diag": True}, *[dict(o, tk2h=0) for o in _TK2X[1:]])}
-ATT_DIAG_BUILD = False  # s84: DIAG check copies only (sed to True): full-attention probes (attn_src ATT_DIAG) + defaults
-if ATT_DIAG_BUILD:  # gd: 11 = gathers only (no math after tile 0), 12 = all-L2; gw: 1 = no V widen, 2 = all-L2, 3 = no consumer math, 4 = 1+2
+ATT_DIAG_BUILD = False
+if ATT_DIAG_BUILD:
     TUNE = {16: ({}, *[{"attx": k, "diag": True} for k in (11, 12)]), 32: ({}, *[{"attx": k, "diag": True} for k in (11, 12)]),
             128: ({}, *[{"attx": k, "diag": True} for k in (2, 3)]), 256: ({}, *[{"attx": k, "diag": True} for k in (1, 2, 3, 4)])}
 TUNE_REPS = 40
-TUNE_SKEW = True  # s25: skewed synthetic routing (_synth_stream)
-TUNE_MARGIN = 0.001  # a non-default pick must beat the defaults by this fraction in a fresh 2-way interleaved run
-TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}  # T -> (batch, q_len)
-
-
-_SLIDING = [True]  # the current kernel_fn call's layer type (set at its start; read by _opt at trace time)
-
-
+TUNE_SKEW = True
+TUNE_MARGIN = 0.001
+TUNE_SHAPE = {1: (1, 1), 8: (1, 8), 16: (16, 1), 32: (32, 1), 128: (16, 8), 256: (32, 8)}
+_SLIDING = [True]
 def _opt(state, tokens, name, default):
     key = (tokens, _SLIDING[0])
     t = state.get("tune", {}).get(key, {})
     return t[name] if name in t else TUNE_BASE.get(key, {}).get(name, default)
-
-
-# s25: skewed synthetic routing for the tuner (expert kernels' timing depends on the per-expert load, e.g. moe_twm's
-# item order). Local expert j (0..19) is one of a token's 8 experts with probability SYNTH_P[j] (the scored loads'
-# measured mean shares: T=128/256 top local expert ~37% of tokens, ~1.3 local routes per token); the rest of the 8 are
-# off-GPU experts. The stream is the sum of the 8 picked experts' unit router rows plus a little noise, so the router
-# picks them. Built from the weights only (prepare-time); the outputs are discarded.
 SYNTH_P = (.37, .29, .16, .11, .08, .065, .05, .047, .035, .027, .02, .016, .012, .012, .01, .008, .008, .004, .004, .004)
-
-
 def _synth_stream(router, tokens, g):
     dev = router.device
     p = torch.zeros(N_EXPERTS, device=dev)
     p[:len(SYNTH_P)] = torch.tensor(SYNTH_P, device=dev)
-    pick = torch.rand((tokens, N_EXPERTS), generator=g, device=dev) < p  # local picks
+    pick = torch.rand((tokens, N_EXPERTS), generator=g, device=dev) < p
     pick &= (torch.cumsum(pick.int(), 1) <= TOP_K)
-    off = torch.rand((tokens, N_EXPERTS - LOCAL_EXPERTS), generator=g, device=dev).argsort(1)  # off-GPU fill, random order
+    off = torch.rand((tokens, N_EXPERTS - LOCAL_EXPERTS), generator=g, device=dev).argsort(1)
     need = TOP_K - pick.sum(1, keepdim=True)
     fill = torch.zeros_like(pick)
     fill[:, LOCAL_EXPERTS:] = off < need
     u = router / router.norm(dim=1, keepdim=True)
     st = (pick | fill).float() @ u * (HIDDEN / TOP_K) ** 0.5
     return st + 0.3 * torch.randn((tokens, HIDDEN), generator=g, device=dev)
-
-
 def _synth_input(batch, dev, ctx=3000, q_len=1, sliding=True, router=None):
     """A decode step / verify block (page 1) of random data with the scored inputs' shapes and dtypes."""
     g = torch.Generator(device=dev).manual_seed(1234)
@@ -18058,8 +17191,6 @@ def _synth_input(batch, dev, ctx=3000, q_len=1, sliding=True, router=None):
                        "rope_theta": 500000.0 if sliding else 0.0,
                        "qk_scale_factor": 5.4730064863875, "sm_scale": 0.125, "kv_scale": 1.0,
                        "n_experts": N_EXPERTS, "top_k": TOP_K, "local_experts": LOCAL_EXPERTS}}
-
-
 def _tune(state):
     state["tune"] = {}
     if not TUNE:
@@ -18072,13 +17203,13 @@ def _tune(state):
             data = _synth_input(TUNE_SHAPE[tokens][0], dev, 3000 if sliding else 80000, TUNE_SHAPE[tokens][1], sliding,
                                 state["router"] if TUNE_SKEW else None)
             graphs, ok = [], []
-            cands = [o for o in cands if not (sliding and o.get("full") or not sliding and o.get("sl"))]  # s84/s85: full-/sliding-only options
+            cands = [o for o in cands if not (sliding and o.get("full") or not sliding and o.get("sl"))]
             for opts in cands:
                 state["tune"][key] = opts
-                fn = lambda: kernel_fn(data, state)  # noqa: E731
+                fn = lambda: kernel_fn(data, state)
                 try:
                     fn()
-                except Exception as ex:  # noqa: BLE001  (host-side checks only: a CUDA fault would raise below)
+                except Exception as ex:
                     print(f"layer tune {key} {opts} skipped ({type(ex).__name__}: {ex})", flush=True)
                     continue
                 torch.cuda.synchronize()
@@ -18107,9 +17238,9 @@ def _tune(state):
                     if r >= 3:
                         ts[i].append(a.elapsed_time(b))
             med = [sorted(v)[len(v) // 2] for v in ts]
-            best = min((i for i in idx if not cands[i].get("diag")), key=lambda i: med[i])  # s81: DIAG probes never picked
+            best = min((i for i in idx if not cands[i].get("diag")), key=lambda i: med[i])
             conf = ""
-            if best != 0 and cands[0] == {}:  # s24: confirm against the defaults (winner's curse of a min over many noisy medians)
+            if best != 0 and cands[0] == {}:
                 c2 = [[], []]
                 for r in range(TUNE_REPS):
                     for j, i in enumerate((0, best) if r % 2 == 0 else (best, 0)):
@@ -18129,20 +17260,16 @@ def _tune(state):
                   + f"{conf} -> {cands[best] or 'default'}", flush=True)
             del graphs, data
         del flush
-    except Exception as ex:  # keep the defaults
+    except Exception as ex:
         print(f"layer tune failed ({type(ex).__name__}: {ex}); using defaults", flush=True)
         state["tune"] = {}
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
-
-
 def _g27_sel(state, key, m):
     """The gemv27 entry _g19 runs for (key, m), or None."""
     if key is None or not _opt(state, m, "g27:" + key, (key, m) in G27_ON):
         return None
     return state.get("g27", {}).get((key, m))
-
-
 def _g24_sel(state, key, m):
     """The gemv24 entry _g19 runs for (key, m), or None (g22 or g19/cuBLAS take it)."""
     if _g27_sel(state, key, m) is not None:
@@ -18155,31 +17282,25 @@ def _g24_sel(state, key, m):
     if e is None:
         e = state.get("g24", {}).get((key, m)) if _opt(state, m, "g24:" + key, False) else None
     return e
-
-
 def _NOZ(dev):
     z = _NOZ_T.get(dev)
     if z is None:
         z = _NOZ_T[dev] = torch.empty(0, dtype=torch.float32, device=dev)
     return z
-
-
 _NOZ_T = {}
-
-
-def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3 = also the full smem carveout
+def _g19(x, key, state, trig=False):
     """x @ W.T (key's weight) in FP32 by gemv19 (a PDL dependent of the previous kernel), or None."""
     m = x.shape[0]
     e = state.get("g22", {}).get((key, m)) if _opt(state, m, "g22:" + key, False) else None
-    if e is not None:  # s20: gemv22 (T=128), where TUNE picks it
+    if e is not None:
         c = e[3]
         out = torch.empty((m, e[2]), dtype=torch.float32, device=x.device)
         _G22["lib"].g22_gemm(e[0], e[1], x.contiguous(), out, c[1], c[2], c[3], _G19_SMS, 0, c[2])
         return out
     e = state.get("g30k", {}).get((key, m), {}).get(_opt(state, m, "g30k:" + key, G30K_DEFAULT.get((key, m), 0)))
-    if e is not None:  # proj s99: stream-K g30 on G CTAs, FP32 slabs [ns, T, n] summed by the rmsnorm
+    if e is not None:
         _G24_ZN.pop((key, m), None)
-        nk = G24_ZCHAIN.get(key)  # ZN like g24: g30k zeroes the next g24's FP32 out after its work (T=16: pooler -> unpool)
+        nk = G24_ZCHAIN.get(key)
         en = _g24_sel(state, nk, m) if nk is not None and _opt(state, m, "g24z", m in G24Z_TOKENS) else None
         zo = _NOZ(x.device)
         if en is not None:
@@ -18187,13 +17308,13 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
         e[0].g30k_gemm(x.contiguous(), e[1][0], e[1][1], e[2], e[1][2], G30_PDL, zo, _NOZ(x.device), e[4])
         return e[2][:e[3]]
     e = state.get("g30n", {}).get((key, m))
-    if e is not None and _opt(state, m, "g30n:" + key, (key, m) in G30N_DEFAULT_ON):  # proj s96: g30 at T=16/32 (BF16 out)
+    if e is not None and _opt(state, m, "g30n:" + key, (key, m) in G30N_DEFAULT_ON):
         _G24_ZN.pop((key, m), None)
         out = torch.empty((m, e[2]), dtype=torch.bfloat16, device=x.device)
         e[0].g30_gemm(x.contiguous(), e[1][0], e[1][1], out, e[1][2], G30_PDL)
         return out
     e = _g27_sel(state, key, m)
-    if e is not None:  # proj s57: gemv27 (no zeroed out needed; ZN for the next g24 like g24)
+    if e is not None:
         c = e[3]
         _G24_ZN.pop((key, m), None)
         out = torch.empty((m, e[1].shape[0]), dtype=torch.float32, device=x.device)
@@ -18205,20 +17326,20 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
         _G27["lib"].g27_gemm(e[0], e[1], e[2], x.contiguous(), out, c[1], c[2], c[3], c[4], 99 | ((int(trig) & 1) << 16), zo)
         return out
     e = _g24_sel(state, key, m)
-    if e is not None:  # proj s53: gemv24, where TUNE picks it
+    if e is not None:
         c = e[4]
-        out = _G24_ZN.pop((key, m), None)  # proj s56: zeroed by the previous g24 of this layer call (EZ)
+        out = _G24_ZN.pop((key, m), None)
         ez = out is not None and G24_EZUSE
         if out is None:
             out = torch.empty((m, e[1].shape[0]), dtype=torch.float32, device=x.device)
         nk = G24_ZCHAIN.get(key)
         en = _g24_sel(state, nk, m) if nk is not None and _opt(state, m, "g24z", m in G24Z_TOKENS) else None
         zo = _NOZ(x.device)
-        if en is not None:  # this g24 zeroes the next one's out after its own work (ZN)
+        if en is not None:
             zo = _G24_ZN[(nk, m)] = torch.empty((m, en[1].shape[0]), dtype=torch.float32, device=x.device)
-        elif key == "unpool" and _G24X and _G24X[0].shape[0] == m:  # s59 G24X: zero the next call's qkv out
+        elif key == "unpool" and _G24X and _G24X[0].shape[0] == m:
             zo = _G24X.pop()
-        elif key == "unpool" and _G24P and _G24P[0].shape[0] == m:  # s63 G24P: zero the next call's pooler out
+        elif key == "unpool" and _G24P and _G24P[0].shape[0] == m:
             zo = _G24P.pop()
         grid = G19_GRID.get((key, m), _G19_SMS)
         ctr = e[3].get(grid)
@@ -18234,13 +17355,11 @@ def _g19(x, key, state, trig=False):  # trig: 1 = trigger dependents at start, 3
     c = e[4]
     out = torch.empty((x.shape[0], e[1].shape[0]), dtype=torch.float32, device=x.device)
     grid = G19_GRID.get((key, m), _G19_SMS)
-    ctr = e[3].get(grid)  # the epoch barrier needs one counter per grid size
+    ctr = e[3].get(grid)
     if ctr is None:
         ctr = e[3][grid] = torch.zeros(2, dtype=torch.int32, device=x.device)
     _G10["lib"].g19_gemm(e[0], e[1], e[2], x.contiguous(), out, ctr, c[1], c[2], c[3], 1, grid, 0, 2, c[4] | (trig << 16), c[5])
     return out
-
-
 def _g12_prepare(state):
     """gemv12's packed weights, FP32 split-K workspace (overwritten each call) and per-rg counters (left zeroed).
     All gemv12 calls run on the main stream, one at a time, so they share the workspace and counters."""
@@ -18251,16 +17370,14 @@ def _g12_prepare(state):
     state["g12"] = {key: _pack12(w[key], 1024 * c[0]) for key, c in G12_CFG.items()}
     state["g12_ws"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=dev)
     state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
-    state["ob8_part"] = torch.empty(G12_CFG["o"][3] * 32, dtype=torch.float32, device=dev)  # s86 OB8 per-block partials
-    state["ob8_bar"] = torch.zeros(1, dtype=torch.int32, device=dev)  # s86 OB8 grid barrier (epoch counter)
-    state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)  # pr1's router ticket (self-resetting)
-    state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n2u's last-block counter (self-resetting)
+    state["ob8_part"] = torch.empty(G12_CFG["o"][3] * 32, dtype=torch.float32, device=dev)
+    state["ob8_bar"] = torch.zeros(1, dtype=torch.int32, device=dev)
+    state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)
+    state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)
     state["g13"] = {key: pk for key in list(G13_CFG) + (["o"] if G13_O else []) if (pk := _pack13(w[key])) is not None}
     state["g14"] = {key: pk for key, c in G14_CFG.items() if (pk := _pack14(w[key], 1024 * c[0])) is not None}
-    state["g14k"] = {(key, kc): pk for key, v in G14_ALT.items() if key in state["g14"]  # alt packs (other kcu)
+    state["g14k"] = {(key, kc): pk for key, v in G14_ALT.items() if key in state["g14"]
                      for kc in sorted({a[0] for a in v} - {G14_CFG[key][0]}) if (pk := _pack14(w[key], 1024 * kc)) is not None}
-
-
 def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
     """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), gemv12 at 8 (FP32 accumulate and
     split-K partials), else cuBLAS."""
@@ -18313,11 +17430,7 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
         _LT["lib"].lt_gemm(w, x.contiguous(), out, state["lt_ws"], list(cfg))
         return out
     return F.linear(x, w)
-
-
 TK2F_SQ_T1 = False
-
-
 def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     """T = 1: moe_tk2f (as moe_src's kernel_fn) -> n2u (moe_norm2 + unpool slice): the unpool slice output."""
     st = state["moe"]
@@ -18331,9 +17444,8 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     ids = local_ids.contiguous()
     slot = N2U_SLOT and _moe_TK2F == 204 and N2U_CFG[0] == 8
     c = (84204 if slot else _moe_TK2F) + (100000 if _moe_TK2SA and st["sa"] else 0)
-    # s68: moe n14 SQ off here (H100 ab_flag 4 rounds x 3 seeds d1 +0.4..0.9 us; H200 moe diag d1 0)
     c, w13_, w2_ = _moe__tk2f_w(c, st) if TK2F_SQ_T1 else (c, st["w13q"], st["w2q"])
-    if _opt(state, 1, "tk2x", 0):  # s81 DIAG probes (tuner timing only, never selected)
+    if _opt(state, 1, "tk2x", 0):
         c, w13_, w2_ = _moe__tk2x(_moe__tk2f_w(c, st)[0], st, _opt(state, 1, "tk2x", 0))
     lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"], c)
@@ -18341,63 +17453,37 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     _G10["lib"].n2u_launch(y32, inv, ids, topk_weights.float().contiguous(), st["w1"], st["gs2"], 0, LOCAL_EXPERTS,
                            POST_NORM_EPS, state["unpool_slice"], f, st["cnt"], N2U_CFG[0] + (1000 + 2000 * N2U_PFW) * slot, N2U_CFG[1], list(bnd), POST_NORM_EPS, RMS_EPS)
     return f
-
-
-# s26 NU8 (T = 8): moe_tk2f PF 20 (its gemm2 epilogue also sums each slot's (y w1)^2 into y32 row 64) -> nu8 (moe_norm3 +
-# the unpool slice split over k into NU8_KB-wide FP32 slabs, PDL secondary of moe_tk2f) -> the boundary adds the slabs.
-# Replaces moe_norm3 + gemv17 (H100 v1 tail tk2f end -> norm3 3.7 -> g17 4.6 -> boundary 3.3 us). TUNE option "nu8".
 NU8_DEFAULT = False
-# s28 QF32 (proj s19 request): at T=16 decode the g19 qkv stays FP32 into attention (csl sliding, _gd_full + merges full),
-# rounded to BF16 (RN) at each load: bit-identical to the torch cast it drops (H200 ea9421fa: 1.2-1.3 us per layer).
 QF32 = True
-QSS_NS = 2  # proj s22: H200 (proj check ccf41026, tuner us) qkv T=32 bmm 2 slabs 16.03 vs cuBLASLt split-K + reduce 17.50
-QSS_VERIFY = True  # s72: QSS also at verify sliding (nvs + _combine_hb load the slabs) when the qss option is on (default off at T=128/256)
-# (H100 ab_flag 3 rounds x seeds 7,11: v16 sl -0.9/+0.0, v32 sl +2.0/+1.5 us; nvs's FP32 slab loads +1.6 us vs bmm -1.0)
-# H200 tuner (check 0f12113f): T=128 sl {qss: True} 306.4 vs default 306.0, full 368.6 vs 368.3: DEAD, candidate removed
-QSS_DEFAULT = {32: True}  # tokens -> default of TUNE option qss (H100 layer, options pinned: d32 sliding -1.5, full -1.5 us)
-# s34 O_PF {tokens: fraction}: sliding attention (csl/nds/nvs) L2-prefetches the first fraction of o's weight once each
-# CTA's K/V loads are out (HBM idles in the latency-bound attention; o then starts L2-warm). H100 ab_flag: d32 sliding
-# 0.5: -1.0/-1.3 us (1.0 -0.2, prefetch at nds START: o -2.2 but nds +3 = zero-sum), v16 sliding 0.5: -1.6/-1.7;
-# losers: d16 (csl, o on g19) 0.5 +0.6, 1.0 +1.6; v32 tie. TUNE option o_pf (0 = off).
+QSS_NS = 2
+QSS_VERIFY = True
+QSS_DEFAULT = {32: True}
 O_PF = {32: 0.5, 128: 0.5}
-VTK_QF32 = True  # s38: the T=8 sliding attention (vtk) takes the g19 m8 qkv in FP32 too (TUNE option g19:qkv_gate at T=8)
-NVS_CL = True  # s85: verify-32 sliding on moe s31's 2-CTA cluster nvs (attn_src _NVSCL; H200 standalone -1.1..-1.4 us). TUNE nvscl
-QF32_NDS = True  # s29: also at T=32 (nds sliding templated on the qkv type; full = the same Gluon path as T=16)
-RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 -> 109.9 (8 rounds), 112.3 -> 110.7 (4)
-TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
-TK2FJ_TOKENS = (16, 32)  # s27: the same at T = 16/32 after joining the router's side stream before the rmsnorm
-TK2FJ_DEFAULT = True  # H100 ab_files 5 rounds: d16 212.4/313.3 -> 209.9/313.8, d32 205.7/433.8 -> 203.7/432.0 us
-TK2FX_DEFAULT = True  # H100 ab_files 6 rounds: d1 90.4/112.8 -> 89.9/111.8, v1 154.0/167.7 -> 152.1/167.8 us
+VTK_QF32 = True
+NVS_CL = True
+QF32_NDS = True
+RF_TRIG_DEFAULT = True
+TK2FX_TOKENS = (1, 8)
+TK2FJ_TOKENS = (16, 32)
+TK2FJ_DEFAULT = True
+TK2FX_DEFAULT = True
 NU8_KB = 512
-NU8_X = True  # sums of squares in nu8 (blocks 0..7 + a counter) instead of moe_tk2f PF 20 (H100: its epilogue +2.4 us)
-
-
+NU8_X = True
 def _nu8_on(state, tokens):
     return (tokens == 8 and _use_moe(tokens) and _moe_TK2F and _G10.get("lib") is not None and tokens <= SLICED_UNPOOL_MAX_TOKENS
             and _moe__tk2f_cfg(tokens, state["moe"]) % 100000 == 84204 and _opt(state, tokens, "nu8", NU8_DEFAULT))
-
-
 def _nu8_x(state, tokens):
     return _opt(state, tokens, "nu8x", NU8_X)
-
-
-NU8_D = True  # s59 NU8D: per-slot partials, the post-expert norm scales applied in the boundary (no exchange). TUNE "nu8d"
-# H100 ab_flag 6 rounds ABBA x 3 seeds (tuner off) vs X: v1 sliding -0.6..0.9, full -0.4..0.6 us (nu8 -0.7, boundary +0.6)
-
-
-TK2F_BAL_DEFAULT = False  # moe n8 BAL at T = 8/16/32 (TUNE option "bal")
-
-
+NU8_D = True
+TK2F_BAL_DEFAULT = False
 def _nu8_d(state, tokens):
     return _opt(state, tokens, "nu8d", NU8_D)
-
-
 def _experts_nu8(x, topk_weights, local_ids, state, y32):
     """T = 8: moe_tk2f (PF 20) -> nu8: the unpool slice as FP32 split-K slabs [D_EXPERT / NU8_KB, 8, 1024]. y32 [65, 4096]:
     row 64 (the slots' sums of squares) was zeroed by the pre-expert _rmsnorm_gain."""
     st = state["moe"]
     _moe_TK2F_BAL_M.discard(8)
-    if _opt(state, 8, "bal", TK2F_BAL_DEFAULT):  # moe n8 BAL
+    if _opt(state, 8, "bal", TK2F_BAL_DEFAULT):
         _moe_TK2F_BAL_M.add(8)
     lib = st["lib"]
     dev = x.device
@@ -18407,7 +17493,7 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
     inv = torch.empty(8 * TOP_K, dtype=torch.int32, device=dev)
     ids = local_ids.contiguous()
     tw = topk_weights.float().contiguous()
-    d = y32.shape[0] == 81  # NU8D (kernel_fn allocated the per-slot rows)
+    d = y32.shape[0] == 81
     lib.moe_set_ss(0 if d else st["w1"].data_ptr())
     lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"],
@@ -18417,16 +17503,10 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
     _G10["lib"].nu8_launch(y32, ids, tw, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, state["unpool_slice"], f, st["cnt"],
                            NU8_KB + (2000 if d else 1000 * _nu8_x(state, 8)), 1)
     return f, ((y32[64], ids, tw) if d else None)
-
-
-_moe_TWM_ORDER_M = {}  # s15: moe's H200 proxy (s16): order 76 at T=256 (r-moe 499bde6 default) loses ~3.6 us at v32
-
-
-G19_TRIG_TOKENS = (16, 32)  # s57: the g19 unpool triggers at start, the second boundary is its PDL secondary
-G19_TRIG_O_TOKENS = (16, 32)  # s57: the same for the g19 o GEMM (T=16 sliding pick) and the first boundary
-BND_SEP_TOKENS = (8,)  # s57 SEP: the T=8 second boundary loads nu8's 8 slabs as an [8, 1024] tile (H100 ab_flag v1 -1.0/-1.1 us; T=1 tie)
-
-
+_moe_TWM_ORDER_M = {}
+G19_TRIG_TOKENS = (16, 32)
+G19_TRIG_O_TOKENS = (16, 32)
+BND_SEP_TOKENS = (8,)
 def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
     """unpool -> second boundary: (next attention input, stream)."""
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
@@ -18435,12 +17515,12 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
         f = _linear(moe, state["unpool_slice"], "unpool_slice", state) if sliced else _g19(moe, "unpool", state, trig)
         pdl = pdl or trig and f is not None
         if f is None:
-            f = _linear(moe, state["unpool"], "unpool", state)  # all-gather: identity (zeros)
+            f = _linear(moe, state["unpool"], "unpool", state)
             pdl = pdl or (G30_TRIG and tokens == G30_TOKENS and "unpool" in state.get("g30", {}) and _opt(state, tokens, "g30:unpool", False))
     stream2 = torch.empty_like(stream1)
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]
-    spl = _opt(state, tokens, "bspl2", BND_SPLIT.get((tokens, 2), 1))  # s74: TUNE option
+    spl = _opt(state, tokens, "bspl2", BND_SPLIT.get((tokens, 2), 1))
     _boundary[(tokens * spl,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
                          NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
                          EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, RB=f.dtype == torch.float32, num_warps=16,
@@ -18449,34 +17529,30 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
                          **({} if sc is None else dict(sc_ptr=sc[0], ids_ptr=sc[1], tw_ptr=sc[2], SC=True,
                                                      SC_LOCAL=LOCAL_EXPERTS, SC_K=D_EXPERT, SC_EPS=POST_NORM_EPS)))
     return hidden, stream2
-
-
 def kernel_fn(data, state):
     _G24X.clear()
     _G24P.clear()
     r = _kernel_fn(data, state)
-    if _G24X:  # s59 G24X: unpool did not zero qkv's persistent out: restore the zero invariant
+    if _G24X:
         _G24X.pop().zero_()
-    if _G24P:  # s63 G24P: same for the pooler's persistent out
+    if _G24P:
         _G24P.pop().zero_()
     return r
-
-
 def _kernel_fn(data, state):
     cfg = data["config"]
     _G24_ZN.clear()
-    _SLIDING[0] = cfg["window"] > 0  # s73: before the G24X/G24P _opt reads (they read the previous call's flag before)
-    g30q = (state.get("g30n", {}).get(("qkv_gate", cfg["tokens"])) is not None  # n5s3: qkv on g30n (BF16 out): no G24X
+    _SLIDING[0] = cfg["window"] > 0
+    g30q = (state.get("g30n", {}).get(("qkv_gate", cfg["tokens"])) is not None
             and _opt(state, cfg["tokens"], "g30n:qkv_gate", ("qkv_gate", cfg["tokens"]) in G30N_DEFAULT_ON))
     if cfg["tokens"] in G24X_TOKENS and not g30q and _opt(state, cfg["tokens"], "g24x", True) and _g24_sel(state, "qkv_gate", cfg["tokens"]) is not None:
         xb = state.get("g24x", {}).get(cfg["tokens"])
         if xb is not None and _g24_sel(state, "qkv_gate", cfg["tokens"])[4][0] == cfg["tokens"]:
-            _G24_ZN[("qkv_gate", cfg["tokens"])] = xb  # zero (invariant): the qkv g24 runs EZ on it
+            _G24_ZN[("qkv_gate", cfg["tokens"])] = xb
             _G24X.append(xb)
     if cfg["tokens"] in G24P_TOKENS and _opt(state, cfg["tokens"], "g24p", False) and _g24_sel(state, "pooler", cfg["tokens"]) is not None:
         pb = state.get("g24p", {}).get(cfg["tokens"])
         if pb is not None and _g24_sel(state, "pooler", cfg["tokens"])[4][0] == cfg["tokens"]:
-            _G24_ZN[("pooler", cfg["tokens"])] = pb  # zero (invariant): the pooler g24 runs EZ on it
+            _G24_ZN[("pooler", cfg["tokens"])] = pb
             _G24P.append(pb)
     batch, length, tokens = cfg["batch"], cfg["q_len"], cfg["tokens"]
     hq, d = cfg["num_q_heads"], cfg["head_dim"]
@@ -18485,28 +17561,22 @@ def _kernel_fn(data, state):
     kc, vc, pt = data["k_cache"], data["v_cache"], data["page_table"]
     kv_pf = None
     if _opt(state, tokens, "kv_pf", KV_PF) and tokens == 1 and cfg["window"] > 0 and kc.shape[1] == 1 and kc.is_contiguous() and vc.is_contiguous():
-        # the window's page-table entries (csl's speculative range: the table's last W + 1 columns)
         n_pf = min(pt.shape[1], cfg["window"] + 1)
         kv_pf = (pt[0, pt.shape[1] - n_pf:], kc, vc, n_pf, kc.stride(0) * kc.element_size())
     global RF_TRIG, ATT_DIAG, ATT_PLAN
-    ATT_DIAG = 0 if cfg["window"] > 0 else _opt(state, tokens, "attx", 0)  # s84 DIAG probes (tuner timing only)
-    ATT_PLAN = {} if cfg["window"] > 0 else _opt(state, tokens, "aplan", {})  # s84: attention plan picked by the H200 tuner
-    RF_TRIG = _opt(state, tokens, "rf_trig", RF_TRIG_DEFAULT)  # s27: attention's _red_fin (decode 1 full) triggers o after its wait
-    # s62 CSL_PW: decode sliding csl as a PDL secondary of the g19 qkv (g19 triggers at start; csl's K/V gathers
-    # go out before its griddepcontrol.wait, overlapping the GEMM's weight stream)
+    ATT_DIAG = 0 if cfg["window"] > 0 else _opt(state, tokens, "attx", 0)
+    ATT_PLAN = {} if cfg["window"] > 0 else _opt(state, tokens, "aplan", {})
+    RF_TRIG = _opt(state, tokens, "rf_trig", RF_TRIG_DEFAULT)
     csl_pw = bool(cfg["window"] > 0 and length in (1, 8) and _opt(state, tokens, "cslpw", tokens in CSL_PW_TOKENS))
-    qkv = _g19(data["attn_input"], "qkv_gate", state,  # s15: T=16 (FP32 out, rounded to the GEMM's BF16)
+    qkv = _g19(data["attn_input"], "qkv_gate", state,
                trig=csl_pw and (1 + 2 * bool(_opt(state, tokens, "cslcarve", CSL_PW_CARVE))))
-    csl_pw = csl_pw and (qkv is not None or tokens in (1, 8))  # T=1/8: the qkv gemv13/14 trigger at start (GEMV_PDL)
+    csl_pw = csl_pw and (qkv is not None or tokens in (1, 8))
     slabs, qss = None, 0
     if (qkv is None and (length == 1 and batch >= NDS_MIN_BATCH and HAVE_GLUON and USE_GDEC and QF32_NDS
                          and (_NDS is not None or cfg["window"] == 0)
-                         # s72: verify sliding on nvs (it sums the 2 slabs at its loads, as nds)
                          or length == 8 and batch >= NVS_MIN_BATCH and _NVS is not None and cfg["window"] == 2048
                          and cfg["page_size"] == 1 and QSS_VERIFY)
             and _opt(state, tokens, "qss", QSS_DEFAULT.get(tokens, False))):
-        # proj s22 (QSS): qkv split over k into QSS_NS FP32 slabs by one strided batched GEMM (no split-K reduce
-        # kernel); attention adds the slabs in FP32 and rounds to BF16 at each load (= cuBLAS split-K + BF16 out).
         x, w = data["attn_input"], dense["qkv_gate"]
         kc = x.shape[1] // QSS_NS
         slabs = torch.bmm(x.view(tokens, QSS_NS, kc).permute(1, 0, 2), w.view(w.shape[0], QSS_NS, kc).permute(1, 2, 0),
@@ -18522,12 +17592,12 @@ def _kernel_fn(data, state):
         qkv = qkv.to(torch.bfloat16)
     o_pf = (0, 0)
     pf_frac = _opt(state, tokens, "o_pf", O_PF.get(tokens, 0)) if cfg["window"] > 0 else 0
-    if pf_frac:  # s34: decode sliding attention (csl / nds) L2-prefetches the first pf_frac of o's weight once its K/V are in
+    if pf_frac:
         e = state.get("g19", {}).get(("o", tokens)) if "o" in G19_ON and _opt(state, tokens, "g19:o", ("o", tokens) not in G19_DEFAULT_OFF) else None
-        e27 = _g27_sel(state, "o", tokens)  # proj s57: gemv27's pack when it runs o
+        e27 = _g27_sel(state, "o", tokens)
         w = e27[0] if e27 is not None else e[0] if e is not None else dense["o"]
         e30 = state.get("g30n", {}).get(("o", tokens))
-        if e30 is not None and _opt(state, tokens, "g30n:o", ("o", tokens) in G30N_DEFAULT_ON):  # n5s4: g30n o reads its pack
+        if e30 is not None and _opt(state, tokens, "g30n:o", ("o", tokens) in G30N_DEFAULT_ON):
             w = e30[1][0]
         o_pf = (w.data_ptr(), int(w.numel() * w.element_size() * pf_frac) & ~15)
     o = attn_kernel_fn({
@@ -18547,7 +17617,6 @@ def _kernel_fn(data, state):
     pr1 = (tokens in PR1_TOKENS and _opt(state, tokens, "pr1", True) and pdl and fp32_router and _GPR1_SRC is not None and not npf
            and (tokens == 1 and "pooler" in state.get("g13", {}) or tokens == 8 and _GPR8_SRC is not None
                 and "pooler" in state.get("g14", {}) and G14_CFG["pooler"][0] == 8))
-    # s86 OB8: the T=8 o GEMM writes the boundary's stream1 / h / h32 itself (pr8 = its PDL secondary)
     ob8 = (pr1 and tokens == 8 and _GOB8_SRC is not None and _opt(state, tokens, "ob8", OB8) and "g12" in state
            and not (("o", 8) in state.get("g19", {}) and "o" in G19_ON and _opt(state, 8, "g19:o", ("o", 8) not in G19_DEFAULT_OFF))
            and _g27_sel(state, "o", 8) is None and o.shape[1] == 1024
@@ -18561,12 +17630,12 @@ def _kernel_fn(data, state):
                              | 2 * _opt(state, tokens, "ob8late", OB8_LATE))
     else:
         a = _g19(o, "o", state, otrig)
-        otrig = otrig and a is not None  # s57: the first boundary is then the o GEMM's PDL secondary
+        otrig = otrig and a is not None
         if a is None:
-            a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
-    bnd = ob8 or pr1 and tokens == 1 and _opt(state, tokens, "pr1bnd", PR1_BND) and a.dtype == torch.bfloat16  # s74: TUNE option
+            a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)
+    bnd = ob8 or pr1 and tokens == 1 and _opt(state, tokens, "pr1bnd", PR1_BND) and a.dtype == torch.bfloat16
     if not bnd:
-      spl = _opt(state, tokens, "bspl1", BND_SPLIT.get((tokens, 1), 1))  # s74: TUNE option
+      spl = _opt(state, tokens, "bspl1", BND_SPLIT.get((tokens, 1), 1))
       _boundary[(tokens * spl + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
                                PDL=pdl or otrig, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32,
@@ -18574,13 +17643,9 @@ def _kernel_fn(data, state):
                                launch_pdl=pdl or otrig, SPL=spl)
     main_stream, side_stream = torch.cuda.current_stream(), state["side_stream"]
     if tokens in ROUTER_AFTER_POOLER and pdl:
-        # The pooler GEMV (triggers its dependents at start) first; the router is its PDL secondary on the same
-        # stream (reads only h: no griddepcontrol.wait), so it fills SMs beside the pooler instead of delaying it;
-        # the rmsnorm waits for the pooler through an event (full edge) on the side stream.
         pooled = _linear(h, dense["pooler"], "pooler", state)
         pooled_done = torch.cuda.Event()
         pooled_done.record(main_stream)
-        # p before the router: the side stream writes it, so it must not reuse a block _route frees (its partials)
         p = torch.empty_like(pooled)
         topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens, router_pdl=True)
         side_stream.wait_event(pooled_done)
@@ -18595,14 +17660,10 @@ def _kernel_fn(data, state):
         return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
     if (not fp32_router and state.get("pool_router") is not None
             and _opt(state, tokens, "fr", tokens in FUSED_ROUTER_TOKENS)):
-        # SGLang's router above 8 tokens = BF16 h against the BF16 hi/lo split of the FP32 weight (FP32 accumulation):
-        # the same h as the pooler, so one GEMM [pooler; hi; lo] with FP32 output; the routing sums the hi/lo logits,
-        # the rmsnorm rounds the pooler part to BF16 (what the BF16-out pooler GEMM returns). No side stream.
         pr = torch.mm(h, state["pool_router"].t(), out_dtype=torch.float32)
         ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
         lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
         wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
-        # s37: T > 32: moe_route right after the routing, the pre-expert rmsnorm inside moe_gathern (strided FP32 rows)
         gnorm = (tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and _opt(state, tokens, "gnorm", GNORM_DEFAULT))
         rg = gnorm and _opt(state, tokens, "rg", RG_DEFAULT)
         bkt = gnorm and not rg and _opt(state, tokens, "bkt", BKT_DEFAULT)
@@ -18621,7 +17682,7 @@ def _kernel_fn(data, state):
             _experts_marlin if HAVE_SGL else _experts_local)(p, wts, lids, state)
         return _tail(moe, stream1, h, tokens, state, pdl) + (ids,)
     pr32 = False
-    if pr1:  # pooler + router + routing in one launch (proj pr1), PDL secondary of the boundary: no side stream
+    if pr1:
         pooled = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
         logits = torch.empty((tokens, N_EXPERTS), dtype=torch.float32, device=dev)
         topk_ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
@@ -18645,7 +17706,7 @@ def _kernel_fn(data, state):
                                    ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)
     elif (pr32 := (tokens in PR32_TOKENS and state.get("pr32", {}).get(tokens) is not None
                    and _opt(state, tokens, "pr32", PR32_DEFAULT))):
-        side_stream.wait_stream(main_stream)  # nothing runs there, but the later joins need it forked in the capture
+        side_stream.wait_stream(main_stream)
         lib, (wp, hdr, scale), rw = state["pr32"][tokens]
         pooled = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
         topk_ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
@@ -18665,12 +17726,10 @@ def _kernel_fn(data, state):
                                         and not _opt(state, tokens, "rg", RG_DEFAULT))
             rpdl = bkt and _opt(state, tokens, "route_pdl", ROUTE_PDL)
             topk_ids, local_ids, topk_weights = _route(state, h, h32, data["local_start"], tokens, trig=rpdl)
-            # The experts' bucketing too, off the main stream's path.
             bucket = _moe_bucket(state, local_ids, rpdl) if bkt else None
     if pr1 or pr32:
         pass
     elif tokens in POOLER_HI_PRIORITY:
-        # the pooler on a high-priority stream: its CTAs go ahead of the router's remaining waves
         hi = state["hi_stream"]
         hi.wait_stream(main_stream)
         with torch.cuda.stream(hi):
@@ -18682,7 +17741,6 @@ def _kernel_fn(data, state):
     elif (pooled := _g19(h, "pooler", state)) is not None:
         pass
     elif tokens in POOLER_BMM and not _opt(state, tokens, "lt:pooler", False):
-        # split K in NS slabs as one strided batched GEMM with FP32 out; the rmsnorm sums the slabs (no reduce kernel)
         ns = POOLER_BMM[tokens]
         kc = HIDDEN // ns
         wp = dense["pooler"]
@@ -18693,33 +17751,27 @@ def _kernel_fn(data, state):
     p = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
     tk2_pdl = TK2_PDL13 and tokens <= TK2_MAX_TOKENS and _use_moe(tokens)
     if tk2_pdl:
-        # moe_tk2 gemm13 reads the routing before its griddepcontrol.wait: join first, so that its only
-        # (programmatic) predecessor is this rmsnorm, which has full edges from the pooler and the routing.
         main_stream.wait_stream(side_stream)
-    nsp = pooled.shape[0] if pooled.dim() == 3 else 1  # bmm slabs [ns, T, n]
+    nsp = pooled.shape[0] if pooled.dim() == 3 else 1
     nu8 = _nu8_on(state, tokens)
     tk2fx = (pr1 and pdl and not tk2_pdl and tokens in TK2FX_TOKENS and _use_moe(tokens) and _moe_TK2F
              and _opt(state, tokens, "tk2fx", TK2FX_DEFAULT))
     tk2fj = (not pr1 and not tk2_pdl and tokens in TK2FJ_TOKENS and tokens <= TK2_MAX_TOKENS and _use_moe(tokens)
              and _moe_TK2F and _opt(state, tokens, "tk2fj", TK2FJ_DEFAULT))
-    if tk2fj:  # s27: join the side stream (routing) first: the rmsnorm loses its PDL, moe_tk2f becomes its PDL secondary
+    if tk2fj:
         main_stream.wait_stream(side_stream)
     rpdl = pdl and not tk2_pdl and not tk2fj
-    # s86: the rmsnorm below reads local_ids (nu8d ZL): the routing must be on this stream (pr1) or joined (tk2fj).
-    # Without pr1 it is still running on the side stream there: opt test verify 1 sliding {pr1: False} failed 7/30 seeds.
     nu8d = nu8 and _nu8_d(state, tokens) and local_ids.is_contiguous() and (pr1 or tk2fj)
     y32 = torch.empty((81 if nu8d else 65, D_EXPERT), dtype=torch.float32, device=dev) if nu8 else None
     gnorm = (not pr1 and not nu8 and tokens > 32 and _use_moe(tokens) and _moe_TW_CFG and pooled.dim() == 2
              and pooled.is_contiguous() and _opt(state, tokens, "gnorm", GNORM_DEFAULT))
-    # n5s2 ZR: if unpool runs g30n (it does not zero G24X's qkv out as g24's ZN), the rmsnorm zeroes it (qkv's out is dead
-    # after o) instead of a trailing zero_ kernel at the end of kernel_fn (H100 d32: 1.2 us + gap on the critical path).
     zr = None
     if (ZR_ON and not gnorm and _G24X and _G24X[0].shape[0] == tokens and _G24X[0].shape[1] <= D_EXPERT
             and state.get("g30n", {}).get(("unpool", tokens)) is not None
             and _opt(state, tokens, "g30n:unpool", ("unpool", tokens) in G30N_DEFAULT_ON)):
         zr = _G24X.pop()
     if gnorm:
-        p = pooled  # s27 GNORM: the rmsnorm runs inside the experts' gather
+        p = pooled
     else:
       _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=rpdl,
                              TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
@@ -18728,7 +17780,7 @@ def _kernel_fn(data, state):
                              zr_ptr=zr, ZR=zr.shape[1] if zr is not None else 0,
                              ZRP=triton.next_power_of_2(zr.shape[1]) if zr is not None else 1)
     if tk2fx or tk2fj:
-        state["moe"]["lib"].moe_set_tk2fpdl(1)  # the next moe_tk2f launch (one-shot) is this rmsnorm's PDL secondary
+        state["moe"]["lib"].moe_set_tk2fpdl(1)
     if not pr1:
         main_stream.wait_stream(side_stream)
     if not pr1 and not torch.cuda.is_current_stream_capturing():
@@ -18751,10 +17803,8 @@ def _kernel_fn(data, state):
         f, sc = _experts_nu8(p, topk_weights, local_ids, state, y32)
         return _tail(None, stream1, h, tokens, state, pdl, f=f, sc=sc) + (topk_ids,)
     if _use_moe(tokens):
-        moe = _experts_moe(p, topk_weights, local_ids, state, bucket, gnorm)  # all-reduce: identity
+        moe = _experts_moe(p, topk_weights, local_ids, state, bucket, gnorm)
     else:
         moe = (_experts_marlin if HAVE_SGL else _experts_local)(p, topk_weights, local_ids, state)
     return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
-
-
 _PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30k_builds(), *_pr32_builds())]

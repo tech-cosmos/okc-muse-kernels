@@ -80,6 +80,29 @@ assert Q3 not in lt and layer.count("_LT_SRC = None  # @@LT@@\n") == 1
 layer = layer.replace("_LT_SRC = None  # @@LT@@\n", "_LT_SRC = r" + Q3 + lt + Q3 + "\n")
 out = "# okc: problem=muse_decode_layer\n" + layer.replace("# @@ATTENTION@@\n", "# ---- attention (attn_src.py) ----\n" + attn + "\n# ---- layer ----\n")
 assert "@@ATTENTION@@" not in out and "@@MOE@@" not in out and "attn_kernel_fn" in out
+
+
+def strip_comments(src):
+    """n5s6: the judge rejects files > 1,000,000 bytes: drop Python comments (COMMENT tokens only; strings, incl. the
+    CUDA sources, stay as they are) and the blank/whitespace lines left behind; the AST must not change."""
+    all_toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    inner = set()  # rows inside a multi-line string token (after its first row): left exactly as they are
+    for t in all_toks:
+        if t.start[0] != t.end[0] and t.type not in (tokenize.NEWLINE, tokenize.NL):
+            inner.update(range(t.start[0] + 1, t.end[0] + 1))
+    res = tokenize.untokenize([t for t in all_toks if t.type != tokenize.COMMENT])
+    lines, keep = res.split("\n"), []
+    for i, ln in enumerate(lines):
+        keep.append(ln if i + 1 in inner else ln.rstrip() if ln.strip() else None)
+    res = "\n".join(l for l in keep if l is not None) + "\n"
+    assert ast.dump(ast.parse(res)) == ast.dump(ast.parse(src)), "strip_comments changed the AST"
+    return res
+
+
+HEADER = "# okc: problem=muse_decode_layer\n"
+assert out.startswith(HEADER)
+out = HEADER + strip_comments(out[len(HEADER):])
+assert len(out.encode()) < 1_000_000, f"submission.py is {len(out.encode())} bytes (judge limit 1,000,000)"
 (here / (sys.argv[1] if len(sys.argv) > 1 else "submission.py")).write_text(out)
 import ast as _ast
 _ast.parse(out)  # the built file must at least parse
