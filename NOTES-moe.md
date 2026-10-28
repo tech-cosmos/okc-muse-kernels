@@ -2157,3 +2157,16 @@
      overall): BELOW the lead's 8 us step-2 threshold. Stopped at step 1 as instructed; no persistent kernel built.
 - The biggest sub-peak items are per-kernel ramp+drain (~3-4 us per HBM-streaming kernel: qkv m1, g30 fit 3.9 us fixed) and
   data-dependency latency (routing -> first expert byte), not launch gaps between kernels.
+
+## n5s10 (2026-10-27 23:38Z - 2026-10-28 00:30Z): H200 verdict on pr32 = DEAD
+- Source: layer's 00:00Z v144 check 4937830f, ~/r-layer/muse_decode_layer/profiles/submission.4937830fb2ff4921.log,
+  parsed with tools/n5s10/pr32_tune.py (H200 prepare tuner, us per layer):
+    T=16 sliding: default 166.3, pr32 169.3 (+3.0) | full: default 223.5, pr32 226.1 (+2.6)
+    T=32 sliding: default 169.2, pr32 167.9, pr32+g30n:unpool 164.4, g30k:pooler 104 + g30n:unpool 162.1 (PICKED)
+    T=32 full:    default 329.6, pr32 329.0, pr32+g30n:unpool 325.3, g30k:pooler 104 + g30n:unpool 323.0 (+qkv_gate 322.9 PICKED)
+  => pr32 (one-launch pooler + router + routing) loses 2.3 us to g30k pooler 104 + side-stream router at T=32 and ~3 us to the
+  default at T=16. The L2W proxy (n5s2: 15-17 us, chain hidden) did not hold in-layer on the H200: fusing the router into the
+  pooler's streaming CTAs + finisher chain costs more than it saves vs a separate side-stream router. Without an H200 in-layer
+  timeline (not available to moe: layer checks only) there is no evidence to tune against; closed.
+- Ask to layer: drop {"pr32": ...} options from TUNE[16]/TUNE[32] (and the pr32 builds) to cut cold prepare time.
+- 0 runs. Note: I accidentally ran `git pull` in ~/r-layer this session (fast-forward, clean tree, no harm); read r-layer only.
