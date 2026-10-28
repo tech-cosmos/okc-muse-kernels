@@ -2468,3 +2468,20 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   tools/n5s23/patch_layer_rg.py <layer.py> ports the same 3 changes (applies cleanly to r-layer 2f66dbb; NOT compiled/tested
   in-layer). Expect ~-2..3 us at v32 and possibly RG winning at v16 too. Posted under COORD Handoffs.
 - Other small latency-bound kernels may have the same serial-load-in-loop pattern: worth grepping (moe_route, moe_norm prologue).
+
+## n5s24 (2026-10-28 05:45Z - 06:10Z): latency audit of moe_norm2 / moe_norm (STATE n5s23 NEXT); 1 moe check, 0 submits
+- SASS of moe_norm2<true> (main d3fc872): ids loaded as 8 LDG.STRONG.GPU in one batch, then predicated Y loads (fine), but
+  tw[tok*8+s] was loaded AFTER the ssum barrier, one LDG.STRONG.GPU per local slot inside its own branch = serial L2 trips.
+  moe_norm (big-M, NORM_EARLY rdy path): ids loaded pre-spin by tid < 8, then reloaded by everyone (__ldcg) after the spin,
+  tw again per slot after the barrier.
+- Fix (main 725f39a): moe_norm2 loads ids + tw for all 8 slots in one batch right after griddepcontrol.wait; moe_norm keeps
+  ids + tw in smem (loaded pre-spin by tid < 8; after the wait in the non-rdy path). Bitwise = before
+  (tools/n5s24/dump.py: 60 routings bs1/2/8/16/32/33/128/256 normal + skewed, eager + graph), bench test 15/15.
+  H100 paired ab (tools/n5s24/ab.py A.py B.py: two submissions in one process, graph replay, cold L2, alternating): tie
+  (+0.6/0/0/+1.1/-0.5/+0.9 us bs1..256, noise).
+- H200 check e3bd482e 2.2713x (vs d3761aa5 2.2641x, same code otherwise): norm2 per-kernel 3.1/3.5/3.9/3.3 -> 3.7/3.7/3.4/3.3 us
+  (bs1/16/32/8); big-M GPU busy 210.8 -> 218.1 (bs128), 236.4 -> 225.9 (bs256): all noise. => the tw trips were hidden
+  (rsqrt/LDS chain; ~1 local slot/token). DEAD as a speedup; kept on main (bitwise, harmless). Not handed to layer
+  (layer's moe_src moe_norm/moe_norm2 have the same pattern but nothing to gain). Not submitted (2.2713 vs board 2.2703 = noise).
+- proj/twm (7ae024a, 3 independent consumer WGs) is self-declared dead by proj (H100 +25..43%): nothing to review.
+- New tool: tools/n5s24/ab.py = paired A/B of two submission.py files in one process (use for any bitwise-equal latency change).

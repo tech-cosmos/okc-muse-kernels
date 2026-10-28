@@ -1,6 +1,6 @@
 # STATE-moe
 
-## NOW (n5s23, 2026-10-28 05:50Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
+## NOW (n5s24, 2026-10-28 06:10Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
 - n5s15: tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps); bytes-in-flight lever closed.
 - n5s16: H200 ORACLE: the extra 8-token groups cost d16 4.0 / d32 7.7 us (tk2f fit 14.1 + 6.97 E + 4.4 X us).
 - n5s16-n5s18: EVERY 16-token shared-dequant form on mma.sync tk2f is DEAD: inlined (i-cache), noinline (ABI), tk2h merged
@@ -26,7 +26,9 @@
 - n5s23: moe_routegather latency fix (x row + ids batched before the scan; bitwise): H200 bs128 4.4->3.2, bs256 6.3->4.4 us;
   check d3761aa5 2.2641x, submit 4fb734c6 2.2703x = board best. Layer port tools/n5s23/patch_layer_rg.py (Handoff, untested in-layer).
   NEXT idea: audit other small latency-bound kernels (moe_route, moe_norm/norm2 prologues, layer glue) for serial loads in loops.
-- Checks 10-28: moe 10 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326, cefcc133, d3761aa5), 2 submits (951c17e0, 4fb734c6); attention 0/20.
+- n5s24: moe_norm2/moe_norm tw+ids batched up front (bitwise; main 725f39a): H200 check e3bd482e 2.2713x = noise, norm2 per kernel unchanged.
+  Small-kernel serial-load audit DONE (route/routegather/norm/norm2); nothing left there. proj/twm 3-WG self-declared dead.
+- Checks 10-28: moe 11 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326, cefcc133, d3761aa5, e3bd482e), 2 submits (951c17e0, 4fb734c6); attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
