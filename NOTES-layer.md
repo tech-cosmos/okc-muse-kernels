@@ -2723,3 +2723,16 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   between cuBLAS GEMMs (no PDL in nvjet) and the boundary: removable only by fusing the boundary into the GEMMs (row norm over
   8192 cols needs a cross-CTA reduce; folding the gain into W changes h's BF16 rounding vs SGLang = routing risk). ~0.3-0.5% at best.
 => No layer-lane piece has a reachable >= 1%: biggest free numbers are v32 glue (32 us sl, ~2/3 bytes) and sliding attention (closed).
+
+## night5 s27 (2026-10-28 09:12Z - 09:35Z): no build, 0 judge runs, 0 Modal min (lane request n5s26 unanswered)
+- H100 timeline main v163 verify 32 sliding (tools/timeline.py submission.py "verify 32 sliding"; note the filter is the
+  full load name, "v32 sliding" matches nothing): total 385 us = qkv nvjet 22.0 | nvs attn 16.3 | o nvjet 10.3 | bnd 9.1 |
+  FR nvjet 39.7 | _routing 3.3 + routegathern 7.1 | moe_hot 105.4-281.3 beside moe_twm 107.9-340.2 (experts 235 us = 61%) |
+  moe_norm 316.9-341.9 (1.7 us past twm) | unpool nvjet 33.2 | bnd 9.2.
+- H200 (scored run 7693598b) v32 sl: twm 205.0 vs moe n5s25 bytes floor ~156 us (624 MB at 4.0 TB/s); d1 sl tk2f 20.4,
+  pr1 17.0, qkv g13 10.6, bnd 2x 6.2, o g13 6.1, n2u 5.2, csl 3.9. The weighted gap is in the expert kernels (twm drain ~20 us
+  per T=128/256 call = proj TWS, claimed; consumer excess ~21 us = moe closed), not in the layer's glue (n5s26 oracles).
+- Re-checked levers already on record: NVFP4 code/scale compression (codes uniform 4.0 bits; scales 3.71 bits, S6 H200-dead),
+  unpool W prefetch during the twm drain (s6 dead), row-subset unpool during the drain (W-bound: doubles W reads).
+  Choosing routes among near-ties to cut distinct experts would use the checker's slack, not a real speedup: not done.
+- Nothing built; no check spent (10-28 left: 5 checks / 7 submits). main unchanged (v163).
