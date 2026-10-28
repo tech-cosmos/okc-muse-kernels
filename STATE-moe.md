@@ -1,6 +1,9 @@
 # STATE-moe
 
-## NOW (n5s35, 2026-10-28 10:15Z): twm dq instruction cut (lead 09:20Z/09:55Z) CLOSED in SASS (NOTES n5s35)
+## NOW (n5s36, 2026-10-28 10:40Z): 'dequant once, mma many' (lead 10:20Z) = already built as moe_hot N128 (NOTES n5s36)
+- Layer v16/v32 routings: 0 repeated dq (v16 max 49 tok = one N64 pass; v32 hot 73-98 tok = one moe_hot N128 pass). Microbench
+  tools/n5s36/mb_dqonce.py: one A -> 2 N64 wgmma = N128 = 8.0 cyc/8KB/token (tensor peak). Only slack = hot N128 padding (exact-N, dead n5s21).
+## WAS (n5s35, 2026-10-28 10:15Z): twm dq instruction cut (lead 09:20Z/09:55Z) CLOSED in SASS (NOTES n5s35)
 - twm N8 loop: dq core = 96 instr / 64 weights = the s27 proven minimum (8 int + 4 HMUL2 per 8); extras 12/180 instr <= ~0.7 us.
   All dq alternatives dead on record (n22 DQW, s27 LUT/tiling, s29 scale fold, s18 mma.sync N8, s22/s27 WS). Lane ask in COORD.
 ## WAS (n5s34, 2026-10-28 09:40Z): consumer-instruction oracles (lead 08:50Z) -> tk2f decode consumer lane CLOSED (NOTES n5s34)

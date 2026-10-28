@@ -2699,3 +2699,17 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - VERDICT: twm dq instruction-cut lane CLOSED (nothing buildable >= 1 us, lead bar 6 us). The 00:00Z H200 dq-free oracle would
   only bound a lever that has no buildable form, so I won't spend Modal on it unless the lead wants the number anyway
   (command in n5s34). Lane request to lead in COORD.
+
+## n5s36 (2026-10-28 10:08Z - 10:40Z): 'dequant once, mma many' (lead 10:20Z) = ALREADY BUILT (moe_hot N128); no repeated dq on any layer routing; no build; 0 judge runs, 0 Modal
+- tools/n5s36/passes.py tools/data/routes.pt: twm pass structure on the layer's sliding routings (5 seeds each):
+  v16 (T=128): max expert 36-49 tokens, 0 experts > 64 -> every expert = ONE pass (<=32: RT4 N<=32; 33-64: RT2 N64): 0 repeated dq.
+  v32 (T=256): 2 hot experts (73-98 tok) per seed -> moe_hot (HOT_M {256: 32}, in the layer since v87) = ONE N128 pass: 0 repeated dq.
+  The only slack = N128 padding of the hot experts: ideal exact-N saves 2.5-2.9% of summed consumer cycles (G88 table) = n5s21's
+  exact-N (H200 probe N104 -2.3 us; full ~-3.7 us < 5 us gate, dead).
+- tools/n5s36/mb_dqonce.py (s18 microbench, 1 CTA 2 WGs, RS both, one dq'd A fragment -> C wgmma on different B tiles), H100:
+    cyc/stage (per 8 KB W per token): RT4 N32 1048 (16.4) | RT2 N64 736 (11.5) | RT2 N64x2 1024 (8.0) = RT2 N128 1024 (8.0)
+    | RT2 N32x2 723 (11.3) x3 916 (9.5) x4 1133 (8.9) | RT1 N64x2 652/4KB (10.2) x3 (8.0) x4 (8.0) | RT4 N32x2 1442 (11.3).
+  ptxas: 128 acc regs fit (moe_hot RT2 N128 has 0 LDL/STL at 168, s28); 0 spills everywhere. 8.0 = H100 BF16 tensor peak per SM.
+  => "mma many" is just larger N: -30% per token vs N64 only when an expert HAS > 64 tokens, and those already run N128.
+  Experts with <= 64 tokens have no second x tile to feed. Lane CLOSED (no new structure). Answer to proj's byte question: the
+  HBM 156 vs 109 gap is NOT weight re-reads (every expert's weight bytes are fetched by one item set once, K-split items disjoint).
