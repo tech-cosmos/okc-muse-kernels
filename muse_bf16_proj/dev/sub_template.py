@@ -223,9 +223,9 @@ BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 1
 DIAG30K = {}  # n5s4 diag done (check 6d9063a1: qkv kF132 only -0.2 us vs g30 S3; pooler/unpool g30k lose 1-3 us; NOTES n5s4)
 # n5s4 _diag30e only (print, no picks): g30 with the escape path compiled out (G30_ESC 0: WRONG output, timing only) vs g30,
 # m32, standalone and after a 3 us PDL predecessor = the H200 upper bound of a cheaper escape format.
-DIAG30E = {}  # n5s5 diag done (check b3ff96fb: G30_PL vs g30 m32 standalone -0.3/-0.4/-0.4, after pred -0.2/-0.2/-0.5 us qkv/pool/unp; was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}). n5s4 diag done (check 198e7084: escapes cost H200 qkv/pool/unp m32 1.2/1.1/0.6 us standalone, 1.5/2.0/2.0 after a pred; NOTES n5s4); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
+DIAG30E = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}  # n5s6: G30_GX vs g30 (print only). n5s5 diag done (check b3ff96fb: G30_PL vs g30 m32 standalone -0.3/-0.4/-0.4, after pred -0.2/-0.2/-0.5 us qkv/pool/unp; was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}). n5s4 diag done (check 198e7084: escapes cost H200 qkv/pool/unp m32 1.2/1.1/0.6 us standalone, 1.5/2.0/2.0 after a pred; NOTES n5s4); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 DIAG30E_M = 32
-DIAG30E_V = "G30_PL=0"  # n5s5: the variant timed against g30 ("noesc" column): escape keys in a per-thread smem list (0 = no escape path)
+DIAG30E_V = "G30_GX=1"  # n5s6: escapes out of the main loop (prepare() records, TMA x boxes, escape warps). n5s5 was "G30_PL=0": the variant timed against g30 ("noesc" column): escape keys in a per-thread smem list (0 = no escape path)
 DIAG30K_S = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
@@ -834,6 +834,45 @@ def _tune(st, reps=25):
     return picks
 
 
+def _g30_gx_tables(hdr, K, S, gxc=64, gxr=512):
+    """hdr [N][ESC] float32 pairs (col bits, v) as built by _compress; returns int32 [N / 64 * S][rlen] on hdr's
+    device or None if a record does not fit (more than gxc distinct escape columns in one CTA: use the non-GX g30)."""
+    h = hdr.detach().cpu()
+    N, E = h.shape[0], h.shape[1]
+    cols = h[:, :, 0].contiguous().view(torch.int32)
+    vb = h[:, :, 1].contiguous().view(torch.int32)
+    valid = h[:, :, 1] != 2.0 ** -15
+    KS = K // 64
+    recs = []
+    for g in range(N // 64):
+        for y in range(S):
+            i0, i1 = 2 * (y * (KS // 2) // S), 2 * ((y + 1) * (KS // 2) // S)
+            c = cols[g * 64:(g + 1) * 64]
+            ok = valid[g * 64:(g + 1) * 64] & (c >= i0 * 64) & (c < i1 * 64)
+            rows, es = ok.nonzero(as_tuple=True)  # row-major = header order
+            cc = c[rows, es]
+            uc = torch.unique(cc)  # sorted
+            if len(uc) > gxc:
+                return None
+            slot = torch.searchsorted(uc, cc)
+            starts = [int((rows < 16 * w).sum()) for w in range(4)] + [len(rows)]
+            last = torch.ones_like(rows, dtype=torch.bool)
+            last[:-1] = rows[1:] != rows[:-1]
+            ent = torch.stack([slot | (rows << 16) | (last.int() << 22) | ((cc & 7) << 28), vb[g * 64:(g + 1) * 64][rows, es]], 1).reshape(-1)
+            recs.append((uc, starts, ent))
+    emax = max(len(r[2]) for r in recs)
+    rlen = (8 + gxc + emax + 3) // 4 * 4
+    if rlen > gxr:
+        return None
+    out = torch.zeros(len(recs), rlen, dtype=torch.int32)
+    for i, (uc, starts, ent) in enumerate(recs):
+        out[i, 0] = len(uc)
+        out[i, 1:6] = torch.tensor(starts, dtype=torch.int32)
+        out[i, 8:8 + len(uc)] = uc
+        out[i, 8 + gxc:8 + gxc + len(ent)] = ent
+    return out.to(hdr.device)
+
+
 def _diag30e(st):
     """Print only: g30 vs g30 without the escape path (wrong output, timing only), standalone and after a 3 us predecessor."""
     if _g19 is None:
@@ -847,10 +886,20 @@ def _diag30e(st):
             continue
         P_, hdr, scale = st[("g30", layer)]
         n, k = st[layer].shape
+        hb = _g30_gx_tables(hdr, k, S) if "G30_GX=1" in DIAG30E_V else hdr
+        if hb is None:
+            print(f"diag30e {layer}: GX records do not fit")
+            continue
         xs = torch.randn(m, k, generator=g, device="cuda").to(torch.bfloat16)
         x = xs.clone()
         out = torch.empty(m, n, dtype=torch.bfloat16, device="cuda")
-        fns = [lambda pdl: a.g30_gemm(x, P_, hdr, out, scale, pdl), lambda pdl: b.g30_gemm(x, P_, hdr, out, scale, pdl)]
+        ref = F.linear(x, st[layer]).float()
+        b.g30_gemm(x, P_, hb, out, scale, 0)
+        eb = ((out.float() - ref).norm() / ref.norm()).item()
+        a.g30_gemm(x, P_, hdr, out, scale, 0)
+        ea = ((out.float() - ref).norm() / ref.norm()).item()
+        print(f"diag30e {layer} m{m} S{S}: rel err g30 {ea:.2e} {DIAG30E_V} {eb:.2e}")
+        fns = [lambda pdl: a.g30_gemm(x, P_, hdr, out, scale, pdl), lambda pdl: b.g30_gemm(x, P_, hb, out, scale, pdl)]
         med0 = _graph_medians([lambda: None] + [lambda fn=fn: fn(0) for fn in fns] * 2)
         medp = _graph_medians([lambda: _g19.g19_pred(xs, x, 3000)] + [lambda fn=fn: (_g19.g19_pred(xs, x, 3000), fn(1)) for fn in fns] * 2)
         print(f"diag30e {layer} m{m} S{S}: standalone (+us over an empty graph {med0[0] * 1e3:.2f}) g30 "

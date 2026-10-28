@@ -6216,6 +6216,28 @@ _G30_SRC = r'''// s100 "g30" (layer s99 dev/s99_g30.cu, layer form): T=128 GEMM 
 #ifndef G30_MTOK
 #define G30_MTOK 128
 #endif
+#ifndef G30_GX  // proj n5s6: escapes OUT of the main loop: the x producer warp gathers x at the escape columns from each
+#define G30_GX 0  // x stage just before refilling it (smem, no extra gating); WG0 adds x * (v - 2^-15) in FP32 after the reduce
+#endif
+#ifndef G30_GXC
+#define G30_GXC 64  // G30_GX: max distinct escape columns per CTA (prepare() checks: g30_gx_tables)
+#endif
+#ifndef G30_GXD
+#define G30_GXD 0  // debug (wrong output): 1 no fixup walk, 2 no x gathers
+#endif
+#ifndef G30_GXN
+#define G30_GXN 4  // G30_GX: escape warps (1, 2 or 4); warp 10 + e owns the 16-row groups e, e + GXN, ..
+#endif
+#ifndef G30_GXW
+#define G30_GXW 0  // G30_GX: escape warp sleeps this many ns before its walk
+#endif
+#ifndef G30_GXR
+#define G30_GXR 512  // G30_GX: max record u32 words
+#endif
+#if G30_GX
+#undef G30_PL
+#define G30_PL 0
+#endif
 #define G30_ND (G30_MTOK / 2)
 #ifndef G30_S
 #define G30_S 1  // proj s95: K split over a (1, S, 1) cluster, rank 1 sums into rank 0 via DSMEM (S <= 2)
@@ -6310,10 +6332,11 @@ __device__ __forceinline__ void wg_mma_rs(float* d, unsigned a0, unsigned a1, un
 #endif
 }
 
-__global__ void __launch_bounds__(320, 1)
-g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ wp, __nv_bfloat16* __restrict__ out,
-           const float2* __restrict__ hdr, int N, int KS, float scale) {
-  // KS = k-stages; wp = [G][KS][WST]
+__global__ void __launch_bounds__(G30_GX ? 320 + 32 * G30_GXN : 320, 1)
+g30_kernel(const __grid_constant__ CUtensorMap tmX, const __grid_constant__ CUtensorMap tmG, const uint8_t* __restrict__ wp, __nv_bfloat16* __restrict__ out,
+           const float2* __restrict__ hdr, int N, int KS, float scale,
+           const uint32_t* __restrict__ gtab, int rlen) {
+  // KS = k-stages; wp = [G][KS][WST]; G30_GX: tmG = x boxes {8, MTOK}, gtab = [G][S][rlen] records (cols at 8, list at 8 + gcm)
   extern __shared__ __align__(1024) uint8_t smraw[];
   uint8_t* sm = (uint8_t*)(((uintptr_t)smraw + 1023) & ~(uintptr_t)1023);
   uint8_t* xs = sm;                                  // NS x 16 KB
@@ -6358,6 +6381,75 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
 #if !G30_PRE
   asm volatile("griddepcontrol.wait;" ::: "memory");  // x (and out's memory) belong to the previous kernels
 #endif
+#if G30_GX
+  // per-(tile, split) escape record from prepare() (g30_gx_tables): u32 [0] ncols, [1..5] list start per 16 rows (+ end),
+  // [8 .. 8 + GXC) escape columns (ascending; slot = index), [8 + GXC ..] uint2 (slot | row << 16 | last-of-row << 22 |
+  // (col & 7) << 28, v) in row order. Warp 10 (escape warp): record bulk copy before the wait; after it, x boxes {8 cols, MTOK} at every
+  // escape column (TMA) into gbuf; then corr = sum over the tile's escapes of x * v - x * 2^-15 (FP32), in red's layout,
+  // built while the consumers stream; WG1 writes red = d + corr.
+  uint32_t* grec = (uint32_t*)(ws + G30_NW * G30_WST + 1024 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 : 0));
+  __nv_bfloat16* gbuf = (__nv_bfloat16*)(grec + G30_GXR);
+  float* corr = (float*)(gbuf + G30_GXC * G30_MTOK * 8);  // [ND][128]
+  uint64_t* hbar = (uint64_t*)(corr + G30_ND * 128);  // [0] record landed, [1] x gathers landed
+  if (warp >= 10) {
+    const int ew = warp - 10;
+    if (ew == 0 && lane == 0) {
+      mbar_init(hbar, 1);
+      mbar_init(hbar + 1, 1);
+      asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+      mbar_expect_tx(hbar, rlen * 4);
+      bulk1d(grec, gtab + (size_t)(g * G30_S + blockIdx.y) * rlen, rlen * 4, hbar);
+    }
+    for (int gr = ew; gr < 4; gr += G30_GXN)  // own slice of corr (rows 16 gr ..: lanes 32 gr .. of every j)
+#pragma unroll
+      for (int j = 0; j < G30_ND; j++) corr[j * 128 + gr * 32 + lane] = 0.f;
+    asm volatile("griddepcontrol.wait;" ::: "memory");  // x belongs to the previous kernels
+    if (ew == 0 && lane == 0) {
+      mbar_wait(hbar, 0);
+      const int nc = (G30_GXD & 2) ? 0 : (int)grec[0];
+      mbar_expect_tx(hbar + 1, nc * G30_MTOK * 16);
+      for (int c = 0; c < nc; c++) tma2d(gbuf + c * G30_MTOK * 8, &tmG, (int)grec[8 + c] & ~7, 0, hbar + 1);
+    }
+    asm volatile("bar.sync 4, %0;" :: "n"(32 * G30_GXN) : "memory");  // barriers initialized by warp 10
+    mbar_wait(hbar + 1, 0);  // (implies the record landed)
+    if (G30_GXW) __nanosleep(G30_GXW);
+    __syncwarp();
+    const uint2* gel = (const uint2*)(grec + 8 + G30_GXC);
+    for (int gr = ew; gr < 4; gr += G30_GXN) {
+    const int p1 = (G30_GXD & 1) ? 0 : (int)grec[2 + gr];
+    float cn[(G30_MTOK + 31) / 32], cp[(G30_MTOK + 31) / 32];  // per row: corr = -2^-15 sum x + sum x v, lane = token
+#pragma unroll
+    for (int u = 0; u < (G30_MTOK + 31) / 32; u++) cn[u] = cp[u] = 0.f;
+#pragma unroll 4
+    for (int p = (int)grec[1 + gr]; p < p1; p++) {  // flat walk (row order; bit 22 = last entry of its row): loads independent of the sums
+      const uint2 en = gel[p];
+      const float v = __uint_as_float(en.y);
+#pragma unroll
+      for (int u = 0; u < (G30_MTOK + 31) / 32; u++) {
+        const int tk = lane + 32 * u;
+        if (tk < G30_MTOK) {
+          const float xv = __bfloat162float(gbuf[((en.x & 0xFFFF) * G30_MTOK + tk) * 8 + (en.x >> 28)]);
+          cn[u] += xv;
+          cp[u] = fmaf(xv, v, cp[u]);
+        }
+      }
+      if (en.x & (1u << 22)) {
+        const int row = (en.x >> 16) & 63;
+#pragma unroll
+        for (int u = 0; u < (G30_MTOK + 31) / 32; u++) {
+          const int tk = lane + 32 * u;
+          if (tk < G30_MTOK)  // owner: lane (row % 8) * 4 + (tk % 8) / 2 of warp row / 16, d[4 (tk / 8) + 2 ((row / 8) & 1) + tk % 2]
+            corr[(4 * (tk >> 3) + 2 * ((row >> 3) & 1) + (tk & 1)) * 128 + (row >> 4) * 32 + (row & 7) * 4 + ((tk & 7) >> 1)] =
+                fmaf(cn[u], -0x1p-15f, cp[u]);
+          cn[u] = cp[u] = 0.f;
+        }
+      }
+    }
+    }
+    asm volatile("bar.arrive 3, %0;" :: "n"(128 + 32 * G30_GXN) : "memory");  // corr ready for WG1
+    return;
+  }
+#endif
   if (warp == 9) {
 #if G30_PRE
     asm volatile("griddepcontrol.wait;" ::: "memory");  // x belongs to the previous kernels
@@ -6376,7 +6468,12 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
   float d[G30_ND];
 #pragma unroll
   for (int j = 0; j < G30_ND; j++) d[j] = 0.f;
-#if G30_ESC
+#if G30_GX
+#if G30_PRE
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // consumers: out written after
+#endif
+#define G30_FIX(a)
+#elif G30_ESC
   unsigned cand[2 * G30_ESC], nxt;
 #define G30_POP { nxt = cand[0]; _Pragma("unroll") for (int e = 0; e < 2 * G30_ESC - 1; e++) cand[e] = cand[e + 1]; cand[2 * G30_ESC - 1] = ~0u; }
   {
@@ -6473,8 +6570,14 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
   float* red = (float*)xs;
   asm volatile("bar.sync 1, 256;" ::: "memory");
   if (wg == 1) {
+#if G30_GX
+    asm volatile("bar.sync 3, %0;" :: "n"(128 + 32 * G30_GXN) : "memory");  // + the escape warps: corr ready
+#pragma unroll
+    for (int j = 0; j < G30_ND; j++) red[j * 128 + t] = d[j] + corr[j * 128 + t];
+#else
 #pragma unroll
     for (int j = 0; j < G30_ND; j++) red[j * 128 + t] = d[j];
+#endif
   }
   asm volatile("bar.sync 1, 256;" ::: "memory");
   if (wg == 1) return;
@@ -6522,7 +6625,7 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ 
 }
 
 static PFN_cuTensorMapEncodeTiled_v12000 g_enc = nullptr;
-static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, uint32_t b0, uint32_t b1) {
+static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, uint32_t b0, uint32_t b1, bool sw = true) {
   if (!g_enc) {
     cudaDriverEntryPointQueryResult q;
     cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled", (void**)&g_enc, 12000, cudaEnableDefault, &q);
@@ -6530,7 +6633,7 @@ static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, ui
   cuuint64_t dims[2] = {inner, outer}, strides[1] = {inner * 2};
   cuuint32_t box[2] = {b0, b1}, es[2] = {1, 1};
   CUresult r = g_enc(m, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, (void*)p, dims, strides, box, es,
-                     CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                     CU_TENSOR_MAP_INTERLEAVE_NONE, sw ? CU_TENSOR_MAP_SWIZZLE_128B : CU_TENSOR_MAP_SWIZZLE_NONE, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
                      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   TORCH_CHECK(r == CUDA_SUCCESS, "g30 tensor map encode failed ", (int)r);
 }
@@ -6544,12 +6647,21 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
   CUtensorMap tx;
   g30::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
   const int smem = G30_NS * G30_XBOX + G30_NW * G30_WST + 1024 + 512 + (G30_S > 1 ? (G30_S - 1) * G30_ND * 128 * 4 + 1024 : 0)
-                   + (G30_PL ? (2 * G30_ESC + 1) * 256 * 4 : 0);
+                   + (G30_PL ? (2 * G30_ESC + 1) * 256 * 4 : 0)
+                   + (G30_GX ? G30_GXR * 4 + G30_GXC * G30_MTOK * 16 + G30_ND * 128 * 4 + 16 : 0);
+  // G30_GX: hdr = escape records int32 [G * S][rlen] from g30_gx_tables (rlen <= GXR, rlen % 4 == 0)
+  CUtensorMap tg = tx;
+  int rlen = 0;
+#if G30_GX
+  g30::mk(&tg, x.data_ptr(), K, G30_MTOK, 8, G30_MTOK, false);
+  rlen = hdr.size(1);
+  TORCH_CHECK(hdr.dtype() == torch::kInt32 && hdr.size(0) == (N / 64) * G30_S && rlen <= G30_GXR && rlen % 4 == 0, "g30 GX: records");
+#endif
   static bool once = false;
   if (!once) { cudaFuncSetAttribute(g30::g30_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(N / 64, G30_S);
-  cfg.blockDim = dim3(320);
+  cfg.blockDim = dim3(G30_GX ? 320 + 32 * G30_GXN : 320);
   cfg.dynamicSmemBytes = smem;
   cfg.stream = at::cuda::getCurrentCUDAStream();
   cudaLaunchAttribute at[2];
@@ -6558,9 +6670,9 @@ void g30_gemm(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tenso
   at[1].id = cudaLaunchAttributeClusterDimension;
   at[1].val.clusterDim.x = 1; at[1].val.clusterDim.y = G30_S; at[1].val.clusterDim.z = 1;
   cfg.attrs = at; cfg.numAttrs = G30_S > 1 ? 2 : 1;
-  TORCH_CHECK(cudaLaunchKernelEx(&cfg, g30::g30_kernel, tx, (const uint8_t*)wp.data_ptr(), (__nv_bfloat16*)out.data_ptr(),
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, g30::g30_kernel, tx, tg, (const uint8_t*)wp.data_ptr(), (__nv_bfloat16*)out.data_ptr(),
                                  (const float2*)hdr.data_ptr(), N, K / 64,
-                                 (float)scale) == cudaSuccess, "g30 launch failed");
+                                 (float)scale, (const uint32_t*)hdr.data_ptr(), rlen) == cudaSuccess, "g30 launch failed");
 }
 
 #ifdef G30K_ON
@@ -7048,9 +7160,9 @@ BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 1
 DIAG30K = {}  # n5s4 diag done (check 6d9063a1: qkv kF132 only -0.2 us vs g30 S3; pooler/unpool g30k lose 1-3 us; NOTES n5s4)
 # n5s4 _diag30e only (print, no picks): g30 with the escape path compiled out (G30_ESC 0: WRONG output, timing only) vs g30,
 # m32, standalone and after a 3 us PDL predecessor = the H200 upper bound of a cheaper escape format.
-DIAG30E = {}  # n5s5 diag done (check b3ff96fb: G30_PL vs g30 m32 standalone -0.3/-0.4/-0.4, after pred -0.2/-0.2/-0.5 us qkv/pool/unp; was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}). n5s4 diag done (check 198e7084: escapes cost H200 qkv/pool/unp m32 1.2/1.1/0.6 us standalone, 1.5/2.0/2.0 after a pred; NOTES n5s4); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
+DIAG30E = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}  # n5s6: G30_GX vs g30 (print only). n5s5 diag done (check b3ff96fb: G30_PL vs g30 m32 standalone -0.3/-0.4/-0.4, after pred -0.2/-0.2/-0.5 us qkv/pool/unp; was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}). n5s4 diag done (check 198e7084: escapes cost H200 qkv/pool/unp m32 1.2/1.1/0.6 us standalone, 1.5/2.0/2.0 after a pred; NOTES n5s4); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 DIAG30E_M = 32
-DIAG30E_V = "G30_PL=0"  # n5s5: the variant timed against g30 ("noesc" column): escape keys in a per-thread smem list (0 = no escape path)
+DIAG30E_V = "G30_GX=1"  # n5s6: escapes out of the main loop (prepare() records, TMA x boxes, escape warps). n5s5 was "G30_PL=0": the variant timed against g30 ("noesc" column): escape keys in a per-thread smem list (0 = no escape path)
 DIAG30K_S = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 _G7 = sorted({c[1:6] for _, c in ROUTER_HL})
 _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for _, c in ROUTER_F32)) + "\n" +
@@ -7659,6 +7771,45 @@ def _tune(st, reps=25):
     return picks
 
 
+def _g30_gx_tables(hdr, K, S, gxc=64, gxr=512):
+    """hdr [N][ESC] float32 pairs (col bits, v) as built by _compress; returns int32 [N / 64 * S][rlen] on hdr's
+    device or None if a record does not fit (more than gxc distinct escape columns in one CTA: use the non-GX g30)."""
+    h = hdr.detach().cpu()
+    N, E = h.shape[0], h.shape[1]
+    cols = h[:, :, 0].contiguous().view(torch.int32)
+    vb = h[:, :, 1].contiguous().view(torch.int32)
+    valid = h[:, :, 1] != 2.0 ** -15
+    KS = K // 64
+    recs = []
+    for g in range(N // 64):
+        for y in range(S):
+            i0, i1 = 2 * (y * (KS // 2) // S), 2 * ((y + 1) * (KS // 2) // S)
+            c = cols[g * 64:(g + 1) * 64]
+            ok = valid[g * 64:(g + 1) * 64] & (c >= i0 * 64) & (c < i1 * 64)
+            rows, es = ok.nonzero(as_tuple=True)  # row-major = header order
+            cc = c[rows, es]
+            uc = torch.unique(cc)  # sorted
+            if len(uc) > gxc:
+                return None
+            slot = torch.searchsorted(uc, cc)
+            starts = [int((rows < 16 * w).sum()) for w in range(4)] + [len(rows)]
+            last = torch.ones_like(rows, dtype=torch.bool)
+            last[:-1] = rows[1:] != rows[:-1]
+            ent = torch.stack([slot | (rows << 16) | (last.int() << 22) | ((cc & 7) << 28), vb[g * 64:(g + 1) * 64][rows, es]], 1).reshape(-1)
+            recs.append((uc, starts, ent))
+    emax = max(len(r[2]) for r in recs)
+    rlen = (8 + gxc + emax + 3) // 4 * 4
+    if rlen > gxr:
+        return None
+    out = torch.zeros(len(recs), rlen, dtype=torch.int32)
+    for i, (uc, starts, ent) in enumerate(recs):
+        out[i, 0] = len(uc)
+        out[i, 1:6] = torch.tensor(starts, dtype=torch.int32)
+        out[i, 8:8 + len(uc)] = uc
+        out[i, 8 + gxc:8 + gxc + len(ent)] = ent
+    return out.to(hdr.device)
+
+
 def _diag30e(st):
     """Print only: g30 vs g30 without the escape path (wrong output, timing only), standalone and after a 3 us predecessor."""
     if _g19 is None:
@@ -7672,10 +7823,20 @@ def _diag30e(st):
             continue
         P_, hdr, scale = st[("g30", layer)]
         n, k = st[layer].shape
+        hb = _g30_gx_tables(hdr, k, S) if "G30_GX=1" in DIAG30E_V else hdr
+        if hb is None:
+            print(f"diag30e {layer}: GX records do not fit")
+            continue
         xs = torch.randn(m, k, generator=g, device="cuda").to(torch.bfloat16)
         x = xs.clone()
         out = torch.empty(m, n, dtype=torch.bfloat16, device="cuda")
-        fns = [lambda pdl: a.g30_gemm(x, P_, hdr, out, scale, pdl), lambda pdl: b.g30_gemm(x, P_, hdr, out, scale, pdl)]
+        ref = F.linear(x, st[layer]).float()
+        b.g30_gemm(x, P_, hb, out, scale, 0)
+        eb = ((out.float() - ref).norm() / ref.norm()).item()
+        a.g30_gemm(x, P_, hdr, out, scale, 0)
+        ea = ((out.float() - ref).norm() / ref.norm()).item()
+        print(f"diag30e {layer} m{m} S{S}: rel err g30 {ea:.2e} {DIAG30E_V} {eb:.2e}")
+        fns = [lambda pdl: a.g30_gemm(x, P_, hdr, out, scale, pdl), lambda pdl: b.g30_gemm(x, P_, hb, out, scale, pdl)]
         med0 = _graph_medians([lambda: None] + [lambda fn=fn: fn(0) for fn in fns] * 2)
         medp = _graph_medians([lambda: _g19.g19_pred(xs, x, 3000)] + [lambda fn=fn: (_g19.g19_pred(xs, x, 3000), fn(1)) for fn in fns] * 2)
         print(f"diag30e {layer} m{m} S{S}: standalone (+us over an empty graph {med0[0] * 1e3:.2f}) g30 "
