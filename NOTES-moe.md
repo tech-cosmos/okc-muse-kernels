@@ -2519,3 +2519,23 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   s15 inline producer was 2x slower in twm) or 12 warps + setmaxnreg (n4 note: ptxas budget follows the launch bound).
 - And even registers would not save DT: on s99 (no pair rows) it already loses +8..10 us (layout / moved gemm2 loop, n5s18),
   and DT spills at 224 too. Extra-group (16-token) lever stays CLOSED. Nothing to hand off.
+
+## n5s27 (2026-10-28 06:42Z - ~07:40Z): tk2f L2 row prefetch (PFL2) on the H200: DEAD; 1 moe check (DIAG 979cb0ea)
+- Hypothesis (from the n13/n5s15 stream probes: free-consumer 36-64 KB single copies beat 18 KB by ~6 us at d32, but the
+  real kernel loses with bigger smem stages): decouple DRAM request size from the smem stage with
+  cp.async.bulk.prefetch.L2 of whole 72 KB SQ rows (a row = 4 contiguous 18 KB stages; a CTA's rows of one expert are
+  contiguous), 1/2/3 rows ahead (p1/p2/p3), or 18 KB stage prefetches one row ahead (ps). DIAG-only (#define TK2F_PFL2K,
+  python TK2F_PFL2 -> moe_set_l2h2 + 10000 * d; cfg 204/84204 + PF 4096 | (d-1) << 28). Bitwise = sq on 60 routings.
+- H100 (tools/n5s24/ab.py, 3 seeds): p1 +4..7, p2 +6..11, ps +3..6 us; ncu DRAM bytes identical (85.0 / 368.2 MB at bs1/16),
+  so no extra traffic, only slower.
+- H200 DIAG 979cb0ea (e99123b + DIAG = 1; 2.2705x as a test run, never submit), MEAN us over 5 layer routings:
+            sq    p1    p2    p3    ps    sqb
+    d1     30.2  34.0  35.3  35.4  33.1  30.3
+    d16    63.9  73.3  75.2  79.3  71.6  63.8
+    d32    84.5  98.3  99.7 103.4  97.4  84.6
+    v1     64.0  71.8  73.4  75.6  70.4  64.5
+  => DEAD everywhere, worse with distance, and the 18 KB form loses LEAST: request size is not the lever; any HBM
+  traffic beyond tk2f's 72 KB/SM ring slows its stream (same as n5s15's deeper rings). Code kept, off (DIAG builds only).
+- Open question I could not settle: the free-consumer probe gains from 144 KB in flight, the real kernel loses from it.
+  So the consumers' own traffic (x/inter loads, y32 stores) or SM-side delivery, not DRAM, sets the rate with
+  consumers on. Not a build item without a new measurement idea.

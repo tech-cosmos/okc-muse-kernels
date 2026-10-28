@@ -1,22 +1,13 @@
 # STATE-moe
 
-## NOW (n5s25, 2026-10-28 06:55Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
+## NOW (n5s27, 2026-10-28 07:40Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
 - n5s15: tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps); bytes-in-flight lever closed.
 - n5s16: H200 ORACLE: the extra 8-token groups cost d16 4.0 / d32 7.7 us (tk2f fit 14.1 + 6.97 E + 4.4 X us).
 - n5s16-n5s18: EVERY 16-token shared-dequant form on mma.sync tk2f is DEAD: inlined (i-cache), noinline (ABI), tk2h merged
   (+4%/row), TK2S rolled smem-x (H200 +10%), n5s18 DT = pair rows in their own loop (built, bitwise, DIAG-only TK2DT):
   H100 d16 +8..20, d32 +23..29 us. Pair row ~= 2 one-group rows (REG cap 168 -> spills; x group 0 needs 64 regs) and the
   relocated gemm2 loop slows (+27% stall/instr). n5s17 code-layout rule: tools/n5s17/loop64k.py. NOTES n5s16-n5s18.
-- tk3 (wgmma decode consumer, B = x in smem, N16 for 2 groups in one pass) costed in n5s18, NOT recommended: warm-L2
-  (consumer-bound) H100 tools/n5s18/mb_warm.py, cycles per 9 KB stage: N8 596 / N16 634 / N32 695 = ~4.0 / 3.8 / 3.4 TB/s
-  consumer rate on 132 SMs, vs the HBM stream 4.06 and tk2f's own consumer ~6.3 TB/s per 8-token group (from the H200 fit's
-  4.4 us per extra group). => tk3 N16: 2-group expert 11.4 -> ~7.3 us, but every 1-group expert +0.3 us (consumer-bound
-  below HBM) and the microbench has no row/epilogue overhead: est. d32 ~-3..-5 net of layer's tk2h W3, d16 ~0. Too small for
-  a 2-4 session kernel. tk2f extra-group lever CLOSED; lane request to lead (COORD Requests n5s18).
-- n5s19: norm2/norm3 as a PDL secondary of tk2f (NORM2_PDL, off) DEAD on the H200 (138051ec: d1 +3.5, d16/d32/v1 +0.8..1.2 us).
-  No untried tk2f item left on my list; waiting for a lane answer (COORD Requests n5s18).
-- n5s20: audit only (NOTES n5s20): #1 now 2.685x; decode excess = fit's fixed 14.1 + 4.4/extra group, all pieces measured dead.
-  Gap to #1 is most likely big-M (proj's lane). Lane request refreshed (COORD Requests n5s20).
+- tk3 (wgmma N16 decode consumer) costed n5s18: est. d32 -3..-5, d16 ~0: not worth a 2-4 session kernel (NOTES n5s18).
 - Big-M (bs128/256, twm) is proj's lane now (LANE 7); moe reviews proj/twm* before layer integrates.
 - n5s21 (lead 04:50Z: moe = bs256): exact-N moe_hot (hot experts 65..128 tok padded to N128) H200 DIAG 43eb5326: N104 probe v32
   -2.3 us mean (~half the SM-time model) -> full exact-N ~-3.7 us < 5 us bar: not built. Probe HOT_NX/HOT_NXB kept off. Untested: board-only
@@ -25,14 +16,13 @@
   bs256 lane: no untried lever >= 5 us on my model (NOTES n5s22 list). Next: only a new structural idea, or a lead reassignment.
 - n5s23: moe_routegather latency fix (x row + ids batched before the scan; bitwise): H200 bs128 4.4->3.2, bs256 6.3->4.4 us;
   check d3761aa5 2.2641x, submit 4fb734c6 2.2703x = board best. Layer port tools/n5s23/patch_layer_rg.py (Handoff, untested in-layer).
-  NEXT idea: audit other small latency-bound kernels (moe_route, moe_norm/norm2 prologues, layer glue) for serial loads in loops.
-- n5s24: moe_norm2/moe_norm tw+ids batched up front (bitwise; main 725f39a): H200 check e3bd482e 2.2713x = noise, norm2 per kernel unchanged.
-  Small-kernel serial-load audit DONE (route/routegather/norm/norm2); nothing left there. proj/twm 3-WG self-declared dead.
 - n5s25: bs256 cost model (proj's H200 a763ccaf v32 timelines): HBM 156 + consumer excess ~21 (all per-weight levers dead) + drain 15-22
   (proj's KQ K-split covers T=256) + route/norm ~7. No moe bs256 build >= 5 us; lane question to lead (COORD Requests n5s25). 0 runs.
-- n5s26: DT pair rows without the REG cap: 168 is a HARDWARE cap at 288 threads (3 warps on one SMSP x 168 = 16K regs); DT at
-  __maxnreg__ 224 won't launch and still spills; DT loses +8..10 us even with no pair rows. DEAD (NOTES n5s26). 0 runs.
-- Checks 10-28: moe 11 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326, cefcc133, d3761aa5, e3bd482e), 2 submits (951c17e0, 4fb734c6); attention 0/20.
+- n5s19/20/24/26 DEAD (NOTES): norm2 as PDL secondary of tk2f (H200 d1 +3.5); norm2/norm ids batching (noise); DT pair rows w/o
+  REG cap (168 = HW cap at 288 threads). Decode excess = fit's fixed 14.1 + 4.4/extra group, every piece measured dead.
+- n5s27: tk2f L2 row prefetch (PFL2, DIAG-only, off) DEAD on the H200 (979cb0ea: d1 +3..5, d16 +8..15, d32 +13..19, v1 +6..12 us;
+  18 KB form loses least => request size is no lever; any HBM traffic beyond the 72 KB/SM ring slows tk2f). NOTES n5s27.
+- Checks 10-28: moe 12 of its 12 used (+979cb0ea n5s27); was: 11 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326, cefcc133, d3761aa5, e3bd482e), 2 submits (951c17e0, 4fb734c6); attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
