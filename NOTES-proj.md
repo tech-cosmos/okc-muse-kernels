@@ -2184,3 +2184,24 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   * TMA tile box whose inner start coordinate is not 16 B aligned -> ILLEGAL INSTRUCTION (UTMALDG): box at col & ~7, pick col & 7.
   * fixup walk on WG1 after the loop (+1.5 us on the tail); one escape warp (walk ~3-4 us, qkv +1.5); nanosleep before the walk worse.
 - Check 53639fe3: 1/20 checks 10-28.
+
+## n5s7 (2026-10-28 02:07-03:20Z, night5 session 7): G30_GX into the layer + GX in g30k (pooler T=32)
+- r-layer branch proj/g30gx152 5b39450 (= main 26ca733 v152 + g30_src.cu + layer.py GX wiring). proj/g30gx afc0c8b is
+  SUPERSEDED (a stray "# comment" mid-line in TUNE[32] swallowed 13 existing options; caught via falling opt_test counts).
+- layer.py: G30GX_CFG {(unpool,32),(o,32)} -> _g30gx_build (g30n defines + -DG30_GX=1), _g30_gx_tables (= dev/n5s6/gx.py),
+  _g30gx_prepare (twin of the g30n entry: same pack tensor, records as 3rd arg; checked vs F.linear); call site swaps the
+  g30n entry when _opt "g30gx:<key>" (o_pf still reads the same pack). G30KGX_CFG {(pooler,32)} -> _g30kgx_build (NS = min(NS,
+  G30KGX_NS = 8)), _g30k_gx_tables (= dev/n5s7/gxk.py), _g30kgx_prepare (shares the slab buffer), option "g30kgx:pooler".
+- g30k GX kernel (g30_src.cu, G30K_ON + G30_GX): kernel gets tmG + gtab/rlen; escape warps 10..13: record bulk copy before the
+  PDL wait, x boxes for all of the CTA's escape cols after it, then per segment s: (s>0: bar.sync 5) zero own corr slice, walk
+  entries of segment s, bar.arrive 3. WG1 per segment end: bar.sync 3, red = d + corr, bar.arrive 5 if not the last segment.
+  hdr/cand escape path compiled out under GX. Pooler records: G104 ncols max 63 (cap GXC 64; prepare falls back if it doesn't fit), <= 2 segments.
+- H100 standalone (dev/n5s7/gxkm.py, pooler m32, us standalone | after 3 us pred): G104 old 21.4-21.8 | 19.8-20.0, GX 22.1-23.1 |
+  19.3-19.5; G120 old 21.6-21.8 | 19.8-19.9, GX 22.5-23.7 | 20.0-20.5; m16 G104 tie (18.7-19.3 vs 18.8-19.7). One-hot bad 0.
+- H100 in-layer (tools/ab_flag.py, TUNE {}, d32, seeds 99/7, ABBA): g30n GX unpool+o: sl -0.3..-0.6, full -0.2..-0.6; d16 tie.
+  g30k GX NS 16: sl +1.3, full +1.3 (LOSES); NS 12: +1.0/+0.5; NS 8: sl -0.8..-1.0, full -0.6..-0.7 (WIN). Smem 221/206/190 KB:
+  above ~200 KB the side-stream router's CTAs cannot share the 104 pooler SMs. All three (NS 8), 3 seeds, GPU shared: sl -0.4..-0.7,
+  full -0.1..-0.4.
+- Cold prepare: each g30 variant is a separate ~39 s load_inline (host compile dominates; g30n/g30gx/g30k/g30kgx all 39 s);
+  4 extra builds -> 175-188 s, pool 12 workers no help; trimmed to 2 builds (T=32 only): 150.1 s vs v152 148.4 s.
+- 0 judge runs.

@@ -1,20 +1,18 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log (sessions in order, newest last)
-Updated 2026-10-28 02:25 UTC (night5 n5s6 = session 6). Lane: the layer's T>=16 GEMMs (proj board = test bed only).
-**G30_GX BUILT (dev/g30_src.cu -DG30_GX=1, off by default; records = dev/n5s6/gx.py = sub_template _g30_gx_tables)**: g30 escapes
-taken OUT of the main loop. prepare() builds per (64-row tile, K split) an int32 record (sorted escape cols, (slot,row,last,col&7,v)
-list); 4 extra "escape warps" (warps 10-13) bulk-copy it before the PDL wait, TMA x boxes {8 cols, MTOK} at each escape col after
-it, build an FP32 corr tile (red layout) while the consumers stream; WG1 writes red = d + corr. Main loop = the no-escape loop.
-One-hot exact (dev/n5s6/gxm.py), bench test 39/39, esc PASS. **H200 check 53639fe3 (acae6b8) 1.3608x, _diag30e GX vs g30, m32:
-after a 3 us PDL pred qkv 12.0->10.9, pooler 15.6->14.5, unpool 14.7->13.1..14.1 (-1.1 us/call); standalone qkv tie, pooler +1.0,
-unp +0.6.** H100 m16 after pred qkv -1.2, pool -0.3, unp -0.8..-1.1. So GX = a win for PDL-secondary g30 calls only (layer:
-unpool g30n T=16/32, o g30n T=32; pooler is g30k there = needs a GX port; qkv first op = standalone = tie: leave qkv on PL).
-Under GX the 3rd g30_gemm arg is the record tensor (int32 [N/64*S, rlen]) instead of hdr; None from _g30_gx_tables = use non-GX.
-Dead this session (NOTES n5s6): x gathers by the x producer per stage (starved warp, +4 us), any LSU/cp.async/local-memory load
-during the W stream (starved behind TMA: +7..18 us), in-kernel escape setup (+5 us), walk on WG1 at the end (+1.5 us).
+Updated 2026-10-28 03:20 UTC (night5 n5s7 = session 7). Lane: the layer's T>=16 GEMMs (proj board = test bed only).
+**n5s7: G30_GX handed to layer as r-layer branch proj/g30gx152 5b39450** (= layer main v152 + g30_src.cu + 5 TUNE[32] options:
+{g30gx:unpool}, {g30gx:o}, both, {g30kgx:pooler}, all three). NEW: GX inside g30k (layer T=32 pooler, stream-K FP32 slabs): one
+record per CTA (layer.py _g30k_gx_tables = dev/n5s7/gxk.py: header 24 words [ncols, nseg, 5 list starts per segment], cols at 24,
+entries at 24 + GXC), escape warps build segment s's corr while consumers stream, WG1 bar.sync 3 -> red = d + corr -> bar.arrive 5
+(corr free). One-hot bit-exact (dev/n5s7/gxkm.py). **GX g30k must build with x ring NS 8**: NS 16 = 221 KB smem -> side-stream
+router can't co-reside on the pooler SMs: in-layer +1.3 us (NS 12 +0.5..1.0), NS 8 (190 KB) sl -0.8..-1.0, full -0.6..-0.7 us.
+H100 in-layer (tools/ab_flag.py, TUNE {}, seeds 99/7): g30n GX unpool+o d32 sl -0.3..-0.6, full -0.2..-0.6. d16 tie -> T=16 GX
+dropped (each g30 variant = one ~39 s JIT; cold prepare 150.1 s vs v152 148.4). validate --quick ALL OK.
+Pitfall found: an edit leaving "# comment" mid-line in TUNE swallowed 13 layer options; diff TUNE dicts by AST after edits.
 **proj board best: submit eb166fc0 (34b7483) 1.3574x.** Checks 10-28: 1/20, scored 0/10.
-NEXT: (1) port GX to the layer: r-layer branch proj/g30gx = layer main + this g30_src.cu + records built next to pack30 for the
-g30n unpool/o calls as TUNE options {g30gx:unpool}/{g30gx:o} at T=16/32; H100 in-layer A/B + validate + cold prepare, Handoff.
-(2) GX in g30k (layer pooler at T=16/32). (3) GX at T=8 (MTOK 8 o) and T=128 (smem: gbuf 64 x 128 x 16 B too big; cap GXC 16?).
+NEXT: (1) watch the layer's next check tune lines for g30gx/g30kgx at T=32 (H200 decides; on H200 GX was -1.1 us/call).
+(2) GX at T=8 (o g30n MTOK 8) and T=128 (smem: gbuf too big; GXC 16-32 or smaller rings). (3) g30k GX at T=16 only if the H200
+tuner picks g30k:pooler at T=16. proj dev/g30_src.cu lacks layer's MTOK-8 hunk and g30k GX: the branch's g30_src.cu is the superset.
 Older session headers (n5s1-n5s5, s46-s100): NOTES-proj.md.
 ## Board
 - **Best: submit eb166fc0 = 34b7483, 1.3574x** (n5s5, G30_PL). Before: a0168544 = ffb1ae8, 1.3543x (s100b, g30 picks + m32 rings 16/16). Before: a12513ed 1.3483x. Before: 1ff4721e87c844c2 = ca7e557, 1.3233x (s56; its check ed67748e 1.3277). Before: 3810db09 (2480c53) 1.3110x (s16: gemv14 qkv m8 without split-K; its check a9b13469 1.3161).
