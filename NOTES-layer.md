@@ -2392,3 +2392,22 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   d32 147.2/302.1 (d16/d32 sl best ever), v1 109.0/121.2, v16 257.3/353.6, v32 343.8/519.9. d1 sl +2 us / v32 +8..13 vs 3e3b9fd3 =
   run noise: the H200 tuner timed the same T=1 config (default 69.4 here vs 70.2 in 60f02748) and T=256 options tie within 0.5 us.
   Picks: mostly default (T=16 g30n unpool(+qkv), T=128 sl ltalt:pooler 2, T=256 sl lt all). Not submitted (< 2.1580x). main = v155.
+
+## night5 s11 (2026-10-28 03:27Z-, okc-night5 session 11): v156 = v155 + cold-prepare cuts (split-compile, pool 16, dead g30 builds)
+- Board at start: #35 at 2.1580x (3e3b9fd3); #1 pjmullin3 2.399x, #10 2.254x, #20 2.207x. 10-28 budget: 13 checks / 9 submits.
+- Re-audit (no new lever found): H200 cd6b3ba4 profiles + H100 timelines (main v155, seed 99). Boundary after its producer is a
+  stable ~2.8 us at T=32 (3 replays sl/full; a single 4.9 us sample was noise). H100 vs H200 tk2f per load is not comparable
+  (local seed-99 routings differ: d16 10 experts here vs ~6 in the judge's). Expert scale bytes: entropy 3.71 bits (32 distinct
+  E4M3 codes 95..126), FP4 codes 4.00 bits: the only compressible part is the scales (= moe's TK2F_S6, already dead on H200).
+- Cold prepare anatomy (fresh caches, per-build start/end stamps via a timed copy of _PREBUILD): _moe__lib alone = 117.5 s
+  serial (99.9 in a 2nd run) and was the critical path (122.5 s in the 8-thread pool); 13 other builds ~41 s each in 2-3 waves.
+  * nvcc --split-compile=0 on _moe__lib: 117.5 -> 65-67 s alone. SASS: 115 kernels, same set; 63 identical up to shared-var
+    offsets, others +-16..48 instrs (scheduling/shared address codegen). H100 ab_files (TUNE = {} both, A B B A x 4 rounds, all 12
+    shapes): tie (A/B avg d1 85.9/85.9, d16 192.0/191.6 | 295.4/294.8, d32 189.1/188.3 | 415.8/415.2, v1 142.4/142.3 | 157.7/156.9,
+    v16 302.6/304.1 | 451.2/449.1, v32 377.3/376.8 | 631.0/630.6). files_eq A vs B = the A vs A control (d16/d32 1-ulp nondeterminism).
+    Also on _g10_lib (NVCC_SPLIT, layer.py).
+  * dead builds dropped: g30n pooler T=32 (1,20,8) / T=16, all G30_GX g30n builds (G30GX_CFG = set(): no TUNE option since v155),
+    g30k pooler G 120 and T=16. 16 -> 12 layer builds (+ 4 attention builds on the same pool).
+  * _BUILD_POOL 8 -> 16 threads (19 builds incl. attention): builds done 122.9 -> 106 s (24 threads: 98 s; kept 16 for judge RAM).
+  * cold prepare (prep_time.py): v155 142.2 s (builds 125.6 + tune 15.7) -> v156 131.5 s (builds 103.8 + tune 25.2: GPU shared).
+- v156 validate --quick (prep skipped, measured above): ALL OK: test 13/13, scored 0/12, opt 0/42, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/60.

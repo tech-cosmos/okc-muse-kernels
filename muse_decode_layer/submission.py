@@ -37,7 +37,8 @@ try:
 except ImportError:
     HAVE_SGL = False
 import concurrent.futures as _cf
-_BUILD_POOL = _cf.ThreadPoolExecutor(8)
+_BUILD_POOL = _cf.ThreadPoolExecutor(16)
+NVCC_SPLIT = ["--split-compile=0"]
 class _LazyBuild:
     def __init__(self, fut, name):
         self.fut, self.name = fut, name
@@ -13986,19 +13987,19 @@ def _pr32_prepare(state):
         state["pr32"][m] = (lib, e[1], rw)
 G30_TRIG = True
 _G30 = {}
-G30N_CFG = {("unpool", 32): (1, 16, 16), ("pooler", 32): (1, 20, 8), ("qkv_gate", 32): (3, 16, 16),
-            ("unpool", 16): (1, 16, 16), ("pooler", 16): (1, 16, 16), ("qkv_gate", 16): (3, 16, 16),
+G30N_CFG = {("unpool", 32): (1, 16, 16), ("qkv_gate", 32): (3, 16, 16),
+            ("unpool", 16): (1, 16, 16), ("qkv_gate", 16): (3, 16, 16),
             ("o", 32): (1, 16, 16), ("o", 16): (1, 16, 16),
             ("o", 8): (1, 8, 8)}
 G30N_DEFAULT_ON = set()
-G30GX_CFG = {("unpool", 32), ("o", 32), ("o", 16)}
+G30GX_CFG = set()
 G30GX_DEFAULT_ON = set()
 _G30GX = {}
 G30KGX_CFG = {("pooler", 32)}
 G30KGX_NS = 8
 _G30KGX = {}
 _G30N = {}
-G30K_CFG = {("pooler", 32): ((104, 120), 16, 16), ("pooler", 16): ((104,), 16, 16)}
+G30K_CFG = {("pooler", 32): ((104,), 16, 16)}
 G30K_DEFAULT = {}
 _G30K = {}
 G27_CFG = {("o", 16): (16, 4, 4, 108, 4, 0), ("o", 32): (32, 4, 4, 108, 4, 0)}
@@ -15273,7 +15274,7 @@ def _g10_lib():
                             + "void ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t);\n",
                 cuda_sources=src, functions=["ob8_gemm", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
                 + (["pr8_launch"] if _GPR1_SRC is not None and _GPR8_SRC is not None else []),
-                extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
+                extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3", *NVCC_SPLIT], verbose=False)
         except Exception as e:
             print("layer: gemv10/12 build failed, cuBLAS:", e)
     return _G10["lib"]
@@ -15770,7 +15771,7 @@ def _moe__lib():
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
                                            "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch", "moe_routegathern_launch",
                                            "moe_set_hot", "moe_hot_launch"],
-                                extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
+                                extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3", *NVCC_SPLIT],
                                 extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
 _N2U_SRC = r'''namespace n2u {

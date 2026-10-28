@@ -43,7 +43,11 @@ except ImportError:
 # joins them (cold H100: serial import 97 s + prepare 217 s). Each build has its own name/dir; a build that fails on the
 # pool is retried serially in prepare (attention: Triton fallback as before).
 import concurrent.futures as _cf
-_BUILD_POOL = _cf.ThreadPoolExecutor(8)
+_BUILD_POOL = _cf.ThreadPoolExecutor(16)  # n5s11: was 8 (19 builds incl. attention = 3 waves of ~41 s; 16: H100 builds 123 -> 106 s, 24: 98 s)
+# n5s11: nvcc --split-compile=0 (cicc/ptxas per kernel on all host cores) for the two many-kernel libs: cold moe lib alone
+# 117.5 -> 65-67 s (the prepare critical path). SASS differs only in scheduling / shared addresses; H100 ab_files A B B A x 4
+# rounds: all 12 scored shapes tie; outputs = the A-vs-A control (the known d16/d32 1-ulp nondeterminism).
+NVCC_SPLIT = ["--split-compile=0"]
 
 
 class _LazyBuild:
@@ -843,8 +847,8 @@ _G30 = {}
 # proj s96 g30n (proj s95, r-proj dev/s95: G30_MTOK 32/16 + G30_S cluster split-K, DSMEM reduce in rank 0, BF16 out): T=16/32
 # unpool/pooler/qkv on g30. One build per (MTOK, S, NW, NS); NW >= 16 keeps 1 CTA/SM (2 CTAs/SM under PDL +5 us). H100 standalone
 # after a 3 us PDL pred vs g24: d32 unp 17.3 vs 20.3, pool 18.9 vs 21.5, qkv 12.3 vs 13.4; d16 unp 17.2 vs 18.7, pool 18.4 vs 18.75.
-G30N_CFG = {("unpool", 32): (1, 16, 16), ("pooler", 32): (1, 20, 8), ("qkv_gate", 32): (3, 16, 16),
-            ("unpool", 16): (1, 16, 16), ("pooler", 16): (1, 16, 16), ("qkv_gate", 16): (3, 16, 16),
+G30N_CFG = {("unpool", 32): (1, 16, 16), ("qkv_gate", 32): (3, 16, 16),  # n5s11: pooler 32 (1, 20, 8) / 16 dropped (no TUNE option)
+            ("unpool", 16): (1, 16, 16), ("qkv_gate", 16): (3, 16, 16),
             ("o", 32): (1, 16, 16), ("o", 16): (1, 16, 16),  # (S, NW, NS); n5s4: o (K 1024: each CTA's W share ~ its ring)
             ("o", 8): (1, 8, 8)}  # n5s5: G30_MTOK 8 (m64n8k16), T=8 o (v1); NW 8 (half the W ring) so CTAs co-reside with vtk
 G30N_DEFAULT_ON = set()  # (key, T) on without TUNE; otherwise TUNE option "g30n:<key>"
@@ -852,7 +856,7 @@ G30N_DEFAULT_ON = set()  # (key, T) on without TUNE; otherwise TUNE option "g30n
 # (_g30_gx_tables), 4 escape warps TMA x boxes at the escape cols + an FP32 corr tile, WG1 writes d + corr. One-hot exact.
 # H200 (proj check 53639fe3, m32 after a 3 us PDL pred): qkv 12.0->10.9, pooler 15.6->14.5, unpool 14.7->13.1..14.1 us;
 # standalone tie/+0.6..1.0 (so not qkv, the graph's first op). TUNE option "g30gx:<key>" (with g30n:<key> on).
-G30GX_CFG = {("unpool", 32), ("o", 32), ("o", 16)}  # T=16 unpool dropped (H100 tie; cold prepare)
+G30GX_CFG = set()  # n5s11: was {("unpool", 32), ("o", 32), ("o", 16)}: no TUNE option since v155 (H200 ties), builds dropped
 G30GX_DEFAULT_ON = set()
 _G30GX = {}
 # proj n5s7: the same in g30k (pooler T=16/32): one record per CTA (_g30k_gx_tables), the escape warps build each segment's
@@ -874,7 +878,7 @@ _G30N = {}
 # H100 in-layer (TUNE off, seeds 99/7, 4 rounds, d32 vs g24 pooler): G 80 +1, 88 -0.2..0.8, 96 -0.6..1.7, 104 -1.1..2.0 (sl) /
 # -1.5..1.7 (full), 112 -0.5..+0.8, 120/132 +14 us (the side-stream router starves). d16 G108: sl +2.4, full -0.3..1.2.
 # TUNE option "g30k:<key>": <G> (one prepared entry per G in the tuple; the H200's router is ~3x faster than the H100's).
-G30K_CFG = {("pooler", 32): ((104, 120), 16, 16), ("pooler", 16): ((104,), 16, 16)}  # (key, T) -> (grids, NW, NS)
+G30K_CFG = {("pooler", 32): ((104,), 16, 16)}  # (key, T) -> (grids, NW, NS). n5s11: G 120 and T=16 dropped (no TUNE option)
 G30K_DEFAULT = {}  # (key, T) -> G used without TUNE (0 = off)
 # proj s100: T=32 rings NW16/NS16 (was 20/8) for g30n unpool and g30k pooler: H200 standalone (proj check 7ad5148c) unp m32
 # 19.42 vs 21.12, g30n S2 pool m32 19.97 vs 21.86 us; H100 in-layer tie (r-proj dev/s100/ringab.py); GEMM bitwise identical.
@@ -1274,7 +1278,7 @@ def _g10_lib():
                             + "void ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t);\n",
                 cuda_sources=src, functions=["ob8_gemm", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
                 + (["pr8_launch"] if _GPR1_SRC is not None and _GPR8_SRC is not None else []),
-                extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
+                extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3", *NVCC_SPLIT], verbose=False)
         except Exception as e:  # noqa: BLE001
             print("layer: gemv10/12 build failed, cuBLAS:", e)
     return _G10["lib"]
@@ -1824,7 +1828,7 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
                                            "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch", "moe_routegathern_launch",
                                            "moe_set_hot", "moe_hot_launch"],
-                                extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
+                                extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3", *NVCC_SPLIT],
                                 extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
 
