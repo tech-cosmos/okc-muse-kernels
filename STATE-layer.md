@@ -10,75 +10,7 @@ night5 s6: **main = v147** = v146 (v145 + proj G30_PL) + build.py: Python commen
   10-28 checks: 4937830f v145 2.0907x, 133068b8 v146 **2.1097x** (d32 sl 152.2 / full 295.5 vs board 164.3/308.0: g30k104 + g30n unp+qkv
   picked at T=32 sl+full in both; v32 noise +11..38). Not submitted (1.13% < board; rule needs >= 2.1126x). Budget 10-28: 18 checks / 10 submits.
   Dead this session: T=8 pooler on g30k MTOK 8 + side router (no pr8): H100 v1 +5 us (router starves beside it).
-night5 s5: **main = v144** = v143 + g30n G30_MTOK 8 (wgmma m64n8k16) as TUNE[8] option {g30n:o} (T=8 o, NW8/NS8; default off).
-  H100 ab_flag v1 sl -0.3..-0.8, full +1.0..1.6 us (wash: pr8 is v1's long pole, o is off the critical path; NOTES n5s5).
-  validate --quick ALL OK, cold 155.6 s. **00:00Z: check 1 = v144** (same plan as below; also read 'layer tune T=8' g30n:o).
-night5 s4: main was v143; **main = v143** = v142 + moe PR_SA pr32 (r-moe 11d49b7 pr32_src.cu; option only). v142 = v141 + **g30n o** in TUNE_BASE at T=32 sl/full
-  and T=16 full (12-bit o, K 1024: each CTA's W share ~ its ring, filled under PDL before the attention ends; o_pf -> g30 pack);
-  H100 ab_flag d32 sl -1.5..-1.9, full -1.8..-2.2, d16 full -2.4 us (d16 sl +0.8 vs g27: option only). Escapes {g30n:o False}(+lt:o).
-  Dead: qkv g30k stream-K on 132 CTAs (standalone tie); _combine_hb early trigger (CB_HB_TRIG, -0.3 noise, inert False).
-  **00:00Z: check 1 = v143**; submit if > 2.1339x or per the 09:28Z rule; read 'layer tune T=16/32' lines (g30n:o False must lose;
-  paste g30k/g30n/pr32 lines to proj/moe).
-night5 s3: main = v141 = v140 + proj/g30k139 deb4a62 (g30k stream-K pooler, g30n qkv_gate actually built (uneven S3), moe pr32 one-launch
-  pooler+router+routing; all TUNE options at T=16/32, off by default). validate --quick ALL OK (opt 0/344, fuzz 0/508), cold prepare 153.6 s.
-  H100 tuner T=32 sl: default 220.3, g30k104+g30n unp+qkv 215.0 (picked); full 439.8 vs 435.1 (g30k104+unp). T=16: ties (+-1).
-  **00:00Z: check 1 = v141** (covers v140 stream fix + g30k/g30n/pr32): submit if > 2.1339x or per the 09:28Z rule; paste the
-  'layer tune T=16/32' g30k/g30n/pr32 lines into NOTES and to moe (pr32) / proj (g30k).
-night5 s2: **main = v140** = v139 + OWN STREAMS: side_stream/hi_stream were torch pool streams; the harness's capture stream (pool,
-  round-robin 32) could BE our side stream, so the side branch serialized (H100 first capture after prepare d16 sl 201.6 vs 192.2 us;
-  also every 32nd tuner candidate). Now cudaStreamCreateWithPriority via ctypes -> ExternalStream (NOTES n5s2). validate ALL OK, cold 151.4 s.
-  **00:00Z: check 1 = v140**; submit if > 2.1339x or per the 09:28Z rule. moe asks: paste the 'layer tune T=16/32' pr32 lines to moe once pr32 is in a bundle.
-  (v139 = v138 + ZR (g30n unpool -> the pre-expert rmsnorm zeroes the G24X qkv buffer: no trailing zero_
-  kernel; H100 d32 sl -1.3 us both seeds) + v138's g30n:qkv_gate TUNE options removed (no-ops: S=3 needs K % 384). validate --quick ALL OK, cold 166.5 s.
-  )
-night5 s1 (2026-10-27 19:4xZ): **main = v138** = v137 + TUNE[16] {g30n:unpool}/{g30n:qkv_gate}/{both}, TUNE[32] {g30n:qkv_gate}/{unp+qkv}
-  (no new builds). validate --quick ALL OK on night5 (v137 cold 137.7 s, v138 cold 144.3 s). H100 tuner: T=16 ties, T=32 sl picks unp+qkv -2.0 us.
-  **00:00Z: check 1 = v138**; read 'layer tune T=16/T=32' g30n entries; submit if > 2.1339x or per the 09:28Z rule.
-  Judge profiles are NOT in git: recover any job's with `okc status <full 16-hex id> --json` (writes profiles/ into cwd); board run 35dd53d0d33246a1 restored.
-s107: **main = v137** = v136 + proj/g30n 453790c (TUNE[32] option {g30n:unpool: True}, off by default; proj H100 d32 unpool -1.2..-2.1 us, tuner picks it at sl;
-  proj validate ALL OK cold 122.3 s; my re-validate ALL OK, cold 125.3 s). **00:00Z: check 1 = v137** (one check covers v136 + g30n: read 'layer tune T=32' g30n lines;
-  if the H200 tuner picks g30n:unpool at full too, consider moving it into TUNE_BASE[(32,*)]). Submit if > 2.1339x or per the 09:28Z rule.
-s106: no build (sandbox moves ~18:00Z; checks 20/20; proj claimed the g30 T=16/32 port, branch proj/g30n: qkv/pool/unp/o, H100 per call d32 -1.1/-2.6/-2.9/-1.3, d16 -0.5/-0.4/-1.5 us vs g24).
-  **00:00Z plan:** check 1 = main v136 (submit if > 2.1339x, or per the 09:28Z rule). check 2 = v136 + proj/g30n once proj's validate is ALL OK
-  (read 'layer tune T=16/T=32' g30 lines; d32 is the target, ~-8 us/layer H100 = ~+0.4%). Before merging: cold prepare <= 200 s (2nd g30 lib).
-s105: one-launch pooler+router g30 DEAD (H100: S2 + any router rows = 136 CTAs = 2 waves 43.7 us; S3 33.8, S1 37.0 vs cuBLAS FR 29.3; NOTES s105). Queue empty. main = v136. 0 runs.
-s104: **main = v136** = v135 + proj g30_sort + G30_PRE (proj/g30pre 88ba088); validate --quick ALL OK, cold 117.8 s; H100 v16 tie (bitwise equal). Lead 16:45Z (2) qkv/FR-pooler g30 = s101/s102 DEAD; only one-launch pooler+router g30 left (<= -4 us H100; router lo rows do not 12-bit compress: 18 esc/row, needs raw BF16 stages; queued). **First check after 00:00Z = v136.** 0 runs.
-s103: no build (SMEM-resident T=1 pooler preload dead on paper: csl latency contention, NOTES s103). Board #30. 0 runs.
-s102: T=128 pooler on split-K g30 slabs (summed in the rmsnorm) + separate router: H100 v16 +7..17 us, DEAD (NOTES s102; dev/s102_g30sp.patch). Lead item (2) closed. main = v135 unchanged. 0 runs.
-s101: qkv on g30 at T=128 (uneven split-K S3 + ticket reduce, dev/s101_g30split.cu, bit-exact) standalone 21.4 vs cuBLAS 20.0 us, in-layer v16 +0.1..4.1 us: DEAD (reduce chain ~5 us; NOTES s101). main unchanged = v135. 0 runs.
-s100: **main = v135** = v134 + g30 (g30_src.cu: T=128 unpool on the 12-bit wgmma GEMM, proj s91 in-fragment escape patch, PDL + G30_TRIG) in TUNE_BASE[128]; TUNE[128] escape hatches {g30:unpool False}, + {g30:o True} options. H100 standalone 22.4 vs cuBLAS 25.6 us, bit-exact (dev/s100_g30exact.py); in-layer ab_flag v16 sl -4.1..-5.2, full -4.5..-5.5 us, G30_TRIG -0.6..-1.5 more (~+0.3% total if it holds on the H200). T=256 form DEAD (per-SM x ingest). validate --quick ALL OK, cold 119.7 s. **First check after 00:00Z = v135**: read 'layer tune T=128' lines (g30:unpool False must lose).
-s99: lead 13:30Z item (2) BUILT standalone: dev/s99_g30.cu = 12-bit-W wgmma GEMM at T=128 (W DEC3-decoded into register A-fragments, x TMA, split W/x rings). H100: unp 21.6 vs cuBLAS 25.7 us, pool S2 25.4 vs 26.5; x-latency/ingress-bound, not HBM (multicast, K-rotation, 128-row CTAs all measured no better: NOTES s99). Escapes + integration not done; worth ~0.3% only if it holds on the H200. 0 runs.
-s98: T=128 split-K bound for moe's xr (NOTES s98): FP32 red.add ~2.1 TB/s (FR T128 ~17 us of reds; DSMEM cluster reduce no faster); xr = 44 vs cuBLAS 29 us, red-free 27.5: dead unless red volume /4. 0 runs.
-s97: plateau, no build, 0 runs (e4m3-cvt dequant re-derived = moe dead end). s96: s95's g24 m32 M-split idea measured DEAD (H100 consumer oracle: 2x warps at m16 only -2.4%, split would double the decode; NOTES s96). s95: no build (plateau). s94: **main = v134** (566828e) = v133 + proj/qf35 (moe s35 d1-full qf + proj s68 TUNE[128] ltalt:pooler; proj full validate ALL OK, cold 116.5 s). First check after 00:00Z = v134.
-s93: no build (plateau re-check, NOTES s93: d32 g24 pooler+unpool ~2.0 TB/s = biggest non-expert gap, proj-closed). s92: no build; verify-gap audit (NOTES s92): twm dq-bound ~57/80 us above stream rate at v16/v32 (~6.6% weighted) = biggest gap to #1, closed lane; all else <= ~1%.
-s91: **main = v133** = v132 + TUNE[8] {cslpw, pr8_npf 206/220/112} (H200 picks pr8 bulk-PF depth; no new compile; validate ALL OK incl. fuzz, cold 118.5 s). First check after 00:00Z: main v133; read 'layer tune T=8' pr8_npf lines.
-s90: main v132 + proj stream_fuzz tool (validate step fuzz): full fuzz 0/1462 bad. 0 judge runs.
-s89: **main = v132** = v131 + moe s33 verify-1 full attention spec=True (H200 standalone -0.65 us, H100 in-layer ~-0.4; validate
---quick ALL OK, cold 118.9 s). proj/attn31 stack = H100 tie, left out (NOTES s89). First check after 00:00Z: main v132.
-s88: main was v131 = v130 + pr8 template generalized (light 512-thr / x-ring configs, none compiled). Light pr8 and
-OB8+light pr8 measured DEAD on H100 (NOTES s88): pr8 ends at the same time whatever precedes it; boundary already hidden.
-pr8's stream rate (H200 ~17 us after bnd vs 13.7 floor) was already worked by proj s36-s38/s80 (PF, bulk/2nd-wave prefetch,
-RGI, stealing bound ~2 us): no lever > ~1 us. First check after 00:00Z: main v131 + any handoff bundle. validate --quick ALL OK, cold 116.8 s. 0 judge runs.
-s87: main = v130 = v129 minus all {pr1: False} TUNE[8] options (lead 11:50Z: never picked on 22 H200 logs incl. board run
-35dd53d0, +1.7..5.8 us; board run clean, no withdraw). validate --quick ALL OK, nu8_race 0/180, cold prepare 147.8 s. 0 judge runs.
-First check after 00:00Z: main v130 + any proj bundle (light pr1/pr8 asked, COORD Requests s87).
-s86: main = v129 = v128 + fix of a latent race in the non-default T=8 {pr1: False} path (nu8d rmsnorm read side-stream
-local_ids before the join; old main failed 7/30 seeds there; tuner never picked it) + inert OB8 code. Lead 10:50Z lane (a) built
-and MEASURED DEAD on H100: OB8 (T=8 o GEMM + first boundary in its epilogue, grid barrier, ob8_src.cu) v1 sl +2.2..2.5, full
-+0.2..0.6 us: pr8/pr1 fill a whole SM (1024 thr x 64 regs) so they cannot ramp beside o blocks; the separate 16-program boundary
-hides pr8's W ramp, a barrier exposes it. T=1 analogue closed by the same mechanism (+ PR1_BND s74). NOTES s86. 0 judge runs.
-Only open form: a lighter pr1/pr8 (<= 512 thr) that co-resides with o (proj redesign; ask under Requests).
-s85: main = v128 (536adfd) = v127 + moe s31 verify-32 sliding 2-CTA cluster nvs (attn_src _NVSCL, TUNE nvscl default on;
-H100 v32 sl -1.1, H200 tuner -0.9 us). Check 940a4fca 2.0943x (noise; not submitted, < 1% rule). Budget 10-27: 0 checks / 4 submits.
-Lane question to the lead still open (Requests s84). tools/attn_probe.py (proj) now on main: run --only=<shape> --passes=0 after attention changes.
-
-CLOSED lanes (measured): tk2f (s81 H200 diag, <= 0.9% unreachable), full attention in-layer (s84, ~0.15%), T<=8 glue/tail
-(s78), o+bnd+pr fusion T=1/T=8 (s86), light pr8 (s88). Remaining open: moe/proj handoffs (attention csl/vtk/nvs ports), lighter pr1/pr8.
-
-Prepare-time rule: the judge fails prepare > 300 s. Measure cold with tools/prep_time.py (fresh TORCH_EXTENSIONS_DIR +
-TRITON_CACHE_DIR) after any build/tuner change; keep <= 200 s. New load_inline builds must go on _BUILD_POOL (see _PREBUILD).
-Judge noise dominates: identical-ish code 2.04-2.12x across checks; per-shape T=32 moves 5-10%.
-
+Older session summaries (night5 s1-s5, s85-s107): NOTES-layer.md.
 
 ## Per-load H200 us vs the s12 floor (board run 19ebde23 = v108; lead 05:07Z request; s74)
 Score %/us = gain in total score per us saved on that layer type (geomean of 6 loads x (46 sl + 16 full)).
@@ -94,22 +26,14 @@ v1 54-64; twq/twm+hot v16 169-186, v32 217+114 us); full attention _gd_full d16 
 floor per ~/attn STATE); g24 pooler+unpool d16 35, d32 48; pr1 17.3 (d1). Layer glue (bnd, routing, norms) <= ~10%.
 Judge noise: one shape moves up to 10% between runs of the same code (v108: d32 full 291 vs 327 us).
 
-## NEXT
-00. (s79: still no answer, no handoffs; see NOTES s79) (s78) Layer-own structural items re-bounded (NOTES s78): T<=8 prologue fusion ~0, persistent T<=8 tail <= ~0.5%,
-    T=1 o+bnd+pr1 megakernel <= ~0.25% (o/csl window has no spare HBM). Waiting for the lead's lane decision (COORD Requests s78).
-0. (s77) Lead 06:41Z: up to 4 of the 10-27 checks go to moe as in-layer DIAG bundles (watch Handoffs for "moe DIAG for layer"; run on main v124, copy the tuner lines to moe). Don't spend checks on tuner-option ties.
-   Only unbuilt layer item: T=1 o+bnd+pr1 megakernel (bound ~-3 us d1 = ~+0.5%, multi-session, NOTES s45/s61/s74).
-1. Integrate new moe/proj Handoffs on top of main (v111) (stack several), H100 ab_flag, tests (bench test, replay_test, route_judge,
-   cold compile < ~5.5 min), then check; submit only if the check beats 2.0860x.
-2. Weakest ratios on the board run: d32 sl 1.589, v16 sl 1.923, d16 sl 1.976: experts (tk2f/twm) are moe's lane; ask moe.
-3. okc check can exceed a 600 s tool timeout: run it in the background, poll `okc jobs`, read with `okc status <job> --json`.
-
-Mains v71-v88 (older, H100-validated): NOTES s32-s44.
-
-s19-s23 (v48-v55): generic prepare() tuner `TUNE` (layer.py): per (T, sliding/full) it times whole-layer graph replays of
-option sets on synthetic inputs (shapes only) and keeps the fastest in state["tune"]; `_opt()` reads it at trace time.
-Options: g19:<key>, lt:<key>, ltalt:<key>, g10alt/g13alt/g14alt:<key> (1-based `_ALTS` index), pr1, pr1_npf, pr1_rb,
-pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Defaults = v45 (checked 1.9634x).
+## NEXT (n5s7)
+Plateau: every kernel-level lever in NOTES s45-n5s7 is measured or bounded (dead-ends below + NOTES). H200 judge noise
+(+-1.5% total; the tuner's own T=16 sl default moved 162 -> 180 us between nodes) hides < 2% changes: decide on H100
+interleaved A/Bs (tools/ab_flag.py), confirm on a check. Submit only > 2.1339x, or per the 09:28Z rule (>= 2.1126x +
+per-shape evidence). Open items, biggest first (none started):
+1. o+bnd+pr1 megakernel at T=1 (bound ~-3 us d1 = ~+0.5%; NOTES s45/s61/s74; moe n5s9 audit: post-attention chain <= 3-4.5 us).
+2. Any new Handoff from moe (attention lane) / proj: port as a TUNE option, validate, bundle into one check.
+T=16: every g30 option ties on 3 H200 checks (f824b925, 133068b8, 4937830f): don't add more g30 work at T=16.
 
 ## Board
 - Best scored = see top (19ebde23 v108 2.0860x). Older bests: 703d3a7e v70 1.9954x, 371a17ee v42 1.9558x (NOTES s32/s27).
@@ -149,30 +73,7 @@ pr1_pf, kv_pf. Every option was forced and passed scored + replay tests. Default
   (sub_v15/v16 ...): regenerate from git. Flags kept OFF (dead, s5): TW_TOKENS, TK2_PDL13/2, ROUTER_AFTER_POOLER,
   POOLER_HI_PRIORITY, ROUTER_L2_PF_TOKENS.
 
-## Next (ranked)
--4. (s64) d32 sliding attention: CLOSED. csl NC 2 (one wave at B32) loses to nds+combine (18.1 vs 17.4 us); real-input gather
-   floor 12.3 (tools/gather_real.py) but nds is 14.0 us even fully L2-warm (pipeline-latency-bound): K/V L2 prefetch <= ~2 us,
-   nds+combine fusion <= ~1-1.5 us at d32 sl (<= 0.1% each): not built. NOTES s64, dev/csl_nc2_s64.patch.
--3. (s15) Watch Handoffs: proj is building g19 mode 3 (BF16 out, per-tile tickets) for qkv T=16/32 (drops v44's 1.2 us
-   cast at d16; m32 lost on H100 so far) and was asked for an M=8 g19 (T=8 qkv: g14 m8 is issue-bound, 13.0 us H200 vs
-   g19 m16 10.6). moe works big-M (v16/v32 twm) on its calibrated H200 proxy (H100 with the expert grid capped at 88,
-   x0.73): TRUST moe's proxy over full-grid H100 for expert kernels (it reversed the twm order call, v44 uses {}).
--2. s14 state of the tail: d1 n2u ends ~5 us after the last tk2f CTA (PDL release ~0.9 + y32 L2 trip + reduce) + the
-   boundary ~2 us; v1 tail 11.6 us H100 (norm3 3.7, g17 4.6, boundary 3.3). s15: the cluster fusion n2u8 and the
-   cluster boundary bndc are DEAD (NOTES s15): the tail needs a non-cluster idea or nothing.
--1. Layer-side gap at T=16/32 is GEMMs: H200 d32 qkv cuBLAS 12.8 + splitK reduce 1.9, o 7.1 (cuBLAS); pooler/unpool now
-   g19 (v44). The experts (tk2f d16/d32, twm v16/v32) are 40-55% of every T>=16 shape: moe's lane.
-0. Re-copy procedure (moe/proj): `git -C ~/r-moe show <c>:muse_moe_w4a16/submission.py > moe_src.py` (check the patch
-   anchors in layer.py still match: asserts at import; layer overrides _moe_TWM_ORDER_M and _moe__lib (adds moe_set_upf));
-   proj g19 patches: `git apply -p1` on r-layer. Then bench.py test, tools/scored_test.py, tools/replay_test.py,
-   tools/tk2f_stress.py if tk2f changed, tools/ab_files.py old/new, check.
-1. s55 DEAD: L2 prefetch of the routed experts' w13q beside the d32 g19 pooler (H100 tk2f -7 us/40 MB, but the prefetch
-   blocks take the router's free SMs: routing +12..16 us; real ids only exist at the pooler's end; the real form XPF after the routing: tk2f only -1.1 us per 16 MB
-   prefetched, its own L2 traffic evicts the rest: <= ~1 us even on the H200). NOTES s55, dev/xpf_s55.patch.
-   s54 DEAD: d1 qkv/gate split with the gate GEMV beside csl (oracle +0.5..1.3 us, NOTES s54).
-   Dead this session (don't retry without a new idea): every L2 prefetch of a next weight (unpool during tk2f/norm,
-   o during csl, more pooler chunks in pr1) on H100 AND H200; boundary variants (cluster, CUDA 1-CTA, 2-4 rows per
-   program); qkv/o g19 at T=32; csl overlapped with g13; T=8 norm3+unpool cluster fusion.
+Older ranked-next list (s3-s64 items, all closed): NOTES-layer.md and the dead ends below.
 
 ## Dead ends (details in NOTES)
 - s75: moe n21 twq K-split at T=128 (moe-only H200 -10.6 us) loses in-layer on H200 (+6 us sl real, +11..16 tuner).
