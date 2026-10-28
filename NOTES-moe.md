@@ -2237,3 +2237,12 @@ noisy pick of g30n:o silently replaced ob8 in the first A/B: always pin the tune
   secondary of the rmsnorm which triggers right after its wait) starts 0.3 us after pr8 ends. Moving tk2f's route
   prologue into pr8's routing block keeps the chain serial (same work, one global round trip either way; routing ->
   first weight byte = data dependency). Bound ~0.5-1 us v1 only, and per the round-trip lesson above likely 0.
+
+## n5s14 (2026-10-28 01:34Z - 01:50Z): no lane, no build; 0 runs
+- No lead answer after n5s13. Read the moe board (okc leaderboard muse_moe_w4a16): #1 pjmullin3 2.623x (also #1 layer 2.399x,
+  attention 3.032x) vs our febfcb1f 2.247x. Per shape from `okc status febfcb1fac2d4824 --json` (median_ns / SGLang / floor us):
+  bs1 27.0/77.2/11.4, bs16 88.9/185.3/52.5, bs32 120.1/204.1/70.8, bs8 68.3/149.7/37.3, bs128 204.2/465.5/101.3,
+  bs256 247.8/630.7/108.9. Our x floor: 2.37/1.69/1.70/1.83/2.01/2.27. Profile: bs128 twm 196.8 + moe_norm (tail) 40.6 +
+  routegather 4.5; bs256 twm 235.1 + 38.5 + 6.4; bs1 tk2f 20.1 + norm2 3.1.
+  => the expert kernels are not at a hard bound: another team is ~17% faster in geomean. Posted to the lead as a lane request
+  (Requests n5s14) with a 3-consumer-WG twm proposal (more warps per SMSP; caveat twq's 16 warps were also ~50% issue).

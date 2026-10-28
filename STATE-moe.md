@@ -1,10 +1,10 @@
 # STATE-moe
 
-## NOW (n5s13, 2026-10-28 02:30Z): lead 01:10Z items DONE on H100, both no-go. Next lane: ask lead (COORD Results).
-- (1) v1 o -> bnd -> pr8: oracle (bnd free) bound -3..4 us v1 sl; OB8 tail-barrier build (tools/n5s13) +1.4 sl / +1.0 full,
-  OB8 full barrier +2.7 / +2.0 (H100 ab_files, tuner off). Floor: every post-o global round trip ~2 us under pr8's ramp.
-- (2) T=8 tk2f first copy from the router: not built; tk2f already starts 0.3 us after pr8; bound <= 0.5-1 us.
-- Every other moe item closed on H200 data (n5s12 list): tk2f (layer-owned), twm/twq dq, attention, pr32, batch-1 chain.
+## NOW (n5s14, 2026-10-28 01:50Z): no lane; lane request to lead posted (COORD Requests, n5s14) with moe-board evidence.
+- moe board: #1 pjmullin3 2.623x vs ours 2.247x (febfcb1f). Ours vs the 4.8 TB/s floor: bs1 2.37x, bs8 1.83, bs16 1.69,
+  bs32 1.70, bs128 2.01, bs256 2.27 => a 2.623x team is ~1.17x faster on average; our worst = bs1 (tk2f fixed ~14 us)
+  and big-M twm (consumer issue ~50%). Proposed: 3-consumer-WG twm (uncertain: twq with 16 warps also issued at ~50%).
+- n5s13: lead 01:10Z items (v1 o->bnd->pr8 OB8, T=8 tk2f first copy) both DEAD/bounded on H100 (NOTES n5s13).
 - Enabler (n5s11): tools/n5s11/cuda_strip.py (layer 1 MB judge limit). Offered under COORD Requests; layer decides.
 - Checks: moe 20/20 and attention 20/20 unused on 10-28.
 
