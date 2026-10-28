@@ -2747,3 +2747,46 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   the o output instead of reading s': 176 vs 192 KB/row = -4 MB per v32 call = ~1.3 us (0.04%), plus a bit-identity risk on s'. Not built.
 - Sliding attention d1 2.4 / v1 3.3 us free (n5s26) = latency-bound csl/vtk; every overlap form is dead (s62 CSL_PW, n5s14 flag-spin).
 - => layer lane has no build >= 0.3%. Lane-change request posted in COORD (Requests). main unchanged (v163); 10-28 left: 5 checks / 7 submits.
+
+## night5 s29 (2026-10-28 09:48Z - ~11:00Z): tk3 lane (lead 09:55Z) -> built "PR" (pair-role tk2f) on branch layer/tk3 a2ed836; H100 ~tie/loss; 1 judge DIAG check; 0 Modal
+- (1) Consumer microbench (dev/n5s29/mb_tk3.py = moe tools/n5s18/mb_warm.py + modes; per stage 8 KB W + 1 KB scales + N x 64 x
+  tile; 2 WGs x 128 rows x k64; tk2f's dq). `WMB=24 NL=16 MM=01,41,51,61,81,71 python mb_tk3.py` (WMB 24 = L2 = consumer-bound).
+  H100 G132 warm, cycles/stage: ring 308-427 | wgmma moe form (wait<1> per k16) N8 591 / N16 632 / N32 690 | wgmma stage-pipelined
+  N8 542 / N16 611 / N32 672 | mma.sync 1 group x-regs 553, 2 groups x-regs 597, 1 group x-smem 532, 2 groups x-smem 671.
+  => wgmma is dq-bound like mma.sync (not wait-latency-bound); N16 wgmma only 9% under an mma.sync pair with x from smem; any
+  16-token shared-dequant body should cost ~1.2-1.3x one 8-token row in isolation (moe's in-kernel forms measured ~2x).
+- (2) Built PR (tk2f PF 16384, layer option "tk2pr" = W + 1 at T=16/32, pair row weight (8+W)/8; TK2PR build flag, OFF on
+  main = not compiled): routing splits each expert into a pair space (ng/2 full 16-token pairs) and a single space (the odd
+  8-token group); k = rint(G w np / (ns + w np)) CTAs [G-k, G) run ONLY pairs, the rest ONLY singles with tk2f's unchanged
+  1-group body (s_sb group base); both roles publish into cnt, gemm2 waits for the sum. Producer = tk2f_produce on SQ stages.
+  Correct: dev/n5s29/pr_test.py (24 scored d16/d32 inputs x 6 seeds + bench TESTS = 37/37; d32 bitwise = tk2h).
+  BUG found on the way: moe kernel_fn's norm2/norm3 pick decodes PF4 from cfg digits ((c5-80000)//1000 & 4): my 19W204 code
+  only got moe_norm3 for W 2..5 (fixed: explicit PR clause). Timings below with W outside 2..5 before the fix were wrong-output.
+- (3) Pair body iterations (H100 ab_flag, real routings, d16 sliding s7 / s13; base BAL 154.8/155.7, non-BAL tk2f 157.9/158.6):
+  a. tk2g_row TWO as is (x group 0 regs, group 1 smem; n<=8 body merged in: 192-mma 35 KB loop): +15..30 us.
+  b. TWO only (128 mma, 20 KB): 166-170 best W. Timeline (dev/n5s29/pr_tl.py, TK2PR_TL globaltimer stamps): pair row 5.3 us
+     vs single 2.4 us (DRAM-paced) -> 2.2x; ncu source counters: pair loops stall_no_inst 36-52% even when moved fully past
+     0x10000 with a dead pad (TK2PR_PAD) or put in a __noinline__ function (no -rdc: callee is emitted inside the kernel
+     section, same offsets). RULE (extends moe n5s17): a HOT loop at kernel code offset >= 64 KB is slow (no_inst), not only
+     one straddling it; the compiler always emits single g13, single g2, pair g13, pair g2 (source order / __builtin_expect
+     ignored) and the singles' unrolled loops are 20 KB each.
+  c. Compact body tk2p_consume (TK2PR_C): ONE run-time-gated body for both phases, both x groups in lane-private smem
+     (2 x 64 KB after the ring; dyn smem 200 KB), s_red single-buffered (+1 bar.sync/row): rolled 4.4 KB loop -> latency-bound
+     (stall wait 22% / short_sb 15%, ~2000 cyc per 18 KB stage vs tk2f single ~680): 159.7/159.7 at W 5.
+  d. + PR skips the dead D>0 tk2w_bound block (-9 KB of code before the loops) + `#pragma unroll 2` (loop 0xdaf0-0xfce0, all
+     < 64 KB, REG 166, no stack): d16 s7/s13 158.7/159.2 (W 4) = non-BAL tie, +4 vs BAL base; s99 (no pairs) +3.2 fixed;
+     d32 (base tk2h W3=4): s99 186.5 vs 185.9, s7 195.1 vs 195.3, s13 191.3 vs 185.9 (W 4).
+  Fixed overhead (s99, k = 0, identical instructions 35.19M): ncu +3.8 us = DRAM 82 -> 79%; ~1.1 us of it is the L1 carveout
+  (plain tk2f with +128 KB dyn smem: +1.06 us, variants/sub_nbpad.py); gemm2 long_sb +5% (inter reloads with a 30 KB L1).
+- Cold prepare with TK2PR on: 69.2 s (H100). H100 tuner: T=32 sl picked tk2pr 5 (213.4 vs 214.0, tie), T=16 +5 (synthetic
+  routing has no pair at T=16).
+- (4) Judge DIAG check (see below): variants/chk_pr.py = main build + TK2PR True + TUNE[16]/[32] += {tk2pr 5}, {tk2pr 7}.
+  check df997d8f (chk_pr.py sha1 4a05fbc6, = main v163 build + TK2PR + tk2pr tuner options; branch layer/tk3 a2ed836):
+  **2.158x**, prepare_s 91.9. Per shape us: d1 65.9/73.8, d16 125.1/204.2, d32 151.2/289.8, v1 107.3/121.3, v16 264.8/351.3,
+  v32 335.8/515.0. H200 tuner (synthetic routing; T=16 has no pair expert, T=32 has 2): T=16 sl default 155.1 | tk2pr 5 158.1 |
+  7 157.9; full 213.4 | 214.8 | 214.1; T=32 sl 155.2 | 155.3 | 156.7; full 329.1 | 330.8 | 330.1. PR never picked -> the run
+  executed main v163's configuration = a redraw of v163 (NOT submitted: no code path of ours changed).
+  => H200: PR's fixed overhead ~+3 us (= H100 +3.2), and at T=32 the pair gain ~= that overhead (tie). Next lever: remove the
+  fixed overhead (L1 carveout ~1 us: dyn smem 200 KB -> e.g. keep x of ONE group in smem by splitting the pair row's K in
+  halves, or alias the x region into the ring; the other ~2 us: ncu gemm2 long_sb / waits) -> T=32 ~-3 us sl, then real-routing
+  Modal A/B (after 00:00Z; Modal 55.8/60 used 10-28) at d16/d32 x seeds. If the overhead can't be cut, PR is dead (tie).

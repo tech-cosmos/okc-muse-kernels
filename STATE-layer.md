@@ -6,6 +6,12 @@ night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (too
   (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
   unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 7 submits left after v163.
   Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
+night5 s29: tk3 lane: BUILT "PR" (pair-role tk2f: k CTAs run 16-token pairs with a compact rolled TWO body, rest tk2f's
+  1-group rows) on BRANCH layer/tk3 a2ed836 (option tk2pr, TK2PR build flag; main untouched). Correct 37/37. H100 d16 ~= non-BAL,
+  +4 vs BAL; d32 tie..+5. DIAG check df997d8f 2.158x (= v163 redraw, PR not picked, not submitted), prepare_s 91.9: H200 tuner
+  T=16 +3 (fixed overhead, no pairs), T=32 tie. NEXT: cut PR's ~3 us fixed overhead (L1 carveout from 200 KB dyn smem ~1 us,
+  gemm2 long_sb) -> T=32 ~-3 us; then Modal real-routing A/B. Rule found: hot loops at kernel code offset >= 64 KB stall
+  (no_inst ~50%), not only straddling ones. Micro: wgmma N16 not cheaper than mma.sync pair (NOTES n5s29). 10-28 left: 4 checks / 7 submits.
 night5 s28: no build, 0 runs: pr1/qkv at d1 sit on the H200 bulk-stream fit (3.8 us + B/4.26 TB/s); co-resident pr1
   bounded <= 1 us; T=256 b1/b2 byte cut 0.04%. Lane-change request posted (lead 09:20Z). 10-28 left: 5 checks / 7 submits.
 night5 s27: no build, 0 runs: H100 v32 sl timeline (experts 235 of 385 us); remaining gaps are expert-kernel
@@ -27,21 +33,7 @@ night5 s22: no build, 0 judge runs: H200 (Modal) real-input T=128 A/B: g30:unpoo
 night5 s21: no build, 0 judge runs. H200 (Modal) standalone ranking of T=128 g30 forms (NOTES n5s21 table): R2 dead, qkv
   split dead (reduce +3.7 us), unpool g30 is +1.1 us vs cuBLAS standalone on H200 (main keeps it for the in-layer PDL overlap),
   pooler FP32-slab g30 -4.6 us vs cuBLAS -> only pays with the router's hi/lo rows inside it (NEXT 3). fr False at T=128: H100 tie.
-night5 s19: no build, 0 runs; proj KQ K-split = -0.3 us vs the twf_split 66 we already tune (not ported). NOTES n5s19.
-night5 s18: check 3e39a051 (v162, unchanged main) **2.1143x**, prepare_s 88.9: abs us beat the board run v153 on 9/12 shapes
-  (d32 sl 149.7 vs 155.7, d32 full 301.2 vs 308.2, v32 sl 327.8 vs 335.7, d16 sl 124.0 vs 129.9) but SGLang drew fast (ratio is per run).
-  Not submitted. Re-checked: T=256 boundary writes no h32 (~24 MB/call = near floor); T=256 unpool/FR are ~compute-bound (cuBLAS).
-  10-28: 7 checks / 8 submits (09:28Z-rule submits of 10-28 used).
-night5 s17: **main = v162** = v160 + attn RF_TRIG_ALL (batched _red_fin triggers after its wait) + CB_TRIG (_combine triggers after
-  its wait): the o GEMM's W ring now fills under the merge at d16/d32/v1 full (H100 -0.2..-0.8 us) + T=8 full base g30n:o (H200 tuner
-  picked it once CB_TRIG was in). check 8f5427dc (v161) 2.1169x, prepare_s 88.8; v16 sl 262.6 confirms v160 (2 H200 samples ~261 vs
-  265-269 before), v16 full 349.3 best. validate ALL OK (v162), cold 71.0 s. PDL audit (tools/timeline_all.py) found no other serial
-  PDL hand-off: T<=32 chains overlap, T>=128 GEMMs are cuBLAS. 10-28: 8 checks / 8 submits left.
-night5 s16: main = v160 (9fa5164) = v158 + moe n5s24 norm ids/tw batch (v159, bitwise v16/v32) + NORME_TRIG (moe_norm's
-  NORM_EARLY path triggers PDL dependents at start: the T=128 g30 unpool's W prologue now runs under twm's drain; H100 v16 sl -1.9..-4.4,
-  full -2.1..-2.3 us, 3 seeds). check aba95f63 2.1033x (noise: d1/v1 slow) but v16 sl 260.7 = best H200 (prev 265-269); g30 starts
-  ~21 us earlier in the H200 profile. validate ALL OK, cold 69.7 s, judge prepare_s 89.6. Not submitted. 10-28: 9 checks / 8 submits.
-Older session summaries (night5 s1-s15, s85-s107): NOTES-layer.md.
+Older session summaries (night5 s1-s19, s85-s107): NOTES-layer.md.
 
 ## Per-load H200 us vs the s12 floor (board run 19ebde23 = v108; lead 05:07Z request; s74)
 Score %/us = gain in total score per us saved on that layer type (geomean of 6 loads x (46 sl + 16 full)).
