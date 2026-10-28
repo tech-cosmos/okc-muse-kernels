@@ -1,10 +1,11 @@
 # STATE-moe
 
-## NOW (n5s32, 2026-10-28 09:10Z): lead 07:35Z = in-layer oracle -> build. tools/n5s32/oracles.py (r-layer copies, TUNE={}):
-- H100 in-layer: tk2f rows' STRUCTURE (zero bytes + zero math, ornc-orz) = d1 8.9/10.2, d16 20.4/23.5, d32 20.6/19.8, v1 17.5/17.6 us
-  (sl/full), ADDITIVE to the stream (why: ring = 1 row, or serial per-row chain; NOTES n5s32). ~9% score if free (H100).
-- NEXT: at 00:00Z Modal H200 base0/orz/ornc/orn (cmd in NOTES n5s32). If H200 structure >= ~5 us d1 / ~10 us d16-v1: BUILD overlapped rows
-  (x double-buffer, epilogue under next row's stages, ring slack); else close. orw/both invalid (L2 re-reads no faster).
+## NOW (n5s33, 2026-10-28 08:40Z): tk2f in-layer structure oracle (n5s32) decomposed and REFUTED as a lever (NOTES n5s33)
+- H100 in-layer: n5s32's ornc-orz "structure" (d1 9, d16 20, v1 18 us) is half per-row bar.sync+stores (d16/v1 ~10 us), barrier
+  <= 1.2, x loads <= 0.8. The REAL fix of the biggest piece (BRA: warps 4-7 arrive-only, tools/n5s33/bra.py) = TIE on all 12 shapes
+  -> the structure hides under the stream; not additive. BRA also racy (1-row ring): dead, not handed off. 00:00Z Modal oracle cancelled.
+- tk2f levers now all closed on measurement (stream at ring optimum n5s15/n5s29, extra groups n5s16-18, structure n5s33).
+  Lane request to lead posted (COORD Requests n5s33). Until answered: nothing in this lane >= 1% layer.
 - n5s15: tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps); bytes-in-flight lever closed.
 - n5s16: H200 ORACLE: the extra 8-token groups cost d16 4.0 / d32 7.7 us (tk2f fit 14.1 + 6.97 E + 4.4 X us).
 - n5s16-n5s18: EVERY 16-token shared-dequant form on mma.sync tk2f is DEAD: inlined (i-cache), noinline (ABI), tk2h merged

@@ -2632,3 +2632,27 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   (regenerate /tmp/n5s32 with oracles.py first). If H200 ornc-orz >= ~5 us at d1 or >= ~10 at d16/d32/v1: BUILD the overlapped-row
   tk2f (one CTA-local change, layer integrates); else close.
 - 0 judge runs, 0 Modal min.
+
+## n5s33 (2026-10-28 07:59Z - 08:40Z): DECOMPOSITION of the n5s32 structure oracle + BRA (real) = the oracle OVERSTATES; 0 judge runs, 0 Modal
+- Budget: moe board checks 14/20 used (moe 12 + proj 2), Modal 55.8/60 (1 variant reserves 7 min): H100 only.
+- tools/n5s33/oracles2.py <r-layer submission.py> <outdir> (r-layer cd2ee75): ornc minus ONE piece, in tk2f_consume only (T=1/T=8/T=16
+  rows; d32's tk2g rows untouched): ornb = no gemm13->gemm2 cnt spin, ornx = no x/inter LDGs (v = g < n && !ORX), ornr = no
+  bar.sync 1 + no row output stores, ornall = all 3. H100 in-layer, 2 rounds, us sliding (full):
+            base0        orz          ornc         ornb         ornx         ornr         ornall
+    d1     85.0(104.6)  54.6(64.5)   62.8(74.7)   61.6(74.0)   62.0(74.0)   59.5(70.8)   58.4(69.6)
+    d16   190.0(294.3)  87.0(205.6) 106.7(229.2) 106.5(229.0) 105.9(228.0)  96.9(214.9)  96.7(214.7)
+    d32   188.2(415.0)  97.2(325.9) 117.3(346.1) 117.2(346.0) 117.6(345.9) 116.4(345.5) 116.0(345.1)  (pieces not patched there)
+    v1    142.2(158.2)  66.2(80.3)   83.8(98.5)   83.1(97.7)   83.2(97.2)   73.7(87.6)   72.0(85.8)
+  => in the zero-byte world: phase barrier <= 1.2, x loads <= 0.8, per-row bar.sync+stores = d1 3.3, d16 9.8, v1 10.1 us (half the
+  structure); residual (ornall - orz: ring waits/arrives, LDS, publish) d1 3.8, d16 9.7, v1 5.8.
+- REAL candidate BRA (tools/n5s33/bra.py, correct output, bench test 13/13): only warps 0-3 (the epilogue threads) bar.sync the row
+  reduce, warps 4-7 bar.arrive and run on; gemm2 epilogue on 128 threads x 2 tiles. H100 in-layer 2 rounds vs base0: ALL 12 shapes
+  within +-0.5 us (d1 85.9 vs 85.9, d16 190.2/189.7, v1 142.2/142.3) = TIE. So with the stream present the reduce barrier is
+  hidden: the oracle's ornc-orz "structure" is the consumer chain when NOTHING waits on data, NOT time added to the stream.
+  n5s32's "additive" reading is refuted for its biggest piece; base0 - ornc ~= bytes/BW was a coincidence of a DRAM-bound H100.
+- BRA is ALSO RACY as written (found because orncbra hung): with a 1-row ring, warps 4-7 can bar.arrive for row r+1 before warps
+  0-3 reach row r's bar.sync -> barrier 1 completes without them. A safe form needs alternating barrier ids per red buffer. Dead
+  anyway (tie): NOT handed off. Same trap for any future arrive/sync split in tk2f.
+- Reading for layer's H200 TK2F_ORX DIAG (r-layer n5s25, oracles as tuner probes): ornc-orz on the H200 is an UPPER bound of
+  nothing useful; the honest ceiling is base0 - (stream-only time), which n5s15/n5s29 put within 0.5-2.5% of the H200 HBM ceiling
+  for tk2f's ring. 00:00Z Modal oracle run (n5s32 queue) CANCELLED: the decomposition says it would not name a buildable piece.
