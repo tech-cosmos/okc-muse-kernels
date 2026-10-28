@@ -13991,7 +13991,7 @@ G30N_CFG = {("unpool", 32): (1, 16, 16), ("pooler", 32): (1, 20, 8), ("qkv_gate"
             ("o", 32): (1, 16, 16), ("o", 16): (1, 16, 16),
             ("o", 8): (1, 8, 8)}
 G30N_DEFAULT_ON = set()
-G30GX_CFG = {("unpool", 32), ("o", 32), ("o", 16)}
+G30GX_CFG = {("unpool", 32), ("o", 32)}
 G30GX_DEFAULT_ON = set()
 _G30GX = {}
 G30KGX_CFG = {("pooler", 32)}
@@ -16981,11 +16981,11 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
              {"g24sk:pooler": True, "g24sk:unpool": True}, {"g24sk:qkv_gate": True}, {"g24sk:pooler": True, "g24sk:unpool": True, "g24sk:qkv_gate": True},
              {"g27:o": False},
              {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, {"pr32": True},
-             {"g30n:o": True, "g30gx:o": True},
              {"g30n:o": True}, {"g30n:o": False}, {"g30n:o": False, "g27:o": False},
              ),
         32: ({}, {"g30gx:unpool": True}, {"g30gx:o": True}, {"g30gx:unpool": True, "g30gx:o": True}, {"g30kgx:pooler": True},
              {"g30kgx:pooler": True, "g30gx:unpool": True, "g30gx:o": True},
+             {"g30n:o": False}, {"g30n:o": False, "lt:o": True}, {"g30n:qkv_gate": False}, {"g30n:unpool": False}, {"g30k:pooler": 0}, {"g30k:pooler": 120}, {"g30k:pooler": 0, "g30n:unpool": False, "g30n:qkv_gate": False}, {"pr32": True, "g30k:pooler": 0}, {"g19:qkv_gate": True}, {"g19:o": True}, {"g19:qkv_gate": True, "g19:o": True}, {"lt:qkv_gate": True},
              {"lt:o": True}, {"lt:qkv_gate": True, "lt:o": True}, {"g19:pooler": False, "lt:pooler": True},
              {"g19:unpool": False, "lt:unpool": True}, {"g19:pooler": False, "lt:pooler": True, "g19:unpool": False, "lt:unpool": True},
              {"ltalt:qkv_gate": 1}, {"ltalt:qkv_gate": 1, "lt:o": True}, {"tk2fj": False},
