@@ -1,6 +1,7 @@
 # STATE-moe
 
-## NOW (n5s36, 2026-10-28 10:40Z): 'dequant once, mma many' (lead 10:20Z) = already built as moe_hot N128 (NOTES n5s36)
+## NOW (n5s37, 10:35Z): idle, lane ask stands; per-shape value table in NOTES n5s37 (bs1 fixed cost = 1.5 us per +1% board, all pieces dead)
+## WAS (n5s36, 2026-10-28 10:40Z): 'dequant once, mma many' (lead 10:20Z) = already built as moe_hot N128 (NOTES n5s36)
 - Layer v16/v32 routings: 0 repeated dq (v16 max 49 tok = one N64 pass; v32 hot 73-98 tok = one moe_hot N128 pass). Microbench
   tools/n5s36/mb_dqonce.py: one A -> 2 N64 wgmma = N128 = 8.0 cyc/8KB/token (tensor peak). Only slack = hot N128 padding (exact-N, dead n5s21).
 ## WAS (n5s35, 2026-10-28 10:15Z): twm dq instruction cut (lead 09:20Z/09:55Z) CLOSED in SASS (NOTES n5s35)

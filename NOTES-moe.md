@@ -2713,3 +2713,14 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   => "mma many" is just larger N: -30% per token vs N64 only when an expert HAS > 64 tokens, and those already run N128.
   Experts with <= 64 tokens have no second x tile to feed. Lane CLOSED (no new structure). Answer to proj's byte question: the
   HBM 156 vs 109 gap is NOT weight re-reads (every expert's weight bytes are fetched by one item set once, K-split items disjoint).
+
+## n5s37 (2026-10-28 10:21Z - 10:35Z): no open assignment (10:20Z task closed in n5s36); per-shape value table of the moe board; no build; 0 judge runs, 0 Modal
+- Budget: moe's 12 moe-board checks for 10-28 used (board 16/20), Modal ~55.8/60: no H200 A/B possible before 00:00Z.
+- Board 10:22Z: #1 pjmullin3 2.685x, #2-#11 2.50-2.62x (10 teams >= 2.5x); ours 2.2703x (4fb734c6).
+- Per shape (4fb734c6): x vs SGLang / x over floor / H200 us that buy +1% board score:
+    bs1 2.911 / 2.31 / 1.5 | bs8 2.217 / 1.82 / 3.8 | bs16 2.093 / 1.70 / 5.1 | bs32 1.717 / 1.71 / 6.8 | bs128 2.268 / 1.98 / 11.4 | bs256 2.604 / 2.17 / 13.4
+  The cheapest us are the tk2f fixed cost (H200 fit 14.1 us/call: bs1 = tk2f 20.0 + norm2 3.2 + replay ~3.2 vs 56.6 MB of bytes):
+  -7 us on bs1/8/16/32 would be +9.8% board. Every piece of it is on record dead (route->copy n5s23, fused norm s9/n5s28,
+  norm2 PDL n5s19, PSC s12, ring n5s15/n5s29/n5s30, structure n5s33). The board gain does NOT carry to the layer (in-layer d1/v1
+  the fixed part already overlaps the pre-expert kernels by PDL; layer n5s23 d1 experts excess 12 us H100).
+- No new assignment from the lead since 10:20Z; lane ask stands (COORD Requests n5s36). Nothing built.
