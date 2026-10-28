@@ -2253,3 +2253,16 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   pooler 23 us: serial = no better either. pr8's fusion (router items inside the pooler blocks) is worth ~5 us at T=8;
   a g30 pooler would need the router fused like pr32 (FP32 router at T=8: hi/lo x hi/lo products, a new port) to have a chance,
   and even standalone it is ~17 us vs pr8's 23.5 for 56 MB: <= ~3 us H100, ~0.3% v1. Not queued. Change reverted (prepare time).
+- **00:00Z: check 1 = v144 REJECTED at upload (422: "submission is larger than 1000000 bytes"; no check spent).** submission.py had
+  been 1.050-1.051 MB since ~v141 (pr32 + g30 sources); no night5 check had run to notice. Fix (v145, d372b7e): build.py
+  strip_comments() drops Python COMMENT tokens + the blank lines left (rows inside multi-line strings untouched; CUDA sources keep
+  their comments), asserts the AST is unchanged and the file < 1,000,000 B: 963.7 KB. Headroom only ~36 KB: drop dead embedded
+  sources (ob8 9 KB, g22 22 KB) before adding big new ones. v145 validate --quick ALL OK (opt 0/356, fuzz 0/530), cold 155.6 s.
+- **check 4937830f (v145 = v144 code) 2.0907x** (board 2.1339x = 35dd53d0 v125). Per shape ours/SGLang us: d1 69.7/173.3, 76.5/181.3;
+  d16 130.4/269.2, 210.6/433.6; d32 155.8/258.6, 312.8/612.9; v1 115.3/267.4, 125.2/278.5; v16 274.5/533.9, 369.8/715.8;
+  v32 348.0/726.0, 532.4/1099.9. vs board run: d32 sl -8.5 us (g30k/g30n: the targeted shape, best ever), v1 full -2.1,
+  d1 +2.3/+1.5, d16 +5.5/+6.1, v16 full +17, v32 +26/+38 (H200 tuner T=256 defaults 344.6/541.4 vs 336.1/521.4 in the board
+  run's log, every candidate +8..15: the T=256 default has ranged 336-351 over past checks = node noise). Not submitted (< 1% rule).
+  H200 picks: T=1 full {g10alt:o 1}; T=8 sl {nu8d/nu8x False}, full {cslpw, pr8_npf 220} (g30n:o not picked); T=16 sl {tk2fj False},
+  full {bal}; T=32 sl {g30k:pooler 104, g30n:unpool} (169.2 -> 162.7 confirm), full + g30n:qkv_gate (329.6 -> 323.2);
+  T=128 {lt:o}; T=256 sl {lt:unpool}, full {rg}. pr32 never picked (moe), g30k104 at T=16 full not picked on H200.
