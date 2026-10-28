@@ -2326,3 +2326,20 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Lesson: the tuner's synthetic routing does not represent the judge's inputs for routing-sensitive expert knobs (hot, twf_split,
   twq, bkt); decide those on real-input H100 A/Bs over >= 3 seeds and pin them in TUNE_BASE; keep tuner options to
   routing-insensitive GEMM/attention picks. Still open: why synthetic sees hot 24 as a tie (not pinned down).
+
+## night5 s9 (2026-10-28 02:08Z-, okc-night5 session 9): v151 = T=8 base pin {nu8d/nu8x off, cslpw, pr8_npf 220} on real routings
+- Board: #42 at 2.1339x (#1 pjmullin3 2.399x, #10 2.254x, #20 2.198x). 10-28 budget at start: 16 checks / 10 submits.
+- H100 v1 sl timeline (main v150, seed 99): g14 qkv 0-14.0, vtk 12.0-19.1, g12 o 13.7-28.6, bnd 14.8-31.4, pr8 18.6-53.5,
+  norm 31.5-55.6, tk2f 54.0-137.9 (84 us = 57% of the layer: moe's LANE 6 bs8 item), nu8 132.4-143.1, bnd 137.7-146.7.
+  bnd ends 2.8 us after o on the H100 (moe audit said 4.0); o->bnd->pr8 not attacked this session.
+- Real-routing A/B (variants/n5s9_notune.py = main with TUNE = {}; tools/ab_flag.py, TUNE_BASE swapped per stmt; /tmp/n5s9_ab1.txt,
+  /tmp/n5s9_ab8.txt). us vs base:
+  * T=1 + T=8 tk2fx off: d1 sl +1.5/+0.8/+0.9, full +0.7/+1.1/+0.7; v1 sl +1.7/+0.7/+1.6, full +1.4/+0.5/+1.3: base right; option
+    dropped from TUNE[1] (and TUNE[8]).
+  * T=1 kv_pf off: -0.2..+0.2 (tie; H100 tuner picked it at full this run): unchanged.
+  * T=8 (seeds 99/7/13/5, 4 rounds): nu8d/nu8x off sl +0.1/-0.8/-1.1/+0.7, full -0.1/-1.2/-0.2/-1.6; cslpw+pr8_npf 220 sl -0.2/-0.7/
+    -1.2/-0.3, full -0.2/-0.3/-0.3/-0.5; **both: sl -0.4/-1.8/-2.7/-0.4, full -0.3/-1.5/-0.8/-1.8** (every seed) -> TUNE_BASE[(8, *)]
+    += _T8N. TUNE[8] rebuilt around the new base (escapes: nu8d/nu8x on, nu8x on, cslpw off (+npf 212), npf 206/212/112, g14alt 0-3,
+    nu8 off, g19 qkv, g30n:o).
+- v151 validate --quick ALL OK: test 0/13, scored 0/12, opt 0/264, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/428,
+  cold prepare 162.5 s.
