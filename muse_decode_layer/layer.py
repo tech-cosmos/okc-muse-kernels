@@ -1837,6 +1837,10 @@ MOE_PRUNE = True
 _MOE_STUBS = ("moe_gemm13", "moe_gemm2", "moe_tb_launch", "moe_tw_launch", "moe_twf_launch", "moe_twq_launch",
               "moe_tk2fn_launch", "moe_sk_launch")  # moe_tk2_launch kept: tools/tk2f_stress.py's reference path
 _MOE_TK2F_PRUNED = """
+#if TK2F_ORX
+  g_orx = (int)(cfg / 100000000);
+  cfg %= 100000000;
+#endif
   const int nr = (int)ids_.numel();
   if (nr > 256) return -2;
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \\
@@ -1882,6 +1886,8 @@ def _moe__lib():  # = moe_src's _lib() + moe_set_upf
     if _moe__LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = _moe_CUDA_SRC.replace("#define TK2F_DIAG 0", "#define TK2F_DIAG 1") if _moe_TK2F_DIAG else _moe_CUDA_SRC  # s81
+        if _moe_TK2F_ORX:  # n5s25: oracle probes (pruned dispatch kept: tk2f_go adds the PF bits)
+            src = src.replace("#define TK2F_ORX 0", "#define TK2F_ORX 1")
         if MOE_PRUNE and not _moe_TK2F_DIAG:
             src = _moe_prune(src)
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
@@ -3269,6 +3275,11 @@ CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem 
 if _moe_TK2F_DIAG:  # s81: DIAG check copies only: the tk2f probes (+ the defaults) at T = 1/16/32, no other tuning
     _TK2X = [{"tk2x": k, "diag": True} for k in (6, 1, 2, 3, 4, 5)]
     TUNE = {1: ({}, *_TK2X), 16: ({}, *[dict(o, bal=False) for o in _TK2X]), 32: ({}, {"tk2h": 0, "diag": True}, *[dict(o, tk2h=0) for o in _TK2X[1:]])}
+if _moe_TK2F_ORX:  # n5s25: DIAG check copies only: moe n5s32's tk2f oracles (7 orz = no rows, 8 orn = zero-byte ring,
+    # 9 ornc = orn + no consumer math; wrong output, timed, never picked) beside the defaults at T = 1/8/16/32
+    _ORX = [{"tk2x": k, "diag": True} for k in (7, 8, 9)]
+    TUNE = {1: ({}, *_ORX), 8: ({}, *_ORX), 16: ({}, *_ORX),
+            32: ({}, *_ORX[:2], {"tk2h": 0, "diag": True}, *[dict(o, tk2h=0) for o in _ORX])}  # tk2h's consumer ignores PF 256
 ATT_DIAG_BUILD = False  # s84: DIAG check copies only (sed to True): full-attention probes (attn_src ATT_DIAG) + defaults
 if ATT_DIAG_BUILD:  # gd: 11 = gathers only (no math after tile 0), 12 = all-L2; gw: 1 = no V widen, 2 = all-L2, 3 = no consumer math, 4 = 1+2
     TUNE = {16: ({}, *[{"attx": k, "diag": True} for k in (11, 12)]), 32: ({}, *[{"attx": k, "diag": True} for k in (11, 12)]),
@@ -3615,7 +3626,9 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     c = (84204 if slot else _moe_TK2F) + (100000 if _moe_TK2SA and st["sa"] else 0)
     # s68: moe n14 SQ off here (H100 ab_flag 4 rounds x 3 seeds d1 +0.4..0.9 us; H200 moe diag d1 0)
     c, w13_, w2_ = _moe__tk2f_w(c, st) if TK2F_SQ_T1 else (c, st["w13q"], st["w2q"])
-    if _opt(state, 1, "tk2x", 0):  # s81 DIAG probes (tuner timing only, never selected)
+    if _opt(state, 1, "tk2x", 0) >= 7:  # n5s25 DIAG oracle probes (wrong output, tuner timing only, never selected)
+        c += (_opt(state, 1, "tk2x", 0) - 6) * 100000000
+    elif _opt(state, 1, "tk2x", 0):  # s81 DIAG probes (tuner timing only, never selected)
         c, w13_, w2_ = _moe__tk2x(_moe__tk2f_w(c, st)[0], st, _opt(state, 1, "tk2x", 0))
     lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"], c)
@@ -3693,7 +3706,8 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
     lib.moe_set_ss(0 if d else st["w1"].data_ptr())
     lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"],
-                        _moe__tk2f_cfg(8, st) + (0 if d or _nu8_x(state, 8) else 1000))
+                        _moe__tk2f_cfg(8, st) + (0 if d or _nu8_x(state, 8) else 1000)
+                        + max(0, _opt(state, 8, "tk2x", 0) - 6) * 100000000)  # n5s25 DIAG oracle probes
     lib.moe_set_ss(0)
     f = y32[65:81].view(8 * TOP_K, UNPOOL_SLICE) if d else torch.empty((D_EXPERT // NU8_KB, 8, UNPOOL_SLICE), dtype=torch.float32, device=dev)
     _G10["lib"].nu8_launch(y32, ids, tw, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, state["unpool_slice"], f, st["cnt"],

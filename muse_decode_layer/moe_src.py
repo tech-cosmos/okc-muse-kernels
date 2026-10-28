@@ -80,6 +80,7 @@ static int launch_k(void (*k)(KA...), int grid, int block, int smem, cudaStream_
 }
 int64_t moe_set_pdl(int64_t v, int64_t twpf) { g_pdl = (int)v; g_twpf = (int)twpf; return 0; }
 int64_t moe_set_blk(int64_t v) { g_blk = (int)v; return 0; }
+static int g_orx = 0;  // layer n5s25 DIAG (TK2F_ORX): tk2f oracle code of the current launch (cfg / 100000000)
 static int g_sa = 0;  // s9: moe_twf uses the arithmetic scale decode (set from kernel_fn: prepare() checked the scales)
 int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }
 static int g_hot = 0;  // s29: moe_twm skips the 65..128-token experts (moe_hot ran them)
@@ -88,6 +89,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
+#define TK2F_ORX 0       // layer n5s25: moe n5s32 oracle probes orz/orn/ornc (tuner timing only; DIAG check copies)
 #define TK2F_DIAG 0      // layer s81: tk2f DIAG instantiations (no-math / KPS 4 SQ timing probes, tuner-only; set by TK2F_DIAG below)
 #define TK2F_L2H 4       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
 #define NORM_EARLY 1     // n4s1 (layer s53: set here, layer has its own _lib): twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them
@@ -3271,7 +3273,7 @@ int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 // once earlier kernels free their SMs. cnt lives in the state, zero between calls: moe_norm2 (after this kernel) zeroes it again (a memset node cost ~2.5 us).
 // layer s68 (moe n14 TK2F_SQ, r-moe 01326b4): SQ = Wq is the single-copy repack (prepare _sq_pack: [E][RPE][NQ][SB bytes]
 // = {tile lr chunks, tile lr + RPE chunks, scales}, exactly the stage's smem image): ONE bulk copy per stage instead of 3.
-template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false>
+template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false, bool ORN = false>
 __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
                                              int r1, const int* s_rs, const int* s_e, uint4* smem, uint64_t* full,
                                              uint64_t* empty, int& st, int& ph, int& i) {
@@ -3301,6 +3303,7 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
     for (int q = 0; q < NQ; ++q, ++i) {
       if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
       char* sbase = reinterpret_cast<char*>(smem) + st * SB;
+      if (ORN) { mbar_arrive(&full[st]); if (++st == NSTG) { st = 0; ph ^= 1; } continue; }  // n5s25 orn: no bytes
       mbar_expect_tx(&full[st], SB);
 #if TK2F_L2H
       if (SQ) {
@@ -4268,14 +4271,15 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     a0 = b * q1 + max(0, b - e1); a1 = a0 + q1 + (b >= e1);
     b0 = b * q2 + min(b, e2); b1 = b0 + q2 + (b < e2);
   }
+  if constexpr ((PF & 4096) != 0) { a1 = a0; b1 = b0; }  // n5s25 orz: no rows (routing, launch, barriers' setup kept)
   int st = 0, ph = 0;
   if (warp == NC) {
     if (lane == 0) {
       int i = 0;
       constexpr bool SQ = (PF & 512) != 0;  // layer s68 (moe n14): single-copy stages (Wq13 / Wq2 = the _sq_pack buffers)
       constexpr bool S6 = (PF & 1024) != 0;  // layer s73 (moe n20): 6-bit scale codes (the _s6_pack buffers)
-      tk2f_produce<512, NC, NSTG, KPS, SQ, S6>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i);
-      tk2f_produce<256, NC, NSTG, KPS, SQ, S6>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i);
+      tk2f_produce<512, NC, NSTG, KPS, SQ, S6, (PF & 2048) != 0>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i);
+      tk2f_produce<256, NC, NSTG, KPS, SQ, S6, (PF & 2048) != 0>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i);
     }
     return;
   }
@@ -4327,6 +4331,13 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
     cudaFuncSetAttribute(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
+#if TK2F_ORX
+  if constexpr ((PF & (256 | 2048 | 4096)) == 0) {  // n5s25 DIAG: 1 orz, 2 orn, 3 ornc (= orn + PF 256 no math)
+    if (g_orx == 1) return tk2f_go<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF | 4096>(D, nr, w13, s13, w2, s2, lut, gs13, gs2, x, ids, start, count, meta, sr, inv, inter, y, cnt, tw, w1, out, eps);
+    if (g_orx == 2) return tk2f_go<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF | 2048>(D, nr, w13, s13, w2, s2, lut, gs13, gs2, x, ids, start, count, meta, sr, inv, inter, y, cnt, tw, w1, out, eps);
+    if (g_orx == 3) return tk2f_go<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF | 2048 | 256>(D, nr, w13, s13, w2, s2, lut, gs13, gs2, x, ids, start, count, meta, sr, inv, inter, y, cnt, tw, w1, out, eps);
+  }
+#endif
   cudaStream_t st = at::cuda::getCurrentCUDAStream();
   return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM, st, false,
       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
@@ -4357,6 +4368,10 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
                         torch::Tensor lut_, torch::Tensor gs13_, torch::Tensor gs2_, torch::Tensor x_,
                         torch::Tensor ids_, int64_t start, int64_t count, torch::Tensor meta_, torch::Tensor sr_,
                         torch::Tensor inv_, torch::Tensor inter_, torch::Tensor y_, torch::Tensor cnt_, int64_t cfg) {
+#if TK2F_ORX
+  g_orx = (int)(cfg / 100000000);
+  cfg %= 100000000;
+#endif
   const int nr = (int)ids_.numel();
   if (nr > 256) return -2;
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
@@ -5032,6 +5047,7 @@ def _tk2f_w(c, st):
     return c, st["w13q"], st["w2q"]
 
 
+TK2F_ORX = False  # layer n5s25: build moe n5s32's tk2f oracle probes (tk2x 7 orz, 8 orn, 9 ornc; DIAG check copies only)
 TK2F_DIAG = False  # layer s81: build the tk2f DIAG probes (DIAG check copies only; sed to True)
 TK2X_M = {}  # layer s81 DIAG: M -> probe code (tuner timing only): 1 nm204, 2 sq402, 3 sq403, 4 nm402, 5 nm403, 6 plain SQ 204
 
@@ -5081,7 +5097,10 @@ def kernel_fn(data, st):
             return out
         if TK2F:
             c, w13_, w2_ = _tk2f_w(_tk2f_cfg(M, st), st)
-            if TK2X_M.get(M):  # layer s81 DIAG
+            if TK2X_M.get(M, 0) >= 7:  # layer n5s25 DIAG: oracle code in cfg / 100000000 (same buffers and cfg otherwise)
+                assert TK2F_ORX, TK2X_M
+                c += (TK2X_M[M] - 6) * 100000000
+            elif TK2X_M.get(M):  # layer s81 DIAG
                 c, w13_, w2_ = _tk2x(c, st, TK2X_M[M])
             lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)

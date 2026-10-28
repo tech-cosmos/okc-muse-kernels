@@ -4819,6 +4819,7 @@ static int launch_k(void (*k)(KA...), int grid, int block, int smem, cudaStream_
 }
 int64_t moe_set_pdl(int64_t v, int64_t twpf) { g_pdl = (int)v; g_twpf = (int)twpf; return 0; }
 int64_t moe_set_blk(int64_t v) { g_blk = (int)v; return 0; }
+static int g_orx = 0;  // layer n5s25 DIAG (TK2F_ORX): tk2f oracle code of the current launch (cfg / 100000000)
 static int g_sa = 0;  // s9: moe_twf uses the arithmetic scale decode (set from kernel_fn: prepare() checked the scales)
 int64_t moe_set_sa(int64_t v) { g_sa = (int)v; return 0; }
 static int g_hot = 0;  // s29: moe_twm skips the 65..128-token experts (moe_hot ran them)
@@ -4827,6 +4828,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
+#define TK2F_ORX 0       // layer n5s25: moe n5s32 oracle probes orz/orn/ornc (tuner timing only; DIAG check copies)
 #define TK2F_DIAG 0      // layer s81: tk2f DIAG instantiations (no-math / KPS 4 SQ timing probes, tuner-only; set by TK2F_DIAG below)
 #define TK2F_L2H 4       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
 #define NORM_EARLY 1     // n4s1 (layer s53: set here, layer has its own _lib): twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them
@@ -8010,7 +8012,7 @@ int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 // once earlier kernels free their SMs. cnt lives in the state, zero between calls: moe_norm2 (after this kernel) zeroes it again (a memset node cost ~2.5 us).
 // layer s68 (moe n14 TK2F_SQ, r-moe 01326b4): SQ = Wq is the single-copy repack (prepare _sq_pack: [E][RPE][NQ][SB bytes]
 // = {tile lr chunks, tile lr + RPE chunks, scales}, exactly the stage's smem image): ONE bulk copy per stage instead of 3.
-template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false>
+template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false, bool ORN = false>
 __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
                                              int r1, const int* s_rs, const int* s_e, uint4* smem, uint64_t* full,
                                              uint64_t* empty, int& st, int& ph, int& i) {
@@ -8040,6 +8042,7 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
     for (int q = 0; q < NQ; ++q, ++i) {
       if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
       char* sbase = reinterpret_cast<char*>(smem) + st * SB;
+      if (ORN) { mbar_arrive(&full[st]); if (++st == NSTG) { st = 0; ph ^= 1; } continue; }  // n5s25 orn: no bytes
       mbar_expect_tx(&full[st], SB);
 #if TK2F_L2H
       if (SQ) {
@@ -9007,14 +9010,15 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     a0 = b * q1 + max(0, b - e1); a1 = a0 + q1 + (b >= e1);
     b0 = b * q2 + min(b, e2); b1 = b0 + q2 + (b < e2);
   }
+  if constexpr ((PF & 4096) != 0) { a1 = a0; b1 = b0; }  // n5s25 orz: no rows (routing, launch, barriers' setup kept)
   int st = 0, ph = 0;
   if (warp == NC) {
     if (lane == 0) {
       int i = 0;
       constexpr bool SQ = (PF & 512) != 0;  // layer s68 (moe n14): single-copy stages (Wq13 / Wq2 = the _sq_pack buffers)
       constexpr bool S6 = (PF & 1024) != 0;  // layer s73 (moe n20): 6-bit scale codes (the _s6_pack buffers)
-      tk2f_produce<512, NC, NSTG, KPS, SQ, S6>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i);
-      tk2f_produce<256, NC, NSTG, KPS, SQ, S6>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i);
+      tk2f_produce<512, NC, NSTG, KPS, SQ, S6, (PF & 2048) != 0>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i);
+      tk2f_produce<256, NC, NSTG, KPS, SQ, S6, (PF & 2048) != 0>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i);
     }
     return;
   }
@@ -9066,6 +9070,13 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
     cudaFuncSetAttribute(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
     grid = nsm;
   }
+#if TK2F_ORX
+  if constexpr ((PF & (256 | 2048 | 4096)) == 0) {  // n5s25 DIAG: 1 orz, 2 orn, 3 ornc (= orn + PF 256 no math)
+    if (g_orx == 1) return tk2f_go<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF | 4096>(D, nr, w13, s13, w2, s2, lut, gs13, gs2, x, ids, start, count, meta, sr, inv, inter, y, cnt, tw, w1, out, eps);
+    if (g_orx == 2) return tk2f_go<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF | 2048>(D, nr, w13, s13, w2, s2, lut, gs13, gs2, x, ids, start, count, meta, sr, inv, inter, y, cnt, tw, w1, out, eps);
+    if (g_orx == 3) return tk2f_go<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF | 2048 | 256>(D, nr, w13, s13, w2, s2, lut, gs13, gs2, x, ids, start, count, meta, sr, inv, inter, y, cnt, tw, w1, out, eps);
+  }
+#endif
   cudaStream_t st = at::cuda::getCurrentCUDAStream();
   return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM, st, false,
       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
@@ -9096,6 +9107,10 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
                         torch::Tensor lut_, torch::Tensor gs13_, torch::Tensor gs2_, torch::Tensor x_,
                         torch::Tensor ids_, int64_t start, int64_t count, torch::Tensor meta_, torch::Tensor sr_,
                         torch::Tensor inv_, torch::Tensor inter_, torch::Tensor y_, torch::Tensor cnt_, int64_t cfg) {
+#if TK2F_ORX
+  g_orx = (int)(cfg / 100000000);
+  cfg %= 100000000;
+#endif
   const int nr = (int)ids_.numel();
   if (nr > 256) return -2;
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \
@@ -9700,6 +9715,7 @@ def _moe__tk2f_w(c, st):
     if _moe_TK2F_SQ and sq and "w13sq" in st:
         return c + 10000000, st["w13sq"], st["w2sq"]
     return c, st["w13q"], st["w2q"]
+_moe_TK2F_ORX = False
 _moe_TK2F_DIAG = False
 _moe_TK2X_M = {}
 def _moe__tk2x(c, st, code):
@@ -9743,7 +9759,10 @@ def _moe_kernel_fn(data, st):
             return out
         if _moe_TK2F:
             c, w13_, w2_ = _moe__tk2f_w(_moe__tk2f_cfg(M, st), st)
-            if _moe_TK2X_M.get(M):
+            if _moe_TK2X_M.get(M, 0) >= 7:
+                assert _moe_TK2F_ORX, _moe_TK2X_M
+                c += (_moe_TK2X_M[M] - 6) * 100000000
+            elif _moe_TK2X_M.get(M):
                 c, w13_, w2_ = _moe__tk2x(c, st, _moe_TK2X_M[M])
             lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"], x, ids,
                                 st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
@@ -15791,6 +15810,10 @@ MOE_PRUNE = True
 _MOE_STUBS = ("moe_gemm13", "moe_gemm2", "moe_tb_launch", "moe_tw_launch", "moe_twf_launch", "moe_twq_launch",
               "moe_tk2fn_launch", "moe_sk_launch")
 _MOE_TK2F_PRUNED = """
+#if TK2F_ORX
+  g_orx = (int)(cfg / 100000000);
+  cfg %= 100000000;
+#endif
   const int nr = (int)ids_.numel();
   if (nr > 256) return -2;
 #define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \\
@@ -15830,6 +15853,8 @@ def _moe__lib():
     if _moe__LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = _moe_CUDA_SRC.replace("#define TK2F_DIAG 0", "#define TK2F_DIAG 1") if _moe_TK2F_DIAG else _moe_CUDA_SRC
+        if _moe_TK2F_ORX:
+            src = src.replace("#define TK2F_ORX 0", "#define TK2F_ORX 1")
         if MOE_PRUNE and not _moe_TK2F_DIAG:
             src = _moe_prune(src)
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
@@ -17135,6 +17160,10 @@ CSL_PW_CARVE = False
 if _moe_TK2F_DIAG:
     _TK2X = [{"tk2x": k, "diag": True} for k in (6, 1, 2, 3, 4, 5)]
     TUNE = {1: ({}, *_TK2X), 16: ({}, *[dict(o, bal=False) for o in _TK2X]), 32: ({}, {"tk2h": 0, "diag": True}, *[dict(o, tk2h=0) for o in _TK2X[1:]])}
+if _moe_TK2F_ORX:
+    _ORX = [{"tk2x": k, "diag": True} for k in (7, 8, 9)]
+    TUNE = {1: ({}, *_ORX), 8: ({}, *_ORX), 16: ({}, *_ORX),
+            32: ({}, *_ORX[:2], {"tk2h": 0, "diag": True}, *[dict(o, tk2h=0) for o in _ORX])}
 ATT_DIAG_BUILD = False
 if ATT_DIAG_BUILD:
     TUNE = {16: ({}, *[{"attx": k, "diag": True} for k in (11, 12)]), 32: ({}, *[{"attx": k, "diag": True} for k in (11, 12)]),
@@ -17445,7 +17474,9 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
     slot = N2U_SLOT and _moe_TK2F == 204 and N2U_CFG[0] == 8
     c = (84204 if slot else _moe_TK2F) + (100000 if _moe_TK2SA and st["sa"] else 0)
     c, w13_, w2_ = _moe__tk2f_w(c, st) if TK2F_SQ_T1 else (c, st["w13q"], st["w2q"])
-    if _opt(state, 1, "tk2x", 0):
+    if _opt(state, 1, "tk2x", 0) >= 7:
+        c += (_opt(state, 1, "tk2x", 0) - 6) * 100000000
+    elif _opt(state, 1, "tk2x", 0):
         c, w13_, w2_ = _moe__tk2x(_moe__tk2f_w(c, st)[0], st, _opt(state, 1, "tk2x", 0))
     lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"], c)
@@ -17497,7 +17528,8 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
     lib.moe_set_ss(0 if d else st["w1"].data_ptr())
     lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"],
-                        _moe__tk2f_cfg(8, st) + (0 if d or _nu8_x(state, 8) else 1000))
+                        _moe__tk2f_cfg(8, st) + (0 if d or _nu8_x(state, 8) else 1000)
+                        + max(0, _opt(state, 8, "tk2x", 0) - 6) * 100000000)
     lib.moe_set_ss(0)
     f = y32[65:81].view(8 * TOP_K, UNPOOL_SLICE) if d else torch.empty((D_EXPERT // NU8_KB, 8, UNPOOL_SLICE), dtype=torch.float32, device=dev)
     _G10["lib"].nu8_launch(y32, ids, tw, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, state["unpool_slice"], f, st["cnt"],
