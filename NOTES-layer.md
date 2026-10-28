@@ -2280,3 +2280,15 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Next: TUNE_BASE[(32, *)] could take {g30k:pooler 104, g30n:unpool, g30n:qkv_gate} (picked in both checks; saves nothing on the
   judge since the tuner already finds it, but removes the pick risk). The d32 win is in; gap to the board's lucky draw is noise
   on v16/v32: keep stacking real per-shape wins and submit once a check lands >= 1% rule or > 2.1339x.
+
+## night5 s7 (2026-10-28 00:57Z-, okc-night5 session 7): v148 = T=32 g30 picks in TUNE_BASE; check f824b925 2.0944x (not submitted)
+- v148 (c0413d8) = v147 + TUNE_BASE[(32, sl/full)] += {g30k:pooler 104, g30n:unpool, g30n:qkv_gate} (H200 picked that set at T=32 in
+  4937830f and 133068b8). TUNE[32]: the 4 options that set it removed; escapes {g30n:qkv_gate False}, {g30n:unpool False},
+  {g30k:pooler 0}, all three off, {pr32 + g30k 0} added (g30k:pooler 120 kept).
+- validate --quick ALL OK: test 13/13, scored 0/12, opt 0/350, tk2f 0/300, replay 0/240, route 0/240 (gap 0.0256), fuzz 0/520;
+  cold prepare 199.8 s inside validate (other agents' compiles running), rerun cold (fresh caches) 154.4 s = v147's figure.
+- **check f824b925 (v148) 2.0944x** (CI 2.063-2.126). ours/SGLang us: d1 67.5/170.9, 76.9/180.8; d16 121.3/251.9, 211.5/442.5;
+  d32 154.2/263.6, 307.9/612.9; v1 108.1/258.0, 126.8/281.5; v16 274.9/531.2, 362.4/699.0; v32 378.5/740.1, 536.7/1094.6.
+  H200 tune T=32 sl: default 168.9 vs every escape 169.5-172.4 (g30k 120 182.7); full 326.8 vs 327.4-329.5: the base is right.
+  vs 133068b8 (v146, same kernels): d32 full +12.4 (295.5 -> 307.9), v32 sl +45, d16 sl -7, v1 sl -8: node noise both ways.
+  Not submitted (< 2.1126x, the 09:28Z rule's 1%).
