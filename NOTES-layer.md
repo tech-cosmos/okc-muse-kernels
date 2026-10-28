@@ -2266,3 +2266,17 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   H200 picks: T=1 full {g10alt:o 1}; T=8 sl {nu8d/nu8x False}, full {cslpw, pr8_npf 220} (g30n:o not picked); T=16 sl {tk2fj False},
   full {bal}; T=32 sl {g30k:pooler 104, g30n:unpool} (169.2 -> 162.7 confirm), full + g30n:qkv_gate (329.6 -> 323.2);
   T=128 {lt:o}; T=256 sl {lt:unpool}, full {rg}. pr32 never picked (moe), g30k104 at T=16 full not picked on H200.
+- v146 (2f105a0) = v145 + proj G30_PL (r-layer proj/g30pl 19d3f19: g30_src.cu only). validate --quick ALL OK; cold prepare 189.7 s
+  during other agents' compiles (load avg ~30), 168.3 s on rerun (proj measured 156.2 s for the same tree).
+- **check 133068b8 (v146) 2.1097x**: d1 69.1/171.5, 75.8/181.2; d16 128.4/265.3, 208.4/435.4; d32 152.2/253.7, 295.5/614.8;
+  v1 116.3/268.8, 122.1/275.7; v16 276.3/544.3, 357.5/707.4; v32 333.1/697.8, 523.3/1074.7. vs board run 35dd53d0: d32 sl -12.1,
+  full -12.5 (2nd check in a row: real, g30k/g30n at T=32), v1 full -5.2, v16 full +4.8, v32 +11/+29 (noise), rest +-2.
+  1.13% below board: misses the 09:28Z rule's 1% (>= 2.1126x) by 0.003: NOT submitted.
+  H200 picks: T=32 sl AND full {g30k:pooler 104, g30n:unpool, g30n:qkv_gate} (-5.4/-5.5 confirm); T=8 sl {cslpw, pr8_npf 220}, full
+  {g14alt:qkv_gate 1}; T=16 sl default, full {bal}; T=128 sl {lt:o, lt:unpool}, full {twf_split 1022}; T=256 sl {rg}, full default.
+  pr32 / g30n:o (T=8/16) never picked in 2 checks.
+- v147 = v146 + build.py DEAD_SRCS ("22", "OB8") not embedded (G22_CFG {} and OB8 False: never built): 933.6 KB (66 KB headroom).
+  validate --quick ALL OK (opt 0/356, fuzz 0/530), cold 154.1 s. Same kernels as v146 (no check needed for it alone).
+- Next: TUNE_BASE[(32, *)] could take {g30k:pooler 104, g30n:unpool, g30n:qkv_gate} (picked in both checks; saves nothing on the
+  judge since the tuner already finds it, but removes the pick risk). The d32 win is in; gap to the board's lucky draw is noise
+  on v16/v32: keep stacking real per-shape wins and submit once a check lands >= 1% rule or > 2.1339x.

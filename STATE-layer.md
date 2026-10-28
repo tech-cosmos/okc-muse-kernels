@@ -2,6 +2,11 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s6: **main = v147** = v146 (v145 + proj G30_PL) + build.py: Python comments stripped + g22/ob8 sources not embedded:
+  **the judge REJECTS files > 1,000,000 B** (v141-v144 were 1.05 MB); now 933.6 KB, build.py asserts < 1 MB. validate ALL OK, cold 154.1 s.
+  10-28 checks: 4937830f v145 2.0907x, 133068b8 v146 **2.1097x** (d32 sl 152.2 / full 295.5 vs board 164.3/308.0: g30k104 + g30n unp+qkv
+  picked at T=32 sl+full in both; v32 noise +11..38). Not submitted (1.13% < board; rule needs >= 2.1126x). Budget 10-28: 18 checks / 10 submits.
+  Dead this session: T=8 pooler on g30k MTOK 8 + side router (no pr8): H100 v1 +5 us (router starves beside it).
 night5 s5: **main = v144** = v143 + g30n G30_MTOK 8 (wgmma m64n8k16) as TUNE[8] option {g30n:o} (T=8 o, NW8/NS8; default off).
   H100 ab_flag v1 sl -0.3..-0.8, full +1.0..1.6 us (wash: pr8 is v1's long pole, o is off the critical path; NOTES n5s5).
   validate --quick ALL OK, cold 155.6 s. **00:00Z: check 1 = v144** (same plan as below; also read 'layer tune T=8' g30n:o).
