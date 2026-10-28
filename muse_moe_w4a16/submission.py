@@ -99,6 +99,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
 #define TWM_EPI 0        // n6s3: staged, rolled tw_item epilogue (python TWM_EPI)
 #define TWM_HOTC 0       // n6s3: compile moe_twm's hot class (cl 3) in (python: on iff TWM_HOT / TWM_HOT_M set)
+#define TWM_KSC 1        // n6s4: compile moe_twm's K-split tail code in (python: on iff TWF_SPLIT / TWF_SPLIT_M set; 2 = both builds, per call)
 #define DQW 0            // n22: dq() rotations on the FMA pipe (python DQW; DIAG builds both)
 #define NORM_EARLY 0     // n4s1: twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them (python NORM_EARLY)
 #ifndef TK2G_PAR4
@@ -1893,7 +1894,8 @@ __device__ __forceinline__ void tw_epi2(float (&acc)[RT][N / 2], int lane, int w
 
 // DYN: one main loop for both GEMMs (moe_twf), epilogue picked by g2 at run time
 template <int RT, int KG, int N, int NSTG, bool GATED, int NW, bool DYN = false, bool SA = false, int STRIDE = 0,
-          int XBO = 0>  // s29: XBO = x tile bytes (weights' offset in the stage) when != the TWC default
+          int XBO = 0,  // s29: XBO = x tile bytes (weights' offset in the stage) when != the TWC default
+          bool KS = true>  // n6s4: false = no K-split tail code (part must be null; i-cache)
 __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
                                         const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
                                         const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out,
@@ -2011,7 +2013,7 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
     return;
   }
   if constexpr (DYN) {
-    if (part) {  // s11 K-split tail item: the first half to finish stores its FP32 partial, the second adds it
+    if (KS && part) {  // s11 K-split tail item: the first half to finish stores its FP32 partial, the second adds it
       const int ct = warp * 32 + lane;
       asm volatile("bar.sync 1, 256;" ::: "memory");  // s_flag is free (previous split item done with it)
       if (ct == 0) *s_flag = atomicAdd(tick, 1);
@@ -2728,7 +2730,8 @@ __device__ __forceinline__ void tw_hot(const char* smem, uint64_t* full, uint64_
   mbar_arrive(&empty[pst]);  // the slot held the exchange: release it only now
 }
 
-template <int NSTG, bool SA = false, int PB = 64>  // n12: PB = big-class pass size (64; 48 = N48 passes)
+template <int NSTG, bool SA = false, int PB = 64,  // n12: PB = big-class pass size (64; 48 = N48 passes)
+          bool KS = (TWM_KSC != 0)>  // n6s4: false = no K-split tail code (a split request is ignored); i-cache
 __global__ void __launch_bounds__(384, 1) moe_twm(
     const char* __restrict__ W13, const char* __restrict__ S13, const float* __restrict__ gs13,
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
@@ -2764,6 +2767,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   const int tail = nsplit < 0 && !sx ? (-nsplit) & 4095 : 0, tail13 = nsplit < 0 && !sx ? ((-nsplit) >> 12) & 1023 : 0;
   const int order = nsplit < 0 ? (-nsplit) >> 24 : 0, hot = nsplit < 0 ? ((-nsplit) >> 23) & 1 : 0;
   nsplit = nsplit < 0 ? (sx ? ((-nsplit) >> 12) & 1023 : 0) : nsplit;
+  if (!KS) nsplit = 0;
   // s20: split count 1022 / 1023 = AUTO: K-split the last r light gemm2 items, r = (total item cost mod gridDim) when
   // that last wave is at most half full (halves then fill it; else no split). 1022: every item costs 1; 1023: light
   // RT 4 items weighted by their pass size (N8 1, N16 1.25, N32 1.5). Shape/routing-derived on device, no host sync.
@@ -2856,6 +2860,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
 #endif
   if (tid == 0) {
     int nbig = 0;
+#pragma unroll 1  // n6s4: was unrolled 32x (321 SASS on every CTA's start path; i-cache)
     while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
     const int mrg = (order >> 3) & 3;
     s_ord[0] = nbig;
@@ -2989,7 +2994,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     // n15: descriptor instead of the raw item: g2 | class << 1 | half (K split) << 3 | pass << 4 | nv << 8 | e << 16
     if (tl && tid == 0 && ntl < 20) tl[4 + 3 * ntl] = g2 | (cl << 1) | ((h >= 0) << 3) | (min(p, 15) << 4) | (nv << 8) | (e << 16);
 #endif
-#define TWI(RT, NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
+#define TWI(RT, NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA, STRIDE, 0, KS>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
                                                         h < 0 ? 64 : 32, pt, tick + j, &s_flag, h ? -16384 : 16384)
     if (cl == 3) {
 #if TWM_HOTC  // n6s3: the in-twm hot class only when python TWM_HOT / TWM_HOT_M asks for it (i-cache: moe_twm 11.4k -> 8.0k SASS without)
@@ -3211,6 +3216,9 @@ static int64_t twm_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
     cudaFuncSetAttribute(moe_twm<NSTG, SA>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+#if TWM_KSC == 2
+    cudaFuncSetAttribute(moe_twm<NSTG, SA, 64, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+#endif
 #if TWM_PB48
     cudaFuncSetAttribute(moe_twm<NSTG, SA, 48>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
 #endif
@@ -3224,6 +3232,9 @@ static int64_t twm_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
 #else
   TORCH_CHECK(!(g_hot & 2), "TWM_PB_M needs a TWM_PB48 build (DIAG)");
   auto kf = moe_twm<NSTG, SA>;
+#endif
+#if TWM_KSC == 2  // n6s4: both builds; the no-K-split one when this call has no split (ns > 0 or bit 22 of -ns)
+  if (!(ns > 0 || (ns < 0 && (((-ns) >> 22) & 1)))) kf = moe_twm<NSTG, SA, 64, false>;
 #endif
   // n15: g_hot >> 8 = CTAs fewer than the SM count (with moe_hot: no twm CTA starts late on a freed hot SM)
   return launch_k(kf, std::max(1, grid - (g_hot >> 8)), 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
@@ -5630,6 +5641,15 @@ _LIBX = {}  # n22: (DQW, TWM_EPI, hotc) -> library
 TWM_HOTC_FORCE = None
 
 
+TWM_KSC_FORCE = None
+TWM_KSC_DUAL = 0  # n6s4: with a K split set for some M, build moe_twm with and without the split code (calls without a split take the smaller one)
+
+
+def _ksc():  # n6s4: moe_twm K-split tail code compiled in only if some setting can use it (i-cache)
+    if TWM_KSC_FORCE is not None: return int(TWM_KSC_FORCE)  # DIAG A/B only
+    return (2 if TWM_KSC_DUAL else 1) if (TWF_SPLIT or any(TWF_SPLIT_M.values())) else 0
+
+
 def _hotc():  # n6s3: moe_twm hot class compiled in only if some setting can use it
     if TWM_HOTC_FORCE is not None: return int(TWM_HOTC_FORCE)  # DIAG A/B only
     return int(bool(TWM_HOT or any(TWM_HOT_M.values())))
@@ -5686,7 +5706,7 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
 
 def _lib():
     global _LIB
-    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc()))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
+    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc(), _ksc()))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
     if _LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = CUDA_SRC.replace("#define TK2F_L2H 0 ", f"#define TK2F_L2H {int(TK2F_L2H)} ")
@@ -5695,6 +5715,7 @@ def _lib():
         src = src.replace("#define TWM_L2H 0 ", f"#define TWM_L2H {int(TWM_L2H)} ")
         src = src.replace("#define TWM_EPI 0 ", f"#define TWM_EPI {int(TWM_EPI)} ")  # n6s3
         src = src.replace("#define TWM_HOTC 0 ", f"#define TWM_HOTC {int(_hotc())} ")  # n6s3
+        src = src.replace("#define TWM_KSC 1 ", f"#define TWM_KSC {int(_ksc())} ")  # n6s4
         if TK2F_S6 or DIAG:  # n20
             src = src.replace("#define TK2F_S6K 0 ", "#define TK2F_S6K 1 ")
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
@@ -5712,7 +5733,7 @@ def _lib():
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_l2h2", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
-        _LIBX[(int(DQW), int(TWM_EPI), _hotc())] = _LIB
+        _LIBX[(int(DQW), int(TWM_EPI), _hotc(), _ksc())] = _LIB
     return _LIB
 
 
