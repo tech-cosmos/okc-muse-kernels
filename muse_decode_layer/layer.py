@@ -1688,14 +1688,7 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   __syncthreads();
   const int lim = tok * 8;
-  for (int i = tid; i < ((nroutes + 255) & ~255); i += 256) {  // uniform trip count: __match_any_sync below
-    const int e = i < nroutes ? __ldcg(ids + i) : -1;
-    const bool v = e >= 0 && e < count;
-    const unsigned m = __match_any_sync(0xffffffffu, v ? e : -1);
-    const unsigned mp = __match_any_sync(0xffffffffu, (v && i < lim) ? e : -1);
-    if (v && (__ffs(m) - 1) == lane) atomicAdd(&cnt[e], __popc(m));
-    if (v && i < lim && (__ffs(mp) - 1) == lane) atomicAdd(&pre[e], __popc(mp));
-  }
+  const int mye = tid < 8 ? __ldcg(ids + lim + tid) : -1;
   // this token's row: load + sum of squares while the counts settle
   const size_t row = (size_t)tok;
   float v[KD / 2 / 256][2];
@@ -1715,6 +1708,20 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
     }
     v[i][0] = f.x; v[i][1] = f.y;
     ss = fmaf(f.x, f.x, fmaf(f.y, f.y, ss));
+  }
+  for (int b = 0; b < nroutes; b += 256 * 8) {  // uniform trip count: __match_any_sync below
+    int ev[8];
+#pragma unroll
+    for (int u = 0; u < 8; ++u) { const int i = b + 256 * u + tid; ev[u] = i < nroutes ? __ldcg(ids + i) : -1; }
+#pragma unroll
+    for (int u = 0; u < 8; ++u) {
+      const int i = b + 256 * u + tid, e = ev[u];
+      const bool v = e >= 0 && e < count;
+      const unsigned m = __match_any_sync(0xffffffffu, v ? e : -1);
+      const unsigned mp = __match_any_sync(0xffffffffu, (v && i < lim) ? e : -1);
+      if (v && (__ffs(m) - 1) == lane) atomicAdd(&cnt[e], __popc(m));
+      if (v && i < lim && (__ffs(mp) - 1) == lane) atomicAdd(&pre[e], __popc(mp));
+    }
   }
 #pragma unroll
   for (int o = 16; o; o >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o);
@@ -1748,15 +1755,13 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
     }
   }
   __syncthreads();
-  if (tid < 8) {
-    const int e = __ldcg(ids + lim + tid);
-    int pos = -1;
-    if (e >= 0 && e < count) {
-      pos = pre[e];
-      for (int j = 0; j < tid; ++j) pos += __ldcg(ids + lim + j) == e;  // repeated ids in a token (not from topk)
-      sroutes[pos] = lim + tid;
-    }
-    s_pos[tid] = pos;
+  if (tid < 32) {
+    const int e = mye;
+    int pos = -1, rep = 0;
+#pragma unroll
+    for (int j = 0; j < 7; ++j) { const int ej = __shfl_sync(0xffffffffu, mye, j); rep += j < tid && ej == e; }
+    if (tid < 8 && e >= 0 && e < count) { pos = pre[e] + rep; sroutes[pos] = lim + tid; }
+    if (tid < 8) s_pos[tid] = pos;
   }
   float tot = 0.f;
 #pragma unroll
