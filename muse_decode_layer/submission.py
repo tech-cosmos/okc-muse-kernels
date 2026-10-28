@@ -15761,7 +15761,7 @@ _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, """int64_t moe_route_pdl_launch(torch:
 _moe__CPP = _moe__CPP + "int64_t moe_route_pdl_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor);"
 MOE_PRUNE = True
 _MOE_STUBS = ("moe_gemm13", "moe_gemm2", "moe_tb_launch", "moe_tw_launch", "moe_twf_launch", "moe_twq_launch",
-              "moe_tk2fn_launch", "moe_tk2_launch", "moe_sk_launch")
+              "moe_tk2fn_launch", "moe_sk_launch")
 _MOE_TK2F_PRUNED = """
   const int nr = (int)ids_.numel();
   if (nr > 256) return -2;
@@ -15781,6 +15781,7 @@ _MOE_TK2F_PRUNED = """
     if (bal) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 36 | 512>(0, TK2F_ARGS0);
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512>(0, TK2F_ARGS0);
   }
+  if (!bal && cfg == 100001) return tk2f_go<8, 4, 2, false, false, true>(0, TK2F_ARGS0);  // tk2f_stress.py (moe TK2F = 1)
   TORCH_CHECK(!bal && cfg == 184204, "layer MOE_PRUNE: tk2f cfg ", cfg, " not built");
   return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4>(0, TK2F_ARGS0);
 #undef TK2F_ARGS0
