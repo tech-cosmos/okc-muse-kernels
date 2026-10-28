@@ -2877,3 +2877,33 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   for other reasons). (3) Layer: port EPI (patch_layer_epi.py) and HOTC if its tuner never picks twm_hot.
 - Session end ~21:50Z. Judge: 5 checks (54eb9bdb, a913b38e, fc7e86d6, 8ca07799 + one 422 reject not charged), 1 submit
   aeba42c5 2.2792x. 0 Modal.
+
+## n6s4 (2026-10-28 21:20Z - ): twm code size, part 2 (K-split code, layout), REL on gemm2 too; 3 H200 DIAGs queued for 00:00Z
+- Tools: tools/n6s4/sass.py <file> (= n6s3 sass.py + TWM_KSC/TWM_REL substitutions, prints spills), /tmp/n6s4/attr.py
+  (lineinfo build: SASS count per moe_twm call site x {loop, epi2, ksplit}); tools/n5s17/loop64k.py <.o|.so> 'moe_twm|moe_hot'
+  (MMA loops across a 64 KB function boundary; n5s17: +4..12%). ALWAYS run loop64k after any twm/tk2f code-size change.
+- moe_twm SA1 (7864 SASS) by call site: RT4 N8/16/24/32 692/803/1112/736, RT2 N8/16/32/PB 614/493/583/557, rest prologue/
+  producer. Per instance: main loop ~300, epilogue 120-550 (N24's gated body duplicated by the compiler), K-SPLIT TAIL 110-250
+  (1411 total) = dead unless TWF_SPLIT(_M) is set; prologue `while (nbig...)` fully unrolled = 321 SASS.
+- TWM_KSC (on main): K-split code compiled in only if a split is set (_ksc(); library key). twm KS false 5936 SASS (SA1).
+  The board AND the layer set TWF_SPLIT_M {256: 66} (layer TUNE_BASE (256, *): twf_split 66) -> TWM_KSC_DUAL = 1 builds
+  moe_twm<.., KS> twice and picks per call (no split -> KS false: board bs128, layer v16). Bitwise, 15/15.
+  H100 ab2 dual vs HEAD: board128 -4.2 (-3.6 on a repeat), board256 -0.4, v16 +0.7, v32 -0.3 us. H100 local DIAG
+  (layer routings): split66 at v32 is worth ~6 us on the H100 (s1 214 vs s0 220), so no-split-everywhere is not the way.
+- LAYOUT TRAP: rolling the nbig loop (-321 SASS) put the RT4 N16 MMA loop across 0x10000 in the KS true build (and NOT
+  rolling it does the same in the KS false build). Fix: rolled only `if constexpr (!KS)`. Now all 8 twm/hot functions are
+  clean (KS true = HEAD's 7864 SASS exactly). Older default libs: clean; GS16 tk2f instances cross (dead path).
+- DEAD: NM (one tw_item per RT, wgmma N picked at run time inside, shared epilogue/K-split; template lambda over NN):
+  ptxas then SERIALIZES EVERY wgmma (all DEPBAR gsb0 0x0, +60 B spills; H100 +14..37 us, bitwise). Even RT4-only merged
+  poisons the whole function. Per-N instances must stay separate functions-of-the-loop.
+- H100 4-stamp timeline (layer v16/v32 routings, local DIAG copy /tmp/n6s4/tl): epilogue still 10-16 us per CTA per call;
+  gemm13 N8 item end 3.1-4.1 us. Timing-only probes: drop the writer-side fence.proxy.async -> no change; drop bar.sync +
+  thread-0 __threadfence (atomic only) -> gemm13 N8 item end 0.45 us, but CTA exits unchanged (H100 = DRAM-bound: consumer
+  stalls hide). On the H200 twm is consumer-bound and warp 0's fence stall holds WG0's next wgmma: that is REL's case.
+- TWM_REL (on main, default 0, library key): n6s3 REL helper warp 9 now releases gemm2 items too (NORM_EARLY flags,
+  e | 256 | a << 16), 4 slots. REL + dual: bitwise vs dual, 15/15, tools/seeds_big.py 0 bad, H100 ab2 noise (+0.9/-2.6/+1.9/-1.7).
+- tk2f has the same pattern (bar.sync 2 + thread-0 fence + atomicAdd at each segment end, 1-3 per CTA per call; the next
+  row's bar.sync 1 waits for warp 0): the tk2f analog is next IF REL wins on the H200.
+- Queued DIAG copies (regenerate from main: python tools/n6s4/mkdiag_ksc.py / mkdiag_rel.py; TL: see below):
+  /tmp/n6s4/dg (KSC 1 vs 2, ABAB), /tmp/n6s4/dgr (REL 0 vs 1, dual, ABAB), /tmp/n6s4/tl (n6s3 mk_tl4 + mkdiag on main+DUAL;
+  stores column bogus with TWM_EPI 1). Local H100 prepare: dg 6-variant version 310 s (judge cap 300!), tl 156 s.

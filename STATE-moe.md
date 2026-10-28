@@ -1,22 +1,23 @@
 # STATE-moe
 
-## NOW (n6s3, 2026-10-28 ~21:50Z): I-CACHE is a real twm lever. On main: TWM_EPI (a60019d) + TWM_HOTC (0be4fa0+), bitwise;
-## H200 v16 -4.3 / v32 -4.5 us per call together. a60019d submitted (2.2792x). 00:00Z: check main, submit if > 2.2792x
-- n6s3 4-stamp timeline (tools/n6s3/mk_tl4.py, mkdiag.py; H200 DIAG 54eb9bdb): per CTA per call loop ~120-136 us, epilogue
-  9-14 us, gaps ~2 us. The N24/N32 epilogue time stayed with the global stores REMOVED: cause = i-cache (moe_twm was 16.7k SASS
-  ~264 KB; fully unrolled epilogues per (RT, N, gated) ran cold from L2). Fix TWM_EPI = 1: smem-staged chunk stores + ROLLED
-  8-token-group loop (acc shift by 4). twm 16.7k -> 11.4k SASS. H200 DIAG a913b38e (A B A B): v16 -1.8, v32 -3.0 us.
-- TWM_HOTC: moe_twm's in-kernel hot class (tw_hot 80/96) compiled only if TWM_HOT(_M) set (python _hotc(), TWM_HOTC_FORCE for
-  DIAG): twm 11.4k -> 8.0k SASS; H200 DIAG 8ca07799 v16 -2.5, v32 -1.4 us. NOT yet in a check/submit (checks 20/20 on 10-28).
-- Handoff posted (tools/n6s3/patch_layer_epi.py for r-layer moe_src; HOTC only if layer's twm_hot TUNE option unused).
-- NEXT (ranked): (1) shrink moe_twm code further (11.4k SASS still > i-cache): find what's big (cuobjdump per region:
-  8 tw_item loop instances RT4 N8/16/24/32 + RT2 N8/16/32/PB, tw_hot 80/96 (hot class inside twm, rarely used with the
-  separate moe_hot), K-split paths); candidates: drop the N24 instance (use N32), dedupe g2/gated loop bodies. Measure each with tools/n6s3/sass.py + ab2.py, then
-  one H200 DIAG (TWM_EPI-style python-keyed library switch, tools/n6s3/mkdiag_epi.py pattern).
-  (2) the same i-cache view for tk2f decode (tk2f/tk2h instance sizes) and the per-stage ~230 cyc overhead (s27): cold loop
-  code at each item start? (3) REL (helper-warp release) = noise on H100 (tools/n6s3/mk_rel.py), retest on H200 only if cheap.
-- Tools: tools/n6s3/ab2.py A.py B.py (paired H100 A/B, board bs128/256 + layer v16/v32, prints max|A-B|); sass.py <file>
-  (ptxas spills + SASS counts of twm/hot); itl4.py (H100 per-item loop/epi split). The judge REJECTS `import reference`.
+## NOW (n6s4, 2026-10-28 ~22:40Z): twm code size + release stalls; 3 H200 DIAGs queued for 00:00Z (checks 0/20 left on 10-28)
+- On main (all default OFF = the a60019d+HOTC code, bitwise): TWM_KSC (K-split tail code only when a split is set; twm
+  KS false 5.9k vs 7.9k SASS), TWM_KSC_DUAL (python: build twm with + without it, pick per call: calls without a split =
+  board bs128 / layer v16), TWM_REL (helper warp 9 does the gemm13 AND gemm2 releases; consumers skip bar.sync + thread-0
+  fence). All bitwise, 15/15 (REL also seeds_big 0 bad). H100: dual board128 -4 us, rest noise; REL noise (H100 is
+  DRAM-bound: H100 timeline shows warp 0 stalls ~3 us per gemm13 N8 item on the fence, hidden there; H200 is consumer-bound).
+- LAYOUT RULE: after ANY twm/tk2f code change run `python tools/n5s17/loop64k.py <k.o> 'moe_twm|moe_hot'` (sass.py builds
+  k.o under /tmp/n6s4/sass_<hash>): an MMA loop across 64 KB = +4..12% (n5s17). The nbig loop is rolled only for KS false
+  for that reason. NM (merge N instances into one tw_item) DEAD: serializes all wgmma.
+- 00:00Z PLAN: okc check (from each dir, DIAG copies NEVER submit): /tmp/n6s4/dg (KSC 1 vs 2), /tmp/n6s4/dgr (REL 0 vs 1),
+  /tmp/n6s4/tl (4-stamp timeline of main+dual). Regenerate dg/dgr from main first (tools/n6s4/mkdiag_ksc.py / mkdiag_rel.py:
+  they drop the DIAG-only tk2f families + decode routings: prepare cap, n6s3 HOTC DIAG was 302.7 s). Read
+  `grep "diag12 MEAN\|n6tl" <dir>/profiles/submission.<job>.log`. Then set TWM_KSC_DUAL / TWM_REL to the winners, plain
+  check, submit if > 2.2792x. If REL wins: same helper for moe_hot and a tk2f analog (bar.sync 2 + thread-0 fence at
+  each segment end; tk2f has no idle warp). Layer port: post Handoff with the flags.
+- Earlier (n6s3): TWM_EPI + TWM_HOTC (on main, default on): H200 v16 -4.3 / v32 -4.5 us per call. a60019d submitted 2.2792x.
+- Tools: tools/n6s3/ab2.py A.py B.py (paired H100 A/B, board bs128/256 + layer v16/v32, max|A-B|); tools/n6s4/sass.py <file>;
+  /tmp/n6s4/rundiag.py <diag copy> (local run of a DIAG prepare). The judge REJECTS `import reference`.
 
 ## WAS (n5s34-n5s40): tk2f consumer, twm dq cut, dq superoptimizer (8 int + 4 HMUL2 per 8 weights is minimal), dequant-once: all CLOSED (NOTES)
 
