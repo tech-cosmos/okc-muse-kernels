@@ -15759,11 +15759,50 @@ _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, """int64_t moe_route_pdl_launch(torch:
 }
 """ + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_route_pdl_launch(torch::Tensor, int64_t, int64_t, torch::Tensor, torch::Tensor);"
+MOE_PRUNE = True
+_MOE_STUBS = ("moe_gemm13", "moe_gemm2", "moe_tb_launch", "moe_tw_launch", "moe_twf_launch", "moe_twq_launch",
+              "moe_tk2fn_launch", "moe_tk2_launch", "moe_sk_launch")
+_MOE_TK2F_PRUNED = """
+  const int nr = (int)ids_.numel();
+  if (nr > 256) return -2;
+#define TK2F_ARGS0 nr, PTR(w13_), PTR(s13_), PTR(w2_), PTR(s2_), PTR(lut_), PTR(gs13_), PTR(gs2_), PTR(x_), PTR(ids_), \\
+    (int)start, (int)count, meta_.data_ptr(), sr_.data_ptr(), inv_.data_ptr(), inter_.data_ptr(), y_.data_ptr(), \\
+    cnt_.data_ptr()
+  const bool s6 = cfg >= 20000000;
+  const bool sq = cfg >= 10000000;
+  cfg %= 10000000;
+  const bool bal = cfg >= 1000000;
+  cfg %= 1000000;
+  TORCH_CHECK(!s6, "layer MOE_PRUNE: tk2f S6 not built");
+  if (sq) {
+    if (cfg >= 140000 && cfg < 150000 && cfg % 1000 == 4)
+      return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4 | 512>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+    TORCH_CHECK(cfg == 184204, "moe_tk2f SQ: cfg ", cfg);
+    if (bal) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 36 | 512>(0, TK2F_ARGS0);
+    return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512>(0, TK2F_ARGS0);
+  }
+  TORCH_CHECK(!bal && cfg == 184204, "layer MOE_PRUNE: tk2f cfg ", cfg, " not built");
+  return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4>(0, TK2F_ARGS0);
+#undef TK2F_ARGS0
+}
+"""
+def _moe_body(src, fn):
+    a = src.index("\nint64_t " + fn + "(")
+    b = src.index(") {\n", a) + 3
+    return b, src.index("\n}\n", b) + 1
+def _moe_prune(src):
+    for fn in _MOE_STUBS:
+        a, b = _moe_body(src, fn)
+        src = src[:a] + f'\n  TORCH_CHECK(false, "layer MOE_PRUNE: {fn} not built");\n  return -1;\n' + src[b:]
+    a, b = _moe_body(src, "moe_tk2f_launch")
+    return src[:a] + _MOE_TK2F_PRUNED.rsplit("}\n", 1)[0] + src[b:]
 def _moe__lib():
     global _moe__LIB
     if _moe__LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = _moe_CUDA_SRC.replace("#define TK2F_DIAG 0", "#define TK2F_DIAG 1") if _moe_TK2F_DIAG else _moe_CUDA_SRC
+        if MOE_PRUNE and not _moe_TK2F_DIAG:
+            src = _moe_prune(src)
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
         _moe__LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_moe__CPP, cuda_sources=src,
                                 functions=["moe_gemm13", "moe_gemm2", "moe_route_launch", "moe_norm_launch", "moe_norme_launch", "moe_sk_launch", "moe_tk2_launch", "moe_tk2f_launch", "moe_tk2fn_launch", "moe_tb_launch",
@@ -16318,6 +16357,21 @@ def _lt_build():
     if "lib" not in _LT:
         try:
             from torch.utils.cpp_extension import load_inline
+            if TSHIM:
+                a = "#include <torch/extension.h>\n#include <ATen/cuda/CUDAContext.h>\n"
+                assert _LT_SRC.count(a) == 1 and "torch/" not in _LT_SRC.replace(a, "")
+                src = _LT_SRC.replace(a, _TSHIM_H) + """
+int64_t lt_gemm_raw(std::vector<int64_t> d, std::vector<int64_t> cfg, int64_t stream) {
+  tshim::g_stream = (cudaStream_t)stream;
+  const int64_t* p = d.data();
+  return lt_gemm(torch::Tensor{p}, torch::Tensor{p + 9}, torch::Tensor{p + 18}, torch::Tensor{p + 27}, cfg);
+}
+"""
+                _LT["lib"] = _LtRaw(load_inline(
+                    name="muse_layer_lt1_ts", cpp_sources=_TSHIM_CPP + "int64_t lt_gemm_raw(std::vector<int64_t>, std::vector<int64_t>, int64_t);",
+                    cuda_sources=src, functions=["lt_gemm_raw"], extra_ldflags=["-lcublasLt"], extra_cuda_cflags=["-O3"],
+                    no_implicit_headers=True, with_pytorch_error_handling=False))
+                return
             _LT["lib"] = load_inline(
                 name="muse_layer_lt1",
                 cpp_sources="int64_t lt_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::vector<int64_t>);",
@@ -16568,6 +16622,89 @@ def _g24_prepare(state, w, comp, g):
         else:
             print("layer gemv24 config dropped:", key, m, c)
     _g27_prepare(state, w, comp, g, packs)
+TSHIM = True
+_TSHIM_H = r"""#include <stdexcept>
+#include <sstream>
+#include <vector>
+#include <cuda_runtime.h>
+namespace tshim {
+inline void cat(std::ostringstream&) {}
+template <class A, class... R> inline void cat(std::ostringstream& o, const A& a, const R&... r) { o << a; cat(o, r...); }
+template <class... R> [[noreturn]] inline void fail(const char* c, const R&... r) { std::ostringstream o; o << c << " "; cat(o, r...); throw std::runtime_error(o.str()); }
+inline cudaStream_t g_stream = nullptr;
+}
+#define TORCH_CHECK(c, ...) do { if (!(c)) tshim::fail(#c, ##__VA_ARGS__); } while (0)
+namespace torch {
+enum ScalarType { kFloat32 = 0, kBFloat16 = 1, kInt32 = 2, kOther = 3 };
+struct Tensor {  // _tdesc: ptr, ndim, sizes[4], numel, dtype, contiguous
+  const int64_t* d;
+  void* data_ptr() const { return (void*)d[0]; }
+  int64_t dim() const { return d[1]; }
+  int64_t size(int64_t i) const { return d[2 + (i < 0 ? i + d[1] : i)]; }
+  int64_t numel() const { return d[6]; }
+  ScalarType scalar_type() const { return (ScalarType)d[7]; }
+  ScalarType dtype() const { return (ScalarType)d[7]; }
+  bool is_contiguous() const { return d[8] != 0; }
+};
+}
+namespace at { namespace cuda { inline cudaStream_t getCurrentCUDAStream() { return tshim::g_stream; } } }
+"""
+_TSHIM_DT = {torch.float32: 0, torch.bfloat16: 1, torch.int32: 2}
+_TSHIM_CPP = "#include <pybind11/pybind11.h>\n#include <pybind11/stl.h>\n#include <cstdint>\n#include <vector>\n"
+def _tdesc(*ts):
+    d = []
+    for t in ts:
+        assert t.dim() <= 4
+        d += [t.data_ptr(), t.dim(), *t.shape, *[1] * (4 - t.dim()), t.numel(), _TSHIM_DT.get(t.dtype, 3), int(t.is_contiguous())]
+    return d
+class _G30Raw:
+    def __init__(self, mod):
+        self.mod = mod
+    def g30_gemm(self, x, wp, hdr, out, scale, pdl):
+        self.mod.g30_gemm_raw(_tdesc(x, wp, hdr, out), scale, pdl, torch.cuda.current_stream().cuda_stream)
+    def g30k_gemm(self, x, wp, hdr, out, scale, pdl, slab, ticket, G):
+        self.mod.g30k_gemm_raw(_tdesc(x, wp, hdr, out, slab, ticket), scale, pdl, G, torch.cuda.current_stream().cuda_stream)
+class _LtRaw:
+    def __init__(self, mod):
+        self.mod = mod
+    def lt_gemm(self, w, x, out, ws, cfg):
+        return self.mod.lt_gemm_raw(_tdesc(w, x, out, ws), cfg, torch.cuda.current_stream().cuda_stream)
+def _g30_load(name, dfs, k):
+    """The g30 (k False) / g30k (k True) lib with defines dfs; TSHIM: torch-free build behind _G30Raw."""
+    from torch.utils.cpp_extension import load_inline
+    fl = ["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs]
+    if not TSHIM:
+        if k:
+            return load_inline(name=name, cpp_sources="void g30k_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
+                               "int64_t, torch::Tensor, torch::Tensor, int64_t);", cuda_sources=_G30_SRC, functions=["g30k_gemm"],
+                               extra_cuda_cflags=fl, extra_ldflags=["-lcuda"])
+        return load_inline(name=name, cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
+                           cuda_sources=_G30_SRC, functions=["g30_gemm"], extra_cuda_cflags=fl, extra_ldflags=["-lcuda"])
+    a = "#include <torch/extension.h>\n#include <ATen/cuda/CUDAContext.h>\n"
+    assert _G30_SRC.count(a) == 1 and "torch/" not in _G30_SRC.replace(a, "")
+    src = _G30_SRC.replace(a, _TSHIM_H)
+    if k:
+        src += """
+void g30k_gemm_raw(std::vector<int64_t> d, double scale, int64_t pdl, int64_t G, int64_t stream) {
+  tshim::g_stream = (cudaStream_t)stream;
+  const int64_t* p = d.data();
+  g30k_gemm(torch::Tensor{p}, torch::Tensor{p + 9}, torch::Tensor{p + 18}, torch::Tensor{p + 27}, scale, pdl, torch::Tensor{p + 36},
+            torch::Tensor{p + 45}, G);
+}
+"""
+        cpp = _TSHIM_CPP + "void g30k_gemm_raw(std::vector<int64_t>, double, int64_t, int64_t, int64_t);"
+    else:
+        src += """
+void g30_gemm_raw(std::vector<int64_t> d, double scale, int64_t pdl, int64_t stream) {
+  tshim::g_stream = (cudaStream_t)stream;
+  const int64_t* p = d.data();
+  g30_gemm(torch::Tensor{p}, torch::Tensor{p + 9}, torch::Tensor{p + 18}, torch::Tensor{p + 27}, scale, pdl);
+}
+"""
+        cpp = _TSHIM_CPP + "void g30_gemm_raw(std::vector<int64_t>, double, int64_t, int64_t);"
+    fn = "g30k_gemm_raw" if k else "g30_gemm_raw"
+    return _G30Raw(load_inline(name=name + "_ts", cpp_sources=cpp, cuda_sources=src, functions=[fn], extra_cuda_cflags=fl,
+                               extra_ldflags=["-lcuda"], no_implicit_headers=True, with_pytorch_error_handling=False))
 def _g30_build():
     if not G30_KEYS or _G30_SRC is None:
         return
@@ -16575,11 +16712,7 @@ def _g30_build():
         try:
             import hashlib
             from torch.utils.cpp_extension import load_inline
-            _G30["lib"] = load_inline(
-                name="layer_g30_" + hashlib.sha256(_G30_SRC.encode()).hexdigest()[:10],
-                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
-                cuda_sources=_G30_SRC, functions=["g30_gemm"],
-                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"], extra_ldflags=["-lcuda"])
+            _G30["lib"] = _g30_load("layer_g30_" + hashlib.sha256(_G30_SRC.encode()).hexdigest()[:10], [], False)
         except Exception as ex:
             print("layer g30 build failed:", ex)
             _G30["lib"] = None
@@ -16590,11 +16723,7 @@ def _g30n_build(c):
             import hashlib
             from torch.utils.cpp_extension import load_inline
             dfs = [f"-DG30_MTOK={c[0]}", f"-DG30_S={c[1]}", f"-DG30_NW={c[2]}", f"-DG30_NS={c[3]}"]
-            _G30N[c] = load_inline(
-                name="layer_g30n_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
-                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
-                cuda_sources=_G30_SRC, functions=["g30_gemm"],
-                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
+            _G30N[c] = _g30_load("layer_g30n_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10], dfs, False)
         except Exception as ex:
             print("layer g30n build failed:", c, ex)
             _G30N[c] = None
@@ -16606,11 +16735,7 @@ def _g30gx_build(c):
             import hashlib
             from torch.utils.cpp_extension import load_inline
             dfs = [f"-DG30_MTOK={c[0]}", f"-DG30_S={c[1]}", f"-DG30_NW={c[2]}", f"-DG30_NS={c[3]}", "-DG30_GX=1"]
-            _G30GX[c] = load_inline(
-                name="layer_g30gx_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
-                cpp_sources="void g30_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t);",
-                cuda_sources=_G30_SRC, functions=["g30_gemm"],
-                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
+            _G30GX[c] = _g30_load("layer_g30gx_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10], dfs, False)
         except Exception as ex:
             print("layer g30gx build failed:", c, ex)
             _G30GX[c] = None
@@ -16663,12 +16788,7 @@ def _g30kgx_build(c):
             import hashlib
             from torch.utils.cpp_extension import load_inline
             dfs = ["-DG30K_ON", "-DG30K_F32=1", f"-DG30_MTOK={c[0]}", f"-DG30_NW={c[1]}", f"-DG30_NS={c[2]}", "-DG30_GX=1"]
-            _G30KGX[c] = load_inline(
-                name="layer_g30kgx_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
-                cpp_sources="void g30k_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
-                            "torch::Tensor, torch::Tensor, int64_t);",
-                cuda_sources=_G30_SRC, functions=["g30k_gemm"],
-                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
+            _G30KGX[c] = _g30_load("layer_g30kgx_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10], dfs, True)
         except Exception as ex:
             print("layer g30kgx build failed:", c, ex)
             _G30KGX[c] = None
@@ -16726,12 +16846,7 @@ def _g30k_build(c):
             import hashlib
             from torch.utils.cpp_extension import load_inline
             dfs = ["-DG30K_ON", "-DG30K_F32=1", f"-DG30_MTOK={c[0]}", f"-DG30_NW={c[1]}", f"-DG30_NS={c[2]}"]
-            _G30K[c] = load_inline(
-                name="layer_g30k_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10],
-                cpp_sources="void g30k_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
-                            "torch::Tensor, torch::Tensor, int64_t);",
-                cuda_sources=_G30_SRC, functions=["g30k_gemm"],
-                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs], extra_ldflags=["-lcuda"])
+            _G30K[c] = _g30_load("layer_g30k_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10], dfs, True)
         except Exception as ex:
             print("layer g30k build failed:", c, ex)
             _G30K[c] = None
