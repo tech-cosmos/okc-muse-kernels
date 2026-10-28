@@ -2217,3 +2217,17 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Found while diffing TUNE: v153 (cherry-pick of SUPERSEDED afc0c8b) still carries the stray comment that swallowed TUNE[32]'s
   {g30n:* False}, {g30k 0/120}, {pr32}, {g19:qkv/o}, {lt:qkv_gate} options. Harmless per the lead's 03:25Z rule (none picked on the
   H200 recently), so not restored; the comment text is gone in v155kgx.
+
+## n5s9 (2026-10-28 03:32-03:50Z, night5 session 9): lane (b) validate of layer main v155 + lane audit; 0 judge runs
+- Layer integrated proj/v155kgx itself (v155 = TUNE cut + T=32 base g30kgx:pooler). Layer claimed the build pruning, so proj did not.
+- Full validate (not --quick) of layer main v155 (origin/main 9d1ef1d, worktree /tmp/pj155): ALL OK: test 13/13, scored 0/24,
+  opt 0/42, tk2f 0/1200, replay 0/480, route 0/240 (worst gap 0.0256, drop-lead 0.0179), fuzz 0/192, cold prepare 170.5 s
+  (GPU shared with 2 agents; layer measured 139.4 s on a quiet GPU).
+- H200 layer tuner lines, last 8 layer checks: every T=128 GEMM option within +-2 us of default ({g30:unpool False} only
+  +0.6..3; g30:o +0.3..3, never picked); T=16 g30 ties; T=32 g30kgx pinned. => no GEMM option left with size.
+- H100 timeline v155 verify 16 sliding (tools/timeline.py, shared GPU), us: qkv cuBLAS 0-19.6, nvs 20.2-32.0, combine_hb -34.6,
+  o cuBLAS 35.0-41.9, bnd -48.2, FR pooler cuBLAS 48.6-82.2 (33.6 = 75 MB at 2.2 TB/s), routing/route/gathern -90.4, twm 89.0-279.5
+  (190.5), moe_norm 244.8-282.0 (NORM_EARLY: waits per token, ends 2.5 us after twm: NOT a 40 us tail), g30 unpool 282.2-308.0,
+  bnd -311.6. Experts = 61% of the load; GEMMs ~86 us, every one of them already A/B'd against own kernels (s28/s101/s102/s105).
+- Lane request to lead (COORD Requests n5s9): (1) take twm big-M at v16/v32 beside moe's tk2f work, or (2) muse_attention_decode
+  (orphan since lead 01:45Z, 20 checks/day unused).

@@ -1,5 +1,9 @@
 # STATE-proj (muse_bf16_proj) — short current picture; NOTES-proj.md is the long log (sessions in order, newest last)
-Updated 2026-10-28 04:10 UTC (night5 n5s8 = session 8). Lane: the layer's T>=16 GEMMs (proj board = test bed only).
+Updated 2026-10-28 03:50 UTC (night5 n5s9 = session 9). Lane: the layer's T>=16 GEMMs (proj board = test bed only).
+**n5s9: layer main v155 full validate ALL OK** (test 13/13, scored 0/24, opt 0/42, tk2f 0/1200, replay 0/480, route 0/240, fuzz 0/192,
+cold 170.5 s on a shared GPU). proj GEMM lane exhausted (H200 tuner: all T=128 GEMM options +-2 us; T=16 g30 ties): **lane request to
+lead pending** (COORD Requests n5s9: twm big-M v16/v32 or muse_attention_decode). Next session: read the lead answer first.
+v16 sl H100 timeline (NOTES n5s9): moe_norm's 37 us is NORM_EARLY waiting, not a tail (ends 2.5 us after twm).
 **n5s8: branch proj/v155kgx d9822c4 for layer** = v154 + g30kgx:pooler pinned in TUNE_BASE[32] (H200 tuner won all 4 T=32 runs in
 60f02748/3e3b9fd3, -1.0..-1.3 us) + g30gx builds/options dropped (never won, +-0.2): validate --quick ALL OK, cold prepare 141.3 vs 153.3 s.
 g30n GX is DEAD on the H200 in-layer (only g30k GX pays). Remaining NEXT (2) GX at T=8 o: dropped with it (same g30n GX path).
