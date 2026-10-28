@@ -22,11 +22,10 @@
   REG cap (168 = HW cap at 288 threads). Decode excess = fit's fixed 14.1 + 4.4/extra group, every piece measured dead.
 - n5s27: tk2f L2 row prefetch (PFL2, DIAG-only, off) DEAD on the H200 (979cb0ea: d1 +3..5, d16 +8..15, d32 +13..19, v1 +6..12 us;
   18 KB form loses least => request size is no lever; any HBM traffic beyond the 72 KB/SM ring slows tk2f). NOTES n5s27.
-- n5s28: s9 fused norm (TK2FN) re-tested fairly on H100 (layout not the cause): FN tail = norm2's cost, replay +2.6..5 us: DEAD. - n5s29: Modal H200 HBM probe (tools/n5s29/ov/bwprobe.py): bulk copies are the fastest stream (4.42-4.57 TB/s contiguous at 280-560 MB),
+- n5s28 TK2FN fused norm DEAD (H100 replay +2.6..5 us). - n5s29: Modal H200 HBM probe (tools/n5s29/ov/bwprobe.py): bulk copies are the fastest stream (4.42-4.57 TB/s contiguous at 280-560 MB),
   LDG never beats them (1 CTA/SM LDG -4..7%); tk2f's 72 KB/SM of 18 KB copies is within 0.5-2.5% of the best: load-method lever DEAD.
-- n5s30: n5s15 ring variants (r5/r6/r8/k44/k45) re-audited with loop64k: no 64 KB loop crossing -> verdict stands, ring lever closed.
-- n5s31: no build (lane ask open). Board JSON has screened_speedup: #1 2.685 submitted / 2.584 screened -> real gap ~14%.
-- Checks 10-28: moe 12 of its 12 used (+979cb0ea n5s27); was: 11 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326, cefcc133, d3761aa5, e3bd482e), 2 submits (951c17e0, 4fb734c6); attention 0/20.
+- n5s31: no build; board JSON screened_speedup: #1 2.685 -> 2.584 screened (real gap ~14%).
+- n5s30: n5s15 ring variants (r5/r6/r8/k44/k45) re-audited with loop64k: no 64 KB loop crossing -> verdict stands, ring lever closed. Checks 10-28: moe 12 of its 12 used (+979cb0ea n5s27); was: 11 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326, cefcc133, d3761aa5, e3bd482e), 2 submits (951c17e0, 4fb734c6); attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
