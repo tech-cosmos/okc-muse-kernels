@@ -1,14 +1,17 @@
 # STATE-moe
 
-## NOW (n5s15, 2026-10-28 02:55Z): LANE DECISION 6 (lead 01:45Z): moe board = H200 A/B bench; tk2f bs16/32/8 first, then big-M
-- 4 moe checks used (DIAG test runs, never submit): ring depth/size/consumer warps/grid-stride ALL at optimum on the H200:
-  tk2f 4 x 18 KB SQ stages (72 KB in flight/SM) + 8 consumer warps beats r2/r3/r5/r6/r8 (2-8 x 18 KB), k44/k45 (36 KB),
-  k14/k16 (9 KB), nc16 (16 warps). Cyclic/grid-stride deal of stages = blocked (probe). Lever (a) of 01:45Z closed. NOTES n5s15.
-- NEXT tk2f: the extra 8-token groups (layer d32 2-3 x ~4.4 us, consumer-bound L2 rows) = most of the 13 us between tk2f
-  (85.3) and the bare stream at its own ring (72.5) at d32. Audit why GS16 2-group rows cost more than 2 single rows (SASS,
-  stalls on H100: tk2g_row TWO), then rebuild. Then big-M (twm drain ~20 us; 3-WG proposal is weak: twq 16 warps ~50% issue).
-- Board-only, cheap, untested on H200: decode norm2/norm3 as PDL secondary in standalone (g_pdl bit 2; no layer value).
-- Checks 10-28: moe 4/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239), 0 submits; attention 0/20.
+## NOW (n5s16, 2026-10-28 03:05Z): LANE DECISION 6 (lead 01:45Z): moe board = H200 A/B bench; tk2f bs16/32/8 first, then big-M
+- n5s15 (4 DIAG checks): tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps; deeper/larger/
+  shallower/nc16/grid-stride all lose). Lever (a) of 01:45Z closed. NOTES n5s15.
+- n5s16 (1 DIAG check): H200 ORACLE (tk2f without the extra 8-token groups): d16 61.0 vs 65.0, d32 76.0 vs 83.7 => the extra
+  groups cost 4.0 / 7.7 us; tk2h W3 gets only 2.8 of it at d32 (loses 1.3 at d16). HYB GS16 consumer (3 bodies) and HYB2
+  (__noinline__ TWO rows) both lose on the H100: an inlined never-run TWO body costs ~5%/row via the I-CACHE (ncu no-instr
+  stall 1.3 -> 4.4%). NOTES n5s16.
+- NEXT tk2f: ONE small body for 1- and 2-group rows: x of both groups in SMEM (no xf registers), stage loop rolled (unroll 1
+  over q), 2nd group = uniform branch per stage. Smem fits (~222 KB with s_red single-buffered). Prize <= d32 7.7, d16 4.0 us
+  H200 (d32 ~ -5 vs the layer's tk2h). First an H100 prototype: 1-group rows must stay at sq's speed (DIAG s99 / ncu_x.py).
+- Then big-M (twm drain ~20 us; 3-WG proposal weak: twq 16 warps ~50% issue).
+- Checks 10-28: moe 5/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1), 0 submits; attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding

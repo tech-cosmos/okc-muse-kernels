@@ -2297,3 +2297,30 @@ default build is unchanged. Every variant bitwise = main locally (maxdiff 0), ex
   L2-served rows, see fit) + routing ~1.5 + norm2. => NEXT for tk2f: make an extra 8-token group cheap (both groups per
   dq pass) -- GS16/tk2h lost before (xs smem LDS + regs + i-cache; "2-group row ~6 us per segment"); find out WHY a
   2-group row costs more than two 1-group rows before building again (SASS/stall audit of tk2g_row TWO on the H100).
+
+## n5s16 (2026-10-28 02:36Z - ): extra 8-token groups: H200 oracle bound + GS16 hybrid consumer (DEAD: i-cache); 1 moe check (DIAG)
+- TK2F_ORACLE (DIAG builds; run-time via moe_set_l2h2(v + 1000) -> kernel arg l2h bit 12; WRONG output, timing only):
+  tk2f computes only each expert's first token group (ng capped at 1). A first version keyed a 2nd library on it:
+  local DIAG prepare 280 s (judge limit 300 s!) -> made it run-time (prepare back to 141 s). Default build bitwise as before.
+- H200 check e19541a1 (fb063c2 + DIAG=1, 2.2557x test run, never submit), MEAN us over 5 layer seeds:
+            sq    or1(oracle) h3(tk2h W3)  sqb
+    d1     30.1   30.0        30.0         30.0
+    d16    65.0   61.0        66.3         64.9    (s99 has no 9+-token expert: or1 = sq there; h3 +2.6 = tk2h's 1-group-row overhead)
+    d32    83.7   76.0        80.9         83.7
+    v1     64.5   64.4        64.3         64.3
+  => the extra token groups cost d16 4.0 us, d32 7.7 us on the H200 (the prize for a "free" 2nd group). tk2h W3 (the layer's
+  d32 pick) recovers 2.8 of 7.7 at d32 and loses 1.3 at d16 (its 1-group rows are slower).
+- Built HYB (tk2x_consume, PF 8192, cfg 1006W004 SQ, python TK2X_M): GS16 segments, 1-group rows = compile-time-gated tk2g_row
+  (= tk2f's body), 2-group rows = ONE run-time-gated TWO body for both phases (3 bodies). Bitwise = sq (maxdiff 0, 15/15).
+  H100 DIAG (layer routings): d16 x3 92.3 vs sq 83.6, d32 112.5 vs 108.6: LOSES, and also at d16 s99 (no 2-group row ever)
+  111.7 vs 106.8. Probe xn (same kernel, TWO body compiled out, wrong output for 2-group rows): s99 106.8 = sq, d32 102.4 ~ or1.
+  ncu (tools/n5s16/ncu_x.py, d16 s99): sq / xn / x3 inst 32.1M / 31.7M / 32.0M, "no instruction" stall 1.33% / 1.33% / 4.40%.
+  => the mere PRESENCE of an inlined, never-executed TWO body costs ~5% per 1-group row: i-cache (kernel 6736 vs 5048 SASS
+  instr). Same cause as s10/s12's GS16 loss; tk2h's +4% on 1-group rows is likely the same thing (n17/n18 suspects).
+- HYB2 (tk2x_two __noinline__ for all 2-group rows of a segment, PF 32768, cfg 1005W004, TK2X2_M): MUCH worse (d16 s99 125.9):
+  the call forces the ABI (REG 168 cap + 328 B stack). Dead. Both kept behind #define TK2X (0; DIAG builds set 2).
+- Lesson: in tk2f any extra main-loop body costs ~5%/row via the i-cache even if never run; a GS16 that wins must have ONE
+  small body for both group counts. Idea for that (NOT built): x in SMEM for both groups (no xf registers) so the stage loop
+  can stay rolled (`#pragma unroll 1` over q, one ~200-instr stage body) and the 2nd group is a uniform branch per STAGE (not
+  per mma). Smem: ring 73.7 KB + x 2 groups x 8 warps x 8 KB = 128 KB + s_red single-buffered 16 KB + ~4 KB statics = ~222 KB
+  (< 227 KB). Risks: LDS of x per mma for 1-group rows (+1 LDS.128 per 2 mma), loss of unrolled ILP. Prize: <= d32 7.7 / d16 4.0.

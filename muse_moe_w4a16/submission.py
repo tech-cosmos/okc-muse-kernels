@@ -88,6 +88,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define KD 4096          // K of both GEMMs
 #define NOUT 4096        // output rows of both GEMMs (gate/up each I, w2 H)
 #define TK2F_RING_SA 0   // s12: SA instantiations of the deeper tk2f rings (208/206/403/108): H200 diag 619ad6ad, all lose
+#define TK2X 0  // n5s16 (DEAD, i-cache): HYB / HYB2 GS16 consumers (tk2x_consume / tk2x_two; python TK2X_M / TK2X2_M); DIAG builds only
 #define TK2F_ORACLE 0  // n5s16 DIAG builds: run-time oracle (l2h bit 12, python TK2F_ORACLE; WRONG output): tk2f computes only the first GS-token group of each expert
 #define TK2F_SQDEEP 0  // n5s15: deeper / 36 KB SQ rings (cfg 205/206/208/404/405 + 84xxx), DIAG builds only
 #define TK2F_SQ4 0  // n14: build the KPS 4 SQ tk2f (36 KB single-copy stages, cfg 402/403 + SQ); DIAG builds only
@@ -3891,6 +3892,119 @@ __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* 
   }
 }
 
+// n5s16 HYB (PF & 8192, GS 16): 1-group rows run the compile-time-gated tk2g_row body (= tk2f_consume's), 2-group
+// rows ONE run-time-gated TWO body shared by both phases: 3 main-loop bodies (old GS16: 4 = i-cache; tk2h: 2, but its
+// run-time-gated 1-group rows are ~4% slower on the H200, n17). Bitwise = tk2f (same per-group mma order and reduce).
+// n5s16 HYB2: all of a CTA's 2-group rows of one segment in a separate (__noinline__) function: own register
+// allocation and code, so the inlined 1-group bodies compile exactly as in tk2f (an inlined TWO body, never executed,
+// cost +5% per 1-group row on the H100). Loads group 0's x itself (group 1's is in xs); returns st | ph << 8 | rb << 9.
+template <int NC, int NSTG, int KPS, bool SA, bool SLOT>
+__device__ __noinline__ int tk2x_two(const uint32_t* slut, const __nv_bfloat16* X, const uint4* xs, void* Out, int R,
+                                     int R1, int seg_start, int off, int n, float gsc, float* s_red, uint4* smem,
+                                     uint64_t* full, uint64_t* empty, int pk, bool gated, const int* s_srt) {
+  constexpr int NQ = 64 / NC;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+  int st = pk & 255, ph = (pk >> 8) & 1, rb = (pk >> 9) & 1;
+  uint4 xf[NQ][2];
+  {
+    int row = 0;
+    if (gated) row = s_srt[off + g] >> 3;
+    else row = off + g;
+    const uint4* xr = reinterpret_cast<const uint4*>(X + (size_t)row * KD + 16 * t);
+#pragma unroll
+    for (int qq = 0; qq < NQ; ++qq) {
+      const int kc = qq * NC + warp;
+      xf[qq][0] = __ldg(xr + kc * 8);
+      xf[qq][1] = __ldg(xr + kc * 8 + 1);
+    }
+  }
+  for (; R < R1; ++R)
+    tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
+  return st | (ph << 8) | (rb << 9);
+}
+
+template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA, bool SLOT, bool NOTWO = false, bool NI = false>
+__device__ __forceinline__ void tk2x_consume(const uint32_t* slut, const float* __restrict__ gs,
+                                             const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
+                                             const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
+                                             float* s_red, uint4* smem, uint4* s_x2, uint64_t* full, uint64_t* empty,
+                                             int& st, int& ph, int& rb) {
+  constexpr int RPE = NRT / 2, NQ = 64 / NC;
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
+  uint4 xf[NQ][2];
+  uint4* xs = s_x2 + warp * (NQ * 2 * 32) + lane;
+  int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0;
+  float gsc = 0.f;
+  for (int R = r0; R < r1; ++R) {
+    if (R >= seg_end) {
+      while (s_rs[a + 1] <= R) ++a;
+      const int gi = (R - s_rs[a]) / RPE;
+      seg_start = s_rs[a] + gi * RPE;
+      seg_end = seg_start + RPE;
+      const int e = s_e[a];
+      gsc = gs[e] * 256.0f;
+      off = s_off[e] + gi * 16;
+      n = min(16, s_off[e + 1] - off);
+      if (!GATED) {  // all gemm13 rows written (by any CTA): see moe_tk2f
+        int c;
+        do {
+          asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cnt) : "memory");
+        } while (c < need);
+      }
+      if (!NI || n <= 8) {  // (NI: 2-group segments load group 0 inside tk2x_two)
+        const bool v = g < n;
+        int row = 0;
+        if (v) row = GATED ? (s_srt[off + g] >> 3) : (off + g);
+        const uint4* xr = reinterpret_cast<const uint4*>(X + (size_t)row * KD + 16 * t);
+#pragma unroll
+        for (int qq = 0; qq < NQ; ++qq) {
+          const int kc = qq * NC + warp;
+          xf[qq][0] = v ? __ldg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
+          xf[qq][1] = v ? __ldg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
+        }
+      }
+      if (n > 8) {
+        const bool v = 8 + g < n;
+        int row = 0;
+        if (v) row = GATED ? (s_srt[off + 8 + g] >> 3) : (off + 8 + g);
+        const uint4* xr = reinterpret_cast<const uint4*>(X + (size_t)row * KD + 16 * t);
+#pragma unroll
+        for (int qq = 0; qq < NQ; ++qq) {
+          const int kc = qq * NC + warp;
+          xs[(qq * 2) * 32] = v ? __ldg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
+          xs[(qq * 2 + 1) * 32] = v ? __ldg(xr + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
+        }
+        if (NI) {
+          const int R1 = min(seg_end, r1);
+          const int pk = tk2x_two<NC, NSTG, KPS, SA, SLOT>(slut, X, xs, Out, R, R1, seg_start, off, n, gsc, s_red, smem, full,
+                                                           empty, st | (ph << 8) | (rb << 9), GATED, s_srt);
+          st = pk & 255; ph = (pk >> 8) & 1; rb = (pk >> 9) & 1;
+          R = R1 - 1;
+          if (GATED) {  // publish this CTA's rows of the segment (R + 1 == seg_end or r1)
+            asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+            if (tid == 0) {
+              __threadfence();
+              atomicAdd(cnt, R + 1 - max(seg_start, r0));
+            }
+          }
+          continue;
+        }
+      }
+    }
+    if (!NOTWO && !NI && n > 8)
+      tk2g_row<0, NC, NSTG, false, KPS, SA, true, true, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, GATED, s_srt);
+    else
+      tk2g_row<NRT, NC, NSTG, GATED, KPS, SA, false, false, SLOT>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, GATED, s_srt);
+    if (GATED && (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
+      asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+      if (tid == 0) {
+        __threadfence();
+        atomicAdd(cnt, R + 1 - max(seg_start, r0));
+      }
+    }
+  }
+}
+
 // s12 MERGED consumer (tk2h): both phases in ONE run-time loop, so the kernel holds one main-loop body per row kind
 // (GS 8: 1 body; GS 16: 2) instead of 2 / 4. GS16's loss was instruction-cache misses: ncu stall_no_instruction at
 // layer d1 923 -> 9418 (118 KB kernel vs 65 KB) with no 2-group row at all.
@@ -4601,6 +4715,13 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   if constexpr (GS == 16) {
     uint4* s_x2 = smem + NSTG * NC * KPS * 72;  // after the ring: 8 KB per consumer warp
+    if constexpr ((PF & 8192) != 0) {  // n5s16 HYB
+      tk2x_consume<512, NC, NSTG, true, KPS, SA, (PF & 4) != 0, (PF & 16384) != 0, (PF & 32768) != 0>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt,
+                                                              s_red, smem, s_x2, full, empty, st, ph, rb);
+      tk2x_consume<256, NC, NSTG, false, KPS, SA, (PF & 4) != 0, (PF & 16384) != 0, (PF & 32768) != 0>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt,
+                                                               s_red, smem, s_x2, full, empty, st, ph, rb);
+      return;
+    }
     tk2g_consume<512, NC, NSTG, true, KPS, SA>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem,
                                                s_x2, full, empty, st, ph, rb);
     tk2g_consume<256, NC, NSTG, false, KPS, SA>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem,
@@ -4746,6 +4867,14 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #if TK2H_P4 || TK2_EXP
     if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 40000 && cfg < 50000 && cfg % 1000 == 4)  // n16: tk2h GS16 + PF4 on SQ stages
       return tk2f_go<8, 4, 2, false, false, true, 16, 1, 516>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+#endif
+#if TK2X
+    if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 60000 && cfg < 70000 && cfg % 1000 == 4)  // n5s16 HYB GS16 + PF4 on SQ stages
+      return tk2f_go<8, 4, 2, false, false, true, 16, 0, 516 | 8192>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+    if (TK2X > 1 && sa && g_tk2f_l2h == TK2F_L2H && cfg >= 50000 && cfg < 60000 && cfg % 1000 == 4)  // n5s16 HYB2 (noinline 2-group rows)
+      return tk2f_go<8, 4, 2, false, false, true, 16, 0, 516 | 8192 | 32768>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+    if (TK2X > 1 && sa && g_tk2f_l2h == TK2F_L2H && cfg >= 70000 && cfg < 80000 && cfg % 1000 == 4)  // probe: no TWO body (wrong)
+      return tk2f_go<8, 4, 2, false, false, true, 16, 0, 516 | 8192 | 16384>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
 #endif
 #if TK2F_SQRT
     if (TK2F_L2H && sa && (g_tk2f_l2h != TK2F_L2H || g_tk2f_l2h2 >= 0)) {  // n18: run-time (per-phase) L2 hint modes
@@ -5008,6 +5137,7 @@ def _lib():
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
             src = src.replace("#define TK2F_SQDEEP 0 ", "#define TK2F_SQDEEP 1 ")  # n5s15
             src = src.replace("#define TK2F_ORACLE 0 ", "#define TK2F_ORACLE 1 ")  # n5s16
+            src = src.replace("#define TK2X 0 ", "#define TK2X 2 ")  # n5s16
             src = src.replace("#define TK2H_P4 0 ", "#define TK2H_P4 1 ").replace("#define TK2F_SQRT 0 ", "#define TK2F_SQRT 1 ")  # n16 (n14's TK2F_SQ4 / n13's TK2_EXP / TWM_PB48: done)
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=src,
@@ -5277,6 +5407,7 @@ _DIAG_R = "eNqVXIt22zgOLc02laBVxDpQorWm/v+/5IpvAASdWZ8zjSVRJAjicXFJj0cfPmC9X66/7
 DIAG_VARIANTS = {  # s25: same-check control: twm (the layer's T=128 default) vs twq q4 vs the HOTQ stack; b = repeats.
     # Keep a twm control in EVERY big-M DIAG (s25: twq variants were compared only to a regressed q4, never to twm).
     "dec": [("sq", {}), ("or1", {"TK2F_ORACLE": 1}), ("h3", {"TK2H_M": {16: 3, 32: 3}}),
+            ("x3", {"TK2X_M": {16: 3, 32: 3}}), ("xn", {"TK2X_M": {16: 10, 32: 10}}),
             ("sqb", {})],  # n5s16: cost of the extra token groups
     "big": [("twm", {"RG": 0, "TWQ_M": {}})],  # n5s15: control only (decode-only DIAG)
 }
@@ -5585,6 +5716,8 @@ TK2F_SQ4_DIAG = False  # n5s15: k44/k45 lost on the H200 (ddfc1353);
 TK2F_SQ8_DIAG = False  # n5s15: KPS 1 SQ images for the k14/k16 DIAG variants (lost: 14ddda06)
 # n16: n14's KPS 4 SQ images in DIAG builds (dead; frees ~0.9 GB + prepare time)
 TK2H_SQ = 1  # n16: tk2h (TK2H_M, GS16 + PF4) on the TK2F_SQ single-copy stages (same smem image: bitwise = off)
+TK2X2_M = {}  # n5s16: HYB2 = HYB with the 2-group rows in a __noinline__ function (cfg 1005W004 SQ): {M: W}
+TK2X_M = {}  # n5s16: per-M HYB GS16 (tk2x_consume, SQ + PF4 -> moe_norm3) 2-group row weight W: {M: W}
 TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
 
 
@@ -5592,7 +5725,7 @@ def _tk2f_cfg(M, st):
     c = _tk2f_cfg0(M, st)
     rt = TK2F_L2H_RT is not None or TK2F_L2H2_RT is not None
     if TK2F_SQ and ("w13sq" in st or "w13s6" in st) and (not rt or DIAG) and (c in (100204, 184204) or (
-            TK2H_SQ and 140000 <= c < 150000 and c % 1000 == 4) or (
+            TK2H_SQ and 140000 <= c < 150000 and c % 1000 == 4) or (150000 <= c < 180000 and c % 1000 == 4) or (
             "w13sq4" in st and c in (100402, 100403, 184402, 184403, 100404, 100405, 184404, 184405)) or (
             DIAG and c in (100205, 100206, 100208, 184205, 184206, 184208, 100202, 100203, 184202, 184203, 101604, 185604)) or (
             "w13sq8" in st and c in (100104, 100106, 184104, 184106))):  # n14 SQ (SA, default configs; KPS 4 in DIAG)
@@ -5604,6 +5737,10 @@ def _tk2f_cfg(M, st):
 
 def _tk2f_cfg0(M, st):
     sa = 100000 if TK2SA and st["sa"] else 0
+    if M in TK2X2_M and sa:  # n5s16 HYB2
+        return sa + 50000 + TK2X2_M[M] * 1000 + 4
+    if M in TK2X_M and sa:  # n5s16 HYB (W >= 10: probe without the TWO body, wrong output)
+        return sa + 60000 + TK2X_M[M] * 1000 + 4
     if M in TK2H_M:  # n6: {M: W}: GS16 tk2h + PF4 (moe_norm3), 2-group row weight (8 + W) / 8; SA only in TK2H_P4 builds
         return sa + 40000 + TK2H_M[M] * 1000 + 4
     if TK2W and M > 1:
@@ -5646,7 +5783,7 @@ def kernel_fn(data, st):
                 lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x,
                                     ids, st["start"], st["count"], meta, sroutes, inv, inter, y32, st["cnt"], c)
             c5 = c % 100000
-            if c5 in (97204, 98204) or (80000 < c5 < 96000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
+            if c5 in (97204, 98204) or (80000 < c5 < 96000 and (c5 - 80000) // 1000 & 4) or (30000 <= c5 < 50000 and c5 % 1000 == 4) or (50000 <= c5 < 80000 and c5 % 1000 == 4):  # s13 slot-ordered y32 (n6: tk2h + 4)
                 lib.moe_norm3_launch(y32, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out, st["cnt"])
                 return out
             lib.moe_norm2_launch(y32, inv, ids, tw, st["w1"], st["gs2"], st["start"], st["count"], POST_NORM_EPS, out,
