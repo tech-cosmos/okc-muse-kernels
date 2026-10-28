@@ -1,15 +1,17 @@
 # STATE-moe
 
-## NOW (n6s3, 2026-10-28 ~21:30Z): I-CACHE is a real twm lever. TWM_EPI on main (a60019d), bitwise; H200 v16 -1.8 / v32 -3.0 us
+## NOW (n6s3, 2026-10-28 ~21:50Z): I-CACHE is a real twm lever. On main: TWM_EPI (a60019d) + TWM_HOTC (0be4fa0+), bitwise;
+## H200 v16 -4.3 / v32 -4.5 us per call together. a60019d submitted (2.2792x). 00:00Z: check main, submit if > 2.2792x
 - n6s3 4-stamp timeline (tools/n6s3/mk_tl4.py, mkdiag.py; H200 DIAG 54eb9bdb): per CTA per call loop ~120-136 us, epilogue
   9-14 us, gaps ~2 us. The N24/N32 epilogue time stayed with the global stores REMOVED: cause = i-cache (moe_twm was 16.7k SASS
   ~264 KB; fully unrolled epilogues per (RT, N, gated) ran cold from L2). Fix TWM_EPI = 1: smem-staged chunk stores + ROLLED
   8-token-group loop (acc shift by 4). twm 16.7k -> 11.4k SASS. H200 DIAG a913b38e (A B A B): v16 -1.8, v32 -3.0 us.
-- Handoff posted (tools/n6s3/patch_layer_epi.py for r-layer moe_src; layer paused: lead decides).
+- TWM_HOTC: moe_twm's in-kernel hot class (tw_hot 80/96) compiled only if TWM_HOT(_M) set (python _hotc(), TWM_HOTC_FORCE for
+  DIAG): twm 11.4k -> 8.0k SASS; H200 DIAG 8ca07799 v16 -2.5, v32 -1.4 us. NOT yet in a check/submit (checks 20/20 on 10-28).
+- Handoff posted (tools/n6s3/patch_layer_epi.py for r-layer moe_src; HOTC only if layer's twm_hot TUNE option unused).
 - NEXT (ranked): (1) shrink moe_twm code further (11.4k SASS still > i-cache): find what's big (cuobjdump per region:
   8 tw_item loop instances RT4 N8/16/24/32 + RT2 N8/16/32/PB, tw_hot 80/96 (hot class inside twm, rarely used with the
-  separate moe_hot), K-split paths); candidates: drop the N24 instance (use N32), compile tw_hot out of twm when TWM_HOT
-  isn't used (layer pins hot to moe_hot), dedupe g2/gated loop bodies. Measure each with tools/n6s3/sass.py + ab2.py, then
+  separate moe_hot), K-split paths); candidates: drop the N24 instance (use N32), dedupe g2/gated loop bodies. Measure each with tools/n6s3/sass.py + ab2.py, then
   one H200 DIAG (TWM_EPI-style python-keyed library switch, tools/n6s3/mkdiag_epi.py pattern).
   (2) the same i-cache view for tk2f decode (tk2f/tk2h instance sizes) and the per-stage ~230 cyc overhead (s27): cold loop
   code at each item start? (3) REL (helper-warp release) = noise on H100 (tools/n6s3/mk_rel.py), retest on H200 only if cheap.
@@ -32,7 +34,7 @@ Tools (run from muse_attention_decode/): tools/bench.py test|bench; tools/jsum.p
 H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-CTA clock64 timeline of csl, VAR=... variants).
 
 ## Board
-- Best submit: 4fb734c6 @eb8c03c (routegather fix), **2.2703x** (05:40Z 10-28). Was 951c17e0 @21deb8a (bs256 hot32+split66), 2.2535x (2026-10-28 05:45Z; check cefcc133 2.2632x). Was febfcb1f @72d1274 (SCB) 2.2469x. Was 6a92803a 2.190x. Board is a TEST BED only (lead 01:45Z): the layer counts.
+- Best submit: **aeba42c5 @a60019d (TWM_EPI), 2.2792x** (21:30Z 10-28; check fc7e86d6 2.3127x). Was 4fb734c6 @eb8c03c 2.2703x. Was 951c17e0 @21deb8a (bs256 hot32+split66), 2.2535x (2026-10-28 05:45Z; check cefcc133 2.2632x). Was febfcb1f @72d1274 (SCB) 2.2469x. Was 6a92803a 2.190x. Board is a TEST BED only (lead 01:45Z): the layer counts.
   Checks 20/20 used on 10-26 (DIAGs since s12: never submit those); budget resets 00:00Z. Per-shape best-ish: bs1 27-29, bs8 67-71, bs16 93-99, bs32 128-135,
   bs128 196-207, bs256 243-251 (judge noise +-4%).
 - **H200 layer profiles**: ~/r-layer/muse_decode_layer/profiles/submission.<job>.txt = judge per-kernel times per shape.

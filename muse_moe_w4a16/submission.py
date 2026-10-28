@@ -5627,7 +5627,11 @@ TWM_EPI = 1  # n6s3: staged + rolled tw_item epilogue (i-cache), bitwise = 0
 _LIBX = {}  # n22: (DQW, TWM_EPI, hotc) -> library
 
 
+TWM_HOTC_FORCE = None
+
+
 def _hotc():  # n6s3: moe_twm hot class compiled in only if some setting can use it
+    if TWM_HOTC_FORCE is not None: return int(TWM_HOTC_FORCE)  # DIAG A/B only
     return int(bool(TWM_HOT or any(TWM_HOT_M.values())))
 
 _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "

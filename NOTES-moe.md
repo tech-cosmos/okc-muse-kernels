@@ -2867,3 +2867,13 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - TWM_HOTC (n6s3): moe_twm's in-kernel hot class (cl 3, tw_hot<80/96>) compiled in only when python TWM_HOT / TWM_HOT_M
   is set (_hotc(); library key (DQW, TWM_EPI, hotc)). Default off -> moe_twm 11.4k -> 8.0k SASS. Bitwise, 15/15; H100 A/B vs
   a60019d: board128 -0.2, board256 -2.5, v16 -2.5, v32 -1.5 us. Not yet on the H200.
+- SUBMIT aeba42c5 (a60019d, TWM_EPI): 2.2792x (CI 2.245-2.313): bs1 26.2, bs16 90.3, bs32 119.6, bs8 67.6, bs128 195.8,
+  bs256 237.4 us. NEW BOARD BEST (was 4fb734c6 2.2703x). Its content_hash = check fc7e86d6's (same code confirmed).
+- H200 judge DIAG 8ca07799 (tools/n6s3/mkdiag_hotc.py, TWM_HOTC_FORCE 1/0/1/0, TWM_EPI 1, layer settings + routings): v16
+  166.2/163.8/166.5/163.8, v32 196.8/195.3/196.7/195.3 us => HOTC v16 -2.5, v32 -1.4 us, every seed, maxdiff 0.
+  Session total on the H200 (EPI + HOTC): v16 ~-4.3, v32 ~-4.5 us per call (~2.5%). moe checks 20/20 used on 10-28.
+- NEXT: (1) 00:00Z: plain check of main (0be4fa0+ = TWM_EPI + TWM_HOTC); submit if > 2.2792x. (2) keep shrinking moe_twm
+  (8.0k SASS; 8 tw_item loop instances; K-split code) and look at tk2f (6-7k SASS per instance; s12 TK2H merged-phase was +4..8 us
+  for other reasons). (3) Layer: port EPI (patch_layer_epi.py) and HOTC if its tuner never picks twm_hot.
+- Session end ~21:50Z. Judge: 5 checks (54eb9bdb, a913b38e, fc7e86d6, 8ca07799 + one 422 reject not charged), 1 submit
+  aeba42c5 2.2792x. 0 Modal.
