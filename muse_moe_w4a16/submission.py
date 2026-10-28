@@ -5272,7 +5272,7 @@ _DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('dec
 _DIAG_R = "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"
 DIAG_VARIANTS = {  # s25: same-check control: twm (the layer's T=128 default) vs twq q4 vs the HOTQ stack; b = repeats.
     # Keep a twm control in EVERY big-M DIAG (s25: twq variants were compared only to a regressed q4, never to twm).
-    "dec": [("sq", {}), ("nc16", {"TK2F": 1604, "TK2F_DYN": 85604}), ("sqb", {})],  # n5s15: bytes in flight per SM
+    "dec": [("sq", {})],  # n5s15: bytes in flight per SM
     "big": [("twm", {"RG": 0, "TWQ_M": {}})],  # n5s15: control only (decode-only DIAG)
 }
 
@@ -5332,6 +5332,8 @@ def _diag(st):
               + " ".join(f"{x[0]:.1f}" for x in v) + f" | maxdiff {max(x[1] for x in v):.3g}", flush=True)
     if DIAG_STREAM:
         _diag_stream(st, routes, flush, sink)
+    if DIAG_STREAM2:
+        _diag_stream2(st, routes, flush, sink)
     if DIAG_TL:
         for load, seed, T, data in routes:
             if T > TK2_MAX:
@@ -5437,6 +5439,76 @@ def _diag_stream(st, routes, flush, sink):
             del gr, dt, bt
     for (load, n), v in res.items():
         print(f"diag9s MEAN {load} {n}: {sum(x[0] for x in v) / len(v):.1f} us {sum(x[1] for x in v) / len(v):.2f} TB/s",
+              flush=True)
+
+
+DIAG_STREAM2 = False  # n5s15: blocked vs CYCLIC (grid-stride) stage assignment in the moe_stream probe
+
+
+def _diag_stream2(st, routes, flush, sink):
+    """n5s15: same unique bytes (each routed expert once: w13q, w13s2, w2q, w2s2 regions) cut into cb-byte single-copy
+    stages; 'blk' = contiguous count split (each SM its own block, like tk2f / every kernel of ours); 'cyG' = groups of G
+    consecutive stages dealt round-robin to the CTAs (grid-stride: at any time the whole GPU reads one compact window)."""
+    import numpy as np
+    lib = _lib()
+    G = torch.cuda.get_device_properties(0).multi_processor_count
+    tens = [st["w13q"], st["w13s2"], st["w2q"], st["w2s2"]]
+    base = [t.data_ptr() for t in tens]
+    cnt = st["count"]
+    per = [t.numel() * t.element_size() // cnt for t in tens]
+    ebytes = sum(per)
+
+    def chunks(es, cb):
+        d = []
+        for e in es:
+            for bb, pp in zip(base, per):
+                o = np.arange(0, pp, cb)
+                d.append(np.stack([bb + e * pp + o, np.minimum(cb, pp - o), 0 * o, 0 * o, 0 * o, 0 * o], 1))
+        return np.concatenate(d, 0)
+
+    def blocked(d):
+        return d, [len(d) * b // G for b in range(G + 1)]
+
+    def cyclic(d, grp):
+        ng = (len(d) + grp - 1) // grp
+        parts, beg = [], [0]
+        for b in range(G):
+            idx = [i for g in range(b, ng, G) for i in range(g * grp, min(len(d), (g + 1) * grp))]
+            parts.append(d[idx])
+            beg.append(beg[-1] + len(idx))
+        return np.concatenate(parts, 0), beg
+
+    res = {}
+    for load, seed, T, data in routes:
+        loc = (data["topk_ids"] - st["start"]).flatten().tolist()
+        es = sorted({e for e in loc if 0 <= e < cnt})
+        vs = []
+        for cb, nstg, tag in ((18432, 4, "18"), (36864, 4, "36")):
+            d = chunks(es, cb)
+            vs.append(("blk" + tag, *blocked(d), cb, nstg))
+            for grp in (1, 4, 16):
+                vs.append((f"cy{grp}_" + tag, *cyclic(d, grp), cb, nstg))
+        for name, d, beg, sb, nstg in vs:
+            dt = torch.from_numpy(np.ascontiguousarray(d, dtype=np.int64)).cuda()
+            bt = torch.tensor(beg, dtype=torch.int32, device="cuda")
+            lib.moe_stream_launch(dt, bt, sb, nstg)
+            torch.cuda.synchronize()
+            gr = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(gr):
+                lib.moe_stream_launch(dt, bt, sb, nstg)
+            tt = []
+            for _ in range(20):
+                torch.sum(flush, 0, out=sink)
+                a, b = torch.cuda.Event(True), torch.cuda.Event(True)
+                a.record(); gr.replay(); b.record()
+                torch.cuda.synchronize()
+                tt.append(a.elapsed_time(b) * 1e3)
+            t = sorted(tt)[len(tt) // 2]
+            ub = len(es) * ebytes
+            res.setdefault((load, name), []).append((t, ub / t / 1e6))
+            del gr, dt, bt
+    for (load, n), v in res.items():
+        print(f"diag15s MEAN {load} {n}: {sum(x[0] for x in v) / len(v):.1f} us {sum(x[1] for x in v) / len(v):.2f} TB/s",
               flush=True)
 
 
