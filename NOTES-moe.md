@@ -2251,20 +2251,20 @@ noisy pick of g30n:o silently replaced ob8 in the first A/B: always pin the tune
 All three: /tmp copies of main with `DIAG = 1` (layer routings, 5 seeds per load, cold L2, graph replay; moe-only),
 test runs only, never submit. Variants live in DIAG builds only (#define TK2F_SQDEEP, set by _lib() when DIAG); the
 default build is unchanged. Every variant bitwise = main locally (maxdiff 0), except nc16 (16-way reduction order, 1-2 ulp).
-- ddfc1353 (74bf73d, 2.2586x as test run): deeper / larger SQ rings WITH L2H 4 hints (the s12 ring test predates SQ + hints).
+- ddfc1353 (81043ea, 2.2586x as test run): deeper / larger SQ rings WITH L2H 4 hints (the s12 ring test predates SQ + hints).
   H200 MEAN us (control sq / repeat sqb):
             sq    r5(5x18KB) r6(6x18) r8(8x18) k44(4x36) k45(5x36) sqb
     d1     30.3   30.8       31.0     32.2     32.1      32.4      30.3
     d16    64.7   65.6       65.8     67.3     68.4      71.3      64.7
     d32    84.8   87.4       87.2     87.6     87.8      89.6      84.9
     v1     64.5   64.7       65.5     66.9     67.7      69.1      64.7
-- 14ddda06 (30afe14, 2.2588x): shallower rings and 9 KB stages (sq8 = _sq_pack nq 8, KPS 1):
+- 14ddda06 (765f129, 2.2588x): shallower rings and 9 KB stages (sq8 = _sq_pack nq 8, KPS 1):
             sq    r3(3x18) r2(2x18) k14(4x9) k16(6x9) sqb
     d1     30.1   31.9     33.2     31.9     31.4     30.2
     d16    64.6   68.9     74.0     71.2     71.0     64.6
     d32    85.3   91.1     99.1     94.7     96.0     85.4
     v1     64.2   67.3     71.9     69.3     66.9     64.2
-- f5430a5c (this commit, 2.2520x): nc16 = 16 consumer warps x KPS 1 on the SAME 18 KB SQ stage image (chunk c = h*NC + warp
+- f5430a5c (77a6514, 2.2520x): nc16 = 16 consumer warps x KPS 1 on the SAME 18 KB SQ stage image (chunk c = h*NC + warp
   maps identically; cfg 1604 / 85604; NB kernel_fn picks norm3 only for 8x4xx-style cfg digits: 81604 ran norm2 on slot-
   ordered y32 = wrong output, caught by tools-less local A/B /tmp/n5s15/t/nc16t.py): d1 32.3 / d16 66.6 / d32 87.4 / v1 65.6
   vs sq 30.3 / 64.4 / 85.4 / 64.3 => +1.3..2.2 us. More consumer warps per SMSP do not help.
@@ -2279,7 +2279,7 @@ default build is unchanged. Every variant bitwise = main locally (maxdiff 0), ex
   norm2 ~4.5 incl. gap: in-layer mostly hidden by PDL).
 - Not done (board-only, no layer value): standalone norm2/norm3 as a PDL secondary of tk2f (g_pdl bit 2; s9 H100 -0.4 us
   at bs1, never tried on the H200 with tk2f).
-- 9af0d239 (DIAG_STREAM2, 2.2565x test run): H200 moe_stream probe, same unique bytes (each routed expert once, no hints),
+- 9af0d239 (1aa4ba3, DIAG_STREAM2, 2.2565x test run): H200 moe_stream probe, same unique bytes (each routed expert once, no hints),
   BLOCKED count split (each SM its own contiguous block = every kernel of ours) vs CYCLIC grid-stride deal of 1 / 4 / 16
   consecutive stages per CTA (whole GPU reads one compact window). MEAN us (TB/s over unique bytes), NSTG 4:
             blk18  cy1_18 cy4_18 cy16_18 | blk36  cy1_36 cy4_36 cy16_36
