@@ -2,6 +2,8 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night5 s15: **main = v158** (76f4632) = v157 + moe n5s23 routegathern latency fix (bitwise = v157; H100 v32 sl -2, v16 sl -1 us;
+  H200 routegathern 7.4 -> 5.2 us). check 1d0568ec 2.1100x (noise), prepare_s 89.4; not submitted. 10-28: 10 checks / 8 submits.
 night5 s14: no build (pooler||router option = s55 dead; csl-in-qkv-drain bounded ~0.4% and CSL_PW-like crowding: NOTES n5s14); 0 runs.
 night5 s13: no build (all layer levers on record measured/bounded; NOTES n5s13). Lead's scored run of v157 = 35af5031
   **2.1420x** (prepare_s 100.6): board best unchanged. 10-28 budget: 11 checks / 8 submits. Lane request posted in COORD.

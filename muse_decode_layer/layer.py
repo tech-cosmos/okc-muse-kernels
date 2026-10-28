@@ -3212,6 +3212,8 @@ TUNE = {1: ({}, {"g10alt:o": 1}),
 # cut to the picks of checks bb8ea548 / 60f02748 / submit 3e3b9fd3 (+ escapes back to the old base); the full old lists are in
 # git (r-layer 51acdef layer.py). T=32 base += g30kgx:pooler (picked sl 60f02748 + 3e3b9fd3, full 3e3b9fd3); T=8 full base
 # g14alt 1 -> 3 (picked 60f02748 + 3e3b9fd3).  # n5s8: hot 40 dropped (real routings sl +9/+5/+2; H200 picked it at full in 73c50eea)  # s84: aplan  # s77 stacks
+# n5s15 v158: moe_routegathern = moe n5s23 latency fix (r-moe d3fc872 tools/n5s23/patch_layer_rg.py): bitwise = v157 at v16/v32;
+# H100 ab_files 2x2 rounds: v32 sl -2.7/-1.8, full -2.3/-0.5, v16 sl -1.4/-0.7, full tie us. rg in the T=128 base: tie on 3 seeds (not taken).
 # n5s8: T=16 full bal in the base: H100 real routings (seeds 99/7/13) -2.5/-4.0/-1.5 us; H200 tuner picked it in 4937830f+133068b8.
 # n5s8: T=256 base {rg, twf_split 66}: H100 real routings (seeds 99/7/13, 3 rounds, all 36 old options) sl -6.6, full -10.8 us vs
 # {hot 32} alone (every seed); options losing there dropped (hot 0/24 sl +12/+17: the f824b925 H200 tuner picked hot 24 on its

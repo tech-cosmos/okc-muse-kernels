@@ -2476,3 +2476,16 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   remove at ~1-3 us d1: no persistent megakernel item >= 1% on layer's side.
 - Gap to #1 stays in the expert kernels (moe board #1 2.685x vs ours 2.25x; proj bs128 / moe bs256 lanes) and attention
   (#1 3.03x vs 2.60x; moe s40 bounds the four full kernels at ~-4% of the attention geomean).
+
+## night5 s15 (2026-10-28 05:46Z-06:35Z, okc-night5 session 15): v158 = moe n5s23 routegathern port; 1 check
+- Ported moe n5s23 (r-moe d3fc872 tools/n5s23/patch_layer_rg.py) into layer.py moe_routegathern: own 8 ids + x row loaded
+  before the id scan, scan batched 8 ids/thread, repeat fixup by shfl. Applied cleanly. test 13/13 PASS; tools/files_eq.py
+  v157 vs v158 'verify' 3 seeds: v16/v32 bitwise identical (v1 diffs = tuner picks, RG is T>32 only).
+- H100 ab_files (v157, v158, v157, v158; 6 rounds, seed 99): v32 sl 379.6/378.9 -> 376.9/377.1, full 631.0/630.3 -> 628.7/629.8,
+  v16 sl 303.7/303.5 -> 302.4/302.8, full tie. rg in the T=128 base (ab_flag, TUNE {}, seeds 99/7/13, 4 rounds): tie (-0.9..+0.2): not taken.
+- H100 v32 sl timeline (v158): qkv 25.0, nvs 17.2, o 10.4, bnd 9.0, FR pooler+router 39.7, routing 3.7, routegathern 8.1 (overlaps
+  routing under PDL), hot || twm 107.6-342.7 (twm 232.5), moe_norm ends 344.9 (2 us after twm), unpool 34.3, bnd 9.4 = 388.5 us.
+- check 1d0568ec (v158 = 76f4632) **2.1100x** [2.078, 2.142], judge prepare_s 89.4. H200 routegathern 5.2 / 5.4 us (v32 sl/full;
+  af87d466 had 7.4): the -2 us holds on the H200. Per shape: d1 65.9/75.3, d16 125.9/209.6, d32 149.1/301.6, v1 112.2/123.7,
+  v16 269.1/357.7, v32 345.6/514.4 (d32 sl 1.702x: SGLang 253.8 that run). Whole-run noise; < 2.1364x (1% rule): not submitted.
+- 10-28 budget after it: 10 checks / 8 submits.
