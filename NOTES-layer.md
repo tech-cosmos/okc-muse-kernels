@@ -2550,3 +2550,28 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   no unmeasured lever >= 0.3% on the layer's side. Unchanged conclusion: the gap to #1 is in the expert kernels and attention.
 - Reminder for 10-29 00:00Z: v162 beats the board run v153 in absolute us on 9/12 shapes (3e39a051); it can go in under the
   09:28Z rule only if a check of it lands within 1% of the board (>= 2.1364x); never resubmit unchanged code for luck.
+
+## night5 s20 (2026-10-28 06:54Z-, okc-night5 session 20): H200 (Modal, tools/h200.py) real-routing A/B of the pinned expert knobs
+- Method: /tmp/n5s20/{a,b,c} = main v162 submission.py + `TUNE = {}` + `_ab(T, drop, **kw)` (resets TUNE_BASE, applies kw at T,
+  sl + full; copy in variants/n5s20_notune.py); `bash run.sh` = tools/ab_flag.py, 2 rounds, SEEDS 99/7/13, base first AND last
+  (stmt-order bias check). Modal H200 numbers: compare within a run only, never vs the judge. Run 1 = 3.8 GPU-min.
+- T=256 (v32), us [base | hot 24 | hot 0 | -twf_split | -rg | base]: sl s99 335.1|340.1|346.0|342.2|341.7|345.0, s7 313.8|335.9|
+  322.5|323.2|318.4|316.5, s13 311.9|335.3|324.8|322.7|318.9|312.0; full s99 516.6|518.0|529.2|526.6|523.7|516.5, s7 490.3|519.5|
+  499.9|501.8|498.7|491.1, s13 523.9|537.9|539.3|536.7|535.7|524.6. => n5s8's H100 pin {hot 32, rg, twf_split 66} confirmed on H200.
+- T=128 (v16) [base | twf_split 66 | rg | twf66+rg | base]: sl s99 251.3|248.2|249.5|246.1|252.5, s7 258.5|259.6|255.9|258.5|260.3,
+  s13 259.3|259.9|258.9|256.4|261.0; full s99 357.0|365.8|354.6|362.8|358.1, s7 354.8|361.7|351.4|354.7|355.1, s13 320.4|325.7|
+  318.1|323.7|320.4. **rg alone: sl -2.4/-3.5/-1.3, full -2.9/-3.6/-2.3 us vs mean base (6/6 inputs)**; H100 n5s15 said tie.
+  twf_split flips sign (as on H100).
+- T=32 (d32) [base | tk2h 0 | tk2h 3 | bal | base]: tk2h 0 +1.7..2.9, tk2h 3 +0.5..1.5, bal +-0.3: base right.
+  T=16 (d16) [base | bal off | tk2h 4 | base]: bal off +0.2..2.1, tk2h 4 +1..3: base right.
+- T=8 sweep crashed: `bal` at T=8 = tk2f cfg 184204 not built (MOE_PRUNE): that option is gone; rerun without it.
+- Run 2 (2.9 GPU-min; a first attempt was killed locally with exit 144 before output, ledger charged its 11-min reservation).
+  T=128 seeds 5/1/4/99 [base | rg | rg+hot 32 | hot 32 | base]: sl 250.3|248.8|250.7|251.6|250.7, 246.3|246.1|248.4|248.5|247.8,
+  260.9|260.0|262.6|263.5|261.4, 251.1|248.8|250.5|251.4|251.5; full 346.9|343.3|345.4|346.6|346.3, 344.9|342.5|343.9|345.0|345.3,
+  336.9|334.4|336.0|336.9|337.5, 353.9|351.7|353.5|354.6|354.7. **rg: sl -1.7/-0.9/-1.1/-2.4, full -3.4/-2.6/-2.8/-2.6 vs mean base**
+  (14/14 inputs over both runs); hot 32 loses.
+  T=8 [base | cslpw off | nu8d+nu8x on | pr8_npf 212 | base]: cslpw off sl +2.7..2.8; others +0.1..+1.0: base right.
+  T=1 [base | kv_pf off | g13o off | base]: +0.2..+1.1: base right.
+- v163 = v162 + rg in TUNE_BASE[(128, *)] (est. v16 sl -1.9, full -2.9 us = ~+0.12% total).
+- Lesson: tools/h200.py real-routing ab_flag is ~3-4 GPU-min for 3 shapes x 3-4 seeds x 5 stmts; its base-first/base-last spread
+  is <= ~1 us except T=256 sl s99 (10 us drift): always repeat the base. Shared ledger hit 40/60 by 07:45Z (all lanes).
