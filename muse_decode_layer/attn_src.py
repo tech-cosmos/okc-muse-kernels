@@ -4262,7 +4262,8 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
              HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, M: tl.constexpr,
              D: tl.constexpr, S: tl.constexpr, S_PAD: tl.constexpr, SB: tl.constexpr, PDL: tl.constexpr, ONE: tl.constexpr = True,
              REDO: tl.constexpr = False, seq_ptr=None, kc_ptr=None, vc_ptr=None, ks_ptr=None, pt_ptr=None, qk_scale=1.0,
-             MAX_PAGES: tl.constexpr = 1, PAGE: tl.constexpr = 1, CHUNK: tl.constexpr = 1, QSS: tl.constexpr = 0):
+             MAX_PAGES: tl.constexpr = 1, PAGE: tl.constexpr = 1, CHUNK: tl.constexpr = 1, QSS: tl.constexpr = 0,
+             TRIG: tl.constexpr = False):
     tok = tl.program_id(0)
     head = tl.program_id(1)
     b = tok // L
@@ -4273,6 +4274,8 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     if PDL:
         # Launched early (programmatic dependent launch): wait here for _attn_split's partials.
         gdc_wait()
+    if TRIG:  # layer n5s17 CB_TRIG: the PDL o GEMM (g30n: W ring before its griddepcontrol.wait) may launch now
+        gdc_launch_dependents()
     # This head's row in each split's partial: [S] maxima and sums, [S, D] accumulators.
     row = (b * HKV + h) * S * M + (tok % L) * G + head % G
     s = tl.arange(0, S_PAD)
@@ -4860,7 +4863,7 @@ def kernel_fn(data: Inputs) -> torch.Tensor:
         SB=min(128, triton.next_power_of_2(splits)), ONE=MERGE1, PDL=USE_PDL, num_warps=4 if splits > 32 else 2,
         REDO=fix > 0, seq_ptr=data["seq_lens"], kc_ptr=data["k_cache"], vc_ptr=data["v_cache"], ks_ptr=data["k_scale"],
         pt_ptr=page_table, qk_scale=cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, MAX_PAGES=max_pages,
-        PAGE=cfg["page_size"], CHUNK=chunk, launch_pdl=USE_PDL)
+        PAGE=cfg["page_size"], CHUNK=chunk, launch_pdl=USE_PDL, TRIG=CB_TRIG and USE_PDL)
     return out
 
 
@@ -4909,7 +4912,7 @@ def _verify_gluon(data, cfg, plan):
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=group, L=length, M=rows, D=d, S=s, S_PAD=triton.next_power_of_2(s),
         SB=min(128, triton.next_power_of_2(s)), ONE=MERGE1, PDL=USE_PDL, num_warps=plan.get("cw", 4 if s > 32 else 2),
-        launch_pdl=USE_PDL)
+        launch_pdl=USE_PDL, TRIG=CB_TRIG and USE_PDL)
     return out
 
 
@@ -4979,13 +4982,15 @@ def _red_args(batch, group, d, sl, device, out):
 RF_NW1 = 16
 RF_TRIG = True  # layer s27 (TUNE option rf_trig at T=1; H100 d1 full -1.5..-3.1 us): batch 1: trigger the dependents right after the wait (s4's +2.5 us was a trigger at entry)
 RF_NW = 4
+RF_TRIG_ALL = True  # layer n5s17: batched _red_fin (decode 16/32 full) also triggers after its wait (g30 o W ring under the merge)
+CB_TRIG = True  # layer n5s17: _combine (verify 1 full) triggers its dependents after its wait (g30n:o W ring under the merge)
 
 
 def _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, sl, bal):
     red, rcnt, rcw = _red_bufs(batch, group, d, sl, qkv.device)
     _red_fin[(batch,)](qkv, red, rcnt, pacc, pml, data["v_scale"], out, HQ=hq, HKV=hkv, G=group, D=d, M=2 * group,
                        S=splits, NR=4 if batch == 1 else BNR, SL=0 if batch == 1 else sl, RCW=rcw, BAL=bal, num_warps=RF_NW1 if batch == 1 else RF_NW, launch_pdl=True,
-                       TRIG=RF_TRIG and batch == 1, QSS=data.get("qkv_ss", 0))
+                       TRIG=RF_TRIG and (batch == 1 or RF_TRIG_ALL), QSS=data.get("qkv_ss", 0))
 
 
 def _decode_gluon(data, cfg, plan):
@@ -5054,5 +5059,5 @@ def _decode_gluon(data, cfg, plan):
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=group, L=1, M=group, D=d, S=s, S_PAD=triton.next_power_of_2(s),
         SB=plan.get("csb", min(128, triton.next_power_of_2(s))), ONE=MERGE1, PDL=USE_PDL,
-        QSS=qss, num_warps=plan.get("cw", 4 if s > 32 else 2), launch_pdl=USE_PDL)
+        QSS=qss, num_warps=plan.get("cw", 4 if s > 32 else 2), launch_pdl=USE_PDL, TRIG=CB_TRIG and USE_PDL)
     return out

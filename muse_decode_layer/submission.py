@@ -4071,7 +4071,8 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
              HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, M: tl.constexpr,
              D: tl.constexpr, S: tl.constexpr, S_PAD: tl.constexpr, SB: tl.constexpr, PDL: tl.constexpr, ONE: tl.constexpr = True,
              REDO: tl.constexpr = False, seq_ptr=None, kc_ptr=None, vc_ptr=None, ks_ptr=None, pt_ptr=None, qk_scale=1.0,
-             MAX_PAGES: tl.constexpr = 1, PAGE: tl.constexpr = 1, CHUNK: tl.constexpr = 1, QSS: tl.constexpr = 0):
+             MAX_PAGES: tl.constexpr = 1, PAGE: tl.constexpr = 1, CHUNK: tl.constexpr = 1, QSS: tl.constexpr = 0,
+             TRIG: tl.constexpr = False):
     tok = tl.program_id(0)
     head = tl.program_id(1)
     b = tok // L
@@ -4081,6 +4082,8 @@ def _combine(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     gate = _qld(qkv_ptr + tok * QKV_W + (HQ + 2 * HKV) * D + head * D + d, QSS).to(tl.bfloat16).to(tl.float32)
     if PDL:
         gdc_wait()
+    if TRIG:
+        gdc_launch_dependents()
     row = (b * HKV + h) * S * M + (tok % L) * G + head % G
     s = tl.arange(0, S_PAD)
     m = tl.load(pml_ptr + (row + s * M) * 2, mask=s < S, other=-1.0e30)
@@ -4568,7 +4571,7 @@ def attn_kernel_fn(data: Inputs) -> torch.Tensor:
         SB=min(128, triton.next_power_of_2(splits)), ONE=MERGE1, PDL=USE_PDL, num_warps=4 if splits > 32 else 2,
         REDO=fix > 0, seq_ptr=data["seq_lens"], kc_ptr=data["k_cache"], vc_ptr=data["v_cache"], ks_ptr=data["k_scale"],
         pt_ptr=page_table, qk_scale=cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, MAX_PAGES=max_pages,
-        PAGE=cfg["page_size"], CHUNK=chunk, launch_pdl=USE_PDL)
+        PAGE=cfg["page_size"], CHUNK=chunk, launch_pdl=USE_PDL, TRIG=CB_TRIG and USE_PDL)
     return out
 def _verify_gluon(data, cfg, plan):
     batch, length = cfg["batch"], cfg["q_len"]
@@ -4614,7 +4617,7 @@ def _verify_gluon(data, cfg, plan):
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=group, L=length, M=rows, D=d, S=s, S_PAD=triton.next_power_of_2(s),
         SB=min(128, triton.next_power_of_2(s)), ONE=MERGE1, PDL=USE_PDL, num_warps=plan.get("cw", 4 if s > 32 else 2),
-        launch_pdl=USE_PDL)
+        launch_pdl=USE_PDL, TRIG=CB_TRIG and USE_PDL)
     return out
 def _verify_bal(data, cfg, plan, out, qk_scale):
     """_verify_gluon with balanced splits (plan gbal): the programs of each KV head pair index share the batch's
@@ -4673,11 +4676,13 @@ def _red_args(batch, group, d, sl, device, out):
 RF_NW1 = 16
 RF_TRIG = True
 RF_NW = 4
+RF_TRIG_ALL = True
+CB_TRIG = True
 def _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, sl, bal):
     red, rcnt, rcw = _red_bufs(batch, group, d, sl, qkv.device)
     _red_fin[(batch,)](qkv, red, rcnt, pacc, pml, data["v_scale"], out, HQ=hq, HKV=hkv, G=group, D=d, M=2 * group,
                        S=splits, NR=4 if batch == 1 else BNR, SL=0 if batch == 1 else sl, RCW=rcw, BAL=bal, num_warps=RF_NW1 if batch == 1 else RF_NW, launch_pdl=True,
-                       TRIG=RF_TRIG and batch == 1, QSS=data.get("qkv_ss", 0))
+                       TRIG=RF_TRIG and (batch == 1 or RF_TRIG_ALL), QSS=data.get("qkv_ss", 0))
 def _decode_gluon(data, cfg, plan):
     batch, hq, hkv, d = cfg["batch"], cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     group = hq // hkv
@@ -4742,7 +4747,7 @@ def _decode_gluon(data, cfg, plan):
         qkv, pacc, pml, data["v_scale"], out,
         HQ=hq, HKV=hkv, G=group, L=1, M=group, D=d, S=s, S_PAD=triton.next_power_of_2(s),
         SB=plan.get("csb", min(128, triton.next_power_of_2(s))), ONE=MERGE1, PDL=USE_PDL,
-        QSS=qss, num_warps=plan.get("cw", 4 if s > 32 else 2), launch_pdl=USE_PDL)
+        QSS=qss, num_warps=plan.get("cw", 4 if s > 32 else 2), launch_pdl=USE_PDL, TRIG=CB_TRIG and USE_PDL)
     return out
 """Routed experts, NVFP4 W4A16, own CUDA kernels (moe agent).
 
