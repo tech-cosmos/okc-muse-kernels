@@ -2246,3 +2246,36 @@ noisy pick of g30n:o silently replaced ob8 in the first A/B: always pin the tune
   routegather 4.5; bs256 twm 235.1 + 38.5 + 6.4; bs1 tk2f 20.1 + norm2 3.1.
   => the expert kernels are not at a hard bound: another team is ~17% faster in geomean. Posted to the lead as a lane request
   (Requests n5s14) with a 3-consumer-WG twm proposal (more warps per SMSP; caveat twq's 16 warps were also ~50% issue).
+
+## n5s15 (2026-10-28 01:54Z - ~02:55Z): LANE DECISION 6 (moe board as H200 A/B bench), tk2f bytes in flight; 3 moe checks (DIAG)
+All three: /tmp copies of main with `DIAG = 1` (layer routings, 5 seeds per load, cold L2, graph replay; moe-only),
+test runs only, never submit. Variants live in DIAG builds only (#define TK2F_SQDEEP, set by _lib() when DIAG); the
+default build is unchanged. Every variant bitwise = main locally (maxdiff 0), except nc16 (16-way reduction order, 1-2 ulp).
+- ddfc1353 (74bf73d, 2.2586x as test run): deeper / larger SQ rings WITH L2H 4 hints (the s12 ring test predates SQ + hints).
+  H200 MEAN us (control sq / repeat sqb):
+            sq    r5(5x18KB) r6(6x18) r8(8x18) k44(4x36) k45(5x36) sqb
+    d1     30.3   30.8       31.0     32.2     32.1      32.4      30.3
+    d16    64.7   65.6       65.8     67.3     68.4      71.3      64.7
+    d32    84.8   87.4       87.2     87.6     87.8      89.6      84.9
+    v1     64.5   64.7       65.5     66.9     67.7      69.1      64.7
+- 14ddda06 (30afe14, 2.2588x): shallower rings and 9 KB stages (sq8 = _sq_pack nq 8, KPS 1):
+            sq    r3(3x18) r2(2x18) k14(4x9) k16(6x9) sqb
+    d1     30.1   31.9     33.2     31.9     31.4     30.2
+    d16    64.6   68.9     74.0     71.2     71.0     64.6
+    d32    85.3   91.1     99.1     94.7     96.0     85.4
+    v1     64.2   67.3     71.9     69.3     66.9     64.2
+- f5430a5c (this commit, 2.2520x): nc16 = 16 consumer warps x KPS 1 on the SAME 18 KB SQ stage image (chunk c = h*NC + warp
+  maps identically; cfg 1604 / 85604; NB kernel_fn picks norm3 only for 8x4xx-style cfg digits: 81604 ran norm2 on slot-
+  ordered y32 = wrong output, caught by tools-less local A/B /tmp/n5s15/t/nc16t.py): d1 32.3 / d16 66.6 / d32 87.4 / v1 65.6
+  vs sq 30.3 / 64.4 / 85.4 / 64.3 => +1.3..2.2 us. More consumer warps per SMSP do not help.
+- VERDICT: tk2f's stream is at a sharp H200 optimum = 4 x 18 KB (72 KB in flight per SM) with 8 consumer warps: less in
+  flight loses a lot (r2 +14 us d32), more loses steadily (r5..k45 +0.5..4.8), smaller copies lose, more warps lose.
+  The lead's 01:45Z lever (a) "bytes in flight per SM (deeper/larger TMA stages, 2 CTAs/SM)" is closed on the H200
+  (2 CTAs/SM: n4s?, register cap, dead on the proxy). Control repeats agree to <= 0.2 us (DIAG noise floor).
+- Reading: since more in-flight bytes per SM HURT, the HBM is saturated with request queueing at 72 KB/SM; the stream rate
+  (~4.06 TB/s per expert) is the H200's practical rate for this access pattern, and the remaining tk2f costs are not in
+  how the bytes are requested. What is left per the H200 fit (14.1 + 6.97 E + 4.4 X): the 4.4 us per extra 8-token group
+  (layer d32 has 2-3: consumer-bound L2-served rows; nc16 did not speed them up) and the fixed part (routing 1.5 us,
+  norm2 ~4.5 incl. gap: in-layer mostly hidden by PDL).
+- Not done (board-only, no layer value): standalone norm2/norm3 as a PDL secondary of tk2f (g_pdl bit 2; s9 H100 -0.4 us
+  at bs1, never tried on the H200 with tk2f).
