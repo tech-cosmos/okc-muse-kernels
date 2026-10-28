@@ -2589,3 +2589,12 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   gemm2 loop at ~0x9d00-0xf2b0: NONE crosses 0x10000 (13 crossing functions are the old GS16/HYB 16-token bodies, known).
   => the n5s15 verdict stands; with n10's no-math probe (consumer math = only 1-4 us of tk2f) and n5s29 (bulk 18x4 within
   0.5-2.5% of the Modal stream ceiling), the stream/ring lever stays closed. No build, nothing to hand off.
+
+## n5s31 (2026-10-28 07:27Z - 07:40Z): no lane answer, no build, 0 judge runs, 0 Modal min
+- No lead reply to n5s25 (lane) since the 04:50Z bs256 assignment; moe's 12 board checks for 10-28 used (okc: 14/20 total);
+  Modal ledger 48.4/60 min. proj (n5s11-15) and layer (n5s19) are also out of items >= 5 us.
+- New board fact: `okc leaderboard muse_moe_w4a16 --json` shows `screened_speedup` for some rows: #1 pjmullin3 2.685x
+  submitted, 2.584x screened (#4 zzz0906 2.568 -> 2.503, #7 2.511 -> 2.486). Real gap to #1 is ~14% (2.584/2.270), not 18%.
+- Per-shape vs TASK floors (best runs): bs1 ~28/11.4 (3 experts: 13.5 us stream + the fit's 14 us fixed), bs8 ~68/37.3,
+  bs16 ~93/52.5, bs32 ~128/70.8, bs128 ~200/101.3, bs256 ~243/108.9. Each item in the fixed part, the extra groups and the
+  big-M consumer is already in NOTES (n5s15-n5s30) with an H200 dead end. Nothing to hand off.
