@@ -16637,7 +16637,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
               {"twm_order": 76}, {"fr": False}, {"ltalt:pooler": 1}, {"ltalt:pooler": 2}),
         256: ({}, {"twf_split": 1022}, {"nvscl": False, "sl": True},
               {"lt:o": True}, {"lt:unpool": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76},
-              {"twm_tail": 32}, {"hot": 40}, {"lt:qkv_gate": False})}
+              {"twm_tail": 32}, {"lt:qkv_gate": False})}
 _G24_ALL = {"g24:pooler": True, "g24:unpool": True, "g24:o": True, "g24:qkv_gate": True}
 TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True, "pr1_rb": 32},
              (8, True): {"nu8": True, "g14alt:qkv_gate": 3}, (8, False): {"nu8": True, "g14alt:qkv_gate": 1},

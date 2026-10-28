@@ -2896,7 +2896,7 @@ TUNE = {1: ({}, {"pr1_npf": 4}, {"pr1_npf": 8}, {"kv_pf": False}, {"pr1_rb": 20}
               # s75: twq split options 73988/73996 removed (H200 checks a0bcbbf4/2f7349ee: in-layer loses)
         256: ({}, {"twf_split": 1022}, {"nvscl": False, "sl": True},
               {"lt:o": True}, {"lt:unpool": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, {"twm_order": 76},
-              {"twm_tail": 32}, {"hot": 40}, {"lt:qkv_gate": False})}  # s84: aplan  # s77 stacks
+              {"twm_tail": 32}, {"lt:qkv_gate": False})}  # n5s8: hot 40 dropped (real routings sl +9/+5/+2; H200 picked it at full in 73c50eea)  # s84: aplan  # s77 stacks
 # n5s8: T=16 full bal in the base: H100 real routings (seeds 99/7/13) -2.5/-4.0/-1.5 us; H200 tuner picked it in 4937830f+133068b8.
 # n5s8: T=256 base {rg, twf_split 66}: H100 real routings (seeds 99/7/13, 3 rounds, all 36 old options) sl -6.6, full -10.8 us vs
 # {hot 32} alone (every seed); options losing there dropped (hot 0/24 sl +12/+17: the f824b925 H200 tuner picked hot 24 on its

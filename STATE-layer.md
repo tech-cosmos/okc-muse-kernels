@@ -2,7 +2,11 @@
 
 BOARD BEST = submit 35dd53d0 = v125 (2663c2c), **2.1339x**, #24 (s82; d1 67.4/75.0, d16 124.9/204.5, d32 164.3/308.0, v1 112.8/127.3, v16 273.0/352.7, v32 322.0/494.6).
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-night5 s7: **main = v148** = v147 + T=32 sl/full TUNE_BASE {g30k:pooler 104, g30n:unpool, g30n:qkv_gate} (escapes in TUNE[32]; H200 tuner:
+night5 s8: **main = v150** = v148 + T=256 base {rg, twf_split 66} + T=16 full base bal (H100 REAL-routing A/Bs, 3 seeds: v32 sl
+  -1/-9/-10, full -13/-14/-5; d16 full -2.5/-4.0/-1.5 us) + TUNE[256] 36->9, TUNE[128] 22->10 (routing-sensitive options that lose or
+  flip sign on real inputs dropped: f824b925's tuner picked hot 24 on synthetic routing = v32 sl 378 us). validate ALL OK, cold 146.7 s.
+  check 73c50eea (v149) 2.1048x (v32 sl/full 2.095/2.089 = good draw / best of 4; not submitted). 10-28 budget: 16 checks / 10 submits.
+night5 s7: main = v148 = v147 + T=32 sl/full TUNE_BASE {g30k:pooler 104, g30n:unpool, g30n:qkv_gate} (escapes in TUNE[32]; H200 tuner:
   every escape loses +0.6..3.5 us). validate ALL OK, cold 154.4 s. check f824b925 2.0944x (noise: d32 full +12, v32 sl +45 vs 133068b8); not submitted.
   10-28 budget after it: 17 checks / 10 submits.
 night5 s6: **main = v147** = v146 (v145 + proj G30_PL) + build.py: Python comments stripped + g22/ob8 sources not embedded:
@@ -26,7 +30,10 @@ v1 54-64; twq/twm+hot v16 169-186, v32 217+114 us); full attention _gd_full d16 
 floor per ~/attn STATE); g24 pooler+unpool d16 35, d32 48; pr1 17.3 (d1). Layer glue (bnd, routing, norms) <= ~10%.
 Judge noise: one shape moves up to 10% between runs of the same code (v108: d32 full 291 vs 327 us).
 
-## NEXT (n5s7)
+## NEXT (n5s8)
+0. RULE (n5s8): routing-sensitive expert knobs (hot, twf_split, twq, bkt, bal, tk2h) are decided on real-input H100 A/Bs over
+   >= 3 seeds (tools/ab_flag.py, SEEDS=99,7,13, variants with TUNE = {}) and pinned in TUNE_BASE; the H200 tuner's synthetic
+   routing (SYNTH_P) does not represent the judge's inputs for them. Candidate: same sweep for T=8 / T=1 expert knobs (tk2f*).
 Plateau: every kernel-level lever in NOTES s45-n5s7 is measured or bounded (dead-ends below + NOTES). H200 judge noise
 (+-1.5% total; the tuner's own T=16 sl default moved 162 -> 180 us between nodes) hides < 2% changes: decide on H100
 interleaved A/Bs (tools/ab_flag.py), confirm on a check. Submit only > 2.1339x, or per the 09:28Z rule (>= 2.1126x +

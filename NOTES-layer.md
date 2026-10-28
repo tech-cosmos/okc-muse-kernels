@@ -2311,3 +2311,18 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - v149: TUNE_BASE[(256, *)] = {hot 32, rg, twf_split 66}; TUNE[256] 36 -> 10 options (no rg/twf-off escapes: the synthetic
   tuner must not undo a real-routing win; twf 1022, lt:*,
   twm_order 76, twm_tail 32, hot 40, nvscl, lt:qkv_gate off); T=16 full base += bal; TUNE[128] 22 -> 10 (twf_split, bkt/gnorm/g30:unpool off, o_pf 0, lt:qkv_gate off dropped).
+- Decode sweep (same method, stmts applied to T=16 AND T=32 bases; /tmp/n5s8_abdec.txt): d16 full bal True -2.5/-4.0/-1.5 us (all
+  seeds; H200 picked {bal} at T=16 full in 4937830f + 133068b8) -> in TUNE_BASE[(16, False)]. d16 sl bal off +4, tk2h 4 +2..6 at T=16;
+  d32: bal / tk2fj / tk2h 0 / tk2h 4 all within +-1.5 (mixed signs): unchanged.
+- v149 (bffbb79) validate --quick ALL OK (test 13/13, scored 0/12, opt 0/280, tk2f 0/300, replay 0/240, route 0/240 gap 0.0256,
+  fuzz 0/444), cold prepare 146.7 s (_tune 24.7 s, was ~30).
+- **check 73c50eea (v149) 2.1048x** (CI 2.073-2.136). ours/SGLang us: d1 67.4/172.0, 75.4/182.1; d16 125.8/259.5, 209.2/432.6;
+  d32 152.3/253.7, 307.5/611.1; v1 111.9/261.9, 123.1/273.7; v16 268.7/517.0, 362.8/702.7; v32 343.3/719.0, 513.9/1073.6.
+  Ratios v32 sl/full 2.095/2.089 (last 3 checks 2.095/2.054, 2.086/2.066, 1.956/2.039: full best of 4, sl = the good draws;
+  board run 2.168/2.132 was a lucky draw). v16 1.924/1.937 (in band). Not submitted (< 2.1126x).
+  H200 picks: T=256 sl {lt:unpool}, full {hot 40} (+0.6 us real-routing tie at full, +2..9 sl: dropped in v150); T=128 sl default,
+  full {lt:o}; T=16 sl {g30n:unpool}, full {g30n:unpool, g30n:qkv_gate} (by 0.6-0.9 us: ties).
+- v150 = v149 - TUNE[256] {hot 40} (tuner list only; bench test 13/13). Not checked.
+- Lesson: the tuner's synthetic routing does not represent the judge's inputs for routing-sensitive expert knobs (hot, twf_split,
+  twq, bkt); decide those on real-input H100 A/Bs over >= 3 seeds and pin them in TUNE_BASE; keep tuner options to
+  routing-insensitive GEMM/attention picks. Still open: why synthetic sees hot 24 as a tie (not pinned down).
