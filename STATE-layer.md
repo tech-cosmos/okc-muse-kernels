@@ -40,15 +40,7 @@ night5 s8: **main = v150** = v148 + T=256 base {rg, twf_split 66} + T=16 full ba
   -1/-9/-10, full -13/-14/-5; d16 full -2.5/-4.0/-1.5 us) + TUNE[256] 36->9, TUNE[128] 22->10 (routing-sensitive options that lose or
   flip sign on real inputs dropped: f824b925's tuner picked hot 24 on synthetic routing = v32 sl 378 us). validate ALL OK, cold 146.7 s.
   check 73c50eea (v149) 2.1048x (v32 sl/full 2.095/2.089 = good draw / best of 4; not submitted). 10-28 budget: 16 checks / 10 submits.
-night5 s7: main = v148 = v147 + T=32 sl/full TUNE_BASE {g30k:pooler 104, g30n:unpool, g30n:qkv_gate} (escapes in TUNE[32]; H200 tuner:
-  every escape loses +0.6..3.5 us). validate ALL OK, cold 154.4 s. check f824b925 2.0944x (noise: d32 full +12, v32 sl +45 vs 133068b8); not submitted.
-  10-28 budget after it: 17 checks / 10 submits.
-night5 s6: **main = v147** = v146 (v145 + proj G30_PL) + build.py: Python comments stripped + g22/ob8 sources not embedded:
-  **the judge REJECTS files > 1,000,000 B** (v141-v144 were 1.05 MB); now 933.6 KB, build.py asserts < 1 MB. validate ALL OK, cold 154.1 s.
-  10-28 checks: 4937830f v145 2.0907x, 133068b8 v146 **2.1097x** (d32 sl 152.2 / full 295.5 vs board 164.3/308.0: g30k104 + g30n unp+qkv
-  picked at T=32 sl+full in both; v32 noise +11..38). Not submitted (1.13% < board; rule needs >= 2.1126x). Budget 10-28: 18 checks / 10 submits.
-  Dead this session: T=8 pooler on g30k MTOK 8 + side router (no pr8): H100 v1 +5 us (router starves beside it).
-Older session summaries (night5 s1-s5, s85-s107): NOTES-layer.md.
+Older session summaries (night5 s1-s7, s85-s107): NOTES-layer.md.
 
 ## Per-load H200 us vs the s12 floor (board run 19ebde23 = v108; lead 05:07Z request; s74)
 Score %/us = gain in total score per us saved on that layer type (geomean of 6 loads x (46 sl + 16 full)).
