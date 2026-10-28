@@ -2450,3 +2450,14 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Prepare 162.8 s on the judge for the full moe file + DIAG.
 - Only consumer number >= 1% left near this lane: moe n5s34 twm dq() free = -10.7 v16 / -9.4 v32 us per sliding layer (H100,
   FREE ceiling; cuts on record dead: moe s18-s30, s22 pingpong). Asked the lead for a lane (COORD Requests).
+
+## n5s19 (2026-10-28 09:45Z-10:20Z, okc-night5 session 19): twm consumer SASS breakdown; no build >= 1%; 0 judge runs, 0 Modal
+- No lead reply to n5s18's lane ask; lead 09:20Z gives the twm dq cut to moe (proj owns twm tail = closed).
+- SASS of moe_twm<8,false,64> (moe's 09:39Z build, cuobjdump), N8 consumer K loop (0x46f0-0x5230, the common item at bs128):
+  180 instr per iteration = 8 HGMMA.64x8x16 (2 M tiles x 4 k16) for 64 weights/thread. dq = 45 LOP3 + 20 SHF + 11 IMAD +
+  32 HMUL2 = 108 (60%, 3.4 instr/pair); uniform descriptor math (UIADD3/ULEA/UMOV/USEL...) ~26; WARPGROUP arrive/depbar 8;
+  LDS 9; sync/branch/pred ~12. Scaling moe n5s34's dq-free oracle (-9..-11 us) by instruction share, everything non-dq is
+  <= ~1.5 us/sliding layer: below the bar. The dq repack itself is moe's (its s27m dq_tiling_search already rules out every
+  shift/rotate/PRMT tiling, incl. the rotate {0,1,2,9}-tile one I re-derived). Nothing built.
+- Also looked at: full attention d16/d32 (~17% of the d32 load, but ~attn s106/s114: _gd_full at the ~4.0 TB/s gather floor;
+  verify full consumer-bound; 126 sessions of dead ends): not a one-session item for proj.
