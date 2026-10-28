@@ -2404,3 +2404,13 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   Rates: wgmma N16 consumer ~3.8 TB/s-equiv (H200 clock, 132 SMs) < HBM 4.06; tk2f consumer from the H200 fit ~6.3 TB/s per
   8-token group. => tk3 saves ~4 us per 2-group expert, costs ~+0.3 per 1-group expert, before row/epilogue overheads
   (absent in the microbench): est. d32 -3..-5 net of layer's tk2h W3, d16 ~0. NOT building. Extra-group lever closed.
+
+## n5s19 (2026-10-28 04:25Z - 05:00Z): norm2 as PDL secondary of tk2f (the last untried small item): DEAD on the H200; 1 moe check (DIAG)
+- No lead answer yet to the n5s18 lane request; took STATE's "untried small item".
+- Built NORM2_PDL (python global, default 0; r-moe 153ebb8): kernel_fn calls moe_set_pdl(4 | 2) before moe_norm2/3 so it
+  launches as a PDL secondary (tk2f triggers launch_dependents at entry). SASS of moe_norm2<true>: ACQBULK at 0x100, no
+  load above it (w1 loads sunk below the wait, Y loads LDG.CONSTANT after it). bench test 15/15 with it on.
+- H200 DIAG check 138051ec (DIAG dec = sq / np / sqb / npb, layer routings, MEAN us):
+      d1 29.9 / 33.5 / 29.9 / 33.1    d16 64.1 / 65.4 / 64.2 / 65.2    d32 84.6 / 85.4 / 84.6 / 85.4    v1 64.2 / 65.3 / 64.2 / 65.1
+  => PDL norm2 LOSES every load (d1 +3.4..3.6 us, others +0.8..1.3), repeatable to 0.4 us; same verdict as s5 with tk2.
+  Whole-run 2.2426x (DIAG build; board rows not comparable). Option kept off; do not retry.

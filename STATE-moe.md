@@ -1,6 +1,6 @@
 # STATE-moe
 
-## NOW (n5s18, 2026-10-28 04:20Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
+## NOW (n5s19, 2026-10-28 05:00Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
 - n5s15: tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps); bytes-in-flight lever closed.
 - n5s16: H200 ORACLE: the extra 8-token groups cost d16 4.0 / d32 7.7 us (tk2f fit 14.1 + 6.97 E + 4.4 X us).
 - n5s16-n5s18: EVERY 16-token shared-dequant form on mma.sync tk2f is DEAD: inlined (i-cache), noinline (ABI), tk2h merged
@@ -13,9 +13,10 @@
   4.4 us per extra group). => tk3 N16: 2-group expert 11.4 -> ~7.3 us, but every 1-group expert +0.3 us (consumer-bound
   below HBM) and the microbench has no row/epilogue overhead: est. d32 ~-3..-5 net of layer's tk2h W3, d16 ~0. Too small for
   a 2-4 session kernel. tk2f extra-group lever CLOSED; lane request to lead (COORD Requests n5s18).
-- Untried small items: norm2/norm3 as a PDL secondary of tk2f (board-only; in-layer already PDL-hidden).
+- n5s19: norm2/norm3 as a PDL secondary of tk2f (NORM2_PDL, off) DEAD on the H200 (138051ec: d1 +3.5, d16/d32/v1 +0.8..1.2 us).
+  No untried tk2f item left on my list; waiting for a lane answer (COORD Requests n5s18).
 - Big-M (bs128/256, twm) is proj's lane now (LANE 7); moe reviews proj/twm* before layer integrates.
-- Checks 10-28: moe 6/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995), 0 submits; attention 0/20.
+- Checks 10-28: moe 7/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec), 0 submits; attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
