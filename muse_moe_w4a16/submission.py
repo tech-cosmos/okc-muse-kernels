@@ -92,6 +92,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TK2X 0  // n5s16 (DEAD, i-cache): HYB / HYB2 GS16 consumers (tk2x_consume / tk2x_two; python TK2X_M / TK2X2_M); DIAG builds only
 #define TK2F_ORACLE 0  // n5s16 DIAG builds: run-time oracle (l2h bit 12, python TK2F_ORACLE; WRONG output): tk2f computes only the first GS-token group of each expert
 #define TK2F_SQDEEP 0  // n5s15: deeper / 36 KB SQ rings (cfg 205/206/208/404/405 + 84xxx), DIAG builds only
+#define TK2F_PFL2K 0  // n5s27: L2 row-prefetch tk2f variants (moe_set_l2h2 + 10000 * d), DIAG builds only
 #define TK2F_SQ4 0  // n14: build the KPS 4 SQ tk2f (36 KB single-copy stages, cfg 402/403 + SQ); DIAG builds only
 #define TWM_PB48 0  // n12: build moe_twm<.., PB 48> (python TWM_PB_M); DIAG builds only (+7 s compile)
 #define TK2F_L2H 0       // s21: tk2f weight-copy L2 hints (python TK2F_L2H): 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only; 4 = evict_last every group of a multi-group expert, evict_first else
@@ -3508,7 +3509,7 @@ template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false, 
 __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
                                              int r1, const int* s_rs, const int* s_e, uint4* smem, uint64_t* full,
                                              uint64_t* empty, int& st, int& ph, int& i, uint64_t* xrdy = nullptr,
-                                             int early = 0, int l2h = TK2F_L2H, const int* s_mg = nullptr) {
+                                             int early = 0, int l2h = TK2F_L2H, const int* s_mg = nullptr, int pfd = 0) {
   constexpr int RPE = NRT / 2, NQ = 64 / (NC * KPS), SB = NC * KPS * (S6 ? 1120 : 1152), KB = NC * KPS;
   constexpr int SG = S6P ? NC * KPS * 1152 : SB;  // n20 S6P: S6 images at the 8-bit stage stride in global memory
   static_assert(!S6 || (SQ && KPS == 2), "S6: SQ stages, KPS 2");
@@ -3527,6 +3528,15 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
     const uint4* src = Wq + ((size_t)e * NRT * 64 + lr * 64) * 32;
     const uint32_t* ssrc = S2 + ((size_t)e * RPE * 64 + lr * 64) * 32;
     const char* qsrc = reinterpret_cast<const char*>(Wq) + ((size_t)e * RPE + lr) * NQ * SG;  // SQ
+    // n5s27 PFL2 (DIAG): L2 bulk prefetch of whole 72 KB rows pfd rows ahead (H200 probe: bigger DRAM requests stream
+    // faster, but bigger smem stages cost the consumers); rows r0+1..r0+pfd at the first row
+    if (SQ && pfd && pfd < 4) {
+      for (int Rp = R == r0 ? R + 1 : R + pfd; Rp <= R + pfd && Rp < r1; ++Rp) {
+        int b = a;
+        while (s_rs[b + 1] <= Rp) ++b;
+        prefetch_l2(reinterpret_cast<const char*>(Wq) + ((size_t)s_e[b] * RPE + ((Rp - s_rs[b]) & (RPE - 1))) * NQ * SG, NQ * SG);
+      }
+    }
 #if TK2F_L2H
     // mode 1-3: nfin = a later group of this expert re-reads this row; mode 4: any group of a multi-group expert
     // (the other group's CTA may read the same row first)
@@ -3540,6 +3550,11 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
       if (i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
       if (xrdy && i == early) mbar_wait(xrdy, 0);  // s15 FP: the consumers' first x loads go out before our burst
       char* sbase = reinterpret_cast<char*>(smem) + st * SB;
+      if (SQ && pfd == 4 && R + 1 < r1) {  // n5s27 PFL2 stage mode: the next row's stage q (18 KB) one row ahead
+        int b = a;
+        while (s_rs[b + 1] <= R + 1) ++b;
+        prefetch_l2(reinterpret_cast<const char*>(Wq) + ((size_t)s_e[b] * RPE + ((R + 1 - s_rs[b]) & (RPE - 1))) * NQ * SG + q * SG, SG);
+      }
       mbar_expect_tx(&full[st], SB);
 #if TK2F_L2H
       if (SQ) {
@@ -4982,8 +4997,9 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
         tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2, s_mg);
         tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, d0, d1, s_rt2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2, s_mg);
       } else {
-      tk2f_produce<512, NC, NSTG, KPS, SQ, S6, S6P>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv);
-      tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2);
+      constexpr int PFD = (PF & 4096) ? 1 + ((PF >> 28) & 3) : 0;  // n5s27 PFL2 (DIAG)
+      tk2f_produce<512, NC, NSTG, KPS, SQ, S6, S6P>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv, nullptr, PFD);
+      tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2, nullptr, PFD);
       }
     }
     return;
@@ -5120,7 +5136,11 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
 static int g_tk2f_l2h = TK2F_L2H;  // n4s3: tk2f L2 hint mode of the next launch (moe_tk2f_launch: cfg / 1000000 - 1)
 static int g_tk2f_l2h2 = -1;  // n18: gemm2 rows' L2 hint mode (-1 = as gemm13); kernel arg l2h bits 4+ = mode + 1
 static int g_tk2f_orc = 0;  // n5s16: DIAG oracle (v + 1000 in moe_set_l2h2)
-int64_t moe_set_l2h2(int64_t v) { g_tk2f_orc = v >= 500; g_tk2f_l2h2 = (int)(v >= 500 ? v - 1000 : v); return 0; }
+static int g_tk2f_pfl2 = 0;  // n5s27 PFL2 (DIAG): prefetch distance in rows (v + 10000 * d in moe_set_l2h2)
+int64_t moe_set_l2h2(int64_t v) {
+  g_tk2f_pfl2 = (int)((v + 5000) / 10000); v -= 10000 * (int64_t)g_tk2f_pfl2;
+  g_tk2f_orc = v >= 500; g_tk2f_l2h2 = (int)(v >= 500 ? v - 1000 : v); return 0;
+}
 template <int NC, int NSTG, int KPS, bool DYN = false, bool FN = false, bool SA = false, int GS = 8, int MRG = 0, int PF = 0>
 static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const void* w2, const void* s2, const void* lut,
                        const void* gs13, const void* gs2, const void* x, const void* ids, int start, int count,
@@ -5292,6 +5312,21 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #if TK2DT
     if (sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0 && cfg == 85204)  // n5s18 DT (deferred TWO) + PF4 -> moe_norm3
       return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 524288 | (20 << 20)>(0, TK2F_ARGS0);  // + 20 KB layout pad
+#endif
+#if TK2F_PFL2K
+    if (g_tk2f_pfl2 && sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0 && (cfg == 204 || cfg == 84204)) {  // n5s27 PFL2 (DIAG)
+      const int d = g_tk2f_pfl2;
+      if (cfg == 204) {
+        if (d == 1) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 512 | 4096>(0, TK2F_ARGS0);
+        if (d == 2) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 512 | 4096 | (1 << 28)>(0, TK2F_ARGS0);
+        if (d == 3) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 512 | 4096 | (2 << 28)>(0, TK2F_ARGS0);
+        return tk2f_go<8, 4, 2, false, false, true, 8, 0, 512 | 4096 | (3 << 28)>(0, TK2F_ARGS0);
+      }
+      if (d == 1) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 4096>(0, TK2F_ARGS0);
+      if (d == 2) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 4096 | (1 << 28)>(0, TK2F_ARGS0);
+      if (d == 3) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 4096 | (2 << 28)>(0, TK2F_ARGS0);
+      return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 4096 | (3 << 28)>(0, TK2F_ARGS0);
+    }
 #endif
     TORCH_CHECK(sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0 && (cfg == 204 || cfg == 84204), "moe_tk2f SQ: cfg ", cfg);
     if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 512>(0, TK2F_ARGS0);
@@ -5547,6 +5582,7 @@ def _lib():
             src = src.replace("#define TK2F_S6K 0 ", "#define TK2F_S6K 1 ")
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
             src = src.replace("#define TK2F_SQDEEP 0 ", "#define TK2F_SQDEEP 1 ")  # n5s15
+            src = src.replace("#define TK2F_PFL2K 0 ", "#define TK2F_PFL2K 1 ")  # n5s27
             src = src.replace("#define TK2F_ORACLE 0 ", "#define TK2F_ORACLE 1 ")  # n5s16
             src = src.replace("#define TK2X 0 ", "#define TK2X 2 ")  # n5s16
             src = src.replace("#define TK2DT 0 ", "#define TK2DT 1 ")  # n5s18
@@ -5809,6 +5845,7 @@ TK2F_S6P = False  # n20 DIAG: run the padded S6 images (S6P: aligned stage start
 TK2F_S6P_DIAG = True  # n20: build the S6P images in DIAG builds
 TK2F_S6_ON = True  # n20: run tk2f / tk2h on them (DIAG A/B: False = the 8-bit SQ stages)
 TK2F_SQ = 1  # n14: tk2f single-copy 18 KB stages (prepare _sq_pack; cfg + 10000000; bitwise = off)
+TK2F_PFL2 = 0  # n5s27: DIAG only: tk2f L2 prefetch of whole 72 KB SQ rows, distance 1..3 rows; 4 = 18 KB stages one row ahead (0 = off)
 TK2F = 204  # s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
@@ -5821,12 +5858,10 @@ _DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('dec
 _DIAG_R = "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"
 DIAG_VARIANTS = {  # s25: same-check control: twm (the layer's T=128 default) vs twq q4 vs the HOTQ stack; b = repeats.
     # Keep a twm control in EVERY big-M DIAG (s25: twq variants were compared only to a regressed q4, never to twm).
-    "dec": [("sq", {})],  # n5s21: control only (big-M DIAG)
-    # n5s21: exact-N moe_hot probe (N 104 for the 65..104-token experts) vs the layer's T=256 config (hot 32, rg, split 66)
-    "big": [("h32", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {256: 66}, "TWM_ORDER_M": {}, "HOT_NXB": 0}),
-            ("n104", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {256: 66}, "TWM_ORDER_M": {}, "HOT_NXB": 16}),
-            ("h32b", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {256: 66}, "TWM_ORDER_M": {}, "HOT_NXB": 0}),
-            ("n104b", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {256: 66}, "TWM_ORDER_M": {}, "HOT_NXB": 16})],
+    # n5s27: tk2f L2 row prefetch (PFL2: whole 72 KB rows 1/2/3 rows ahead; ps = 18 KB stages one row ahead) vs sq
+    "dec": [("sq", {}), ("p1", {"TK2F_PFL2": 1}), ("p2", {"TK2F_PFL2": 2}), ("p3", {"TK2F_PFL2": 3}),
+            ("ps", {"TK2F_PFL2": 4}), ("sqb", {})],
+    "big": [("h32", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {256: 66}, "TWM_ORDER_M": {}, "HOT_NXB": 0})],  # control only
 }
 
 
@@ -6204,7 +6239,8 @@ def kernel_fn(data, st):
             return out
         if TK2F:
             c = _tk2f_cfg(M, st)
-            lib.moe_set_l2h2((-1 if TK2F_L2H2_RT is None else TK2F_L2H2_RT) + (1000 if TK2F_ORACLE and DIAG else 0))
+            lib.moe_set_l2h2((-1 if TK2F_L2H2_RT is None else TK2F_L2H2_RT) + (1000 if TK2F_ORACLE and DIAG else 0)
+                             + (10000 * TK2F_PFL2 if DIAG else 0))  # n5s27 PFL2
             if c >= 10000000:  # n14 SQ
                 k = "s6p" if c >= 40000000 else "s6" if c >= 20000000 else "sq4" if c % 1000 in (402, 403, 404, 405) else "sq8" if c % 1000 in (104, 106) else "sq"
                 lib.moe_tk2f_launch(st["w13" + k], st["w13s2"], st["w2" + k], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x,
