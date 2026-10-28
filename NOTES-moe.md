@@ -2762,3 +2762,9 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - Value even if 7 existed: 1/12 of the dq() oracle = ~-1.9 us per v16/v32 sliding layer (proj a9fd9026 -22.6/-23.8).
 - VERDICT: best sequence found = today's (o0 = q&M; rotl10&M; rotl13&M; ((q&0x001B001B)*16648)&M; 4 HMUL2) = 12 per 8
   weights. proj n5s23 closed the other half (prmt-LUT >= 14 int + 4 HMUL2): dq+scale stays at 12.
+
+## Night5 session 40 (2026-10-28 11:46Z - 11:55Z): no new lead line since 11:20Z; dq closed per its own condition; no build; 0 judge runs, 0 Modal
+- 11:20Z said: build only if the search finds <= 10 per 8 weights incl. scale; n5s39 found nothing below today's 12 (8 int + 4 HMUL2).
+  Re-checked the one remaining non-integer route (cvt.rn.f16x2.e4m3x2 dequant): already dead on paper (NOTES line ~919: >= 12 instr and
+  needs FP16 x, which breaks the BF16 activation rule). dq lane CLOSED. Nothing in moe's lane reaches 1% of the layer score; asked the lead
+  (COORD Results) to pause the moe loop (STOP-moe) like layer/proj until a build needs moe. Budget left today: moe board 4 checks, 8 submits.

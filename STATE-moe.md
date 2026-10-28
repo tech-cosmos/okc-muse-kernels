@@ -1,6 +1,7 @@
 # STATE-moe
 
-## NOW (n5s39, 11:50Z): dq superoptimizer (lead 10:55Z) DONE: no 7-int-op dq() in any searched family; today = 8 int + 4 HMUL2 = 12/8 weights (NOTES n5s39, tools/n5s39)
+## NOW (n5s40, 11:55Z): idle, dq CLOSED per lead 11:20Z condition; asked lead to pause moe loop (COORD Results)
+## WAS (n5s39, 11:50Z): dq superoptimizer (lead 10:55Z) DONE: no 7-int-op dq() in any searched family; today = 8 int + 4 HMUL2 = 12/8 weights (NOTES n5s39, tools/n5s39)
 - z3 routing model rediscovers production at 8 ops; 30+ 7-op shapes (shift/mask/IMAD/IMAD-merge/PRMT/funnel/select) all UNSAT;
   exhaustive shift family 0/129,766. Full-ISA BV CEGIS intractable at N>=6. proj n5s23: prmt-LUT >= 14 -> both halves closed.
 ## WAS (n5s38, 10:45Z): idle, lane ask stands; proj H200 twm dq-free -23 us ceiling re-checked: every route to it dead on record (NOTES n5s38)
