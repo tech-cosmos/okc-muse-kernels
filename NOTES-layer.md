@@ -2736,3 +2736,14 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   unpool W prefetch during the twm drain (s6 dead), row-subset unpool during the drain (W-bound: doubles W reads).
   Choosing routes among near-ties to cut distinct experts would use the checker's slack, not a real speedup: not done.
 - Nothing built; no check spent (10-28 left: 5 checks / 7 submits). main unchanged (v163).
+
+## night5 s28 (2026-10-28 09:31Z - 09:55Z): no build, 0 judge runs, 0 Modal min; lane-change request (lead 09:20Z)
+- Lead 09:20Z: take the v1/d1 sliding attention piece + glue, builds that remove bytes or launches only; else ask for a lane.
+- Checked the only item never attempted (s86: "make pr1/pr8 light enough to co-reside with o"): d1 pr1 = 58 MB in 17.5 us on the H200
+  and d1 qkv g13 = 28 MB in 10.8 us both sit ON moe n5s29's H200 bulk-stream fit (t = 3.8 us + bytes / 4.26 TB/s -> 17.4 / 10.4 us).
+  So the only thing left there is one ~3.8 us ramp hidden under o's tail, and s86 already measured the H100 analogue (o end -> pr1 end
+  21.4 separate vs 22.5 fused; OB8 at T=8 +1.8 us): bound <= ~1 us d1 (~0.2%). Not built.
+- Byte-removal idea at T=256 checked on paper: b1 writes only h (+ a per-row rsqrt), b2 recomputes s' = alpha1 s + beta1 r a from s and
+  the o output instead of reading s': 176 vs 192 KB/row = -4 MB per v32 call = ~1.3 us (0.04%), plus a bit-identity risk on s'. Not built.
+- Sliding attention d1 2.4 / v1 3.3 us free (n5s26) = latency-bound csl/vtk; every overlap form is dead (s62 CSL_PW, n5s14 flag-spin).
+- => layer lane has no build >= 0.3%. Lane-change request posted in COORD (Requests). main unchanged (v163); 10-28 left: 5 checks / 7 submits.

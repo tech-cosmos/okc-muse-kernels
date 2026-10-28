@@ -6,6 +6,8 @@ night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (too
   (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
   unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 7 submits left after v163.
   Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
+night5 s28: no build, 0 runs: pr1/qkv at d1 sit on the H200 bulk-stream fit (3.8 us + B/4.26 TB/s); co-resident pr1
+  bounded <= 1 us; T=256 b1/b2 byte cut 0.04%. Lane-change request posted (lead 09:20Z). 10-28 left: 5 checks / 7 submits.
 night5 s27: no build, 0 runs: H100 v32 sl timeline (experts 235 of 385 us); remaining gaps are expert-kernel
   (proj TWS drain, moe closed); lane request n5s26 still open. 10-28 left: 5 checks / 7 submits.
 night5 s26: H100 in-layer FREE-piece oracles (tools/free_oracle.py, NOTES n5s26 table): us saved sl/full: attention d1 2.4/13,
