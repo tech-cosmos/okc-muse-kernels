@@ -1,22 +1,20 @@
 # STATE-moe
 
-## NOW (n5s17, 2026-10-28 04:45Z): LANE DECISION 6 (lead 01:45Z): moe board = H200 A/B bench; tk2f bs16/32/8 first, then big-M
-- n5s15 (4 DIAG checks): tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps; deeper/larger/
-  shallower/nc16/grid-stride all lose). Lever (a) of 01:45Z closed. NOTES n5s15.
-- n5s16 (1 DIAG check): H200 ORACLE (tk2f without the extra 8-token groups): d16 61.0 vs 65.0, d32 76.0 vs 83.7 => the extra
-  groups cost 4.0 / 7.7 us; tk2h W3 gets only 2.8 of it at d32 (loses 1.3 at d16). HYB GS16 consumer (3 bodies) and HYB2
-  (__noinline__ TWO rows) both lose on the H100: an inlined never-run TWO body costs ~5%/row via the I-CACHE (ncu no-instr
-  stall 1.3 -> 4.4%). NOTES n5s16.
-- n5s16 TK2S (one rolled body, x in smem, GS 8/16) DEAD on the H200 (8ed43995: GS8 alone d16 +3.7, d32 +8.1; GS16 +12..17):
-  tk2f's consumer is critical on the H200. Every 16-token-sharing form so far loses (inlined body = i-cache, noinline = ABI,
-  tk2h merged = +4%/row, rolled smem = +10%). Untried: a separate CTA role / kernel running ONLY the 2-group segments with
-  its own register-x body (one body per CTA role). Prize <= d32 ~5 us vs the layer's h3, d16 ~4.
-- n5s17 (0 checks, H100 ncu): CODE LAYOUT: dead code is free unless it moves a hot consumer loop across a function-relative
-  64 KB boundary (+4..12%); a dead TWO body AFTER the main path costs nothing (r2). HYB padded to avoid crossings is STILL slow
-  (its combined 39 KB per-row loop is the problem). Tools: tools/n5s17/loop64k.py (crossing audit), ncu_r.py. NOTES n5s17.
-  NEXT (build): "deferred TWO" tk2f: per CTA [13 1-group rows][13 TWO rows][2 1-group rows][2 TWO rows], TWO = its own loop
-  placed after the main loops, separate 1-group / pair row spaces split evenly over CTAs; H100 ncu vs sq, then H200 DIAG.
-- Then big-M (twm drain ~20 us; 3-WG proposal weak: twq 16 warps ~50% issue).
+## NOW (n5s18, 2026-10-28 04:20Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
+- n5s15: tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps); bytes-in-flight lever closed.
+- n5s16: H200 ORACLE: the extra 8-token groups cost d16 4.0 / d32 7.7 us (tk2f fit 14.1 + 6.97 E + 4.4 X us).
+- n5s16-n5s18: EVERY 16-token shared-dequant form on mma.sync tk2f is DEAD: inlined (i-cache), noinline (ABI), tk2h merged
+  (+4%/row), TK2S rolled smem-x (H200 +10%), n5s18 DT = pair rows in their own loop (built, bitwise, DIAG-only TK2DT):
+  H100 d16 +8..20, d32 +23..29 us. Pair row ~= 2 one-group rows (REG cap 168 -> spills; x group 0 needs 64 regs) and the
+  relocated gemm2 loop slows (+27% stall/instr). n5s17 code-layout rule: tools/n5s17/loop64k.py. NOTES n5s16-n5s18.
+- tk3 (wgmma decode consumer, B = x in smem, N16 for 2 groups in one pass) costed in n5s18, NOT recommended: warm-L2
+  (consumer-bound) H100 tools/n5s18/mb_warm.py, cycles per 9 KB stage: N8 596 / N16 634 / N32 695 = ~4.0 / 3.8 / 3.4 TB/s
+  consumer rate on 132 SMs, vs the HBM stream 4.06 and tk2f's own consumer ~6.3 TB/s per 8-token group (from the H200 fit's
+  4.4 us per extra group). => tk3 N16: 2-group expert 11.4 -> ~7.3 us, but every 1-group expert +0.3 us (consumer-bound
+  below HBM) and the microbench has no row/epilogue overhead: est. d32 ~-3..-5 net of layer's tk2h W3, d16 ~0. Too small for
+  a 2-4 session kernel. tk2f extra-group lever CLOSED; lane request to lead (COORD Requests n5s18).
+- Untried small items: norm2/norm3 as a PDL secondary of tk2f (board-only; in-layer already PDL-hidden).
+- Big-M (bs128/256, twm) is proj's lane now (LANE 7); moe reviews proj/twm* before layer integrates.
 - Checks 10-28: moe 6/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995), 0 submits; attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)

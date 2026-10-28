@@ -2397,3 +2397,10 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   inlined (i-cache), noinline (ABI), merged (tk2h +4%), rolled smem-x (TK2S +10% H200), separate loop (DT: pair ~= 2 rows,
   and the layout move costs the other loops). The extra-group cost (H200 oracle d16 4.0 / d32 7.7 us) stays; layer's tk2h
   W3 at d32 is the best form. Not worth an H200 check (the H200 is more consumer-critical than the H100).
+- tk3 costing (wgmma decode consumer, the last 16-token form): tools/n5s18/mb_warm.py = s28 mb_mc with WMB (MB of weights;
+  24 = L2-resident = consumer-bound). G132 warm full-mode cycles per 9 KB stage (8 KB W + 1 KB scales = 16384 weights):
+  N8 596 / N16 634 / N32 695 (ring alone 307); cold (512 MB, HBM): 704 / 703 / 720 (ring alone 763). tk2f warm, 1 expert
+  (tools/l2warm.py VS=84204,204): T=8 19.9, T=16 22.3, T=32 34.1 us (non-linear, fixed costs dominate: not a clean rate).
+  Rates: wgmma N16 consumer ~3.8 TB/s-equiv (H200 clock, 132 SMs) < HBM 4.06; tk2f consumer from the H200 fit ~6.3 TB/s per
+  8-token group. => tk3 saves ~4 us per 2-group expert, costs ~+0.3 per 1-group expert, before row/epilogue overheads
+  (absent in the microbench): est. d32 -3..-5 net of layer's tk2h W3, d16 ~0. NOT building. Extra-group lever closed.
