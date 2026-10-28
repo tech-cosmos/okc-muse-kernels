@@ -6,6 +6,9 @@ night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (too
   (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
   unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 8 submits.
   Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
+night5 s21: no build, 0 judge runs. H200 (Modal) standalone ranking of T=128 g30 forms (NOTES n5s21 table): R2 dead, qkv
+  split dead (reduce +3.7 us), unpool g30 is +1.1 us vs cuBLAS standalone on H200 (main keeps it for the in-layer PDL overlap),
+  pooler FP32-slab g30 -4.6 us vs cuBLAS -> only pays with the router's hi/lo rows inside it (NEXT 3). fr False at T=128: H100 tie.
 night5 s19: no build, 0 runs; proj KQ K-split = -0.3 us vs the twf_split 66 we already tune (not ported). NOTES n5s19.
 night5 s18: check 3e39a051 (v162, unchanged main) **2.1143x**, prepare_s 88.9: abs us beat the board run v153 on 9/12 shapes
   (d32 sl 149.7 vs 155.7, d32 full 301.2 vs 308.2, v32 sl 327.8 vs 335.7, d16 sl 124.0 vs 129.9) but SGLang drew fast (ratio is per run).
@@ -66,6 +69,10 @@ per-shape evidence). Open items, biggest first (none started):
 1. o+bnd+pr1 megakernel at T=1 (bound ~-3 us d1 = ~+0.5%; NOTES s45/s61/s74; moe n5s9 audit: post-attention chain <= 3-4.5 us).
 1b. DONE n5s16/n5s17 (v160, v161): no serial PDL hand-off left (timeline_all audit, NOTES n5s17).
 2. Any new Handoff from moe (attention lane) / proj: port as a TUNE option, validate, bundle into one check.
+3. (n5s21, ~+0.19%, 2-3 sessions, below the 1% bar) T=128 'pr128': g30 FP32-slab pooler S2 (128 CTAs) that also carries the
+   router's 256 hi rows (12-bit) + 256 lo rows (raw BF16, 2nd decode path) within <= 132 CTAs; _routing sums router slabs,
+   moe_routegathern sums the 2 pooler slabs (gnorm). H200 Modal: pooler slab 22.3 vs cuBLAS 26.9 us; FR = pooler + ~3 us.
+4. (cheap, Modal) H200 real-input A/B of g30:unpool False at T=128 (H200 standalone cuBLAS 20.6 vs g30 21.7; H100 in-layer +6..8).
 T=16: every g30 option ties on 3 H200 checks (f824b925, 133068b8, 4937830f): don't add more g30 work at T=16.
 
 ## Board

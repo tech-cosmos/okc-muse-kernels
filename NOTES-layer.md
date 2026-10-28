@@ -2583,3 +2583,35 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Next: the H200 pre-screen makes <1% per-shape changes measurable (noise <= ~1 us within a run): candidates the H100 called ties
   (NOTES "tie"/"noise" items: g30 T=16 options, BND_SPLIT, pr1 npf, kv_pf...) can be re-decided there in batches, 3-4 GPU-min each;
   the shared cap is 60 GPU-min/day across lanes.
+
+## night5 s21 (2026-10-28 07:13Z-08:20Z, okc-night5 session 21): H200 (Modal) ranking of the T=128 g30 GEMM forms; no build; 0 judge runs
+- Question left open by s99/s101/s102 + moe n4s43 ("only an H200 run can rank g30 forms": maybe R2 = 128 W rows/CTA, or the
+  split forms, win on the H200 where the W stream is 1.45x faster). Answered with tools/h200.py --cmd (8.8 GPU-min total;
+  runners dev/n5s21_h200_s99.sh / _s101.sh; overlay = submission.py + the dev/s99 / dev/s101 prototypes in a non-dev dir,
+  since h200.py skips dev/). Standalone cold-L2 graph us, T=128, Modal H200 (compare within the run only):
+  | shape | g30 form | g30 | cuBLAS (same run) |
+  | unpool 8192x4096 | R1 S1 (main's form, no escapes) | 21.7 | 20.5-20.6 |
+  | unpool | R1 S2 FP32 slabs | 24.9-25.2 | 20.6 |
+  | unpool | R2 (NS10 NW5) S1 / S2 | 34.9 / 21.9 | 20.5-20.7 |
+  | pooler 4096x8192 | R1 S2 FP32 slabs (no escapes, no reduce) | 22.1-22.3 | 26.1-26.9 |
+  | pooler | R1 S4 / S3 slabs | 24.8-25.0 / 30.1 | 26.5-27.3 |
+  | pooler | R2 S2 / S4 | 35.5 / 22.4 | 26.6-26.7 |
+  | pooler | s101 split real weights (escapes + ticket reduce, BF16 out) S2 / S3 | 26.4 / 36.1 | 28.1 |
+  | qkv 2304x8192 | s101 split real S1 / S2 / S3 | 37.2 / 25.6 / 21.0-21.2 | 17.3-17.5 |
+  | qkv | s101 uneven slabs (no escapes/reduce) S3 / S2 | 16.2 / 21.3 | 17.3-17.8 |
+  H100 same day for reference: unpool R1 S1 22.2 vs 26.6; pool S2 25.6 vs 27.6; R2 S1 34.6-35.4, S2 25.8-26.1, pool R2 S4 26.9-27.6;
+  qkv real S3 21.8 vs 20.6, slabs S3 16.7 vs 20.2.
+- Read: (1) R2 buys nothing on the H200 either (= R1 at best): CLOSED. (2) The H200 favours cuBLAS on the unpool (g30 +1.1 us
+  standalone; main keeps g30:unpool because in-layer its W prologue runs under twm's drain, H100 real-input A/B n5s8 +6..8 us
+  when off, never H200-A/B'd on real inputs: candidate for a Modal run when minutes allow). (3) qkv split-K: the reduce kills it
+  on the H200 too (+3.7 us); the slab form is -1.6 us before any consumer-side slab sum (QSS-style, s72: +1.6 in nvs): CLOSED.
+  (4) Only real H200 lever: the pooler slab form -4.6 us vs cuBLAS pooler-only, but the layer's T=128 FR GEMM carries the router
+  (FR = pooler + 3.1 us on the H100, dev/n5s21_rt.py: FR torch.mm 30.7, pooler-only 27.6) and the stand-alone T=128 router is
+  slow: pr3 router + routing alone 15.6 us H100 (cuBLAS hi/lo 7.6 + reduce 1.9 in s102). So it pays only with the router's
+  512 hi/lo rows INSIDE the slab kernel (hi = 12-bit ok, lo = raw BF16 rows: needs a 2nd decode path; 4.2 MB lo + 3.1 MB hi)
+  and the work split kept at <= 132 CTAs (s105: 136 CTAs = 2 waves). Paper bound: ~22.8 (incl. escapes) + ~3.3 (router bytes)
+  = ~26 vs FR ~29.5 on Modal = ~-3.4 us per v16 layer (sl + full) = ~+0.19% total, plus rg summing 2 slabs. Below the lead's
+  1% bar; 2-3 sessions. Queued in STATE, not started.
+- H100 real-input ab_flag (variants/n5s21_notune.py = v163 + TUNE {} + _ab; seeds 99/7/13, 2 rounds) T=128 fr False vs mean of
+  base first/last: sl +1.0/-0.5/-0.8, full -0.5/-1.3/-0.3 us: tie (n5s8's "full -3..-6" was before rg). Not sent to the H200.
+- Shared Modal ledger: 52.2 of 60 GPU-min used on 10-28 after this session (mine today: n5s20 ~18 incl. a lost reservation, n5s21 8.8).
