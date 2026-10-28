@@ -2427,3 +2427,19 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   9 -> 8.73 row rounding only); not built.
 - So the gap to #1 on this board is most likely big-M (bs128/256: twm 197/235 us + moe_norm tail ~40 us vs floors
   101/109), which is proj's lane since LANE 7. Request refreshed in COORD.
+
+## n5s21 (2026-10-28 04:52Z - 05:45Z): LANE 7b (lead 04:50Z: moe = bs256 hot-expert structure): exact-N moe_hot costed + H200 probe = BELOW the 5 us bar; 1 moe check (DIAG)
+- Routings: layer v32 (embedded _DIAG_R) = 18-21 experts, 2 hot (73-98 tok), 1-2 of 33-50, rest <= 26. Board bs256
+  (reference.generate_input seeds 1-12, judge seed unknown): ~24 experts; 9/12 seeds have an expert > 64 tok (75-223), 5/12 one of 65-128.
+- Cost model (posted COORD Requests n5s21): bytes ~510-590 MB = 128-148 us at 4.0 TB/s vs twm 211.8 || hot 114.5 in-layer (af87d466) =
+  consumer-bound. Stage cycles RT2 8 KB: dq 377 + tensor 8*N + ~230 (fits N64 items 36 us, hot N128 ~52 us). Untested lever found: the
+  hot experts are padded to N128 (s27 pad_bound.py only covered <= 32-tok experts): exact N saves ~78 tok/call = ~970 SM-us = model -7 us.
+- Probe (kept, off): #define HOT_NX (DIAG builds) adds moe_hot<.., NH 104> (x box stays 128 rows, wgmma N 104; class 65..104), python
+  HOT_NXB = 16 picks it (probe only: wrong for experts of 105..128 tok). wgmma generator now emits N 8..128 (adds 104/112/120). Bitwise = N128.
+- H100 (tools/n5s21/nx_ab.py, /tmp/n5s21/prof.py): total tie (+1..3), moe_hot itself -5..22 us but twm +0..6: H100 is DRAM-bound at v32.
+- H200 DIAG 43eb5326 (2.2464x test run, never submit), layer routings moe-only cold, MEAN us (seeds 7/11/13/17/99):
+    v32 h32 201.5 (192.7 201.0 199.2 200.1 214.3) | n104 199.2 (185.8 199.6 200.3 200.4 210.1) | repeats 201.7 / 199.1; v16 tie (no hot).
+  => -2.3 us mean for 48 tok saved per seed (model 4.5): ~half converts (twm decides the makespan on seeds 11/13/17). Full exact-N (avg 78
+  tok) extrapolates to ~-3.7 us/v32 call < the lead's 5 us bar: NOT building the per-expert-N (noinline per-N item) version.
+- Board note: main runs no moe_hot at bs256 (HOT_M = {}); the s29 note "board bs256 has no expert > 49 tok" held for seed 7 only.
+  HOT_M {256: 32} + TWF_SPLIT_M {256: 66} (= the layer's config) is an untested BOARD-only config A/B (no layer gain).

@@ -1,6 +1,6 @@
 # STATE-moe
 
-## NOW (n5s20, 2026-10-28 04:55Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
+## NOW (n5s21, 2026-10-28 05:45Z): LANE 6/7 (lead 01:45Z, 03:50Z): moe = tk2f (T<=32: bs8/16/32), moe board = H200 A/B bench
 - n5s15: tk2f's stream is at a sharp H200 optimum (4 x 18 KB SQ ring, 8 consumer warps); bytes-in-flight lever closed.
 - n5s16: H200 ORACLE: the extra 8-token groups cost d16 4.0 / d32 7.7 us (tk2f fit 14.1 + 6.97 E + 4.4 X us).
 - n5s16-n5s18: EVERY 16-token shared-dequant form on mma.sync tk2f is DEAD: inlined (i-cache), noinline (ABI), tk2h merged
@@ -18,7 +18,10 @@
 - n5s20: audit only (NOTES n5s20): #1 now 2.685x; decode excess = fit's fixed 14.1 + 4.4/extra group, all pieces measured dead.
   Gap to #1 is most likely big-M (proj's lane). Lane request refreshed (COORD Requests n5s20).
 - Big-M (bs128/256, twm) is proj's lane now (LANE 7); moe reviews proj/twm* before layer integrates.
-- Checks 10-28: moe 7/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec), 0 submits; attention 0/20.
+- n5s21 (lead 04:50Z: moe = bs256): exact-N moe_hot (hot experts 65..128 tok padded to N128) H200 DIAG 43eb5326: N104 probe v32
+  -2.3 us mean (~half the SM-time model) -> full exact-N ~-3.7 us < 5 us bar: not built. Probe HOT_NX/HOT_NXB kept off. Untested: board-only
+  HOT_M {256: 32} + TWF_SPLIT_M {256: 66} at bs256 (layer already runs it). No other bs256 item >= 5 us on my model.
+- Checks 10-28: moe 8 of its 12 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239, e19541a1, 8ed43995, 138051ec, 43eb5326), 0 submits; attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding

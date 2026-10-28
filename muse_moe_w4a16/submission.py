@@ -2493,6 +2493,7 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 #define TWM_TL 0
 #endif
 #ifndef HOT_EMU
+#define HOT_NX 0  // n5s21: exact-N moe_hot probe builds (tests only)
 #define HOT_EMU 0  // s29: H200-proxy emulation in moe_twm/moe_hot (tests only; see moe_twm)
 #endif
 #define TQ_DEEP 0  // s24: moe_twq consumer: 0 = 2 A sets / 1 wgmma group in flight; 1 = 4 sets / 3 groups
@@ -2918,7 +2919,8 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     __nv_bfloat16* __restrict__ Y) {
   using HG = TWC<2, true, 8>;
   using HN = TWC<2, false, 8>;
-  constexpr int XB = NH * 128, STRIDE = XB + HG::WB + HG::SB;
+  constexpr int NX = NH > 64 ? 128 : NH;  // n5s21: x box rows (exact-N classes 72..120 load the 128-row box)
+  constexpr int XB = NX * 128, STRIDE = XB + HG::WB + HG::SB;
   static_assert(STRIDE % 1024 == 0 && HG::WB == HN::WB && HG::SB == HN::SB, "stage layout");
   extern __shared__ __align__(1024) uint4 smem_tw[];
   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
@@ -2940,7 +2942,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int nact = meta[0];
     const int e = tid < nact ? meta[1 + tid] : 0;
     const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0;
-    const bool h = nt > NH / 2 && nt <= NH;
+    const bool h = nt > (NH > 64 ? 64 : NH / 2) && nt <= NH;
     const unsigned b = __ballot_sync(0xffffffffu, h);
     if (h) s_e[__popc(b & ((1u << tid) - 1))] = e;
     if (tid == 0) s_nh = __popc(b);
@@ -2965,7 +2967,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
       const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e];
       const char* wsrc = (g2 ? W2 : W13) + ((size_t)e * nrb + rb) * 64 * HG::WB;
       const char* ssrc = (g2 ? S2 : S13) + ((size_t)e * nrb + rb) * 64 * HG::SB;
-      const CUtensorMap* map = g2 ? &maps2.m[NH == 128 ? 5 : 3] : &maps13.m[NH == 128 ? 5 : 3];
+      const CUtensorMap* map = g2 ? &maps2.m[NX == 128 ? 5 : 3] : &maps13.m[NX == 128 ? 5 : 3];
       if (g2) {
         int v;
         for (;;) {
@@ -3036,7 +3038,7 @@ static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
   constexpr int NSTG = 8;
-  constexpr int SMEM = NSTG * (NH * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024;
+  constexpr int SMEM = NSTG * ((NH > 64 ? 128 : NH) * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024;
   static bool init = false;
   if (!init) {
     cudaFuncSetAttribute(moe_hot<NSTG, SA, NH>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
@@ -3055,6 +3057,9 @@ int64_t moe_hot_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
                        torch::Tensor inter_, torch::Tensor y_, int64_t grid) {
 #define HOTA w13_, s13_, gs13_, w2_, s2_, gs2_, lut_, xg_, meta_, sr_, inter_, y_, (int)grid
   if (g_hot & 4) return (g_sa & 1) ? hot_go<true, 64>(HOTA) : hot_go<false, 64>(HOTA);  // s23: 33..64-token experts
+#if HOT_NX
+  if (g_hot & 16) return (g_sa & 1) ? hot_go<true, 104>(HOTA) : hot_go<false, 104>(HOTA);  // n5s21 exp: exact-N probe
+#endif
   return (g_sa & 1) ? hot_go<true, 128>(HOTA) : hot_go<false, 128>(HOTA);
 #undef HOTA
 }
@@ -5432,7 +5437,7 @@ int64_t moe_norm3_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw,
 
 def _gen_wgmma():
     out = ["template <int N> __device__ __forceinline__ void wgmma_bf16(float* d, const uint32_t* a, uint64_t desc);"]
-    for n in list(range(8, 104, 8)) + [128]:
+    for n in range(8, 136, 8):  # n5s21: + 104..120 (exact-N moe_hot)
         na = n // 2
         dl = ", ".join(f"%{i}" for i in range(na))
         al = ", ".join(f"%{na + i}" for i in range(4))
@@ -5516,6 +5521,7 @@ def _lib():
             src = src.replace("#define TK2F_ORACLE 0 ", "#define TK2F_ORACLE 1 ")  # n5s16
             src = src.replace("#define TK2X 0 ", "#define TK2X 2 ")  # n5s16
             src = src.replace("#define TK2DT 0 ", "#define TK2DT 1 ")  # n5s18
+            src = src.replace("#define HOT_NX 0 ", "#define HOT_NX 1 ")  # n5s21
             src = src.replace("#define TK2H_P4 0 ", "#define TK2H_P4 1 ").replace("#define TK2F_SQRT 0 ", "#define TK2F_SQRT 1 ")  # n16 (n14's TK2F_SQ4 / n13's TK2_EXP / TWM_PB48: done)
         h = hashlib.sha256(src.encode()).hexdigest()[:12]
         _LIB = load_inline(name=f"moe_w4a16_{h}", cpp_sources=_CPP, cuda_sources=src,
@@ -5736,6 +5742,7 @@ TWM_ORDER_M = {256: 76}  # s14: per-M override
 RG = 1  # s33: moe_routegather (route + gather fused, one CTA per token) for M > 32
 TWM_PB_M = {}  # n12: {M: 48}: moe_twm's > 32-token experts run 48-token passes at wgmma N48 (s18 mb: 632 vs 737 cyc/stage at N64)
 HOT_TWG = {}  # n15: {M: k}: with moe_hot on, moe_twm runs on SMs - k CTAs (k = hot grid: no late-starting twm CTAs)
+HOT_NXB = 0  # n5s21: probe bits (16: NH 104, 32: NH 80; HOT_NX builds only)
 HOT_M = {}  # s29: {M: grid}: moe_hot (65..128-token experts, one N 128 pass) on that many CTAs before moe_twm
 TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
 TWM_HOT_M = {}  # s17: per-M override
@@ -5785,8 +5792,12 @@ _DIAG_HDR = [('decode 1', 7, 1), ('decode 1', 11, 1), ('decode 1', 13, 1), ('dec
 _DIAG_R = "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"
 DIAG_VARIANTS = {  # s25: same-check control: twm (the layer's T=128 default) vs twq q4 vs the HOTQ stack; b = repeats.
     # Keep a twm control in EVERY big-M DIAG (s25: twq variants were compared only to a regressed q4, never to twm).
-    "dec": [("sq", {}), ("np", {"NORM2_PDL": 1}), ("sqb", {}), ("npb", {"NORM2_PDL": 1})],  # n5s19: norm2 PDL secondary
-    "big": [("twm", {"RG": 0, "TWQ_M": {}})],  # n5s15: control only (decode-only DIAG)
+    "dec": [("sq", {})],  # n5s21: control only (big-M DIAG)
+    # n5s21: exact-N moe_hot probe (N 104 for the 65..104-token experts) vs the layer's T=256 config (hot 32, rg, split 66)
+    "big": [("h32", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {256: 66}, "TWM_ORDER_M": {}, "HOT_NXB": 0}),
+            ("n104", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {256: 66}, "TWM_ORDER_M": {}, "HOT_NXB": 16}),
+            ("h32b", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {256: 66}, "TWM_ORDER_M": {}, "HOT_NXB": 0}),
+            ("n104b", {"HOT_M": {256: 32}, "TWF_SPLIT_M": {256: 66}, "TWM_ORDER_M": {}, "HOT_NXB": 16})],
 }
 
 
@@ -6249,7 +6260,8 @@ def kernel_fn(data, st):
                 ns = -tl if tl else ns
                 if DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)
                 hg = HOT_M.get(M, 0)
-                lib.moe_set_hot((1 if hg else 0) | (2 if TWM_PB_M.get(M, 64) == 48 else 0) | (HOT_TWG.get(M, 0) << 8 if hg else 0))
+                lib.moe_set_hot((1 if hg else 0) | (2 if TWM_PB_M.get(M, 64) == 48 else 0) | (HOT_TWG.get(M, 0) << 8 if hg else 0)
+                                | (HOT_NXB if hg else 0))
                 if hg:  # s29: experts with 65..128 tokens in one N 128 pass, moe_twm (PDL secondary) skips them
                     lib.moe_hot_launch(st["w13b2"], st["w13sb2"], st["gs13"], st["w2b2"], st["w2sb2"], st["gs2"], st["lut"],
                                        xg, meta, sroutes, inter, y, hg)
