@@ -2279,3 +2279,21 @@ default build is unchanged. Every variant bitwise = main locally (maxdiff 0), ex
   norm2 ~4.5 incl. gap: in-layer mostly hidden by PDL).
 - Not done (board-only, no layer value): standalone norm2/norm3 as a PDL secondary of tk2f (g_pdl bit 2; s9 H100 -0.4 us
   at bs1, never tried on the H200 with tk2f).
+- 9af0d239 (DIAG_STREAM2, 2.2565x test run): H200 moe_stream probe, same unique bytes (each routed expert once, no hints),
+  BLOCKED count split (each SM its own contiguous block = every kernel of ours) vs CYCLIC grid-stride deal of 1 / 4 / 16
+  consecutive stages per CTA (whole GPU reads one compact window). MEAN us (TB/s over unique bytes), NSTG 4:
+            blk18  cy1_18 cy4_18 cy16_18 | blk36  cy1_36 cy4_36 cy16_36
+    d1      23.5   23.2   23.4   27.0    | 21.6   21.3   21.6   25.1
+    d16     57.0   57.0   57.3   61.1    | 51.8   51.9   52.4   55.7
+    d32     72.5   72.4   72.7   74.5    | 66.3   66.0   66.5   68.7   (blk36 4.01 TB/s)
+    v1      60.0   60.1   60.5   62.4    | 54.7   54.5   55.0   56.9
+    v16    127.8  128.8  128.1  130.2    |119.0  119.2  119.5  122.1   (4.23 TB/s)
+    v32    139.9  141.4  139.9  142.2    |132.4  132.4  132.7  135.2
+  => grid-stride = blocked (+-1%); cy16 worse (coarse deal = tail). DRAM page locality across SMs is NOT a lever. DEAD.
+  (H100 locally: same tie.) The probe again prefers 36 KB stages at NSTG 4 (144 KB in flight), which the REAL kernel
+  rejects (k44 +3 us d32 above): the probe's consumers are free; tk2f's are not.
+- Gap budget at d32 (layer routings, H200): probe at tk2f's own ring (blk18 = 4 x 18 KB, each expert once) 72.5 us vs tk2f
+  85.3: ~13 us = the multi-group re-read rows (d32 has 2-3 extra 8-token groups x ~4.4 us = 9-13 us, consumer-bound
+  L2-served rows, see fit) + routing ~1.5 + norm2. => NEXT for tk2f: make an extra 8-token group cheap (both groups per
+  dq pass) -- GS16/tk2h lost before (xs smem LDS + regs + i-cache; "2-group row ~6 us per segment"); find out WHY a
+  2-group row costs more than two 1-group rows before building again (SASS/stall audit of tk2g_row TWO on the H100).

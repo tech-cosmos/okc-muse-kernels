@@ -1,12 +1,14 @@
 # STATE-moe
 
-## NOW (n5s14, 2026-10-28 01:50Z): no lane; lane request to lead posted (COORD Requests, n5s14) with moe-board evidence.
-- moe board: #1 pjmullin3 2.623x vs ours 2.247x (febfcb1f). Ours vs the 4.8 TB/s floor: bs1 2.37x, bs8 1.83, bs16 1.69,
-  bs32 1.70, bs128 2.01, bs256 2.27 => a 2.623x team is ~1.17x faster on average; our worst = bs1 (tk2f fixed ~14 us)
-  and big-M twm (consumer issue ~50%). Proposed: 3-consumer-WG twm (uncertain: twq with 16 warps also issued at ~50%).
-- n5s13: lead 01:10Z items (v1 o->bnd->pr8 OB8, T=8 tk2f first copy) both DEAD/bounded on H100 (NOTES n5s13).
-- Enabler (n5s11): tools/n5s11/cuda_strip.py (layer 1 MB judge limit). Offered under COORD Requests; layer decides.
-- Checks: moe 20/20 and attention 20/20 unused on 10-28.
+## NOW (n5s15, 2026-10-28 02:55Z): LANE DECISION 6 (lead 01:45Z): moe board = H200 A/B bench; tk2f bs16/32/8 first, then big-M
+- 4 moe checks used (DIAG test runs, never submit): ring depth/size/consumer warps/grid-stride ALL at optimum on the H200:
+  tk2f 4 x 18 KB SQ stages (72 KB in flight/SM) + 8 consumer warps beats r2/r3/r5/r6/r8 (2-8 x 18 KB), k44/k45 (36 KB),
+  k14/k16 (9 KB), nc16 (16 warps). Cyclic/grid-stride deal of stages = blocked (probe). Lever (a) of 01:45Z closed. NOTES n5s15.
+- NEXT tk2f: the extra 8-token groups (layer d32 2-3 x ~4.4 us, consumer-bound L2 rows) = most of the 13 us between tk2f
+  (85.3) and the bare stream at its own ring (72.5) at d32. Audit why GS16 2-group rows cost more than 2 single rows (SASS,
+  stalls on H100: tk2g_row TWO), then rebuild. Then big-M (twm drain ~20 us; 3-WG proposal is weak: twq 16 warps ~50% issue).
+- Board-only, cheap, untested on H200: decode norm2/norm3 as PDL secondary in standalone (g_pdl bit 2; no layer value).
+- Checks 10-28: moe 4/20 used (ddfc1353, 14ddda06, f5430a5c, 9af0d239), 0 submits; attention 0/20.
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
