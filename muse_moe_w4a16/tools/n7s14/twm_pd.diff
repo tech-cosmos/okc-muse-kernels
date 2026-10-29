@@ -1,0 +1,96 @@
+--- /tmp/n8/base.py	2026-10-29 04:45:06.672121856 +0000
++++ /tmp/n8/pd.py	2026-10-29 05:10:05.202209423 +0000
+@@ -100,6 +100,7 @@
+ #define TWM_EPI 0        // n6s3: staged, rolled tw_item epilogue (python TWM_EPI)
+ #define TWM_HOTC 0       // n6s3: compile moe_twm's hot class (cl 3) in (python: on iff TWM_HOT / TWM_HOT_M set)
+ #define TK2F_REL 0       // n6s6: tk2f/tk2h gemm13 publishes by a helper warp NC + 1 (python TK2F_REL; 2 = tk2h only)
++#define TWM_PD 0         // n7s14: moe_twm producer passes each item's decoded fields to the consumers (python TWM_PD)
+ #define TWM_REL 0        // n6s4: moe_twm gemm13 release by helper warp 9 (python TWM_REL; n6s3 mk_rel.py)
+ #define TWM_KSC 1        // n6s4: compile moe_twm's K-split tail code in (python: on iff TWF_SPLIT / TWF_SPLIT_M set; 2 = both builds, per call)
+ #define DQW 0            // n22: dq() rotations on the FMA pipe (python DQW; DIAG builds both)
+@@ -2756,6 +2757,9 @@
+   __shared__ uint32_t slut[256];
+   __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[2][32], s_ord[4], s_cost;
+   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
++#if TWM_PD
++  __shared__ int4 s_pd[NSTG];  // n7s14: decoded item, written by the producer with s_item
++#endif
+ #if TWM_REL
+   __shared__ __align__(8) uint64_t relb[4];
+   __shared__ int s_rel[4];
+@@ -2871,7 +2875,8 @@
+     int nbig = 0;
+     // n6s4 LAYOUT: rolled (-321 SASS) only in the KS false build. tools/n5s17/loop64k.py: rolled in the KS true build (or
+     // unrolled in the KS false one) puts the RT 4 N16 MMA loop across the function's 64 KB boundary (n5s17: +4..12%)
+-    if constexpr (KS) {
++    // n7s14 TWM_PD (decode gone from the consumer path, -0.5k SASS): unrolled iff KS != SA keeps all 4 builds clean
++    if constexpr (TWM_PD ? (KS != SA) : KS) {
+       while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
+     } else {
+ #pragma unroll 1
+@@ -2981,7 +2986,12 @@
+       for (int kc = k0; kc < k1; ++kc, ++i) {
+         if (kc != k0 && i >= NSTG) mbar_wait(&empty[st], ph ^ 1);
+         char* sb = smem + st * STRIDE;
+-        if (kc == k0) s_item[st] = item;
++        if (kc == k0) {
++          s_item[st] = item;
++#if TWM_PD
++          s_pd[st] = make_int4(e | (cl << 8) | (g2 << 10) | ((h + 1) << 11) | (a << 13) | (p << 19), off, nv, rb | (j << 16));
++#endif
++        }
+         mbar_expect_tx(&full[st], bytes);
+         tma2d(sb, map, kc * 64, off, &full[st]);
+ #if TWM_L2H
+@@ -3027,10 +3037,17 @@
+ #endif
+       break;
+     }
++#if TWM_PD
++    const int4 pd = s_pd[st];
++    const int e = pd.x & 255, cl = (pd.x >> 8) & 3, g2 = (pd.x >> 10) & 1, h = ((pd.x >> 11) & 3) - 1, a = (pd.x >> 13) & 63;
++    const int p = pd.x >> 19, off = pd.y, nv = pd.z, rb = pd.w & 65535, j = pd.w >> 16, big = cl != 0;
++    (void)p;
++#else
+     int g2, a, p, rb, h, j;
+     decode(item, g2, a, p, rb, h, j);
+     const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? PB : 32;
+     const int off = s_off[e] + p * PS, nv = min(PS, s_off[e + 1] - off);
++#endif
+     float* pt = h < 0 ? nullptr : part + (size_t)(2 * j + h) * 16384;
+     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
+     __nv_bfloat16* out = g2 ? Y : Inter;
+@@ -5739,6 +5756,7 @@
+ 
+ 
+ TWM_KSC_FORCE = None
++TWM_PD = 1  # n7s14: moe_twm consumers read the producer's decoded item fields (no per-item decode chain)
+ TWM_REL = 1  # n6s4: moe_twm gemm13+gemm2 releases by a helper warp (H200 DIAG 34547d56: v16 -0.5, v32 -1.4 us every seed; H100 noise)
+ TK2F_REL = 0  # n6s6: tk2f/tk2h gemm13 publishes by a helper warp (2 = tk2h only). H200 DIAG 8c5f1376: tk2h d32 -0.75 us every seed, tk2f d1 +0.25 / v1 +0.3 / d16 tie / d32 -0.15 -> off here (the board runs no tk2h); the layer (T=32 tk2h) takes 2
+ TWM_KSC_DUAL = 1  # n6s4 (H200 DIAG 3ded8769: v16 -1.9 us every seed, v32 tie): with a K split set for some M, build moe_twm with and without the split code (calls without a split take the smaller one)
+@@ -5805,7 +5823,7 @@
+ 
+ def _lib():
+     global _LIB
+-    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL), int(TK2F_REL)))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
++    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL), int(TK2F_REL), int(TWM_PD)))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
+     if _LIB is None:
+         from torch.utils.cpp_extension import load_inline
+         src = CUDA_SRC.replace("#define TK2F_L2H 0 ", f"#define TK2F_L2H {int(TK2F_L2H)} ")
+@@ -5816,6 +5834,7 @@
+         src = src.replace("#define TWM_HOTC 0 ", f"#define TWM_HOTC {int(_hotc())} ")  # n6s3
+         src = src.replace("#define TWM_KSC 1 ", f"#define TWM_KSC {int(_ksc())} ")  # n6s4
+         src = src.replace("#define TWM_REL 0 ", f"#define TWM_REL {int(TWM_REL)} ")  # n6s4
++        src = src.replace("#define TWM_PD 0 ", f"#define TWM_PD {int(TWM_PD)} ")  # n7s14
+         src = src.replace("#define TK2F_REL 0 ", f"#define TK2F_REL {int(TK2F_REL)} ")  # n6s6
+         if TK2F_S6 or DIAG:  # n20
+             src = src.replace("#define TK2F_S6K 0 ", "#define TK2F_S6K 1 ")
+@@ -5834,7 +5853,7 @@
+                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_l2h2", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
+                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
+                            extra_cflags=["-O3"], verbose=False)
+-        _LIBX[(int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL), int(TK2F_REL))] = _LIB
++        _LIBX[(int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL), int(TK2F_REL), int(TWM_PD))] = _LIB
+     return _LIB
+ 
+ 

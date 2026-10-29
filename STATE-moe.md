@@ -1,6 +1,12 @@
 # STATE-moe
 
-## NOW (n7s13, 2026-10-29 ~05:00Z): lead 04:25Z items done; waiting on a new lane (COORD Requests n7s13)
+## NOW (n7s14, 2026-10-29 ~05:25Z): twm item-end lane CLOSED on the H200 (2 Modal A/Bs); main unchanged; 0 judge runs
+- EPW (offload epilogue stores/fence to idle warps): H200 oracle (tools/n7s14/mk_orx.py) stores+fence free = -1.3..+0.3 us -> DEAD.
+- TWM_PD (producer passes decoded item; tools/n7s14/twm_pd.diff): bitwise, 15/15, but H200 +4..6 us every shape -> DEAD, reverted.
+- Oracle rule: count 'DEPBAR.LE gsb0, 0x0' + run loop64k on every oracle build (an epilogue-free oracle serialized all wgmma).
+- No moe item >= 4 us/call open. Budget 10-29: layer 2 checks + 2 submits, moe 5 checks, Modal 33/60.
+
+## WAS-n7s13 (2026-10-29 ~05:00Z): lead 04:25Z items done; waiting on a new lane (COORD Requests n7s13)
 - Layer submit 725fc518 of moe/layer-twm 8309328 = 2.1350x (board stays 2.158, #50). Merged into main 9d2b3a8: layer main =
   v163 + twm EPI/KSC2/REL + TK2F_REL 2 (bench test 13/13). Don't check/submit that code again unchanged.
 - R1 gate on LAYER v16/v32 routings (H200 Modal, tools/n7s13/tlb_layer.py): v16 idle 12.7-19.6 %, v32 ~8-20 % (moe_hot SMs

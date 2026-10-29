@@ -3074,3 +3074,21 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   v32 call - span is 13-15 vs 8-11 us at v16, about what routegather (+2) and the norm account for, so moe_hot is likely not
   the critical path and REL there would be <= ~1 us. The bundle can't reach 4 us. Not built.
 - COORD: Judge runs + Results + Requests (lane or STOP) posted. Budget 10-29: layer 2 checks + 2 submits, moe 5 checks, Modal 13.6/60.
+
+## n7s14 (2026-10-29 04:43Z - 05:25Z): twm item-end levers, 2 H200 oracles/A-Bs (Modal), both DEAD; 0 judge runs
+- Lead 04:25Z "don't idle: pick the next item": the remaining big-M per-item cost is the item end (H200 n6s4: gemm13 N8 1.4-2.2,
+  N16 2.2-3.8 us/item, ~5 items/CTA). Idea EPW: offload tw_epi2's global stores + fence.proxy.async to the idle warps 10/11.
+- ORACLE first (tools/n7s14/mk_orx.py: stores + gemm13 proxy fence removed, LDS kept alive; timing only), H200 Modal ab2
+  (board bs128/256 x5 seeds + layer v16/v32 x5), 4.1 GPU-min: board128 -1.3, board256 -0.7, v16 -0.3, v32 +0.3 us.
+  Layout of orx checked clean (loop64k 0 crossings, DEPBAR 0x0 count = base). => stores/fence are ~free: EPW DEAD (<= ~1 us).
+- A 2nd oracle that dropped the epilogue entirely (acc summed only) was +23..36 us: ptxas serialized every wgmma (96 vs 8
+  'DEPBAR.LE gsb0, 0x0') and 2 builds crossed 64 KB. INVALID; lesson: always count DEPBAR 0x0 + loop64k for an oracle.
+- TWM_PD (tools/n7s14/twm_pd.diff): the producer writes each item's decoded fields (int4 s_pd[NSTG]) with s_item, consumers
+  skip decode() (the cum[] LDS chain + division math): moe_twm -0.5k SASS, bitwise (ab2 max|A-B| 0), bench test 15/15.
+  Layout: needed nbig loop unrolled iff KS != SA to keep all 4 builds clean of 64 KB crossings. H100 ab2: tie (+1.0/+1.8/-0.1/+0.2).
+  H200 Modal ab2 (4.9 GPU-min): board128 +5.8, board256 +4.1, v16 +6.1, v32 +4.1 us = SLOWER everywhere. Cause unknown (code
+  placement / scheduling; n5s17-type sensitivity); reverted, not on main. Consumer-side decode is NOT on the critical path.
+- tools/n6s4/sass.py now also substitutes TWM_PD (no-op for main).
+- Modal today: 33/60 GPU-min (this session 13.3 incl. an invalid run). Judge: 0 runs.
+- Remaining twm item-end time is wgmma drain + silu + REL arrive + next-item wait: no lever left that is not on record dead
+  (NM, dual accumulators exceed regs at N32, K-split pieces). Big-M per-item lane CLOSED.
