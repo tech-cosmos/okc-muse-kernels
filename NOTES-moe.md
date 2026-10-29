@@ -3432,3 +3432,15 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 - Re-checked one more open-looking idea before stopping: an exact dq re-encoding (E2M1 as BF16 subnormals) is production
   since s1, and the n5s39 search found no <= 7-int-op variant. SS/STS A, pingpong and 4 WGs/SM are dead on record (s19/s22/n7s47/n7s48).
   N8 RS overlaps dq (792 vs 750+417), but m64n8 MMA is ~3x the tensor time per token at N32: dead.
+
+## n7s50 2026-10-29T15:55Z-16:40Z: lead 15:50Z Humming yardstick: Humming LOSES everywhere (H100 + one Modal H200 run 2.9 GPU-min); 0 judge runs
+- Full table + configs: muse_moe_w4a16/tools/n7s50/RESULTS.txt (hum.py = harness, hsweep.py = config sweep; Humming clone
+  /tmp/n7s50/humming @f970d0b on PYTHONPATH, never imported by a submission). Humming does NVFP4 natively (modelopt nvfp4:
+  e2m1, E4M3 group 16, FP32 global scale, BF16 act) on our exact weights; its path passes reference checks at all 6 bs.
+- H200 us, ours | Humming's two GEMMs alone (no align/act/norm): bs1 31.1 | 47.5, bs8 63.0 | 87.7, bs16 80.4 | 122.4,
+  bs32 107.6 | 183.4 (1.4-1.7x). H100: bs1 39.4|48.0, bs8 86.5|89.4, bs16 106|125, bs32 155|186, bs128 229|298, bs256 265|441.
+- Humming's times are the same on H100 and H200 => it's latency/issue-bound (mma.sync 8x128x64, 4 warps x 4 CTAs/SM,
+  cp.async, stream-K at bs<=16; wgmma 16x256x128 at bs32; warp-spec + TMA only at bs128/256). Heuristic ~optimal
+  (bs8 sweep of 38 variants: g13 none better, g2 -1.3 us).
+- Verdict: our kernel beats the best public Hopper 4-bit MoE kernel by >= 1.4x on the H200 at decode shapes; the moe-board
+  #1's edge is unpublished. No GEMM-structure item for proj from this. Modal 10-29: 50/60 GPU-min.

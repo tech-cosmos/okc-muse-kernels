@@ -1,0 +1,35 @@
+n7s50 (2026-10-29 15:55Z-16:40Z): vLLM Humming (github.com/vllm-project/humming HEAD f970d0b, clone in /tmp/n7s50/humming,
+benchmark only) MoE vs our submission (main) on the moe board's routings (reference.generate_input ep8, seeds 7/8/9, median;
+CUDA-graph replay, cold L2, bench.time_graph). Humming runs NVFP4 natively: modelopt nvfp4 schema = e2m1 + E4M3 group-16
+block scales + FP32 per-expert global scale, BF16 activations, our exact weights (no proxy). Correctness of the Humming path
+vs reference.check_implementation: PASS at all 6 bs (rel L2 4.2e-3..6.9e-3).
+Humming path = gemm13 (INDEXED, top_k 8, own heuristic config) -> silu*up (torch) -> gemm2 (INDEXED) -> norm+weighted sum (torch);
+sorted_ids/expert_ids (moe_align) built OUTSIDE the graph (generous to Humming). "g13+g2" = its two GEMMs alone = a lower
+bound for any Humming-based pipeline (no align, no activation, no norm/sum).
+
+H100 (us):            ours   hum_full  hum_g13  hum_g2  g13+g2   g13+g2/ours
+  bs1                 39.4     87.4     28.6    19.4    48.0     1.22
+  bs8                 86.5    137.1     56.2    33.2    89.4     1.03
+  bs16               106.0    176.3     78.4    46.1   124.6     1.18
+  bs32               154.8    245.1    122.0    63.9   185.9     1.20
+  bs128              228.9    443.6    189.7   108.6   298.4     1.30
+  bs256              264.8    756.6    288.0   152.5   440.5     1.66
+H200 (Modal, one container, 2.9 GPU-min; Modal != judge absolute):
+  bs1                 31.1     87.3     28.1    19.3    47.5     1.53
+  bs8                 63.0    133.6     55.3    32.4    87.7     1.39
+  bs16                80.4    172.2     78.8    43.5   122.4     1.52
+  bs32               107.6    240.6    120.5    62.9   183.4     1.70
+Humming's times are the SAME on H100 and H200 (bs1-32) => not HBM-bound: latency/issue-bound at these shapes. Ours scale with HBM.
+
+Configs (Humming sm90 heuristic, both GEMMs):
+  bs1/8/16: mma.sync, block (8,128,64), warp (8,64,32) = 4 warps/CTA, 4 CTAs/SM, 4-stage cp.async, stream-K, no TMA, no warp-spec
+  bs32:     wgmma, block (16,256,128), warp (16,64,64), 2 CTAs/SM, 4 stages, no stream-K, no TMA, no warp-spec
+  bs128:    wgmma, block (40|48,512,64), warp-spec + TMA, stream-K, 1 CTA/SM
+  bs256:    wgmma, block (80,256,64), warp-spec + TMA, stream-K, 1 CTA/SM
+Config sweep (hsweep.py, bs8 seed 7, 38 legal variants of block_n/block_k/CTAs-per-SM/stages/stream-K around the pick):
+  g13 heuristic 71.9, best variant 75.5 (heuristic is best); g2 heuristic 41.6, best 40.3 (-1.3). The heuristic is ~optimal.
+
+What differs from ours: two launches with a global-memory intermediate and every expert padded to 8/16-row M blocks; small
+CTAs (128 thr, ~18 KB in flight each) with cp.async; at bs1 the gemm13 alone (28 us) is ~ our whole call on the H200.
+Verdict: Humming loses everywhere, by 1.4-1.7x on the H200 counting only its GEMMs. Our kernel is ahead of the best public
+4-bit Hopper MoE kernel at the board's shapes; the top teams' edge is unpublished. No GEMM-structure item for proj from this.

@@ -1,0 +1,15 @@
+prepare 0.4s
+humming correctness bs 1: PASS relative L2 error 6.756e-03 (worst row 6.756e-03)
+humming correctness bs 16: PASS relative L2 error 4.978e-03 (worst row 5.728e-03)
+humming correctness bs 32: PASS relative L2 error 4.214e-03 (worst row 4.441e-03)
+humming correctness bs 8: PASS relative L2 error 4.596e-03 (worst row 4.743e-03)
+humming correctness bs 128: PASS relative L2 error 4.625e-03 (worst row 5.951e-03)
+humming correctness bs 256: PASS relative L2 error 4.340e-03 (worst row 6.076e-03)
+  bs     ours  hum_full  hum_g13   hum_g2   g13+g2  cfg13 | cfg2
+   1     39.4      87.4     28.6     19.4     48.0  mma blk(8, 128, 64) wp(8, 64, 32) sk1 stg4 cps4 ws0 tma0 | mma blk(8, 128, 64) wp(8, 64, 32) sk1 stg4 cps4 ws0 tma0
+  full cfg13: {"block_shape": [8, 128, 64], "warp_shape": [8, 64, 32], "mma_type": "mma", "use_stream_k": true, "num_stages": 4, "num_ctas_per_sm": 4, "use_warp_spec": false, "use_tma": false, "use_tma_a": false, "use_tma_c": false, "use_tma_as": false, "use_tma_as2": false}
+  16    106.0     176.3     78.4     46.1    124.6  mma blk(8, 128, 64) wp(8, 64, 32) sk1 stg4 cps4 ws0 tma0 | mma blk(8, 128, 64) wp(8, 64, 32) sk1 stg4 cps4 ws0 tma0
+  32    154.8     245.1    122.0     63.9    185.9  wgmma blk(16, 256, 128) wp(16, 64, 64) sk0 stg4 cps2 ws0 tma0 | wgmma blk(16, 256, 128) wp(16, 64, 64) sk0 stg4 cps2 ws0 tma0
+   8     86.5     137.1     56.2     33.2     89.4  mma blk(8, 128, 64) wp(8, 64, 32) sk1 stg4 cps4 ws0 tma0 | mma blk(8, 128, 64) wp(8, 64, 32) sk1 stg4 cps4 ws0 tma0
+ 128    228.9     443.6    189.7    108.6    298.4  wgmma blk(40, 512, 64) wp(40, 32, 64) sk1 stg4 cps1 ws1 tma1 | wgmma blk(48, 512, 64) wp(48, 32, 64) sk1 stg4 cps1 ws1 tma1
+ 256    264.8     756.6    288.0    152.5    440.5  wgmma blk(80, 256, 64) wp(80, 32, 64) sk1 stg4 cps1 ws1 tma1 | wgmma blk(80, 256, 64) wp(80, 32, 64) sk1 stg4 cps1 ws1 tma1
