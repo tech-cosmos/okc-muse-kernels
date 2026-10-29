@@ -3411,7 +3411,7 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 - VERDICT: no variant gets near max(ALU, MMA). Best is RT2 D4 at ~1.32x of max (N64). twm is not rebuilt. Twm consumer
   rates for proj's CUTLASS yardstick: RT4 N32 32768 w / 1007 cyc = 32.5 w/clk/SM, RT2 N64 16384 / 711-749 = 22-23 w/clk/SM.
 
-## n7s48 2026-10-29T15:17Z-16:20Z: lead 14:45Z overlap items (f) 2 CTAs/SM / 4 WGs per SM, (g) K_BLOCK_MAX, (h) C7514 grep (H100; 0 judge runs)
+## n7s48 2026-10-29T15:17Z-15:35Z: lead 14:45Z overlap items (f) 2 CTAs/SM / 4 WGs per SM, (g) K_BLOCK_MAX, (h) C7514 grep (H100; 0 judge runs)
 - Full table: muse_moe_w4a16/tools/n7s48/RESULTS.txt (ovl3.py/ovl3b.py = ovl2 body with NWG/CPB; ovl4.py = per-WG self-fed rings).
 - (f) 4 consumer WGs per SM (1 CTA x 4 or 2 CTAs x 2) beat 2 WGs by 6% (RT4 N32), 13% (RT2 N64), 10-11% (RT2 N32, RT4 N16)
   per SM, but only at 128 regs with no producer at all. 2 CTAs x 1 WG = base (same warps/SM). With a producer warp
