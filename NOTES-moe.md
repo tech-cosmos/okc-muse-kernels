@@ -3426,3 +3426,9 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   C7515 serialization when per-WG paths aren't split. Give each WG its own code path (compile-time offsets).
 - Verdict for the lead's 14:30Z question: on Hopper, the twm consumer can't get closer to max(ALU, MMA) by schedule
   (n7s47) or by more warps per SM (n7s48: RF is full at 4 WGs x 128 regs, leaving nothing for a producer). twm unchanged.
+
+## n7s49 2026-10-29T15:35Z-15:45Z: idle; no lead decision after 14:45Z (its (f)(g)(h) done in n7s48); 0 judge runs, 0 Modal
+- Committed n7s48's ovl3.py/ovl3b.py (cited in n7s48 RESULTS.txt, previously untracked).
+- Re-checked one more open-looking idea before stopping: an exact dq re-encoding (E2M1 as BF16 subnormals) is production
+  since s1, and the n5s39 search found no <= 7-int-op variant. SS/STS A, pingpong and 4 WGs/SM are dead on record (s19/s22/n7s47/n7s48).
+  N8 RS overlaps dq (792 vs 750+417), but m64n8 MMA is ~3x the tensor time per token at N32: dead.

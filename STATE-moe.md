@@ -1,4 +1,5 @@
 ## n7s48 15:35Z: lead 14:45Z (f)(g)(h) done (tools/n7s48/RESULTS.txt): 4 WGs/SM gain 6-13% only at 128 regs w/o producer;
+## n7s49 15:45Z idle: no lead decision after 14:45Z; moe lane closed (overlap n7s47/48). 0 runs. Pause moe or name a lane.
 ## producer warp -> spills; self-fed rings cost ~300 cyc/stage per bulk issue => DEAD. (g) = n7s47 D4. (h) no C75xx in layer moe lib. twm unchanged. 0 runs.
 ## n7s47 15:35Z: lead 14:30Z overlap (a)-(e) measured (tools/n7s47/ovl2.py, RESULTS.txt; NOTES n7s47): twm = 0.83x of ALU+MMA
 ## already (bar met), but 1.4x of max(ALU,MMA); main stall = DISPATCH on dq ops while HGMMA runs (ncu). No variant closes it;
