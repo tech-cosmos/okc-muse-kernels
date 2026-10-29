@@ -1,0 +1,28 @@
+== ORC 0
+verify 1 sliding   142.13 us   (sglang H200   266.83)
+verify 1 full      157.73 us   (sglang H200   272.30)
+verify 16 sliding   295.06 us   (sglang H200   506.48)
+verify 16 full     439.68 us   (sglang H200   692.02)
+verify 32 sliding   367.71 us   (sglang H200   723.60)
+verify 32 full     624.88 us   (sglang H200  1087.28)
+== ORC 1
+verify 1 sliding   141.90 us   (sglang H200   266.83)
+verify 1 full      157.63 us   (sglang H200   272.30)
+verify 16 sliding   291.02 us   (sglang H200   506.48)
+verify 16 full     436.53 us   (sglang H200   692.02)
+verify 32 sliding   363.14 us   (sglang H200   723.60)
+verify 32 full     621.25 us   (sglang H200  1087.28)
+== ORC 8
+verify 1 sliding   142.32 us   (sglang H200   266.83)
+verify 1 full      157.06 us   (sglang H200   272.30)
+verify 16 sliding   291.38 us   (sglang H200   506.48)
+verify 16 full     440.00 us   (sglang H200   692.02)
+verify 32 sliding   363.20 us   (sglang H200   723.60)
+verify 32 full     620.93 us   (sglang H200  1087.28)
+== ORC 7
+verify 1 sliding   142.43 us   (sglang H200   266.83)
+verify 1 full      157.63 us   (sglang H200   272.30)
+verify 16 sliding   274.83 us   (sglang H200   506.48)
+verify 16 full     431.63 us   (sglang H200   692.02)
+verify 32 sliding   350.02 us   (sglang H200   723.60)
+verify 32 full     608.11 us   (sglang H200  1087.28)

@@ -2746,10 +2746,10 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     const int nact = meta[0];
     const size_t tot = PER * nact, stride = (size_t)gridDim.x * 384;
     uint32_t sink = 0;
-    for (size_t u0 = (size_t)blockIdx.x * 384 + tid; u0 < tot; u0 += 8 * stride) {
-      uint4 v[8];
+    for (size_t u0 = (size_t)blockIdx.x * 384 + tid; u0 < tot; u0 += 16 * stride) {
+      uint4 v[16];
 #pragma unroll
-      for (int k = 0; k < 8; ++k) {
+      for (int k = 0; k < 16; ++k) {
         const size_t u = u0 + k * stride;
         v[k] = make_uint4(0, 0, 0, 0);
         if (u < tot) {
@@ -2766,7 +2766,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
         }
       }
 #pragma unroll
-      for (int k = 0; k < 8; ++k) sink ^= v[k].x ^ v[k].y ^ v[k].z ^ v[k].w;
+      for (int k = 0; k < 16; ++k) sink ^= v[k].x ^ v[k].y ^ v[k].z ^ v[k].w;
     }
     if (sink == 0x9E3779B9u && hx == 12345) Y[tid] = __float2bfloat16(1.0f);  // never true: keeps the loads
     __syncthreads();
