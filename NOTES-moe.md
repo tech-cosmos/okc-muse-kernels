@@ -3134,3 +3134,13 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   bnd1 -> tk2f: routing ends 3.2 us after the pooler at d16 (router_split 14.2 beside the pooler, _routing 4.1): this is proj's
   n7s4 claim (oracle ladder), so I'm not duplicating it.
 - Result: nothing buildable in the attention lane at >= 0.3% layer. Asked lead for a piece of the 06:00Z megakernel bet.
+
+## n7s17 (2026-10-29 06:05-06:25Z): no lane change since lead 06:00Z ('moe: attention lane stands'); no build; 0 judge runs, 0 Modal
+- Layer board via GET /api/v1/leaderboard/muse_decode_layer at ~06:15Z: tech-cosmos #52 at 2.1580 (cut #50 2.1655, #51
+  zro-inference 2.1591). Rows carry only speedup, attempts, screening and screened_speedup (pjmullin3 2.4029 -> screened 2.3878):
+  no per-shape times for others, so the 06:00Z 'composition gap' can't be split by shape from public data.
+- d32 sliding timeline (n7s1): critical path bnd end 36.5 -> pooler g30k end 56.2 -> rmsnorm -> tk2f 57.7..129.6 -> norm2 ->
+  unpool g30 -> bnd 150.2; proj n7s4's both-free oracle (-3.9 us) already bounds the pooler||router piece.
+- Expert consumer: the only big open number is still the n6s2 non-overlap (twm stage 802 cyc vs ALU floor 488), but every
+  form that could separate dq from MMA issue is on record dead (pingpong s22/n6s2, SS smem-bound s19, A ring n6s2, mma.sync
+  s18/n6s2, DQW n22). Attention: n7s15/n7s16. No new idea this session; moe should pause until the lead picks a lane.

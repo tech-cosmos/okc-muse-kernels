@@ -1,6 +1,13 @@
 # STATE-moe
 
-## NOW (n7s16, 2026-10-29 ~05:45-06:00Z): lead 06:00Z kept moe on full-layer attention; no buildable lever found; 0 runs
+## NOW (n7s17, 2026-10-29 ~06:05-06:25Z): no new lane since 06:00Z; nothing buildable; 0 runs
+- Layer board (API 06:15Z): we are #52 at 2.158 (cut #50 HyperbolicCurve 2.1655; #1 pjmullin3 2.403). The public API has
+  no per-shape times for other teams (only speedup / screened_speedup), so the 06:00Z gap can't be split per shape from outside.
+- Re-checked the in-layer H200 timeline (r-layer dev/n7s1_tl_h200.txt) against the twm/tk2f record (n6s2 stage 802 vs ALU 488,
+  pingpong s22/n6s2, mma.sync s18/n6s2, SS s19, dq layouts n5s39/n6s2): no unmeasured expert or attention item. Request stands.
+- Budget 10-29: layer 2 checks + 2 submits (+ layer's own), moe 5 checks, Modal 33/60 (moe's 30 used up).
+
+## WAS-n7s16 (n7s16, 2026-10-29 ~05:45-06:00Z): lead 06:00Z kept moe on full-layer attention; no buildable lever found; 0 runs
 - Re-read ~/attn verify-full history against the H200 timeline (r-layer dev/n7s1_tl_h200.txt): v16/v32 _gw_verify 99.5/189.8 us
   vs KV gather ~87/168. Every consumer instruction cut is on record as dead (FP8 QK on main; FP8 P@V s22/s71 H200 tie; poly exp2
   s21/s69/s70; P@ones/ones-column row sums s35/s69/s1xx; lazy rescale s12/s69; ping-pong/dual-head/6 WG s101; native s71/s111;
