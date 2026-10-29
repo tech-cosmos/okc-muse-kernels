@@ -2907,3 +2907,16 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - Queued DIAG copies (regenerate from main: python tools/n6s4/mkdiag_ksc.py / mkdiag_rel.py; TL: see below):
   /tmp/n6s4/dg (KSC 1 vs 2, ABAB), /tmp/n6s4/dgr (REL 0 vs 1, dual, ABAB), /tmp/n6s4/tl (n6s3 mk_tl4 + mkdiag on main+DUAL;
   stores column bogus with TWM_EPI 1). Local H100 prepare: dg 6-variant version 310 s (judge cap 300!), tl 156 s.
+- 00:00Z judge runs (10-29), all from /tmp/n6s4/<dir> (logs in <dir>/profiles/):
+  * DIAG 3ded8769 (dg, KSC 1 vs 2 ABAB, layer settings incl. split66@256, v16/v32 layer routings): v16 163.6/161.7/163.6/161.7
+    = DUAL -1.9 us (every seed); v32 195.2/195.0/195.1/194.8 = tie (same KS true build there). maxdiff 0. prepare_s 216.
+  * DIAG 34547d56 (dgr, REL 0 vs 1 ABAB, dual): v16 161.0/160.6/161.4/160.9 = -0.45; v32 194.0/192.4/193.7/192.5 = -1.4 us,
+    every seed, maxdiff 0. Its prepare_s 322.9 -> the run is marked failed ("prepare() took longer than 300 s"), the diag
+    lines printed before that (3 checks compiling at once; same shape as dg's 216 s). Don't run >= 2 DIAGs concurrently.
+  * DIAG a18cfaed (tl, 4-stamp timeline of main+dual, H200): per CTA per call loop 115-131, EPILOGUE 6.2-10.7 us (n6s3 before
+    EPI/HOTC: 9.3-13.6), gaps 2.1-2.9 us/CTA. gemm13 N8 item end 1.4-2.2 us, N16 2.2-3.8, gemm2 N8 0.9-2.5.
+  * Modal (tools/h200.py ABBA, board shapes, 4.9 GPU-min): main vs dual+REL: bs128 191.2/191.8 vs 189.9/189.7 (-1.7), bs256
+    223.2/223.5 vs 221.0/220.7 (-2.5), decode shapes same. Modal prepare base 134.8 s, cand 139.7 s.
+  * main 7d2a079 = TWM_KSC_DUAL 1 + TWM_REL 1 (bitwise, 15/15). Plain check a4054bf3: 2.2790x (bs1 27.5, bs16 90.9, bs32 125.2,
+    bs8 69.4, bs128 197.5, bs256 232.0) = tie with board 2.2792x (big-M better than fc7e86d6's 199.9/235.3, decode drew slow)
+    -> NOT submitted (rule). Layer: Handoff posted (TWM_KSC 2 + TWM_REL 1 are pure CUDA #defines once moe_twm is copied).

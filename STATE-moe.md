@@ -1,20 +1,18 @@
 # STATE-moe
 
-## NOW (n6s4, 2026-10-28 ~22:40Z): twm code size + release stalls; 3 H200 DIAGs queued for 00:00Z (checks 0/20 left on 10-28)
-- On main (all default OFF = the a60019d+HOTC code, bitwise): TWM_KSC (K-split tail code only when a split is set; twm
-  KS false 5.9k vs 7.9k SASS), TWM_KSC_DUAL (python: build twm with + without it, pick per call: calls without a split =
-  board bs128 / layer v16), TWM_REL (helper warp 9 does the gemm13 AND gemm2 releases; consumers skip bar.sync + thread-0
-  fence). All bitwise, 15/15 (REL also seeds_big 0 bad). H100: dual board128 -4 us, rest noise; REL noise (H100 is
-  DRAM-bound: H100 timeline shows warp 0 stalls ~3 us per gemm13 N8 item on the fence, hidden there; H200 is consumer-bound).
+## NOW (n6s4 end, 2026-10-29 ~01:00Z): main 7d2a079 = TWM_KSC_DUAL 1 + TWM_REL 1 (bitwise, 15/15), H200-verified small wins
+- Judge H200 DIAGs on layer routings: dual (twm without K-split code for calls with no split) v16 -1.9 / v32 tie; REL
+  (helper warp 9 releases gemm13+gemm2 items) v16 -0.5 / v32 -1.4 us per call, every seed. Modal board: bs128 -1.7, bs256 -2.5.
+  Plain check a4054bf3 2.2790x = tie with board 2.2792x (decode drew slow) -> not submitted. Handoff posted for the layer.
+- H200 twm timeline (a18cfaed): epilogue 6-11 us per CTA per call (was 9-14), gemm13 N8 item end 1.4-2.2 us, N16 2.2-3.8.
 - LAYOUT RULE: after ANY twm/tk2f code change run `python tools/n5s17/loop64k.py <k.o> 'moe_twm|moe_hot'` (sass.py builds
-  k.o under /tmp/n6s4/sass_<hash>): an MMA loop across 64 KB = +4..12% (n5s17). The nbig loop is rolled only for KS false
-  for that reason. NM (merge N instances into one tw_item) DEAD: serializes all wgmma.
-- 00:00Z PLAN: okc check (from each dir, DIAG copies NEVER submit): /tmp/n6s4/dg (KSC 1 vs 2), /tmp/n6s4/dgr (REL 0 vs 1),
-  /tmp/n6s4/tl (4-stamp timeline of main+dual). Regenerate dg/dgr from main first (tools/n6s4/mkdiag_ksc.py / mkdiag_rel.py:
-  they drop the DIAG-only tk2f families + decode routings: prepare cap, n6s3 HOTC DIAG was 302.7 s). Read
-  `grep "diag12 MEAN\|n6tl" <dir>/profiles/submission.<job>.log`. Then set TWM_KSC_DUAL / TWM_REL to the winners, plain
-  check, submit if > 2.2792x. If REL wins: same helper for moe_hot and a tk2f analog (bar.sync 2 + thread-0 fence at
-  each segment end; tk2f has no idle warp). Layer port: post Handoff with the flags.
+  k.o under /tmp/n6s4/sass_<hash>): an MMA loop across 64 KB = +4..12% (n5s17). NM (one tw_item per RT) DEAD.
+- DIAG copies: tools/n6s4/mkdiag_ksc.py / mkdiag_rel.py pattern (plain library, big-M routings only: prepare ~216 s).
+  NEVER run 2+ DIAG checks at once (34547d56 hit 323 s > 300 s cap while 3 compiled concurrently).
+- NEXT (ranked): (1) tk2f release analog (bar.sync 2 + thread-0 fence at each segment end stalls the next row's bar.sync 1;
+  no idle warp in tk2f: defer the non-final publishes / merge into the CTA-end publish when !BAL), H200 DIAG on d1/d16/d32/v1;
+  (2) remaining twm epilogue (N16 gemm13 2.2-3.8 us/item: N24's duplicated gated body, store drain); (3) moe_hot same REL.
+- Board stays 2.2792x (aeba42c5). Checks used 10-29: 4 of 20 (3 DIAG + 1 plain); submits 0 of 10. Modal 5/60 min.
 - Earlier (n6s3): TWM_EPI + TWM_HOTC (on main, default on): H200 v16 -4.3 / v32 -4.5 us per call. a60019d submitted 2.2792x.
 - Tools: tools/n6s3/ab2.py A.py B.py (paired H100 A/B, board bs128/256 + layer v16/v32, max|A-B|); tools/n6s4/sass.py <file>;
   /tmp/n6s4/rundiag.py <diag copy> (local run of a DIAG prepare). The judge REJECTS `import reference`.
