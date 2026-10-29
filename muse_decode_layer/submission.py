@@ -4834,6 +4834,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define NORM_EARLY 1     // n4s1 (layer s53: set here, layer has its own _lib): twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them
 #define TWM_EPI 1        // n6s3 (moe a60019d): staged, rolled tw_item / tw_epi epilogues (i-cache); bitwise
 #define TWM_HOTC 0       // n6s3 (moe 0be4fa0): moe_twm's in-twm hot class compiled out (layer: twm_hot is in no TUNE list); set 1 to use twm_hot
+#define TK2F_REL 2       // n6s6 (moe 5eb1e15+): tk2h gemm13 publishes by a helper warp NC + 1 (H200 DIAG 8c5f1376: tk2h d32 -0.75 us; tk2f 1-group paths +0.3: 2 = tk2h only)
 #define TWM_REL 1        // n6s4 (moe 7d2a079): moe_twm gemm13+gemm2 releases by helper warp 9
 #define TWM_KSC 2        // n6s4 (moe 7d2a079): moe_twm built with + without the K-split tail code (picked per call); 0 = never split, 1 = always built in
 #ifndef TK2G_PAR4
@@ -8239,7 +8240,31 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
   }
 }
 
-template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA = false, int PF = 0>
+// n6s6 TK2F_REL: the consumers' gemm13 publishes (bar.sync 2 + thread-0 gpu fence + atomicAdd at each segment end)
+// move to a helper warp (NC + 1): consumers arrive on g_tkrel[k & 7] (release.cta) and go on with the next row. gemm13
+// segments are 256 rows on 256-aligned row-space boundaries (tk2f GS 8 and tk2h), so the helper derives the k-th publish
+// (segment a0 / 256 + k, its row count, its counter) from the CTA's rows [a0, a1) alone. Its mbarrier wait (acquire)
+// + gpu fence (cumulative) order every consumer's inter stores before the count, as bar.sync + thread-0 fence did.
+__shared__ __align__(8) uint64_t g_tkrel[8];
+template <int NC, int DYN, int FN, int GS, int MRG, int PF>
+__host__ __device__ constexpr bool tk2f_rel_on() {
+  return TK2F_REL && (TK2F_REL != 2 || MRG != 0) && NC == 8 && !DYN && !FN && !(PF & 16) && !(PF & 524288) && !(PF & 65536) && !(PF & 256) &&
+         (MRG == 1 || MRG == 2 || (GS == 8 && MRG == 0));
+}
+__device__ __forceinline__ void tk2f_rel_arrive(int seg_start, int r0) { mbar_arrive(&g_tkrel[((seg_start >> 8) - (r0 >> 8)) & 7]); }
+template <bool SEGC>
+__device__ __forceinline__ void tk2f_rel_helper(int* cnt, int a0, int a1) {
+  if (a0 >= a1) return;
+  const int s0 = a0 >> 8, s1 = (a1 - 1) >> 8;
+  for (int s = s0; s <= s1; ++s) {
+    const int k = s - s0;
+    mbar_wait(&g_tkrel[k & 7], (k >> 3) & 1);
+    __threadfence();
+    atomicAdd(SEGC ? cnt + 64 + s : cnt, min(a1, (s + 1) * 256) - max(a0, s * 256));
+  }
+}
+
+template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA = false, int PF = 0, bool REL = false>
 __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* __restrict__ gs,
                                              const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
@@ -8391,10 +8416,14 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
         }
       }
       if (R + 1 == seg_end || R + 1 == r1) {  // publish this CTA's rows of the segment
+        if constexpr (REL) {
+          tk2f_rel_arrive(seg_start, r0);
+        } else {
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
         if (tid == 0) {
           __threadfence();
           atomicAdd(BAL ? cnt + 64 + seg_start / RPE : cnt, R + 1 - max(seg_start, r0));
+        }
         }
       }
     } else if (NC == 8 || ct < 256) {
@@ -8596,7 +8625,7 @@ __device__ __forceinline__ void tk2g_consume(const uint32_t* slut, const float* 
 // s12 MERGED consumer (tk2h): both phases in ONE run-time loop, so the kernel holds one main-loop body per row kind
 // (GS 8: 1 body; GS 16: 2) instead of 2 / 4. GS16's loss was instruction-cache misses: ncu stall_no_instruction at
 // layer d1 923 -> 9418 (118 KB kernel vs 65 KB) with no 2-group row at all.
-template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false, bool SLOT = false, bool S6 = false>
+template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false, bool SLOT = false, bool S6 = false, bool REL = false>
 __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* __restrict__ gs13,
                                              const float* __restrict__ gs2, const __nv_bfloat16* X,
                                              __nv_bfloat16* inter, float* Y, int* cnt, int need, int a0, int a1, int b0,
@@ -8661,10 +8690,14 @@ __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* 
       else
         tk2g_row<0, NC, NSTG, false, KPS, SA, false, true, SLOT, S6>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
       if (gated && (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
+        if constexpr (REL) {
+          tk2f_rel_arrive(seg_start, r0);
+        } else {
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
         if (tid == 0) {
           __threadfence();
           atomicAdd(PSC ? cnt + 64 + seg_start / 256 : cnt, R + 1 - max(seg_start, r0));
+        }
         }
       }
     }
@@ -9025,7 +9058,7 @@ __device__ __forceinline__ int tk2w_bound(int b, int nact, int wE, int rps, cons
 }
 
 template <int NC, int NSTG, int KPS, bool DYN, bool FN = false, bool SA = false, int GS = 8, int MRG = 0, int PF = 0>
-__global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
+__global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>()) * 32, 1) moe_tk2f(
     const uint4* __restrict__ Wq13, const uint32_t* __restrict__ S13, const uint4* __restrict__ Wq2,
     const uint32_t* __restrict__ S2, const uint32_t* __restrict__ lut, const float* __restrict__ gs13,
     const float* __restrict__ gs2, const __nv_bfloat16* __restrict__ X, const int* __restrict__ ids, int nroutes,
@@ -9049,6 +9082,8 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   if (tid == 0) {
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], NC * 32); }
     for (int i = 0; i < 4; ++i) mbar_init(&ridb[i], 1);
+    if constexpr (tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>())
+      for (int i = 0; i < 8; ++i) mbar_init(&g_tkrel[i], NC * 32);
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
@@ -9183,6 +9218,13 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     b0 = b * q2 + min(b, e2); b1 = b0 + q2 + (b < e2);
   }
   if constexpr ((PF & 4096) != 0) { a1 = a0; b1 = b0; }  // n5s25 orz: no rows (routing, launch, barriers' setup kept)
+  constexpr bool REL = tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>();
+  if constexpr (REL) {
+    if (warp == NC + 1) {  // n6s6 TK2F_REL helper
+      if (lane == 0) tk2f_rel_helper<MRG ? MRG == 2 : (PF & 32) != 0>(cnt, a0, a1);
+      return;
+    }
+  }
   int st = 0, ph = 0;
   if (warp == NC) {
     if (lane == 0) {
@@ -9205,7 +9247,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   int rb = 0;
   if constexpr (MRG) {
     asm volatile("griddepcontrol.wait;" ::: "memory");  // layer s58: x is the PDL predecessor's output (TK2FX/TK2FJ)
-    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0, (PF & 1024) != 0>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
+    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0, (PF & 1024) != 0, REL>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
                                         s_srt, s_red, smem, smem + NSTG * NC * KPS * 72, full, empty, st, ph, rb);
     return;
   }
@@ -9217,7 +9259,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
                                                 s_x2, full, empty, st, ph, rb);
     return;
   }
-  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
+  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF, REL>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
                                     empty, st, ph, rb);
   tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
                                      empty, st, ph, rb);
@@ -9250,7 +9292,7 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
   }
 #endif
   cudaStream_t st = at::cuda::getCurrentCUDAStream();
-  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM, st, false,
+  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>()) * 32, SMEM, st, false,
       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
       (const float*)gs13, (const float*)gs2, (const __nv_bfloat16*)x, (const int*)ids, nr, start, count, (int*)meta,
       (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D, (const float*)tw, (const float*)w1,
@@ -15760,7 +15802,7 @@ _a = "\nstatic const char* g_upf = nullptr;"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "\nstatic const float* g_ssw1 = nullptr;\nint64_t moe_set_ss(int64_t p) { g_ssw1 = (const float*)p; return 0; }" + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_set_ss(int64_t);"
-_a = ("  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,\n")
+_a = ("  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF, REL>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,\n")
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, '  asm volatile("griddepcontrol.wait;" ::: "memory");  // s27 TK2FX: x is the PDL predecessor\'s output\n' + _a)
 _a = """        if (GATED) {
@@ -15769,7 +15811,7 @@ _a = """        if (GATED) {
 """
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("__ldg", "__ldcg"))
-_a = "  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM, st, false,"
+_a = "  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>()) * 32, SMEM, st, false,"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "  const bool pdlx = g_tk2fpdl != 0;  // one-shot\n  g_tk2fpdl = 0;\n" + _a.replace("st, false,", "st, pdlx,"))
 _a = "\nstatic const char* g_upf = nullptr;"
