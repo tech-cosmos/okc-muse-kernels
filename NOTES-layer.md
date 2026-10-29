@@ -3046,3 +3046,15 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   a5b4ddab), never locally: the g30kgx build fails now and then on the judge host (records are deterministic). Fallback is the
   plain g30k pooler (tuner picks between them anyway, ~1 us at T=32); not a correctness issue. Worth a look if T=32 pins rely on it.
 - tools/fixed_sglang_score.py: added a5b4ddab. 10-29 left: 14 checks / 7 submits.
+
+## night7 s11 (2026-10-29 08:44Z-09:05Z): no build, 0 judge runs, 0 Modal; recommend pausing the layer loop until a Handoff
+- Re-checked the d1 chain (H200 n7s1 timeline) for anything off the closed lists: none. tk2f's W ring head start is already
+  taken in base (tk2f is a PDL secondary of rmsnorm, streams W pre-wait), which is why n7s8's throttled early launch moved
+  nothing; L2 expert prefetch during pr1 is dead (v73 era oracle, HBM saturated); n2u tail = dependent L2 round trips (s14/s15).
+- 'layer g30kgx dropped (build or records)' in 3/12 judge logs is NOT a build flake: no 'build failed' line, so
+  _g30k_gx_tables returned None (a CTA's escape records don't fit gxc 64 / gxr 512 on that run's random pooler weights).
+  Graceful fallback to plain g30k, ~0.5-1 us at T=32 on those runs (~0.01% expected): not worth a build.
+- Attention share of each load (H200 n7s1 kernels, 46 sl + 16 full): d1 12%, d16 20%, d32 27%, v1 8%, v16 13%, v32 16%.
+  Attention board #1-#4 are ~15% faster than our attention (1233 vs ~1482 us/step), i.e. ~2.4% of the layer if it carried
+  over; attention lane closed by moe n7s15/n7s16 and ~/attn s114/s125, so this is only a pointer for the lead.
+- main = v168 unchanged (checked a5b4ddab 2.1540x). 10-29 left: 14 checks / 7 submits.
