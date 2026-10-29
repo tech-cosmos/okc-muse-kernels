@@ -16571,7 +16571,8 @@ LT_CFG = {("pooler", 128): (66, 143, 35, 1, 0, 0, 0, 2),
           ("unpool", 128): (66, 18, 35, 1, 0, 0, 6, 5),
           ("pooler", 16): (66, 312, 35, 1, 0, 0, 1, 4), ("pooler", 32): (66, 13, 35, 1, 0, 0, 1, 4),
           ("unpool", 16): (66, 394, 35, 1, 0, 0, 7, 4), ("unpool", 32): (66, 397, 35, 1, 0, 0, 5, 4),
-          ("pooler", 256): (66, 18, 35, 1, 0, 0, 0, 2), ("unpool", 256): (66, 20, 35, 1, 0, 0, 6, 5)}
+          ("pooler", 256): (66, 18, 35, 1, 0, 0, 0, 2), ("unpool", 256): (66, 20, 35, 1, 0, 0, 6, 5),
+          ("fr", 256): (66, 125, 35, 1, 0, 0, 4, 5)}
 LT_DEFAULT_OFF = {("qkv_gate", 16), ("qkv_gate", 32), ("o", 16), ("o", 32), ("o", 128), ("o", 256), ("unpool", 128),
                   ("pooler", 16), ("pooler", 32), ("unpool", 16), ("unpool", 32), ("pooler", 256), ("unpool", 256)}
 LT_ALT = {("qkv_gate", 32): [(66, 27, 35, 3, 2, 0, 2, 4)],
@@ -16597,16 +16598,17 @@ struct LtPlan {
 
 // cfg = (algo id, tile, stages, split k, reduction scheme, swizzle, custom option, cluster shape).
 // Returns 0 if the config is valid for the shape and fits the workspace.
-static int lt_make(LtPlan& p, int64_t m, int64_t n, int64_t k, const std::vector<int64_t>& cfg, int64_t wsbytes) {
+static int lt_make(LtPlan& p, int64_t m, int64_t n, int64_t k, const std::vector<int64_t>& cfg, int64_t wsbytes,
+                   cudaDataType_t ct) {
   cublasLtMatmulDescCreate(&p.op, CUBLAS_COMPUTE_32F, CUDA_R_32F);
   cublasOperation_t ta = CUBLAS_OP_T, tb = CUBLAS_OP_N;
   cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof(ta));
   cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof(tb));
   cublasLtMatrixLayoutCreate(&p.a, CUDA_R_16BF, k, n, k);  // W, column-major [k, n]
   cublasLtMatrixLayoutCreate(&p.b, CUDA_R_16BF, k, m, k);  // x, column-major [k, m]
-  cublasLtMatrixLayoutCreate(&p.c, CUDA_R_16BF, n, m, n);  // out, column-major [n, m]
-  if (cublasLtMatmulAlgoInit(lt_handle(), CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, CUDA_R_16BF,
-                             CUDA_R_16BF, (int)cfg[0], &p.algo) != CUBLAS_STATUS_SUCCESS) return 1;
+  cublasLtMatrixLayoutCreate(&p.c, ct, n, m, n);  // out, column-major [n, m] (BF16, or FP32 for the n7s5 FR GEMM)
+  if (cublasLtMatmulAlgoInit(lt_handle(), CUBLAS_COMPUTE_32F, CUDA_R_32F, CUDA_R_16BF, CUDA_R_16BF, ct,
+                             ct, (int)cfg[0], &p.algo) != CUBLAS_STATUS_SUCCESS) return 1;
   uint32_t tile = cfg[1], stages = cfg[2], red = cfg[4], swz = cfg[5], cust = cfg[6];
   int32_t sk = cfg[3];
   uint16_t cl = cfg[7];
@@ -16634,7 +16636,7 @@ static void lt_free(LtPlan& p) {
 int64_t lt_gemm(torch::Tensor w, torch::Tensor x, torch::Tensor out, torch::Tensor ws, std::vector<int64_t> cfg) {
   int64_t m = x.size(0), k = x.size(1), n = out.size(1);
   LtPlan p;
-  int64_t st = lt_make(p, m, n, k, cfg, ws.numel());
+  int64_t st = lt_make(p, m, n, k, cfg, ws.numel(), out.scalar_type() == torch::kFloat32 ? CUDA_R_32F : CUDA_R_16BF);
   if (st == 0) {
     float one = 1.f, zero = 0.f;
     st = 100 + (int64_t)cublasLtMatmul(lt_handle(), p.op, &one, w.data_ptr(), p.a, x.data_ptr(), p.b, &zero,
@@ -16686,16 +16688,21 @@ def _lt_prepare(state):
     if lib is None:
         return
     w = {**state["dense"], "unpool": state["unpool"]}
+    if state.get("pool_router") is not None:
+        w["fr"] = state["pool_router"]
     dev = w["pooler"].device
     state["lt_ws"] = torch.empty(4 << 20, dtype=torch.uint8, device=dev)
     g = torch.Generator(device=dev)
     g.manual_seed(0)
     for (key, m), cfg in LT_CFG.items():
+        if key not in w:
+            continue
         x = torch.randn((m, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
-        out = torch.empty((m, w[key].shape[0]), dtype=torch.bfloat16, device=dev)
+        f32 = key == "fr"
+        out = torch.empty((m, w[key].shape[0]), dtype=torch.float32 if f32 else torch.bfloat16, device=dev)
         st = lib.lt_gemm(w[key], x, out, state["lt_ws"], list(cfg))
         torch.cuda.synchronize()
-        ref = F.linear(x, w[key]).float()
+        ref = torch.mm(x, w[key].t(), out_dtype=torch.float32) if f32 else F.linear(x, w[key]).float()
         if st == 0 and ((out.float() - ref).norm() / ref.norm()).item() < 1e-2:
             state["lt_ok"][(key, m)] = cfg
         else:
@@ -16762,6 +16769,8 @@ def _g22_prepare(state):
     if lib is None:
         return
     w = {**state["dense"], "unpool": state["unpool"]}
+    if state.get("pool_router") is not None:
+        w["fr"] = state["pool_router"]
     dev = state["unpool"].device
     g = torch.Generator(device=dev)
     g.manual_seed(0)
@@ -16816,6 +16825,8 @@ def _g19_prepare(state):
     if lib is None or not G19_CFG or _G19_SRC is None:
         return
     w = {**state["dense"], "unpool": state["unpool"]}
+    if state.get("pool_router") is not None:
+        w["fr"] = state["pool_router"]
     comp, packs = {}, {}
     dev = state["unpool"].device
     g = torch.Generator(device=dev)
@@ -17941,7 +17952,12 @@ def _kernel_fn(data, state):
         return _tail(moe, stream1, h, tokens, state, pdl, nos=nos) + (topk_ids,)
     if (not fp32_router and state.get("pool_router") is not None
             and _opt(state, tokens, "fr", tokens in FUSED_ROUTER_TOKENS)):
-        pr = torch.mm(h, state["pool_router"].t(), out_dtype=torch.float32)
+        ltc = state.get("lt_ok", {}).get(("fr", tokens))
+        if ltc is not None and _opt(state, tokens, "lt:fr", ("fr", tokens) not in LT_DEFAULT_OFF):
+            pr = torch.empty((tokens, state["pool_router"].shape[0]), dtype=torch.float32, device=dev)
+            _LT["lib"].lt_gemm(state["pool_router"], h.contiguous(), pr, state["lt_ws"], list(ltc))
+        else:
+            pr = torch.mm(h, state["pool_router"].t(), out_dtype=torch.float32)
         ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
         lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
         wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)

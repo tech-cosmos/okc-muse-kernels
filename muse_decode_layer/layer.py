@@ -2406,7 +2406,10 @@ LT_CFG = {("pooler", 128): (66, 143, 35, 1, 0, 0, 0, 2),
           ("unpool", 16): (66, 394, 35, 1, 0, 0, 7, 4), ("unpool", 32): (66, 397, 35, 1, 0, 0, 5, 4),
           # s24: proj s16 H200 tuner (Handoffs 10:10Z, standalone, tuner us lt vs F.linear): pooler m256 28.6-28.9 vs
           # 32.9-36.0 (other algo than the s5 m256 pick that lost beside the router), unpooler m256 -0.2
-          ("pooler", 256): (66, 18, 35, 1, 0, 0, 0, 2), ("unpool", 256): (66, 20, 35, 1, 0, 0, 6, 5)}
+          ("pooler", 256): (66, 18, 35, 1, 0, 0, 0, 2), ("unpool", 256): (66, 20, 35, 1, 0, 0, 6, 5),
+          # proj n7s5: the T=256 FR GEMM [pooler; hi; lo] (FP32 out): full algo-66 screen on a Modal H200 (r-proj
+          # muse_bf16_proj/dev/n7s5/frlt.py, cold L2) 28.26 us vs torch.mm 30.14-30.30 (H100 32.9 vs 33.6).
+          ("fr", 256): (66, 125, 35, 1, 0, 0, 4, 5)}
 LT_DEFAULT_OFF = {("qkv_gate", 16), ("qkv_gate", 32), ("o", 16), ("o", 32), ("o", 128), ("o", 256), ("unpool", 128),
                   ("pooler", 16), ("pooler", 32), ("unpool", 16), ("unpool", 32), ("pooler", 256), ("unpool", 256)}
 # s24: alternative cuBLASLt configs, TUNE option "ltalt:<key>" = 1-based index (implies lt): proj s16 H200 qkv m32
@@ -2460,16 +2463,21 @@ def _lt_prepare(state):
     if lib is None:
         return
     w = {**state["dense"], "unpool": state["unpool"]}
+    if state.get("pool_router") is not None:
+        w["fr"] = state["pool_router"]
     dev = w["pooler"].device
     state["lt_ws"] = torch.empty(4 << 20, dtype=torch.uint8, device=dev)
     g = torch.Generator(device=dev)
     g.manual_seed(0)
     for (key, m), cfg in LT_CFG.items():
+        if key not in w:
+            continue
         x = torch.randn((m, w[key].shape[1]), generator=g, device=dev).to(torch.bfloat16)
-        out = torch.empty((m, w[key].shape[0]), dtype=torch.bfloat16, device=dev)
+        f32 = key == "fr"  # FP32 out, like the FR torch.mm
+        out = torch.empty((m, w[key].shape[0]), dtype=torch.float32 if f32 else torch.bfloat16, device=dev)
         st = lib.lt_gemm(w[key], x, out, state["lt_ws"], list(cfg))
         torch.cuda.synchronize()
-        ref = F.linear(x, w[key]).float()
+        ref = torch.mm(x, w[key].t(), out_dtype=torch.float32) if f32 else F.linear(x, w[key]).float()
         if st == 0 and ((out.float() - ref).norm() / ref.norm()).item() < 1e-2:
             state["lt_ok"][(key, m)] = cfg
         else:
@@ -2548,6 +2556,8 @@ def _g22_prepare(state):
     if lib is None:
         return
     w = {**state["dense"], "unpool": state["unpool"]}
+    if state.get("pool_router") is not None:
+        w["fr"] = state["pool_router"]
     dev = state["unpool"].device
     g = torch.Generator(device=dev)
     g.manual_seed(0)
@@ -2606,6 +2616,8 @@ def _g19_prepare(state):
     if lib is None or not G19_CFG or _G19_SRC is None:
         return
     w = {**state["dense"], "unpool": state["unpool"]}
+    if state.get("pool_router") is not None:
+        w["fr"] = state["pool_router"]
     comp, packs = {}, {}
     dev = state["unpool"].device
     g = torch.Generator(device=dev)
@@ -3929,7 +3941,12 @@ def _kernel_fn(data, state):
         # SGLang's router above 8 tokens = BF16 h against the BF16 hi/lo split of the FP32 weight (FP32 accumulation):
         # the same h as the pooler, so one GEMM [pooler; hi; lo] with FP32 output; the routing sums the hi/lo logits,
         # the rmsnorm rounds the pooler part to BF16 (what the BF16-out pooler GEMM returns). No side stream.
-        pr = torch.mm(h, state["pool_router"].t(), out_dtype=torch.float32)
+        ltc = state.get("lt_ok", {}).get(("fr", tokens))
+        if ltc is not None and _opt(state, tokens, "lt:fr", ("fr", tokens) not in LT_DEFAULT_OFF):  # n7s5
+            pr = torch.empty((tokens, state["pool_router"].shape[0]), dtype=torch.float32, device=dev)
+            _LT["lib"].lt_gemm(state["pool_router"], h.contiguous(), pr, state["lt_ws"], list(ltc))
+        else:
+            pr = torch.mm(h, state["pool_router"].t(), out_dtype=torch.float32)
         ids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
         lids = torch.empty((tokens, TOP_K), dtype=torch.int32, device=dev)
         wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
