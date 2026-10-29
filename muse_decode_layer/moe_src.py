@@ -93,6 +93,10 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TK2F_DIAG 0      // layer s81: tk2f DIAG instantiations (no-math / KPS 4 SQ timing probes, tuner-only; set by TK2F_DIAG below)
 #define TK2F_L2H 4       // s21: tk2f weight-copy L2 hints: 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only
 #define NORM_EARLY 1     // n4s1 (layer s53: set here, layer has its own _lib): twm/moe_hot flag each expert's finished gemm2 at meta[100 + e] (>= 1 << 20); moe_norme waits per token on them
+#define TWM_EPI 1        // n6s3 (moe a60019d): staged, rolled tw_item / tw_epi epilogues (i-cache); bitwise
+#define TWM_HOTC 0       // n6s3 (moe 0be4fa0): moe_twm's in-twm hot class compiled out (layer: twm_hot is in no TUNE list); set 1 to use twm_hot
+#define TWM_REL 1        // n6s4 (moe 7d2a079): moe_twm gemm13+gemm2 releases by helper warp 9
+#define TWM_KSC 2        // n6s4 (moe 7d2a079): moe_twm built with + without the K-split tail code (picked per call); 0 = never split, 1 = always built in
 #ifndef TK2G_PAR4
 #define TK2G_PAR4 1      // n17: tk2g_bound's 4 calls on 4 warps + 32-bit p (bitwise: same bounds)
 #endif
@@ -1711,6 +1715,38 @@ __device__ __forceinline__ void tw_epi(float (&acc)[RT][N / 2], int lane, int wa
                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out) {
   const int g = lane >> 2, t = lane & 3;
   constexpr int H = GATED ? RT / 2 : RT;
+#if TWM_EPI
+  // n6s3: rolled 8-token-group loop (i-cache), accumulators shift down by 4 per group; same values/stores as below
+#pragma unroll 1
+  for (int gi = 0; gi < N / 8; ++gi) {
+    if (gi * 8 >= nv) break;
+#pragma unroll
+    for (int r = 0; r < H; ++r) {
+      const int tile = rb * NW * H + warp * H + r;
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const int tok = gi * 8 + t * 2 + (q & 1);
+        if (tok < nv) {
+          const int col = tile * 16 + g + ((q & 2) ? 8 : 0);
+          const float v = acc[r][q] * gsc;
+          if (GATED) {
+            const float u = acc[r + H][q] * gsc;
+            const int c = col & 63;
+            const int lc = (col & ~63) | (((c >> 2) & 3) << 4) | (((c >> 1) & 1) << 3) | ((c >> 4) << 1) | (c & 1);
+            Out[(size_t)(off + tok) * NOUT + lc] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+          } else {
+            Out[(size_t)sroutes[off + tok] * NOUT + col] = __float2bfloat16(v);
+          }
+        }
+      }
+    }
+#pragma unroll
+    for (int r = 0; r < RT; ++r)
+#pragma unroll
+      for (int i = 0; i + 4 < N / 2; ++i) acc[r][i] = acc[r][i + 4];
+  }
+  return;
+#endif
 #pragma unroll
   for (int r = 0; r < H; ++r) {
     const int tile = rb * NW * H + warp * H + r;
@@ -1737,9 +1773,73 @@ __device__ __forceinline__ void tw_epi(float (&acc)[RT][N / 2], int lane, int wa
   }
 }
 
+// n6s3 TWM_EPI: staged epilogue (see tw_epi for the layouts). stg = this warp's 8 x 64 bf16 staging buffer in smem
+// (1 KB, past the ring: +8 KB dyn smem in twm/twf/hot). Writes 16-B (Y rows) / 8-B (RT 4 inter) / 4-B (RT 2 inter) chunks.
+// The 8-token-group loop is NOT unrolled (group gi reads acc[.][0..3], then the accumulators shift down by 4): moe_twm
+// is ~16.7k SASS, far over the i-cache, and the fully unrolled epilogues of rare item kinds (N24/N32) ran cold from L2
+// (H200 DIAG 54eb9bdb: 6-10 us per N24/N32 gemm13 item end; the time stayed with the global stores removed). Bitwise = tw_epi.
+template <int RT, int N, bool GATED, int NW>
+__device__ __forceinline__ void tw_epi2(float (&acc)[RT][N / 2], int lane, int warp, int nv, int off, int rb, float gsc,
+                                        const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out,
+                                        __nv_bfloat16* stg) {
+  const int g = lane >> 2, t = lane & 3;
+  constexpr int H = GATED ? RT / 2 : RT;
+  const int col0 = (rb * NW * H + warp * H) * 16, c0 = col0 & 63;
+#pragma unroll 1
+  for (int gi = 0; gi < N / 8; ++gi) {
+    if (gi * 8 >= nv) break;
+    __syncwarp();
+#pragma unroll
+    for (int r = 0; r < H; ++r)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const int tok = t * 2 + (q & 1), cw = r * 16 + g + ((q & 2) ? 8 : 0);
+        const float v = acc[r][q] * gsc;
+        if (GATED) {
+          const float u = acc[r + H][q] * gsc;
+          const int c = (c0 + cw) & 63;
+          const int lc = (((c >> 2) & 3) << 4) | (((c >> 1) & 1) << 3) | ((c >> 4) << 1) | (c & 1);
+          stg[tok * 64 + lc] = __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
+        } else {
+          stg[tok * 64 + cw] = __float2bfloat16(v);
+        }
+      }
+    __syncwarp();
+    if (GATED) {
+      // the warp's positions in its 64-column block: lc bit 2 fixed (RT 4: 4-element chunks) or bits 1-2 fixed (RT 2: 2)
+      constexpr int CE = H == 2 ? 4 : 2;
+      const int fb = H == 2 ? (c0 >> 5) * 4 : (c0 >> 4) * 2;
+#pragma unroll
+      for (int i = lane; i < 64; i += 32) {
+        const int tok = i >> 3, p = (i & 7) * 8 + fb;
+        if (gi * 8 + tok < nv) {
+          __nv_bfloat16* dst = Out + (size_t)(off + gi * 8 + tok) * NOUT + (col0 & ~63) + p;
+          if (CE == 4) *reinterpret_cast<uint2*>(dst) = *reinterpret_cast<const uint2*>(stg + tok * 64 + p);
+          else *reinterpret_cast<uint32_t*>(dst) = *reinterpret_cast<const uint32_t*>(stg + tok * 64 + p);
+        }
+      }
+    } else {
+      constexpr int CH = H * 2;  // 16-B chunks per token
+#pragma unroll
+      for (int i = lane; i < 8 * CH; i += 32) {
+        const int tok = i / CH, k = i % CH;
+        if (gi * 8 + tok < nv)
+          *reinterpret_cast<uint4*>(Out + (size_t)sroutes[off + gi * 8 + tok] * NOUT + col0 + k * 8) =
+              *reinterpret_cast<const uint4*>(stg + tok * 64 + k * 8);
+      }
+    }
+#pragma unroll
+    for (int r = 0; r < RT; ++r)
+#pragma unroll
+      for (int i = 0; i + 4 < N / 2; ++i) acc[r][i] = acc[r][i + 4];
+  }
+  __syncwarp();
+}
+
 // DYN: one main loop for both GEMMs (moe_twf), epilogue picked by g2 at run time
 template <int RT, int KG, int N, int NSTG, bool GATED, int NW, bool DYN = false, bool SA = false, int STRIDE = 0,
-          int XBO = 0>  // s29: XBO = x tile bytes (weights' offset in the stage) when != the TWC default
+          int XBO = 0,  // s29: XBO = x tile bytes (weights' offset in the stage) when != the TWC default
+          bool KS = true>  // n6s4: false = no K-split tail code (part must be null; i-cache)
 __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64_t* empty, int& st, int& ph,
                                         const uint32_t* slut, int warp, int lane, int nv, int off, int rb, float gsc,
                                         const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Out,
@@ -1857,7 +1957,7 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
     return;
   }
   if constexpr (DYN) {
-    if (part) {  // s11 K-split tail item: the first half to finish stores its FP32 partial, the second adds it
+    if (KS && part) {  // s11 K-split tail item: the first half to finish stores its FP32 partial, the second adds it
       const int ct = warp * 32 + lane;
       asm volatile("bar.sync 1, 256;" ::: "memory");  // s_flag is free (previous split item done with it)
       if (ct == 0) *s_flag = atomicAdd(tick, 1);
@@ -1889,8 +1989,14 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
 #pragma unroll
         for (int i = 0; i < NA; ++i) acc[r][i] += __ldcg(ot + (r * NA + i) * 256 + ct);
     }
+#if TWM_EPI
+    __nv_bfloat16* stg = reinterpret_cast<__nv_bfloat16*>(const_cast<char*>(smem) + NSTG * (STRIDE ? STRIDE : C::STG) + warp * 1024);
+    if (g2) tw_epi2<RT, N, false, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out, stg);
+    else tw_epi2<RT, N, true, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out, stg);
+#else
     if (g2) tw_epi<RT, N, false, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
     else tw_epi<RT, N, true, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
+#endif
   } else {
     tw_epi<RT, N, GATED, NW>(acc, lane, warp, nv, off, rb, gsc, sroutes, Out);
   }
@@ -2328,7 +2434,7 @@ static int64_t twf_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
                        torch::Tensor sr_, torch::Tensor inter_, torch::Tensor y_, torch::Tensor tk_, torch::Tensor part_,
                        int64_t ns) {
   constexpr int NSTG = 8;
-  constexpr int SMEM = NSTG * TWC<RT, true, 8>::STG + 1024;
+  constexpr int SMEM = NSTG * TWC<RT, true, 8>::STG + 1024 + (TWM_EPI ? 8192 : 0);  // n6s3 staging
   static int grid = 0;
   if (!grid) {
     int dev, nsm;
@@ -2461,7 +2567,8 @@ __device__ __forceinline__ void tw_hot(const char* smem, uint64_t* full, uint64_
   mbar_arrive(&empty[pst]);  // the slot held the exchange: release it only now
 }
 
-template <int NSTG, bool SA = false>
+template <int NSTG, bool SA = false, int PB = 64,  // n12: PB = big-class pass size (64; 48 = N48 passes)
+          bool KS = (TWM_KSC != 0)>  // n6s4: false = no K-split tail code (a split request is ignored); i-cache
 __global__ void __launch_bounds__(384, 1) moe_twm(
     const char* __restrict__ W13, const char* __restrict__ S13, const float* __restrict__ gs13,
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
@@ -2484,6 +2591,10 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   __shared__ uint32_t slut[256];
   __shared__ int s_e[32], s_off[33], s_cum[2][33], s_item[NSTG], s_flag, s_big[2][32], s_ord[4], s_cost;
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
+#if TWM_REL
+  __shared__ __align__(8) uint64_t relb[4];
+  __shared__ int s_rel[4];
+#endif
   int* done = meta + 68;
   // s14: nsplit < 0 = no K split; instead the lightest (last) non-big experts whose RT 4 gemm2 items add up to
   // <= -nsplit run their gemm2 at RT 2 with 32-token passes (class 2: half-size items, shorter drain)
@@ -2497,6 +2608,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   const int tail = nsplit < 0 && !sx ? (-nsplit) & 4095 : 0, tail13 = nsplit < 0 && !sx ? ((-nsplit) >> 12) & 1023 : 0;
   const int order = nsplit < 0 ? (-nsplit) >> 24 : 0, hot = nsplit < 0 ? ((-nsplit) >> 23) & 1 : 0;
   nsplit = nsplit < 0 ? (sx ? ((-nsplit) >> 12) & 1023 : 0) : nsplit;
+  if (!KS) nsplit = 0;
   // s20: split count 1022 / 1023 = AUTO: K-split the last r light gemm2 items, r = (total item cost mod gridDim) when
   // that last wave is at most half full (halves then fill it; else no split). 1022: every item costs 1; 1023: light
   // RT 4 items weighted by their pass size (N8 1, N16 1.25, N32 1.5). Shape/routing-derived on device, no host sync.
@@ -2517,6 +2629,9 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   if (tid < 33) s_off[tid] = meta[33 + tid];
   if (tid == 0) {
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 8 * 32); }
+#if TWM_REL
+    for (int i = 0; i < 4; ++i) mbar_init(&relb[i], 256);
+#endif
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
   __syncthreads();
@@ -2589,7 +2704,14 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
 #endif
   if (tid == 0) {
     int nbig = 0;
-    while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
+    // n6s4 LAYOUT: rolled (-321 SASS) only in the KS false build. tools/n5s17/loop64k.py: rolled in the KS true build (or
+    // unrolled in the KS false one) puts the RT 4 N16 MMA loop across the function's 64 KB boundary (n5s17: +4..12%)
+    if constexpr (KS) {
+      while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
+    } else {
+#pragma unroll 1
+      while (nbig < 32 && s_big[0][nbig] == 1 && (!(order & 64) || s_cum[0][nbig + 1] - s_cum[0][nbig] > HG::NRB)) ++nbig;
+    }
     const int mrg = (order >> 3) & 3;
     s_ord[0] = nbig;
     s_ord[1] = mrg == 0 ? 0 : mrg == 1 ? 100 : mrg == 2 ? 85 : 70;
@@ -2632,6 +2754,28 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   };
   if (warp >= 8) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
+#if TWM_REL
+    if (warp == 9) {  // n6s3 REL helper: releases finished items (4 slots; items are >> the release latency apart)
+      // n6s4: gemm2 items too (NORM_EARLY flags). slot = e | g2 << 8 | slot a << 16, -1 = done. The mbarrier wait
+      // (acquire) + this thread's gpu fence (cumulative) order the consumers' stores before the count, as the
+      // bar.sync + thread-0 fence did. Consumers no longer wait for the fence (H200: twm is consumer-bound)
+      if (lane == 0)
+        for (int k = 0;; ++k) {
+          mbar_wait(&relb[k & 3], (k >> 2) & 1);
+          const int v = s_rel[k & 3];
+          if (v < 0) break;
+          const int e = v & 255;
+          __threadfence();
+#if NORM_EARLY
+          if (v & 256) {
+            if (atomicAdd(done + 32 + e, 1) == s_nd2[v >> 16] - 1) atomicAdd(done + 32 + e, 1 << 20);
+          } else
+#endif
+          atomicAdd(done + e, 1);
+        }
+      return;
+    }
+#endif
     if (warp > 8 || lane != 0) return;
     int* counter = meta + 66;
     int st = 0, ph = 0, i = 0;
@@ -2696,6 +2840,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   int ntl = 0;
   if (tl && tid == 0) tl[0] = gtimer();
 #endif
+  int nrel = 0;
   for (;;) {
     mbar_wait(&full[st], ph);
     const int item = s_item[st];
@@ -2705,7 +2850,13 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
       else if (ntl < 20) { tl[2 + 3 * ntl] = gtimer(); tl[4 + 3 * ntl] = item; }
     }
 #endif
-    if (item < 0) break;
+    if (item < 0) {
+#if TWM_REL
+      if (tid == 0) s_rel[nrel & 3] = -1;
+      mbar_arrive(&relb[nrel & 3]);
+#endif
+      break;
+    }
     int g2, a, p, rb, h, j;
     decode(item, g2, a, p, rb, h, j);
     const int e = s_e[a], cl = s_big[g2][a], big = cl != 0, PS = cl == 3 ? 128 : cl == 1 ? 64 : 32;
@@ -2713,11 +2864,13 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     float* pt = h < 0 ? nullptr : part + (size_t)(2 * j + h) * 16384;
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
     __nv_bfloat16* out = g2 ? Y : Inter;
-#define TWI(RT, NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
+#define TWI(RT, NN) tw_item<RT, 1, NN, NSTG, true, 8, true, SA, STRIDE, 0, KS>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2, \
                                                         h < 0 ? 64 : 32, pt, tick + j, &s_flag, h ? -16384 : 16384)
     if (cl == 3) {
+#if TWM_HOTC  // n6s3: the in-twm hot class only when python TWM_HOT / TWM_HOT_M asks for it (i-cache: moe_twm 11.4k -> 8.0k SASS without)
       if (nv <= 80) tw_hot<80, NSTG, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
       else tw_hot<96, NSTG, SA, STRIDE>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb, gsc, sroutes, out, g2);
+#endif
     } else if (!big) {
       switch ((nv + 7) >> 3) {
         case 1: TWI(4, 8); break;
@@ -2737,19 +2890,31 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     if (!g2) {
       // release this item's inter rows to gemm2 producers on other SMs (their TMA reads them: async proxy)
       asm volatile("fence.proxy.async.global;" ::: "memory");
+#if TWM_REL  // n6s3/n6s4 REL: the helper warp 9 fences + counts (consumers go on to the next item)
+      if (tid == 0) s_rel[nrel & 3] = e;
+      mbar_arrive(&relb[nrel & 3]);
+      ++nrel;
+#else
       asm volatile("bar.sync 1, 256;" ::: "memory");
       if (tid == 0) {
         __threadfence();
         atomicAdd(done + e, 1);
       }
+#endif
     }
 #if NORM_EARLY
     else {  // n4s1: Y rows of expert e complete after its last gemm2 item (a K-split's 2nd half writes Y before it counts)
+#if TWM_REL
+      if (tid == 0) s_rel[nrel & 3] = e | 256 | (a << 16);
+      mbar_arrive(&relb[nrel & 3]);
+      ++nrel;
+#else
       asm volatile("bar.sync 1, 256;" ::: "memory");
       if (tid == 0) {
         __threadfence();
         if (atomicAdd(done + 32 + e, 1) == s_nd2[a] - 1) atomicAdd(done + 32 + e, 1 << 20);
       }
+#endif
     }
 #endif
 #if TWM_TL
@@ -2885,7 +3050,7 @@ static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
   constexpr int NSTG = 8;
-  constexpr int SMEM = NSTG * (NH * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024;
+  constexpr int SMEM = NSTG * (NH * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024 + (TWM_EPI ? 8192 : 0);
   static bool init = false;
   if (!init) {
     cudaFuncSetAttribute(moe_hot<NSTG, SA, NH>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
@@ -2913,19 +3078,26 @@ static int64_t twm_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
                       torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_, torch::Tensor inter_,
                       torch::Tensor y_, torch::Tensor tk_, torch::Tensor part_, int64_t ns) {
   constexpr int NSTG = 8;
-  constexpr int SMEM = NSTG * TWC<4, true, 8>::STG + 1024;
+  constexpr int SMEM = NSTG * TWC<4, true, 8>::STG + 1024 + (TWM_EPI ? 8192 : 0);  // n6s3 staging
   static int grid = 0;
   if (!grid) {
     int dev, nsm;
     cudaGetDevice(&dev);
     cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
     cudaFuncSetAttribute(moe_twm<NSTG, SA>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+#if TWM_KSC == 2
+    cudaFuncSetAttribute(moe_twm<NSTG, SA, 64, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+#endif
     grid = nsm;
   }
   TMaps m13, m2;
   tw_maps(m13, xg_.data_ptr(), xg_.size(0));
   tw_maps(m2, inter_.data_ptr(), inter_.size(0));
-  return launch_k(moe_twm<NSTG, SA>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
+  auto kf = moe_twm<NSTG, SA>;
+#if TWM_KSC == 2  // n6s4: both builds; the no-K-split one when this call has no split (ns > 0 or bit 22 of -ns)
+  if (!(ns > 0 || (ns < 0 && (((-ns) >> 22) & 1)))) kf = moe_twm<NSTG, SA, 64, false>;
+#endif
+  return launch_k(kf, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const char*)PTR(w13h_), (const char*)PTR(s13h_),
       (const char*)PTR(w2h_), (const char*)PTR(s2h_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
