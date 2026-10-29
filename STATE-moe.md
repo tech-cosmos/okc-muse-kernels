@@ -1,3 +1,4 @@
+## n7s35 10:33Z idle (no lead decision since 09:35Z; Handoff moe/layer-hotdyn 130a692 pending layer). 0 runs.
 # STATE-moe
 
 ## n7s34 10:20Z idle (no new lane). NOW (n7s33 ~10:15Z): task 2 (tk2f d1/v1 prologue) DROPPED without a check: in-layer, TK2FX already puts routing + W ring

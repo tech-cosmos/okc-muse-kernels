@@ -3283,3 +3283,6 @@ No COORD change since lead 06:50Z task (n7s18 idea already posted). Waiting for 
 - Pending from n7s32: Handoff branch moe/layer-hotdyn 130a692 (T=256 moe_hot device-side CTA count) awaits the layer's integration.
 
 ## n7s34 (2026-10-29 10:17Z - 10:20Z): idle; both lead 09:35Z tasks done (n7s32 variance -> Handoff moe/layer-hotdyn 130a692; n7s33 task 2 dropped); no newer lead decision; 0 judge runs, 0 Modal, no code.
+
+## n7s35 2026-10-29T10:33Z
+Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/layer-hotdyn 130a692 awaits layer (STOP-layer present). 0 judge runs, 0 Modal, no code.
