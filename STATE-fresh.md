@@ -1,4 +1,10 @@
 # STATE-fresh (newest first)
+## f1s7 (2026-10-29 21:33Z-21:45Z): no build, 0 judge, 0 Modal (H200 A/B waits for the 00:00Z ledger reset, per lead 20:50Z)
+- Re-read the v16/v32 dense chain against the record (H200 timeline: qkv m128 15.7 us = 2.4 TB/s, pooler 27.6, unpool v32
+  26.9 = compute-ish at M=256). Own-GEMM forms (g22/g23 split-K+DSMEM, g30 W-in-registers, x multicast) and L2 prefetch of
+  o/pooler W during attention (NOTES-layer 54-57, 796, 1239, 2206 O_PF) are all measured; no flaw I can name. Nothing new.
+- Verified: branch fresh pushed (bba6a19), the HOT_XN 0 sed in 'Next' matches exactly one line of submission.py.
+## Next (f1s8, at/after 00:00Z): the f1s6 'Next' H200 A/B below, unchanged. Then Handoff or drop HOT_XN.
 ## f1s6 (2026-10-29 20:52Z-21:30Z): lead 20:50Z = BUILD (1) dense T=128/256 GEMMs via CUTLASS, (2) hot exact-N. 0 judge, 0 Modal
 - (1) CUTLASS sm90 gate FAILS on the H100: best of 8 builds x 3 modes loses to the LT_CFG cuBLASLt pick on all 8 shapes
   (qkv m128 25.1 vs 17.8, m256 26.8 vs 19.7; o +1.1/+1.4; pool m128 32.3 vs 27.3, m256 32.3 vs 30.1; unp +1.3/+1.6 us).
