@@ -2752,3 +2752,18 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   Humming's two GEMMs alone are 1.06-1.48x slower than our whole MoE at every board shape. Verdict: no shape where Humming
   beats us; nothing to copy. Its overlap model (several CTAs/SM, stream-K, mma.sync at small M) is already what our tk2f/
   twm beat. (Both external yardsticks, CUTLASS ex55 and Humming, are well below twm/tk2f on the H100.)
+
+## n7s13 (2026-10-29 15:20Z-15:45Z): no lead decision after 14:45Z (yardsticks answered in n7s12); short self-pick, no build
+- moe board now: #1 dolanzhao 2.689x (5,002 us), pjmullin3 2.685x; ours 2.279x (#176). `okc status` on another team's job
+  = "no such job" (no per-shape data for other teams; 'S' in the board = screened).
+- Our latest moe run (r-moe profiles/febfcb1f) per load, judge median vs SGLang vs TASK floor (us): bs1 27.0/77.2/11.4 (2.37x floor),
+  bs8 68.3/149.7/37.3 (1.83x), bs16 88.9/185.2/52.5 (1.69x), bs32 120.1/204.0/70.8 (1.70x), bs128 204.1/465.5/101.3 (2.01x),
+  bs256 247.8/630.7/108.9 (2.28x). Geomean 1.96x floor; #1 needs ~1.64x. If #1 is at ~1.6x floor on bs8-32, bs1/bs128/bs256
+  must each be ~1.32x faster than ours (~20.5 / 155 / 188 us): the same conclusion as r-moe REDESIGN s7, nothing new.
+- H100 nsys of moe's standalone bs1 (seed 7 = 3 local experts, 85 MB) and bs8: graph = moe_tk2f 34 us (= 2.5 TB/s) + moe_norm2
+  4.3 us (bs8: 101 + 3.3). The memset in the trace is the timing harness's sum output, not the graph. bs1 standalone overhead
+  (norm2 + gaps ~7 us) is moe's record (TK2FN/R2 closed) and does not carry over to the layer anyway (layer d1 tk2f 18.7 us).
+- Checked again: the E2M1->BF16 'subnormal' bit placement (nibble bits at BF16 [15],[8:6] = value*2^-126 exactly) costs
+  shift+and per output reg + the scale HMUL2 = ~11 ops/8 weights vs today's 12 (moe: 7 ALU/8 minimal) -> no gain at big M.
+  FP8 wgmma with E2M1->E4M3 (exact) needs FP8 activations: below SGLang's precision (rules), not pursued.
+- 0 judge runs, 0 Modal. proj still has no lane; asked the lead again (COORD Requests).
