@@ -187,3 +187,21 @@ H100, bench.py verify loads, us (2 alternating rounds for 0/4/16, spread < 1.5 u
   without RF conflict, which nobody here has found. I did not find one in this session either.
 ### Next H200 run (Modal, after 00:00Z, ~8 GPU-min): base / ORC 1 / ORC 7 at verify 16/32 sl+full, in-layer
    (tools/h200.py muse_decode_layer base=submission.py orc1=<copy> orc7=<copy> --cmd 'python bench.py bench submission.py verify').
+
+## f1s3 (2026-10-29 20:11-21:15Z): no build pick; the planned H200 O2 run dropped (it can't change a decision)
+Re-read the H200 timeline (dev/n7s1_tl_h200.txt) per segment instead of per load, plus an H100 timeline of main at v32 sl
+(tools/timeline.py: hot 100-270 || twm 102-332, i.e. same shape as the H200's 94-247 || 96-300).
+- v16 sl: twm 152 us on the H200 vs the H200 stream probe on the same routings 119-134 (proj n5s20 / moe n9): the WHOLE
+  expert excess at v16 is <= ~20-30 us, and dq-free (proj a9fd9026, H200) is already -22.6. So an H200 ORC 1/7 run would
+  only split ~25 us into dq vs MMA; no structure to cut either is known (n7s47/48: no overlap by schedule or more WGs).
+  At v16 most of the 112 us excess is the T=128 dense chain: pre-expert ~75 us vs ~30 us of bytes, tail ~27 vs ~12.
+- Per-SM model of twm (n7s47 cycles, 9 KB per WG-stage): RT4 N32 consumer ~17.8 B/clk/SM vs H200 HBM share 16.5 B/clk/SM
+  (4.3 TB/s / 132 / 1.98 GHz) = co-bound; RT2 N64 11.4 B/clk = consumer-bound; N8: 794 cyc = stream-bound. moe_hot at N128
+  is tensor-bound (8 KB x 128 MAC / 2048 MAC/clk = 1024 cyc per 2 stages = ~8.8 B/clk). The exact-N hot fix is on record
+  (moe n5s21 HOT_NX: H200 -2.3 us N104, full exact-N ~-3.7 us/v32 call): below the bar, as moe found.
+- Dense T=128/256 GEMMs: per-SM L2->smem ingest (~50 GB/s/SM = ~6.6 TB/s, proj s16/s28) makes any smem-fed tile pay
+  W + x*(rows/BM): qkv v32 at BM 128 x BN 256 = 113 MB = ~17 us vs nvjet 19-21.5; BM 256 needs split-K and FP32 partials
+  (proj s101 g30 split-K: 21.4 vs 20.0 dead). Same verdict as f1s2 (~+1.2% geomean at best).
+- Wave/SM balance at v32: twm grid = 132 with dynamic tickets, so the SMs moe_hot frees are refilled; not an idle gap.
+Conclusion: every lever this fresh review produced (H1 persistent chain, H2 twm consumer, hot exact-N, dense ingest, hot/twm
+balance) is closed or below ~1% on the record, and I can't name a flaw in those measurements. Nothing to build here.

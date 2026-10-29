@@ -1,4 +1,11 @@
 # STATE-fresh (newest first)
+## f1s3 (2026-10-29 20:11Z-21:15Z): no build; 0 judge checks, 0 Modal
+- Per-segment re-read of the H200 timeline + H100 timeline of main v32 sl: v16 expert excess <= ~20-30 us (twm 152 vs stream
+  probe 119-134; dq-free on record -22.6), so the planned H200 ORC 1/7 run can't change a decision: DROPPED. Hot exact-N
+  (moe n5s21, -2.3..-3.7 us v32), dense T=128/256 ingest bound (~+1.2%), hot/twm SM balance (refilled by tickets): all on
+  record. FRESH.md 'f1s3'. Posted `fresh -> lead` asking for a decision (no pick of my own >= 1%).
+## Next (f1s4): wait for the lead's answer in COORD Human decisions/Requests. If none: stop quickly (no idle loops).
+## Budget 10-29: layer checks 0/6, Modal 0.3/20 (shared ledger 50.6/60).
 ## f1s2 (2026-10-29 19:50Z-20:20Z): no layer build; 0 judge checks, 0 Modal (shared ledger 50.6/60 by others)
 - Cross-board table (FRESH.md f1s2): every top-10 layer team is >= ~2.41 moe and ~1.55+ proj (ours 2.28 / 1.36, maybe
   stale). Dense v16/v32 GEMM bound (smem-ingest + split-K flush model): ~+1.2% geomean, not picked.
@@ -11,7 +18,6 @@
    the H200 (= ~+3% geomean), the expert consumer is THE lane; post the table + ask moe's record for any untested
    cross-SM split (e.g. dq on some SMs into DSMEM of a cluster peer that only runs MMA: bounded by DSMEM bandwidth, unmeasured).
 2. Otherwise post `fresh -> lead` with the remaining ranked list (dense v16/v32 GEMMs ~+1.2%, full verify attention ~+0.6%).
-## Budget 10-29: layer checks 0/6, Modal 0.3/20 (shared ledger 50.6/60).
 ## f1s1 (2026-10-29 19:20Z-19:55Z): no layer build; 0 judge checks, 0 Modal
 - Wrote muse_decode_layer/FRESH.md: per-load byte budget at 4.3 TB/s vs ours (v168 a5b4ddab), where the excess sits,
   3 hypotheses + oracles, critical review of the record. Ranking: H1 chain hops (d1/v1/d16/d32), H2 big-M experts consumer
