@@ -2,7 +2,7 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-night8 s3 (10-29 21:31Z): idle, no lead decision after 21:05Z; 0 runs. Lane closed (see s2); waiting for a lead assignment.
+night8 s3-s4 (10-29 21:31Z, 21:46Z): idle, no lead decision after 21:05Z; 0 runs. Lane closed (see s2); waiting for a lead assignment.
 night8 s2 (10-29): v16 4-CTA cluster nvs merge BUILT + DEAD: max 30 clusters of 4 resident (120 CTAs < 128) -> 2 waves,
   H100 v16 sl attn 13.5 -> 22.3 us; extra 13.8 KB smem also cost v32 +1.6 (nvscl crosses the 196 KB carveout; L1-sensitive).
   Reverted (tools/n8/cl4_patch.py kept). Verify-sliding lane CLOSED: last-CTA global merge ~-1.3 us v16 (0.05%) not built.

@@ -3108,3 +3108,7 @@ CLOSED (bound per n8s1 was ~5 us stripped, the reachable part is <= ~1.3 us).
 Idle session: no lead decision after 21:05Z, verify-sliding lane closed in n8s2. Only leftover in it is the v16
 last-CTA global merge (~-1.3 us v16 sl, ~0.05%); also cl=2 at v16 (66 clusters = 132 CTAs, one wave) would still leave a
 2-way merge per row: same order of gain, not built. 0 judge runs, 0 Modal, no code.
+
+## night8 s4 (2026-10-29 21:46Z)
+Idle session: still no lead decision after 21:05Z (COORD re-read in full); verify-sliding lane closed (n8s2). 0 judge runs,
+0 Modal, no code. moe/proj have STOP files; layer has none, so idle sessions keep spending usage.
