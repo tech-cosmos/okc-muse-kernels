@@ -3464,3 +3464,31 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 ## n7s54 2026-10-29T17:04Z-17:07Z: idle; moe paused per lead 16:45Z (n7s53 closed the bundle, no v172); no newer lead decision. 0 judge runs, 0 Modal
 
 ## n7s55 2026-10-29T17:20Z-17:22Z: idle; moe paused per lead 16:45Z (n7s53 closed the bundle, no v172); no newer lead decision. 0 judge runs, 0 Modal
+
+## n9s1 2026-10-29T23:12Z-: lead 22:30Z twm REBUILD step (1): in-layer attribution of moe_twm at v16/v32 (H100 + H200 Modal)
+- Base = r-fresh b8888bd muse_decode_layer (fresh's TWM_ORC: 1 dq-free, 8 wgmma-free (XOR sink), 7 both-free, 256 flat read).
+  fresh already posted the H100 LAYER totals (o2/h100.txt: v16 sl 295.1/291.0/291.4/274.8/flat 273.7). Not redone.
+- Kernel level (torch profiler, warm, v16 sl seed 99 = 17 local experts = 481 MB at 28.3 MB/expert): moe_twm base 179.8,
+  both-free 164.1, flat 161.7 us (flat = 2.98 TB/s = H100 DRAM). => on the H100 structure costs ~2.4 us: the H100 CANNOT
+  test the lead's step-(3) gate (stream-only proto beats (iii) by 25 us): (iii) already sits on the DRAM line.
+- NEW proxy, L2-ALIAS: every expert's weight address -> expert 0 (28.3 MB, L2-resident): same items/routing/structure,
+  bandwidth no longer binding (models a GPU whose HBM outruns the consumer). moe_twm kernel us (prof, v16 sl / v32 sl):
+  base 142.5 / 187.7 | dq-free 115.6 / 153.8 | wgmma-free 131.0 / 162.4 | both-free 79.3 / 121.0 | flat read 147.3 (ld.global
+  path is L2-latency bound, not a yardstick here). => dq alone ~= the whole consumer (wgmma-free 131 vs base 142.5).
+- clock64/globaltimer counters in the consumers (tools/n9s1/inst.py + run_inst.py; per consumer warp, warm replays; H100
+  SM clock under this load = 1.79-1.81 GHz, NOT 1.98): v16 sl s99
+  | variant      | life us (gtimer) | between-item wait | item | loop | ring wait | epi | rest |
+  | real base    | 156.8 | 7.8 | 128.5 | 124.4 | 26.0 | 4.1 | 6.3 |
+  | real both-fr | 149.8 | 10.8 | 116.6 | 116.3 | 95.7 | 0.2 | 8.6 |
+  | alias base   | 127.2 | 5.1 | 105.5 | 102.6 | 6.5 | 2.9 | 4.5 |
+  | alias both-fr|  73.5 | 7.8 |  52.9 |  52.7 | 31.9 | 0.2 | 5.9 |
+  (cycle columns at 1.98 GHz nominal; life = globaltimer.) Producer g2 hand-off spin 0.8-1.7 us per CTA per call
+  (v16/v32); post-item release (fence.proxy.async + REL arrive) 0.25 us per warp per call.
+- Reading: consumer compute (loop - ring wait) ~96 us of cycles in BOTH real and alias = the consumer is a fixed cost;
+  alias base life 127 us at 1.79 GHz = 3.8 TB/s-eq -> at 1.98 GHz ~4.2 TB/s-eq = the twm CONSUMER CEILING, about the
+  H200's HBM rate. So on the H200 consumer and HBM ceilings coincide at v16 (both ~112-115 us for 481 MB); structure
+  (ring wait + between + epi + rest) = ~19 us (15%) of the consumer's life when bandwidth is free.
+- Ring depth (twm_go NSTG, H100 real, v16 sl life us s99/s1/s2): 8 = 156.8/142.2/148.1 | 6 = 157.8/143.2/148.8 | 4 =
+  161.1/145.3/152.3; alias NSTG 6 = 8. => the H100 stream is on the flat part above ~5 stages; the H200 (1.4x the bytes per
+  latency) needs ~1.4x the stages: 8 stages there ~ 5.7 here = still on the flat part. More bytes in flight is NOT the lever
+  (matches tk2f's deeper-ring DIAGs, all lost).

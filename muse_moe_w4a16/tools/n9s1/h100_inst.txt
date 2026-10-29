@@ -1,0 +1,65 @@
+### i_orc7g
+verify 16 sliding s99: clk 1.797 GHz life 149.8 us | life 136.0 | between-item wait 10.8 | item 116.6 (loop 116.3 of which ring wait 95.7; epi+rest 0.2) | items/warp 3.27 big 0.36
+verify 16 sliding s1: clk 1.797 GHz life 133.1 us | life 120.8 | between-item wait 10.4 | item 103.2 (loop 102.9 of which ring wait 83.5; epi+rest 0.2) | items/warp 3.09 big 0.73
+verify 16 sliding s2: clk 1.798 GHz life 140.9 us | life 127.9 | between-item wait 10.4 | item 109.4 (loop 109.2 of which ring wait 88.6; epi+rest 0.2) | items/warp 3.27 big 0.73
+verify 32 sliding s99: clk 1.791 GHz life 169.5 us | life 153.3 | between-item wait 12.9 | item 130.8 (loop 153.3 of which ring wait 121.0; epi+rest -22.5) | items/warp 5.21 big 0.73
+verify 32 sliding s1: clk 1.805 GHz life 186.2 us | life 169.8 | between-item wait 15.6 | item 140.6 (loop 149.0 of which ring wait 116.9; epi+rest -8.4) | items/warp 5.21 big 1.09
+verify 32 sliding s2: clk 1.805 GHz life 187.5 us | life 170.9 | between-item wait 15.6 | item 141.4 (loop 150.0 of which ring wait 117.9; epi+rest -8.6) | items/warp 5.21 big 1.09
+### i_orc0g
+verify 16 sliding s99: clk 1.801 GHz life 156.8 us | life 142.6 | between-item wait 7.8 | item 128.5 (loop 124.4 of which ring wait 26.0; epi+rest 4.1) | items/warp 3.27 big 0.36
+verify 16 sliding s1: clk 1.800 GHz life 142.2 us | life 129.2 | between-item wait 8.4 | item 114.7 (loop 110.6 of which ring wait 21.2; epi+rest 4.1) | items/warp 3.09 big 0.73
+verify 16 sliding s2: clk 1.801 GHz life 148.1 us | life 134.7 | between-item wait 7.7 | item 121.2 (loop 117.2 of which ring wait 22.3; epi+rest 4.0) | items/warp 3.27 big 0.73
+verify 32 sliding s99: clk 1.799 GHz life 180.3 us | life 163.8 | between-item wait 7.2 | item 148.6 (loop 164.2 of which ring wait 28.2; epi+rest -15.5) | items/warp 5.21 big 0.73
+verify 32 sliding s1: clk 1.784 GHz life 204.1 us | life 183.9 | between-item wait 7.6 | item 167.6 (loop 168.2 of which ring wait 31.6; epi+rest -0.6) | items/warp 5.21 big 1.09
+verify 32 sliding s2: clk 1.785 GHz life 202.9 us | life 182.9 | between-item wait 7.6 | item 166.5 (loop 168.4 of which ring wait 31.5; epi+rest -1.9) | items/warp 5.21 big 1.09
+### i_al0g
+verify 16 sliding s99: clk 1.791 GHz life 127.2 us | life 115.1 | between-item wait 5.1 | item 105.5 (loop 102.6 of which ring wait 6.5; epi+rest 2.9) | items/warp 3.27 big 0.36
+verify 16 sliding s1: clk 1.790 GHz life 117.7 us | life 106.4 | between-item wait 5.3 | item 97.1 (loop 94.1 of which ring wait 6.3; epi+rest 2.9) | items/warp 3.09 big 0.73
+verify 16 sliding s2: clk 1.808 GHz life 124.5 us | life 113.7 | between-item wait 6.2 | item 102.9 (loop 100.0 of which ring wait 6.6; epi+rest 2.9) | items/warp 3.27 big 0.73
+verify 32 sliding s99: clk 1.798 GHz life 152.7 us | life 138.6 | between-item wait 4.5 | item 128.9 (loop 144.4 of which ring wait 10.0; epi+rest -15.5) | items/warp 5.21 big 0.73
+verify 32 sliding s1: clk 1.795 GHz life 168.5 us | life 152.8 | between-item wait 5.2 | item 141.4 (loop 144.9 of which ring wait 9.8; epi+rest -3.5) | items/warp 5.21 big 1.09
+verify 32 sliding s2: clk 1.796 GHz life 167.2 us | life 151.7 | between-item wait 5.2 | item 140.5 (loop 145.2 of which ring wait 10.0; epi+rest -4.7) | items/warp 5.21 big 1.09
+verify 16 sliding s99: clk 1.793 GHz life 73.5 us | life 66.6 | between-item wait 7.8 | item 52.9 (loop 52.7 of which ring wait 31.9; epi+rest 0.2) | items/warp 3.27 big 0.36
+verify 16 sliding s1: clk 1.795 GHz life 66.0 us | life 59.9 | between-item wait 7.6 | item 46.8 (loop 46.6 of which ring wait 26.9; epi+rest 0.2) | items/warp 3.09 big 0.73
+verify 16 sliding s2: clk 1.796 GHz life 70.8 us | life 64.3 | between-item wait 8.3 | item 50.1 (loop 49.8 of which ring wait 29.0; epi+rest 0.2) | items/warp 3.27 big 0.73
+verify 32 sliding s99: clk 1.787 GHz life 103.9 us | life 93.8 | between-item wait 10.1 | item 74.0 (loop 88.8 of which ring wait 56.6; epi+rest -14.8) | items/warp 5.21 big 0.73
+verify 32 sliding s1: clk 1.784 GHz life 99.9 us | life 90.0 | between-item wait 10.2 | item 70.3 (loop 74.8 of which ring wait 42.6; epi+rest -4.5) | items/warp 5.21 big 1.09
+verify 32 sliding s2: clk 1.793 GHz life 101.0 us | life 91.5 | between-item wait 10.5 | item 71.1 (loop 75.7 of which ring wait 43.5; epi+rest -4.7) | items/warp 5.21 big 1.09
+## i_al0g_sp
+verify 16 sliding s99: clk 1.798 GHz life 126.6 us | life 115.0 | between-item wait 5.0 | item 105.6 (loop 102.7 of which ring wait 6.6; epi+rest 2.9) | items/warp 3.27 big 0.36
+   producer g2 spin 0.8 us per CTA over 1.09 g2 items/CTA
+verify 16 sliding s1: clk 1.779 GHz life 118.4 us | life 106.4 | between-item wait 5.1 | item 97.3 (loop 94.4 of which ring wait 6.3; epi+rest 2.9) | items/warp 3.09 big 0.73
+   producer g2 spin 1.1 us per CTA over 1.03 g2 items/CTA
+verify 16 sliding s2: clk 1.797 GHz life 124.8 us | life 113.3 | between-item wait 5.8 | item 103.1 (loop 100.2 of which ring wait 6.6; epi+rest 2.9) | items/warp 3.27 big 0.73
+   producer g2 spin 1.0 us per CTA over 1.09 g2 items/CTA
+verify 32 sliding s99: clk 1.803 GHz life 152.0 us | life 138.4 | between-item wait 4.4 | item 128.7 (loop 144.2 of which ring wait 10.2; epi+rest -15.5) | items/warp 5.21 big 0.73
+   producer g2 spin 0.4 us per CTA over 1.82 g2 items/CTA
+verify 32 sliding s1: clk 1.809 GHz life 167.0 us | life 152.6 | between-item wait 5.1 | item 141.3 (loop 144.8 of which ring wait 9.9; epi+rest -3.5) | items/warp 5.21 big 1.09
+   producer g2 spin 0.5 us per CTA over 1.94 g2 items/CTA
+verify 32 sliding s2: clk 1.808 GHz life 166.0 us | life 151.6 | between-item wait 5.2 | item 140.3 (loop 145.0 of which ring wait 10.1; epi+rest -4.7) | items/warp 5.21 big 1.09
+   producer g2 spin 0.5 us per CTA over 1.94 g2 items/CTA
+## i_orc0g_sp
+verify 16 sliding s99: clk 1.795 GHz life 156.6 us | life 142.0 | between-item wait 8.1 | item 127.7 (loop 123.7 of which ring wait 25.1; epi+rest 4.0) | items/warp 3.27 big 0.36
+   producer g2 spin 1.5 us per CTA over 1.09 g2 items/CTA
+verify 16 sliding s1: clk 1.814 GHz life 141.7 us | life 129.8 | between-item wait 8.3 | item 115.5 (loop 111.3 of which ring wait 21.6; epi+rest 4.2) | items/warp 3.09 big 0.73
+   producer g2 spin 1.7 us per CTA over 1.03 g2 items/CTA
+verify 16 sliding s2: clk 1.812 GHz life 148.6 us | life 136.0 | between-item wait 8.1 | item 121.9 (loop 117.8 of which ring wait 22.6; epi+rest 4.1) | items/warp 3.27 big 0.73
+   producer g2 spin 1.7 us per CTA over 1.09 g2 items/CTA
+verify 32 sliding s99: clk 1.810 GHz life 179.6 us | life 164.2 | between-item wait 7.3 | item 149.0 (loop 164.0 of which ring wait 28.1; epi+rest -15.0) | items/warp 5.21 big 0.73
+   producer g2 spin 1.0 us per CTA over 1.82 g2 items/CTA
+verify 32 sliding s1: clk 1.796 GHz life 204.0 us | life 185.1 | between-item wait 7.9 | item 168.3 (loop 169.0 of which ring wait 32.6; epi+rest -0.7) | items/warp 5.21 big 1.09
+   producer g2 spin 1.0 us per CTA over 1.94 g2 items/CTA
+verify 32 sliding s2: clk 1.799 GHz life 203.0 us | life 184.5 | between-item wait 8.1 | item 167.5 (loop 169.2 of which ring wait 32.4; epi+rest -1.6) | items/warp 5.21 big 1.09
+   producer g2 spin 0.9 us per CTA over 1.94 g2 items/CTA
+## i_n6
+verify 16 sliding s99: clk 1.791 GHz life 157.8 us | life 142.7 | between-item wait 7.0 | item 130.3 (loop 126.9 of which ring wait 28.6; epi+rest 3.3) | items/warp 3.27 big 0.36
+verify 16 sliding s1: clk 1.786 GHz life 143.2 us | life 129.1 | between-item wait 7.6 | item 116.1 (loop 113.1 of which ring wait 23.6; epi+rest 3.0) | items/warp 3.09 big 0.73
+verify 16 sliding s2: clk 1.786 GHz life 148.8 us | life 134.3 | between-item wait 6.9 | item 122.1 (loop 118.7 of which ring wait 23.7; epi+rest 3.4) | items/warp 3.27 big 0.73
+## i_n4
+verify 16 sliding s99: clk 1.794 GHz life 161.1 us | life 146.0 | between-item wait 7.5 | item 133.5 (loop 130.5 of which ring wait 33.4; epi+rest 2.9) | items/warp 3.27 big 0.36
+verify 16 sliding s1: clk 1.790 GHz life 145.3 us | life 131.3 | between-item wait 6.4 | item 120.4 (loop 117.5 of which ring wait 28.8; epi+rest 2.9) | items/warp 3.09 big 0.73
+verify 16 sliding s2: clk 1.815 GHz life 152.3 us | life 139.7 | between-item wait 6.9 | item 128.1 (loop 125.2 of which ring wait 31.0; epi+rest 2.9) | items/warp 3.27 big 0.73
+## i_al_n6
+verify 16 sliding s99: clk 1.821 GHz life 125.6 us | life 115.6 | between-item wait 5.2 | item 105.8 (loop 102.8 of which ring wait 6.5; epi+rest 3.1) | items/warp 3.27 big 0.36
+verify 16 sliding s1: clk 1.818 GHz life 116.3 us | life 106.8 | between-item wait 5.5 | item 97.2 (loop 94.3 of which ring wait 6.2; epi+rest 2.9) | items/warp 3.09 big 0.73
+verify 16 sliding s2: clk 1.820 GHz life 123.7 us | life 113.7 | between-item wait 6.2 | item 103.0 (loop 100.1 of which ring wait 6.6; epi+rest 2.9) | items/warp 3.27 big 0.73
