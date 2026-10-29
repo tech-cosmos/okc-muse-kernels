@@ -3320,3 +3320,21 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   v1 sl 142.10 vs 141.97, v1 full 158.65 vs 157.60, d16 sl 189.24 vs 188.69, d16 full 292.06 vs 292.15 = tie;
   v16 sl 293.17 vs 294.71, full 443.38 vs 444.37 (+1.5/+1.0 = the known HOT128 no-hot-expert cost, n7s36: +1.5..2.2;
   -14..-21 us on the ~1/3 of T=128 inputs with 1-2 hot experts). Verdict: no v171 gate needed; v170 stays.
+
+## n7s39 (2026-10-29 11:35Z - ~12:25Z): self-picked (no lead lane after 11:30Z, done in n7s38): HOT128/HOT256 launch-order cost -> HOT_ET, branch only; 0 judge runs, 0 Modal
+- Cause of HOT128's +1.5..2.2 us on T=128 calls with no hot expert (n7s36): moe_hot triggered moe_twm only AFTER its own
+  griddepcontrol.wait (gather complete), so twm's launch was exposed after the gather instead of overlapping it.
+- HOT_ET (r-layer branch moe/layer-hotet 4a9f62d, moe_src.py only): moe_hot with per > 0 triggers launch_dependents before
+  its wait; its CTA 0 sets meta[67] bit 30 after the wait (moe_route zeroes meta[67]; the item counter uses & 0xFFFFF);
+  moe_twm with hx: tid 0 polls meta[67] bit 30 (ld.acquire.gpu + fence.proxy.async.global), then __syncthreads, in place of
+  the entry wait. moe_twq (hx, per = 0) keeps the old order. Ordering argument: gather triggers after its own wait, so
+  route is complete before moe_hot launches; twm sees gather output only via CTA 0's release after its wait.
+- files_eq v170 vs HOT_ET: verify 16/32 sl+full 3 seeds bitwise (v1 diffs = decode run-to-run, as on main); bench test 13/13.
+- H100 ab_files, tuner pinned (TUNE = defaults only; picks differ between modules otherwise), 2 x 10 rounds, seed 99
+  (no T=128 hot expert): v16 sl 295.8/294.9 -> 296.5/296.7 (+0.7..1.8), v16 full 445.5/446.3 -> 441.8/442.3 (-3.7..-4.1),
+  v32 sl 371.9/371.5 -> 370.5/370.1 (-1.4), v32 full 623.7/623.9 -> 623.0/622.7 (-0.7..-1.2). A __nanosleep(256) poll
+  back-off is worse (v16 sl 297.1-297.7). nsys (warm, back-to-back replays) v16 sl: twm starts 88.3 -> 87.2 us, call ends
+  301.2 -> 299.7 (-1.5): the sliding +1 shows only with cold L2; cause not found.
+- Net H100 ~ -0.05% score (v16 load ~0, v32 load -80 us). ~1 us/call: a BUNDLE item (lead 04:25Z rule), not for a check alone.
+  Tools: r-layer branch muse_decode_layer/tools/n7s39/run1.py (nsys driver: <file> "<load> <layer>") + ana.py (per-kernel
+  median start/end from the sqlite export). Worktree /tmp/n7s39/wt (upstream origin/moe/layer-hotet).

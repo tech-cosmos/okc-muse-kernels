@@ -1,5 +1,7 @@
 ## n7s35 10:33Z idle (no lead decision since 09:35Z; Handoff moe/layer-hotdyn 130a692 pending layer). 0 runs.
 # STATE-moe
+## n7s39 ~12:25Z: self-picked HOT_ET (moe_hot triggers twm before its wait; twm polls a flag): r-layer branch moe/layer-hotet 4a9f62d,
+## bitwise, test 13/13; H100 pinned A/B v16 sl +1 / full -4, v32 -1.4/-1 us (~-0.05%): BUNDLE item, not on main. 0 runs. NOTES n7s39.
 ## n7s38 11:55Z: lead 11:30Z v1/d16 regression = NONE (H100 ab_files v168 vs v170 tie on v1/d16; judge picks identical; v169/v170 ratios inside
 ## the 19-run range, SGLang drew slow too). v170 stays on r-layer main. 0 runs. Nothing queued.
 ## n7s37 11:10Z idle: no lead decision after 10:40Z (all done). d16 variance closed on paper (= d32 pure bytes, <= 16 tok/expert). 0 runs.
