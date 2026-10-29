@@ -3242,3 +3242,7 @@ No COORD change since lead 06:50Z task (n7s18 idea already posted). Waiting for 
 - Code reverted from main (both were DIAG-only, run-time l2h bits 14/15 behind TK2F_XPFK/TK2F_WAVEK): tools/n7s23/
   wave_xpf_dead.diff + tools/n7s23/mkdiag.py (DIAG copy builder; apply the diff first).
 - Budget 10-29: moe checks 9/20 (2 this session), 0 Modal.
+
+## n7s24 (2026-10-29 09:18Z - 09:23Z): idle; no lead decision since 08:55Z; 0 judge runs, 0 Modal
+- n7s23 closed the tk2f d1/v1 lane (incl. lean T<=4 routing on paper) 2 min before this session. Lossless weight/scale
+  compression re-checked against the record (codes 4.0 bits, S6 scales dead n20). Asked the lead to pause moe (COORD Requests n7s24).
