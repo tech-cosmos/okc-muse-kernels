@@ -2562,3 +2562,24 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Value: <= ~4 us on v32 sl/full (335/512 us) = ~0.15% score before any straggler/HBM-competition cost. DEAD, not built.
 - Same reasoning closes the other T=256 GEMMs (qkv ~9.7 GFLOP, FR pooler 17 GFLOP): compute-bound at m256, 12-bit bytes don't help.
 - => proj still has no >= 1% item; waiting for layer's H200 table to name a projection/glue piece (COORD Requests n7s1).
+
+## n7s3 (2026-10-29 05:17Z - ~06:10Z): lead 05:35Z lane (b) T=256 boundaries: BUILT BNOS (patch for layer), H200 v32 -2.3/-1.05 us; 0 judge runs, Modal 4.4 GPU-min
+- Bench dev/n7s3/bnd.py (H100; graph: L2 flush -> cuBLAS F.linear writing the branch -> X, minus flush -> F.linear; RF=0 dirty /
+  RF=1 clean flush; variants from ext_*.py). T=256, N=8192, us (dirty | clean flush): empty launch 1.5-1.6; layer _boundary
+  bnd1 9.8-11.7 | 13.3-13.9, bnd2 10.3-11.7 | 13.8; same-bytes copy kernel row-per-program 8.7-10.2 | 11.7-12, 2048 small CTAs
+  7.9-8.8 | 11.3; read-only (no stores) 4.2-5.1. So the 12 MB of stores cost ~4-5 us: writes are the expensive part.
+- DEAD structures (all measured, bitwise-equivalent math): Triton occupancy (base 16 warps = 97 regs -> 1 row/SM; lazy-load
+  variants at 57/32 regs = 2 rows/SM: +0..0.8); maxnreg caps (spills, +4..9); CUDA bndc = row over a cluster of CS CTAs with
+  the 2 row sums via DSMEM + cluster barriers: CS 2/4/8 +3.5..5.5 us (without the barriers, a timing probe, CS 2-8 tie base:
+  small CTAs alone don't help); stores moved after the 2nd cluster barrier: no help; bndp = 1024 thr x RPC rows per CTA, the
+  per-column vectors loaded once + next row's loads before the reductions: RPC 1/2 +1..1.3, 3/4 +3..9.
+- WIN = BNOS (ext_nos.py, then layer): bnd1 does not store the FP32 stream1 (8 MB at T=256, read only by bnd2 ~250 us later)
+  but stores rb (1 float/row); bnd2 recomputes stream1 = a1*s0 + b1*(o_out*rb) from the layer input stream, the o GEMM output
+  (BF16, kept alive) and res1, same Triton expression as bnd1 -> bitwise the same. Standalone: bnd1 -3.5..-4.5, bnd2 +1.3..1.5.
+- Layer (copy of r-layer main 7774ded in /tmp; patch muse_bf16_proj/dev/n7s3/bnos_layer.patch on layer.py): _boundary gets
+  NOS 1/2 (+ rb_ptr/x1_ptr/a1_ptr/b1_ptr), _tail(nos=...), BND_NOS_TOKENS = (256,), TUNE key "bnos". files_eq vs main: verify
+  16/32 bitwise identical (both seeds). bench test 13/13 PASS (no test case reaches T=256: files_eq covers it).
+  H100 ab_files 4 rounds, us: v32 sl -2.8 / -1.8, full -1.0 / -2.2 (two runs); with T=128 on too: v16 -0.6/-0.2 then +0.6/+2.1
+  (the 256-only file, T=128 path = base, also drew +1.2/+1.5: v16 noise ~2 us) -> T=128 left off (TUNE option).
+  H200 Modal 1 round (tools/h200.py, bench verify): v32 sl 330.77 -> 328.48 (-2.3), full 511.07 -> 510.02 (-1.05); v1/v16 +-0.4.
+  ~0.1% score: a bundle item (lead 04:25Z rule), handed to layer (COORD Handoffs).
