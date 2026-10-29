@@ -2735,3 +2735,20 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   peak (2048 BF16 FMA/clk/SM) grows by +0.055. Additive would give ~0.12 at N128, max() ~0.063: measured is halfway,
   i.e. Cooperative's 2 consumer WGs (each 64 rows of the tile, own dq + wgmma, wait<K_BLOCK_MAX-1>) hide ~half of the
   added tensor time behind the other WG's convert. Consistent with lead's survey ('overlap across WGs, not within one').
+- 14:45Z lead switched the yardstick to vLLM HUMMING (clone /tmp/humming @ main, run from source with PYTHONPATH, tqdm/
+  tabulate stubbed in /tmp/hstub; benchmarking only). Format: weights float4e2m1, scales float8e4m3 group 16 (= NVFP4
+  without the FP32 tensor scale), BF16 act/out, Humming's own heuristics (get_heuristics_config). Tools dev/n7s12/hbench.py
+  (dense) and hmoe.py (INDEXED MoE on r-moe reference.generate_input routings, ep8 busiest, 32 local experts, times ONLY
+  gemm13 + gemm2 in one graph: no gather/silu/norm/combine, inputs pre-gathered = a lower bound for a Humming MoE).
+  Both: CUDA-graph replay, 256 MB read flush before each replay, median, GPU lock.
+- Dense H100, N=8192 K=4096 (one gate/up matrix, 18.9 MB): M1 16.3, M8 16.1, M16 17.0, M32 20.0, M64 22.0, M128 26.9,
+  M256 39.2 us = 1.1-1.2 TB/s at M <= 16 (picks: M<=16 mma.sync + cp.async stream-K 1 CTA/SM (8|16,128,128); M>16 wgmma
+  TMA warp-spec 2 CTAs/SM (M,128,64)). Cross-check: Humming's OWN published H200 results
+  (benchmarks/results/h200/dense_n8192_k8192_g0, W4A16 int4) = 22.4 us at M1-16 = 1.50 TB/s on a 4.9 TB/s part.
+- MoE H100 (us; ours = r-moe main 68f0f93 bench.py bench = FULL MoE, seeds 7/8/9, minus empty graph; Humming seeds 7/11):
+    bs     1      8      16        32        128       256
+    ours   39.4   86.2   106.5     153.5     228.0     265.5
+    Hum.   49.6   115.5  135-146   163-192   314-338   358-365    (1.7-2.65 TB/s of distinct-expert W)
+  Humming's two GEMMs alone are 1.06-1.48x slower than our whole MoE at every board shape. Verdict: no shape where Humming
+  beats us; nothing to copy. Its overlap model (several CTAs/SM, stream-K, mma.sync at small M) is already what our tk2f/
+  twm beat. (Both external yardsticks, CUTLASS ex55 and Humming, are well below twm/tk2f on the H100.)
