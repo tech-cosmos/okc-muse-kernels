@@ -3379,3 +3379,6 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   us sl/full: d1 66.1/77.1 (best-ever d1 sl) d16 131.8/207.3 d32 155.6/307.7 v1 110.8/126.7 v16 260.0/350.4 v32 326.0/504.5.
 - Ranked <= 1 us/call item list posted under COORD Requests (row-quant tail, ph2 extra rows, HOT_ET v16 sl +1, HOT128
   no-hot +1.5, tk2f prologue). moe paused per lead. Budget 10-29: layer checks 9/20 (3 submits), moe checks 9/20.
+
+## n7s45 2026-10-29T13:01Z
+- Idle: moe paused per lead 12:45Z (no newer decision; ~/STOP-moe not yet touched). 0 judge runs.
