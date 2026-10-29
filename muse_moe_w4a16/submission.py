@@ -99,6 +99,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
 #define TWM_EPI 0        // n6s3: staged, rolled tw_item epilogue (python TWM_EPI)
 #define TWM_HOTC 0       // n6s3: compile moe_twm's hot class (cl 3) in (python: on iff TWM_HOT / TWM_HOT_M set)
+#define TK2F_REL 0       // n6s6: tk2f/tk2h gemm13 publishes by a helper warp NC + 1 (python TK2F_REL)
 #define TWM_REL 0        // n6s4: moe_twm gemm13 release by helper warp 9 (python TWM_REL; n6s3 mk_rel.py)
 #define TWM_KSC 1        // n6s4: compile moe_twm's K-split tail code in (python: on iff TWF_SPLIT / TWF_SPLIT_M set; 2 = both builds, per call)
 #define DQW 0            // n22: dq() rotations on the FMA pipe (python DQW; DIAG builds both)
@@ -3750,7 +3751,31 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
   }
 }
 
-template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA = false, int PF = 0>
+// n6s6 TK2F_REL: the consumers' gemm13 publishes (bar.sync 2 + thread-0 gpu fence + atomicAdd at each segment end)
+// move to a helper warp (NC + 1): consumers arrive on g_tkrel[k & 7] (release.cta) and go on with the next row. gemm13
+// segments are 256 rows on 256-aligned row-space boundaries (tk2f GS 8 and tk2h), so the helper derives the k-th publish
+// (segment a0 / 256 + k, its row count, its counter) from the CTA's rows [a0, a1) alone. Its mbarrier wait (acquire)
+// + gpu fence (cumulative) order every consumer's inter stores before the count, as bar.sync + thread-0 fence did.
+__shared__ __align__(8) uint64_t g_tkrel[8];
+template <int NC, int DYN, int FN, int GS, int MRG, int PF>
+__host__ __device__ constexpr bool tk2f_rel_on() {
+  return TK2F_REL && NC == 8 && !DYN && !FN && !(PF & 16) && !(PF & 524288) && !(PF & 65536) && !(PF & 256) &&
+         (MRG == 1 || MRG == 2 || (GS == 8 && MRG == 0));
+}
+__device__ __forceinline__ void tk2f_rel_arrive(int seg_start, int r0) { mbar_arrive(&g_tkrel[((seg_start >> 8) - (r0 >> 8)) & 7]); }
+template <bool SEGC>
+__device__ __forceinline__ void tk2f_rel_helper(int* cnt, int a0, int a1) {
+  if (a0 >= a1) return;
+  const int s0 = a0 >> 8, s1 = (a1 - 1) >> 8;
+  for (int s = s0; s <= s1; ++s) {
+    const int k = s - s0;
+    mbar_wait(&g_tkrel[k & 7], (k >> 3) & 1);
+    __threadfence();
+    atomicAdd(SEGC ? cnt + 64 + s : cnt, min(a1, (s + 1) * 256) - max(a0, s * 256));
+  }
+}
+
+template <int NRT, int NC, int NSTG, bool GATED, int KPS, bool SA = false, int PF = 0, bool REL = false>
 __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* __restrict__ gs,
                                              const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
@@ -3913,10 +3938,14 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
         }
       }
       if (R + 1 == seg_end || R + 1 == r1) {  // publish this CTA's rows of the segment
+        if constexpr (REL) {
+          tk2f_rel_arrive(seg_start, r0);
+        } else {
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
         if (tid == 0) {
           __threadfence();
           atomicAdd(BAL ? cnt + 64 + seg_start / RPE : cnt, R + 1 - max(seg_start, r0));
+        }
         }
       }
     } else if (NC == 8 || ct < 256) {
@@ -4452,7 +4481,7 @@ __device__ __forceinline__ void tk2x_consume(const uint32_t* slut, const float* 
 // s12 MERGED consumer (tk2h): both phases in ONE run-time loop, so the kernel holds one main-loop body per row kind
 // (GS 8: 1 body; GS 16: 2) instead of 2 / 4. GS16's loss was instruction-cache misses: ncu stall_no_instruction at
 // layer d1 923 -> 9418 (118 KB kernel vs 65 KB) with no 2-group row at all.
-template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false, bool SLOT = false, bool S6 = false>
+template <int NC, int NSTG, int KPS, bool SA, int GS, bool PSC = false, bool SLOT = false, bool S6 = false, bool REL = false>
 __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* __restrict__ gs13,
                                              const float* __restrict__ gs2, const __nv_bfloat16* X,
                                              __nv_bfloat16* inter, float* Y, int* cnt, int need, int a0, int a1, int b0,
@@ -4519,10 +4548,14 @@ __device__ __forceinline__ void tk2h_consume(const uint32_t* slut, const float* 
       else
         tk2g_row<0, NC, NSTG, false, KPS, SA, false, true, SLOT, S6>(slut, xf, xs, Out, R - seg_start, off, n, gsc, s_red, smem, full, empty, st, ph, rb, gated, s_srt);
       if (gated && (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
+        if constexpr (REL) {
+          tk2f_rel_arrive(seg_start, r0);
+        } else {
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
         if (tid == 0) {
           __threadfence();
           atomicAdd(PSC ? cnt + 64 + seg_start / 256 : cnt, R + 1 - max(seg_start, r0));
+        }
         }
       }
     }
@@ -4947,7 +4980,7 @@ __device__ __forceinline__ int tk2f_proute(const int* __restrict__ ids, int nrou
 }
 
 template <int NC, int NSTG, int KPS, bool DYN, bool FN = false, bool SA = false, int GS = 8, int MRG = 0, int PF = 0>
-__global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
+__global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>()) * 32, 1) moe_tk2f(
     const uint4* __restrict__ Wq13, const uint32_t* __restrict__ S13, const uint4* __restrict__ Wq2,
     const uint32_t* __restrict__ S2, const uint32_t* __restrict__ lut, const float* __restrict__ gs13,
     const float* __restrict__ gs2, const __nv_bfloat16* __restrict__ X, const int* __restrict__ ids, int nroutes,
@@ -4981,6 +5014,8 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], NC * 32); }
     for (int i = 0; i < 4; ++i) mbar_init(&ridb[i], 1);
     mbar_init(&xrdy, NC * 32);
+    if constexpr (tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>())
+      for (int i = 0; i < 8; ++i) mbar_init(&g_tkrel[i], NC * 32);
     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
   }
   if constexpr (FP) {  // s15: the producer warp routes for itself and streams at once (see tk2f_proute)
@@ -5155,6 +5190,13 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
     a0 = b * q1 + max(0, b - e1); a1 = a0 + q1 + (b >= e1);
     b0 = b * q2 + min(b, e2); b1 = b0 + q2 + (b < e2);
   }
+  constexpr bool REL = tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>();
+  if constexpr (REL) {
+    if (warp == NC + 1) {  // n6s6 TK2F_REL helper
+      if (lane == 0) tk2f_rel_helper<MRG ? MRG == 2 : (PF & 32) != 0>(cnt, a0, a1);
+      return;
+    }
+  }
   int st = 0, ph = 0;
   if (warp == NC) {
     if (lane == 0) {
@@ -5185,7 +5227,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   int rb = 0;
   if constexpr (MRG) {
-    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0, (PF & 1024) != 0>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
+    tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0, (PF & 1024) != 0, REL>(slut, gs13, gs2, X, inter, Y, cnt, n13, a0, a1, b0, b1, s_rs13, s_rs2, s_e, s_off,
                                         s_srt, s_red, smem, smem + NSTG * NC * KPS * 72, full, empty, st, ph, rb);
     return;
   }
@@ -5275,7 +5317,7 @@ __global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(
   }
   if (FP) asm volatile("bar.sync 3, %0;" ::"n"((NC + 1) * 32) : "memory");  // the producer initialized the ring
   if (FP && a0 >= a1) mbar_arrive(&xrdy);  // no gemm13 rows here: release the producer's gate at once
-  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
+  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF, REL>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
                                     empty, st, ph, rb, &xrdy);
   tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
                                      empty, st, ph, rb);
@@ -5327,7 +5369,7 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
     grid = nsm;
   }
   cudaStream_t st = at::cuda::getCurrentCUDAStream();
-  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM, st, false,
+  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>()) * 32, SMEM, st, false,
       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
       (const float*)gs13, (const float*)gs2, (const __nv_bfloat16*)x, (const int*)ids, nr, start, count, (int*)meta,
       (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D, (const float*)tw, (const float*)w1,
@@ -5698,6 +5740,7 @@ TWM_HOTC_FORCE = None
 
 TWM_KSC_FORCE = None
 TWM_REL = 1  # n6s4: moe_twm gemm13+gemm2 releases by a helper warp (H200 DIAG 34547d56: v16 -0.5, v32 -1.4 us every seed; H100 noise)
+TK2F_REL = 0  # n6s6: tk2f/tk2h gemm13 publishes by a helper warp (tools/n6s6/patch_rel.py)
 TWM_KSC_DUAL = 1  # n6s4 (H200 DIAG 3ded8769: v16 -1.9 us every seed, v32 tie): with a K split set for some M, build moe_twm with and without the split code (calls without a split take the smaller one)
 
 
@@ -5762,7 +5805,7 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
 
 def _lib():
     global _LIB
-    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL)))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
+    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL), int(TK2F_REL)))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
     if _LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = CUDA_SRC.replace("#define TK2F_L2H 0 ", f"#define TK2F_L2H {int(TK2F_L2H)} ")
@@ -5773,6 +5816,7 @@ def _lib():
         src = src.replace("#define TWM_HOTC 0 ", f"#define TWM_HOTC {int(_hotc())} ")  # n6s3
         src = src.replace("#define TWM_KSC 1 ", f"#define TWM_KSC {int(_ksc())} ")  # n6s4
         src = src.replace("#define TWM_REL 0 ", f"#define TWM_REL {int(TWM_REL)} ")  # n6s4
+        src = src.replace("#define TK2F_REL 0 ", f"#define TK2F_REL {int(TK2F_REL)} ")  # n6s6
         if TK2F_S6 or DIAG:  # n20
             src = src.replace("#define TK2F_S6K 0 ", "#define TK2F_S6K 1 ")
         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
@@ -5790,7 +5834,7 @@ def _lib():
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_l2h2", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
-        _LIBX[(int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL))] = _LIB
+        _LIBX[(int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL), int(TK2F_REL))] = _LIB
     return _LIB
 
 
