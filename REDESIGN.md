@@ -130,3 +130,7 @@ the dq/tensor serialization (~50 us at bs256) reopens.
   by overlap tricks within one warp's dq->MMA chain.
 - What's left in big-M: per-item fixed cost (H200 warm N8 item 34.4 us vs ~26 us of stage loop at 1.98 GHz: up to ~8 us per
   item, ~5 items per CTA at bs256) and the drain (~20 us). Both are R1's targets (section 4); measure the per-item part first.
+
+## 6d. n7s1: R1 gate measured on the H200 with board inputs (tools/n7s1/tlb.py, NOTES n7s1): FAIL
+- twm SM-idle bs128 8.3-16.1 %, bs256 9.2-15.3 % (gate: >= 20 %). Drain 10-26 us, ramp ~4, inter-item gaps ~0.6 us.
+  R1's reachable part (drain minus split tax) is <= ~5-8 us per call: not built. R2 <= ~1 us (n5s28). Both closed.

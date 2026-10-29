@@ -1,6 +1,12 @@
 # STATE-moe
 
-## NOW (n6s6 end, 2026-10-29 ~01:40Z): main b39e4d2 (= 7d2a079 kernels; TK2F_REL 0); layer branch moe/layer-twm 8309328
+## NOW (n7s1 end, 2026-10-29 ~02:00Z): main = b39e4d2 kernels (unchanged); layer branch moe/layer-twm 8309328 (lead's call)
+- n7s1: REDESIGN R1 gate run on the H200 (Modal, board bs128/bs256 inputs, tools/n7s1/tlb.py): twm SM-idle 8-16 %
+  (drain 10-26 us, ramp ~4, gaps ~0.6) < the 20 % gate -> R1 NOT built (net <= ~5-8 us after split tax). R2 ceiling
+  <= ~1 us by n5s28's TK2FN result -> not built. Every moe-lane item >= 5 us/call is measured dead (NOTES n7s1 list).
+  Lane request posted (COORD Requests n7s1). Budget 10-29: moe checks 5/20, layer 1, submits 0, Modal 11.4/60.
+
+## WAS-n6s6 (n6s6 end, 2026-10-29 ~01:40Z): main b39e4d2 (= 7d2a079 kernels; TK2F_REL 0); layer branch moe/layer-twm 8309328
 - n6s6 TK2F_REL (tk2f/tk2h gemm13 publishes by a helper warp; tools/n6s6/patch_rel.py ports it to any copy): judge DIAG
   8c5f1376: tk2h (layer T=32) d32 -0.75 us every seed; tk2f 1-group paths d1/v1 +0.25..0.3, d16 tie. moe default 0; layer
   branch has TK2F_REL 2 (tk2h only), validate ALL OK. ~0.1% layer score: not worth a check on its own.

@@ -2966,3 +2966,33 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   moe board default stays TK2F_REL 0 (board runs no tk2h). Layer: TK2F_REL 2 on branch moe/layer-twm (worth ~0.1% of
   the layer score: d32 only). Not worth a check alone.
 - Budget 10-29 so far: moe checks 5/20 (+8c5f1376 DIAG), layer 1/20, submits 0, Modal 9/60 min.
+
+## n7s1 (2026-10-29 01:33Z - ~02:00Z): REDESIGN R1 gate on the H200 with BOARD inputs = FAIL (idle 8-16%); R2 below bar; 0 judge runs, Modal 2.3 min
+- Tool: muse_moe_w4a16/tools/n7s1/tlb.py (TWM_TL build of main b39e4d2; reference bs128/bs256 ep8 seeds 1-4; full call =
+  graph replay cold L2; then one stamped call after a 512 MB flush; per CTA: busy = sum(item end - start), ramp = first
+  item start - min CTA start, gaps between items, drain = last CTA exit - own last item end). Usage in its header.
+  GOTCHA: a script that does sys.path.insert(0, ".") from the problem dir imports the STOCK submission.py, not the TL copy
+  (stamps = garbage); append "." instead.
+- H200 (Modal, 2.3 GPU-min), us:
+    bs128 s1-s4: call 195.4/204.2/162.6/166.2, twm span 185.2/197.0/152.4/155.8 (call - span 7-10), busy/CTA
+      155.4/180.6/135.1/136.6, ramp 3.7-4.3, gaps 0.6-0.9, drain 25.6/11.5/12.5/14.7 => idle 16.1/8.3/11.3/12.3 %
+    bs256 s1-s4: call 214.9/232.9/213.2/206.0, span 200.1/217.9/200.0/191.1 (call - span 13-15), busy 180.5/184.6/174.2/
+      173.5, ramp 3.9/22.3 (moe_hot ran: its 32 SMs start twm late, not lost work)/4.2/4.2, gaps 0.6/0.8/8.8/0.6,
+      drain 15.0/10.2/12.9/12.8 => idle 9.8/15.3/12.9/9.2 %
+  Items (H200): gemm13 RT4 N8 36-37 us, N16 39-44, N32 45-48; gemm2 N8 34-35 at bs128 but 21-23 at bs256 (same bytes,
+  same stage count: late light items get HBM share while heavy RT2 items are consumer-bound) => N8 items are HBM-share
+  bound at ~3.9 TB/s aggregate (= n5s15's 4.06 practical rate).
+  H100 same tool: idle 9.7-16 %, drain 12-20, gaps 3-11 (DRAM-bound, as always).
+- Verdict: REDESIGN gate (idle >= 20 %, >= 40 us at bs256) FAILS. What R1 could remove = drain 10-15 us (bs128 s1 25.6 is
+  the 4.18-wave quantization) + gaps ~1 us, minus its split tax (proj n5s11: ~3 us per K piece; s20: AUTO halves cut ~9 us
+  of tail when they run but half items cost ~half of that back; quarters lose). Realistic net <= ~5-8 us at bs128/256 for
+  a multi-session rewrite of twm's scheduler: not built.
+- R2 (column-stationary gemm2 + norm in registers, decode): ceiling by the record = what TK2FN's fused tail did not
+  already capture. n5s28: the fused ticket tail costs as much as norm2 (the store -> fence -> ticket -> spin -> reload chain
+  is latency); R2 only drops the y32 reload (~1 L2 trip, ~0.5-1 us) and still needs a grid barrier: <= ~1 us/call,
+  under the 5 us bar. Not built.
+- Also re-read (no new test): s16/s17 per-item ring cost (twm co-bound, TWM_KPS 2 merged copies = tie), s19/s20 tail
+  splitting (fixed, AUTO 1022/1023, quarters). Nothing in moe's lane is unmeasured at >= 5 us/call.
+- routegather is 3.0 us (bs128) / 5.0 us (bs256) on the judge profile (a4054bf3), serial before twm; a faster T=256
+  routing (one counting CTA + parallel gather) is worth <= ~2 us at bs256 (~0.15 % board); in-layer the layer's
+  moe_gathern does the pre-expert norm too. Not built.
