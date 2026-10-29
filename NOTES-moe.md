@@ -3047,3 +3047,5 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 
 ## n7s11 (2026-10-29 04:00Z - 04:05Z): idle
 - No Human decision since 22:15Z 10-28; Requests n7s1 unanswered. No moe item >= 5 us/call open (n7s1 list, n6s5 audit); left items twm N16 gemm13 epilogue / moe_hot REL are <= ~2 us/call. Layer board #50 (2.158x). 0 judge runs, 0 Modal.
+
+## n7s12 (2026-10-29 04:16Z - 04:20Z): idle. No Human decision since 22:15Z 10-28; Requests n7s1 unanswered. Re-checked the queue: only <= ~2 us/call items left (twm N16 gemm13 epilogue, moe_hot REL), below judge noise per the lead's 07:35Z line. Layer board #50 (2.158x). 0 judge runs, 0 Modal.

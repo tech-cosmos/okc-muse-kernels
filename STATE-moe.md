@@ -1,6 +1,8 @@
 # STATE-moe
 
-## NOW (n7s11, 2026-10-29 04:05Z): idle, no lead answer to Requests n7s1; 0 runs. Layer board still #50 = the cutoff (2.158; #1 2.403).
+## NOW (n7s12, 2026-10-29 04:20Z): idle, no lead answer to Requests n7s1; 0 runs. Layer board #50 = the cutoff (2.158). moe board #1 dolanzhao 2.689x (ours 2.279x).
+
+## WAS-n7s11 (04:05Z): idle (same; #50)
 
 ## WAS-n7s10 (03:50Z): idle (same; #50)
 
