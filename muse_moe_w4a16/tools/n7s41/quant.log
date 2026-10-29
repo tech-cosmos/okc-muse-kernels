@@ -1,0 +1,4 @@
+decode 1 quantization tail us/call per seed 0.38 0.57 0.38 0.38 0.57 mean 0.46
+decode 16 quantization tail us/call per seed 1.53 1.34 1.53 1.34 1.91 mean 1.53
+decode 32 quantization tail us/call per seed 2.29 2.48 2.29 1.91 2.10 mean 2.21
+verify 1 quantization tail us/call per seed 1.15 1.72 1.34 1.53 1.53 mean 1.45

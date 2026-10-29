@@ -3341,3 +3341,32 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 ## n7s40 (2026-10-29 11:45Z - 11:48Z): idle; no lead decision after 11:30Z (done n7s38); 0 judge runs, 0 Modal, no code
 - Layer board: tech-cosmos #55 at 2.158x (#1 pjmullin3 2.403, #50 ~2.166). HOT_ET (moe/layer-hotet 4a9f62d) still a bundle item only.
 - Correction: n7s38/n7s39 end times written as ~11:55Z/~12:25Z were estimates past the real clock (n7s40 started 11:44Z).
+## n7s41 (2026-10-29 12:01Z - ~12:15Z): lead 12:00Z (1) HOT_ET -> layer v171; (2) d16/d32 expert stream efficiency step 1 = premise does NOT hold on the H200; 0 judge runs, 0 Modal
+- (1) r-layer main d9553b2 = v171: cherry-pick of moe/layer-hotet 4a9f62d (moe_src.py + submission.py + tools/n7s39),
+  build.py reproduces submission.py byte-for-byte, bench test 13/13 PASS. No check (lead: bundle item).
+- (2) No new DIAG needed: the n7s22 H200 DIAG 81391142 (stamped tk2f GS8, layer routings, 5 seeds x d1/v1/d16/d32) already
+  has per-CTA stamps for d16/d32. Re-analysed with the routings decoded from its _DIAG_R (tools/n7s41/, data/81391142.json).
+  lstsq over the 20 inputs, E = distinct local experts, x = extra 8-token groups (experts with > 8 tokens), us:
+    ph1 (prod1st -> median ph1 end)  = 3.99 E + 2.22 x + 2.94   (resid sd 0.40)
+    transition (ph1end med -> ph2 data med) = 0.30 E - 0.27 x + 0.78 (0.26)
+    ph2 (ph2 data -> median end)     = 2.11 E + 2.08 x - 0.28   (0.27)
+    last CTA end (from first start)  = 6.54 E + 3.90 x + 5.71   (0.45)
+  => H200 marginal = 6.54 us per expert = 28.3 MB at 4.33 TB/s (ph1 4.73, ph2 4.47 TB/s marginal): ~96% of Modal's
+  contiguous-stream asymptote (4.5) and ABOVE the judge-side stream probe (~4.0 TB/s at 266 MB, n5s29). The lead's 7.8 us
+  per expert (12:00Z) is my n7s36 fit of the LAYER on the H100 (28.3 MB / 7.8 us = 3.6 TB/s exceeds the H100's 3.35 TB/s
+  peak, so that slope is not per-expert bytes; on the H200 it does not exist). No 1.5 us/expert gap to close.
+- d32 standalone tk2f E 10, x 2.2 excess over 4.5 TB/s bytes (~16 us/call) = extra groups 3.9 x 2.2 = 8.6 (CLOSED n5s10-n5s26;
+  in-layer d32 runs tk2h 4 which already cuts it to ~2.8) + fixed 5.7 (prologue 2.3, under the rmsnorm in-layer via TK2FX;
+  first-data 1.5; transition/tail: XPF/WAVE dead n7s23) + marginal-rate 2.4.
+- New detail, the s12 'phase 2 only ~3.5 TB/s, unexplained' item: it is ENTIRELY the extra groups. Per CTA-row: ph1 HBM row
+  2.06 us, ph1 extra (L2) row 1.13; ph2 HBM row 2.18, ph2 extra row 2.14 (= an HBM row). The ph2 end histogram is
+  bimodal exactly by row count (d32 s7: 48 CTAs with 11 rows end 2.3 us before the 84 with 12), so in phase 2 a row costs
+  ~2.15 us per CTA whatever its source. Same-time twin fetch (group-1 row r on another CTA at the same local slot as
+  group-0 row r; tools/n7s41/coll.py: d32 s7/s13/s99 100% twins, s11/s17 none) does NOT explain it: per-extra-group
+  residuals are equal for both kinds (fit.log). Can't separate 'phase-2 consumer/CTA-bound' from 'phase-2 re-reads miss L2
+  on the H200' without H200 ncu; either way the bound is ph2 extra rows at ph1's L2-row cost = ~-1 us per extra group
+  (d16 in-layer tk2f+BAL ~1 group: ~-1 us/call; d32 is tk2h).
+- Row-quantization tail (last partial wave of 72 KB rows, (1 - frac) x row time per phase; tools/n7s41/quant.py), upper
+  bound before BAL/tk2h absorb part: d1 0.46, v1 1.45, d16 1.53, d32 2.21 us/call; a half-row last wave recovers ~half.
+- Verdict: d16/d32 stream-efficiency lane CLOSED at <= ~1 us/call per item (ph2 extra rows, quantization tail); nothing
+  >= the 4 us bundle bar. 0 judge runs, 0 Modal. Budget 10-29: moe checks 9/20.

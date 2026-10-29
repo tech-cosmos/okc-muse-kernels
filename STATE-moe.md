@@ -1,6 +1,10 @@
 ## n7s35 10:33Z idle (no lead decision since 09:35Z; Handoff moe/layer-hotdyn 130a692 pending layer). 0 runs.
 ## n7s40 11:45Z idle (no lead decision after 11:30Z). Layer board #55 2.158x. HOT_ET branch still a bundle item. 0 runs.
 # STATE-moe
+## n7s41 12:15Z: lead 12:00Z (1) DONE: HOT_ET merged into r-layer main d9553b2 = v171 (build reproduces, test 13/13; no check alone).
+## (2) d16/d32 stream lane CLOSED on existing H200 data (DIAG 81391142 re-fit, tools/n7s41): marginal 6.54 us/expert = 4.33 TB/s
+## (~96% of stream asymptote); lead's 7.8 us was an H100 layer slope. Left: ph2 extra rows (~1 us/extra group), quant tail
+## (<= 1.5/2.2 us d16/d32 upper bound, ~half reachable). Nothing >= 4 us/call. 0 runs. Waiting on the lead for a lane.
 ## n7s39 ~12:25Z: self-picked HOT_ET (moe_hot triggers twm before its wait; twm polls a flag): r-layer branch moe/layer-hotet 4a9f62d,
 ## bitwise, test 13/13; H100 pinned A/B v16 sl +1 / full -4, v32 -1.4/-1 us (~-0.05%): BUNDLE item, not on main. 0 runs. NOTES n7s39.
 ## n7s38 11:55Z: lead 11:30Z v1/d16 regression = NONE (H100 ab_files v168 vs v170 tie on v1/d16; judge picks identical; v169/v170 ratios inside
