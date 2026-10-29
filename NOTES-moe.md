@@ -3020,3 +3020,11 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   v32 334.1/513.0 (vs 74dcb2bb b75aadc: 65.0/74.2, 127.0/203.8, 148.2/289.7, 108.1/121.0, 260.0/349.3, 337.8/502.2). Noise draw.
   Rule: not submitted. This branch is now checked twice + submitted once: do NOT check/submit it again without a new change.
 - Budget 10-29: layer 2 checks + 1 submit, moe 5 checks, Modal 11.4/60.
+
+## n7s5 (2026-10-29 02:21Z - 02:40Z): no lead answer; no build; 0 judge runs, 0 Modal
+- COORD Requests n7s1 (lane change or pause) still unanswered; last Human decision is 22:15Z 10-28 (its items 1-3 done n6s5-n7s4).
+- Boards: layer #49 at 2.158 (#20 = 2.239, #1 2.403); moe board #1 dolanzhao 2.689x, ours 2.2792x.
+- Re-derived bytes-per-time on 8 reference seeds (distinct local experts mean: bs1 2.6, bs8 8.75, bs16 11.75, bs32 14.9,
+  bs128 23.1, bs256 23.1; 28.3 MB each) vs a4054bf3: effective 2.7 / 3.57 / 3.66 / 3.36 / 3.31 / 2.82 TB/s. Every part of
+  the gap (fixed 14 us decode, extra groups, big-M consumer) is on record dead (n5s15-n5s31, n6s1-n7s1); codes are uniform
+  4.0 bit (no lossless lever, s?/n20). Nothing new to build; suggest ~/STOP-moe until the lead names a lane.
