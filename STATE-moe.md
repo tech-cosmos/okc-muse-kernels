@@ -1,6 +1,6 @@
 # STATE-moe
 
-## NOW (n7s33 ~10:15Z): task 2 (tk2f d1/v1 prologue) DROPPED without a check: in-layer, TK2FX already puts routing + W ring
+## n7s34 10:20Z idle (no new lane). NOW (n7s33 ~10:15Z): task 2 (tk2f d1/v1 prologue) DROPPED without a check: in-layer, TK2FX already puts routing + W ring
 ## fill before tk2f's only griddepcontrol.wait; layer n7s8 IDF oracle (prologue fully hidden) = tk2f end - pr1 end 34.8 vs 35.0
 ## us (bound ~0); standalone s15 FP = -0.2/-0.4 us H100 (< 0.5 line). Open: Handoff moe/layer-hotdyn 130a692 for layer to integrate.
 ## Nothing else queued in the moe lane; budget 10-29 moe checks 9/20.
