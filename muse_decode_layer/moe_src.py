@@ -101,6 +101,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TWM_ORC 0        // fresh f1s2 ORACLE (timing only, wrong output, never submit): tw_item bit 1 dq ~free (wgmma kept),
                          // 2 no wgmma / 4 compiled-out epilogue: BOTH also let ptxas drop the dq (ncu: 15M vs 77M instr) = stream-only;
                          // 16/32/64 runtime-skip all / gemm13 / gemm2 epilogues, 128 epilogue without global stores
+                         // f1s12: 8 no wgmma, dq kept by an XOR sink into acc; 256 flat read of all active experts' bytes
 #endif
 #define TWM_KSC 2        // n6s4 (moe 7d2a079): moe_twm built with + without the K-split tail code (picked per call); 0 = never split, 1 = always built in
 #ifndef TK2G_PAR4
@@ -1917,7 +1918,15 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
 #endif
         }
       wg_fence();
-#if !(TWM_ORC & 2)
+#if TWM_ORC & 8  // fresh f1s12: no wgmma; the dq output is kept alive by an XOR sink into acc (~2 LOP3 per 4 regs)
+#pragma unroll
+      for (int jj = 0; jj < KG; ++jj)
+#pragma unroll
+        for (int r = 0; r < RT; ++r) {
+          const uint32_t* a_ = odd ? afB[jj][r] : afA[jj][r];
+          acc[r][jj & 3] = __int_as_float(__float_as_int(acc[r][jj & 3]) ^ a_[0] ^ a_[1] ^ a_[2] ^ a_[3]);
+        }
+#elif !(TWM_ORC & 2)
 #pragma unroll
       for (int jj = 0; jj < KG; ++jj)
 #pragma unroll
@@ -2728,6 +2737,50 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     }
   }
   __syncthreads();
+#if TWM_ORC & 256  // fresh f1s12 ORACLE: flat grid-stride read of every active expert's w13+s13+w2+s2 bytes (hot ones too:
+                   // moe_hot exits at once), no items/stages/x; then the per-expert flags moe_norme waits on
+  {
+    constexpr size_t B13 = (size_t)CG::NRB * 64 * CG::WB, Q13 = (size_t)CG::NRB * 64 * CG::SB;
+    constexpr size_t B2 = (size_t)CN::NRB * 64 * CG::WB, Q2 = (size_t)CN::NRB * 64 * CG::SB;
+    constexpr size_t PER = (B13 + Q13 + B2 + Q2) / 16;
+    const int nact = meta[0];
+    const size_t tot = PER * nact, stride = (size_t)gridDim.x * 384;
+    uint32_t sink = 0;
+    for (size_t u0 = (size_t)blockIdx.x * 384 + tid; u0 < tot; u0 += 8 * stride) {
+      uint4 v[8];
+#pragma unroll
+      for (int k = 0; k < 8; ++k) {
+        const size_t u = u0 + k * stride;
+        v[k] = make_uint4(0, 0, 0, 0);
+        if (u < tot) {
+          const int a = (int)(u / PER);
+          size_t o = (u - (size_t)a * PER) * 16;
+          const int e = s_e[a];
+          const char* src;
+          if (o < B13) src = W13 + (size_t)e * B13 + o;
+          else if ((o -= B13) < Q13) src = S13 + (size_t)e * Q13 + o;
+          else if ((o -= Q13) < B2) src = W2 + (size_t)e * B2 + o;
+          else src = S2 + (size_t)e * Q2 + (o - B2);
+          asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
+                       : "=r"(v[k].x), "=r"(v[k].y), "=r"(v[k].z), "=r"(v[k].w) : "l"(src));
+        }
+      }
+#pragma unroll
+      for (int k = 0; k < 8; ++k) sink ^= v[k].x ^ v[k].y ^ v[k].z ^ v[k].w;
+    }
+    if (sink == 0x9E3779B9u && hx == 12345) Y[tid] = __float2bfloat16(1.0f);  // never true: keeps the loads
+    __syncthreads();
+    if (tid == 0) {
+      __threadfence();
+      if (atomicAdd(meta + 66, 1) == (int)gridDim.x - 1) {
+        for (int a = 0; a < nact; ++a) { const int e = s_e[a]; atomicAdd(done + e, 1 << 24); atomicAdd(done + 32 + e, 1 << 20); }
+        __threadfence();
+      }
+    }
+    if (hx && tid == 0) asm volatile("griddepcontrol.wait;" ::: "memory");
+    return;
+  }
+#endif
   // s11: the last ns gemm2 items (the lightest: the tail) run as 2 K halves each (items n13 + n2f + 2 j + h)
   // The split starts at an expert boundary (moe_route orders an expert's tokens nondeterministically: a token's
   // result must not depend on whether its pass is split), so ns may come out a bit below nsplit.
@@ -3007,6 +3060,9 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   if (blockIdx.x == 0 && tid == 0) { __threadfence(); atomicOr(meta + 67, 1 << 30); }  // item counter: & 0xFFFFF
 #endif
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#if TWM_ORC & 256  // fresh f1s12: moe_twm reads every expert's bytes flat
+  return;
+#endif
   if (tid < 33) s_off[tid] = meta[33 + tid];
   if (tid == 0) {
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 8 * 32); }
