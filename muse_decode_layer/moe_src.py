@@ -2469,6 +2469,7 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 #define TWM_TL 0
 #endif
 #ifndef HOT_EMU
+#define HOT_ET 1  // n7s39: moe_hot (per > 0) triggers moe_twm (hx) before its own wait; twm polls meta[67] bit 30
 #define HOT_EMU 0  // s29: H200-proxy emulation in moe_twm/moe_hot (tests only; see moe_twm)
 #endif
 #ifndef TWQ_PREG
@@ -2617,6 +2618,18 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
   if (!hx) asm volatile("griddepcontrol.wait;" ::: "memory");
+#if HOT_ET
+  // n7s39 HOT_ET: moe_hot (per > 0) triggers this launch at its start (before its own wait), so the moe_gather output is
+  // complete only once moe_hot CTA 0 sets meta[67] bit 30 (after its wait); moe_route zeroed meta[67]
+  else {
+    if (tid == 0) {
+      int v;
+      do { asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(v) : "l"(meta + 67) : "memory"); } while (!(v & (1 << 30)));
+      asm volatile("fence.proxy.async.global;" ::: "memory");
+    }
+    __syncthreads();
+  }
+#endif
 #if HOT_EMU
   // s29 H200-proxy only (HOT_EMU = moe_hot's grid): the last HOT_EMU CTAs start only as moe_hot CTAs exit, like the
   // twm CTAs queued behind moe_hot on a full device
@@ -2952,7 +2965,13 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   int* done = meta + 68;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   for (int i = tid; i < 256; i += 384) slut[i] = lut[i];
+#if HOT_ET
+  if (per > 0) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // n7s39: moe_twm polls meta[67] bit 30
+#endif
   asm volatile("griddepcontrol.wait;" ::: "memory");
+#if HOT_ET
+  if (blockIdx.x == 0 && tid == 0) { __threadfence(); atomicOr(meta + 67, 1 << 30); }  // item counter: & 0xFFFFF
+#endif
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   if (tid < 33) s_off[tid] = meta[33 + tid];
   if (tid == 0) {
