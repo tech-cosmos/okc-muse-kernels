@@ -5,17 +5,17 @@ p = sys.argv[1]
 s = open(p).read()
 n0 = len(s)
 
-def rep(old, new, cnt=1):
+def rep(old, new, cnt=1):  # cnt None: every occurrence (>= 1; the layer's python anchors repeat CUDA lines)
     global s
     c = s.count(old)
-    assert c == cnt, (c, cnt, old[:120])
+    assert c == cnt if cnt is not None else c >= 1, (c, cnt, old[:120])
     s = s.replace(old, new)
 
 # 1. define
 v = sys.argv[2] if len(sys.argv) > 2 else "0"  # layer copies: hard-coded value (python TK2F_REL in moe's submission.py)
 m = re.findall(r"\n#define TWM_REL [01] ", s)
 assert len(m) == 1, m
-s = s.replace(m[0], f"\n#define TK2F_REL {v}       // n6s6: tk2f/tk2h gemm13 publishes by a helper warp NC + 1 (python TK2F_REL)" + m[0])
+s = s.replace(m[0], f"\n#define TK2F_REL {v}       // n6s6: tk2f/tk2h gemm13 publishes by a helper warp NC + 1 (python TK2F_REL; 2 = tk2h only)" + m[0])
 
 # 2. shared barriers + helper, before tk2f_consume
 helper = r'''// n6s6 TK2F_REL: the consumers' gemm13 publishes (bar.sync 2 + thread-0 gpu fence + atomicAdd at each segment end)
@@ -26,7 +26,7 @@ helper = r'''// n6s6 TK2F_REL: the consumers' gemm13 publishes (bar.sync 2 + thr
 __shared__ __align__(8) uint64_t g_tkrel[8];
 template <int NC, int DYN, int FN, int GS, int MRG, int PF>
 __host__ __device__ constexpr bool tk2f_rel_on() {
-  return TK2F_REL && NC == 8 && !DYN && !FN && !(PF & 16) && !(PF & 524288) && !(PF & 65536) && !(PF & 256) &&
+  return TK2F_REL && (TK2F_REL != 2 || MRG != 0) && NC == 8 && !DYN && !FN && !(PF & 16) && !(PF & 524288) && !(PF & 65536) && !(PF & 256) &&
          (MRG == 1 || MRG == 2 || (GS == 8 && MRG == 0));
 }
 __device__ __forceinline__ void tk2f_rel_arrive(int seg_start, int r0) { mbar_arrive(&g_tkrel[((seg_start >> 8) - (r0 >> 8)) & 7]); }
@@ -87,9 +87,7 @@ rep("""      if (gated && (R + 1 == seg_end || R + 1 == r1)) {  // publish this 
 rep("__global__ void __launch_bounds__((NC + 1) * 32, 1) moe_tk2f(",
     "__global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>()) * 32, 1) moe_tk2f(")
 # init
-rep("""    for (int i = 0; i < 4; ++i) mbar_init(&ridb[i], 1);
-    mbar_init(&xrdy, NC * 32);""", """    for (int i = 0; i < 4; ++i) mbar_init(&ridb[i], 1);
-    mbar_init(&xrdy, NC * 32);
+rep("""    for (int i = 0; i < 4; ++i) mbar_init(&ridb[i], 1);""", """    for (int i = 0; i < 4; ++i) mbar_init(&ridb[i], 1);
     if constexpr (tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>())
       for (int i = 0; i < 8; ++i) mbar_init(&g_tkrel[i], NC * 32);""")
 # helper branch before the producer branch (static path)
@@ -111,12 +109,11 @@ rep("""  int st = 0, ph = 0;
       constexpr bool SQ""")
 # consumer call sites
 rep("tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0, (PF & 1024) != 0>(",
-    "tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0, (PF & 1024) != 0, REL>(")
-rep("""  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
-                                    empty, st, ph, rb, &xrdy);""", """  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF, REL>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
-                                    empty, st, ph, rb, &xrdy);""")
+    "tk2h_consume<NC, NSTG, KPS, SA, GS, MRG == 2, (PF & 4) != 0, (PF & 1024) != 0, REL>(", None)
+rep("tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1,",
+    "tk2f_consume<512, NC, NSTG, true, KPS, SA, PF, REL>(slut, gs13, X, inter, cnt, n13, a0, a1,", None)
 # launch dims
 rep("return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM,",
-    "return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>()) * 32, SMEM,")
+    "return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>()) * 32, SMEM,", None)
 open(p, "w").write(s)
 print("patched", p, len(s) - n0)

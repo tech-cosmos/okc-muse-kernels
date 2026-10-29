@@ -2945,3 +2945,24 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - Layer non-moe CUDA kernels SASS: pr32 4296, pr8 3984, pr1 3320/2928, g30k 2448, g30 2128, g30n 1800: no large rolled-out
   rare paths like twm's; nothing to audit further. i-cache lane closed except twm's out-of-loop code at v32 (~1-2 us/call).
 - Budget 10-29: moe board checks 4/20 (n6s4) , layer check 1 (74dcb2bb), Modal 4.1 min (9/60 used).
+
+## n6s6 (2026-10-29 01:07Z - ~01:50Z): tk2f/tk2h release analog (n6s5 NEXT 1) = TK2F_REL; H200: wins only in tk2h (d32 -0.75 us)
+- TK2F_REL (moe 5eb1e15 + mode 2; tools/n6s6/patch_rel.py <file> [value] applies it to moe's submission.py AND the layer's
+  moe_src.py / submission.py, incl. the layer's python anchor strings): moe_tk2f gets a helper warp NC + 1 (288 -> 320
+  threads, only in instantiations where tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>() holds: NC 8, static, tk2f_consume GS 8
+  or tk2h MRG 1/2). Consumers' gemm13 publish = mbar_arrive(g_tkrel[k & 7]) instead of bar.sync 2 + thread-0
+  __threadfence + atomicAdd. gemm13 segments are 256 rows on 256-aligned row-space boundaries (tk2f and tk2h), so the
+  helper derives the k-th publish (segment a0/256 + k, count, cnt or cnt+64+s for BAL/PSC) from [a0, a1) alone: no slot
+  data, no sentinel. Ordering = twm REL's argument (mbarrier acquire + helper's gpu fence, cumulative). File-scope
+  __shared__ g_tkrel[8]. NC 16 excluded (576 threads -> spills). TK2F_REL 2 = tk2h instantiations only.
+- Tests (REL 1, all paths): moe bench test 15/15; tools/n6s6/ab_dec.py (paired H100, board bs1/8/16/32 x5 + layer decode
+  routings): max|A-B| 0, times +-0.6 us (noise). Layer branch validate --quick ALL OK (tk2f_stress 0/300, replay 0/240,
+  fuzz 0/58; covers the layer's T=16 BAL and T=32 tk2h paths), cold prepare 70.1 s.
+- JUDGE DIAG 8c5f1376 (tools/n6s6/mkdiag_trel.py; decode routings only, ABAB; prepare_s 225 with 2 libraries):
+  results in tools/n6s6/dg_8c5f1376_diag.txt. m = moe defaults (tk2f 204/84204), l = + TK2H_M {32: 3} (layer T=32):
+  d1 30.1/30.1 -> 30.4/30.3 (+0.25), d16 tie (64.2/64.0 vs 64.2/64.1), d32 m 84.1/83.9 -> 83.8/83.9 (-0.15),
+  d32 l (tk2h) 81.5/81.4 -> 80.7/80.7 (-0.75, every seed), v1 64.1/64.1 -> 64.4/64.3 (+0.25). maxdiff 0 everywhere.
+  => the fence stall matters only in tk2h's merged loop; on the 1-group tk2f paths the extra warp costs ~0.3 us.
+  moe board default stays TK2F_REL 0 (board runs no tk2h). Layer: TK2F_REL 2 on branch moe/layer-twm (worth ~0.1% of
+  the layer score: d32 only). Not worth a check alone.
+- Budget 10-29 so far: moe checks 5/20 (+8c5f1376 DIAG), layer 1/20, submits 0, Modal 9/60 min.

@@ -99,7 +99,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
 #define TWM_EPI 0        // n6s3: staged, rolled tw_item epilogue (python TWM_EPI)
 #define TWM_HOTC 0       // n6s3: compile moe_twm's hot class (cl 3) in (python: on iff TWM_HOT / TWM_HOT_M set)
-#define TK2F_REL 0       // n6s6: tk2f/tk2h gemm13 publishes by a helper warp NC + 1 (python TK2F_REL)
+#define TK2F_REL 0       // n6s6: tk2f/tk2h gemm13 publishes by a helper warp NC + 1 (python TK2F_REL; 2 = tk2h only)
 #define TWM_REL 0        // n6s4: moe_twm gemm13 release by helper warp 9 (python TWM_REL; n6s3 mk_rel.py)
 #define TWM_KSC 1        // n6s4: compile moe_twm's K-split tail code in (python: on iff TWF_SPLIT / TWF_SPLIT_M set; 2 = both builds, per call)
 #define DQW 0            // n22: dq() rotations on the FMA pipe (python DQW; DIAG builds both)
@@ -3759,7 +3759,7 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
 __shared__ __align__(8) uint64_t g_tkrel[8];
 template <int NC, int DYN, int FN, int GS, int MRG, int PF>
 __host__ __device__ constexpr bool tk2f_rel_on() {
-  return TK2F_REL && NC == 8 && !DYN && !FN && !(PF & 16) && !(PF & 524288) && !(PF & 65536) && !(PF & 256) &&
+  return TK2F_REL && (TK2F_REL != 2 || MRG != 0) && NC == 8 && !DYN && !FN && !(PF & 16) && !(PF & 524288) && !(PF & 65536) && !(PF & 256) &&
          (MRG == 1 || MRG == 2 || (GS == 8 && MRG == 0));
 }
 __device__ __forceinline__ void tk2f_rel_arrive(int seg_start, int r0) { mbar_arrive(&g_tkrel[((seg_start >> 8) - (r0 >> 8)) & 7]); }
@@ -5740,7 +5740,7 @@ TWM_HOTC_FORCE = None
 
 TWM_KSC_FORCE = None
 TWM_REL = 1  # n6s4: moe_twm gemm13+gemm2 releases by a helper warp (H200 DIAG 34547d56: v16 -0.5, v32 -1.4 us every seed; H100 noise)
-TK2F_REL = 0  # n6s6: tk2f/tk2h gemm13 publishes by a helper warp (tools/n6s6/patch_rel.py)
+TK2F_REL = 0  # n6s6: tk2f/tk2h gemm13 publishes by a helper warp (2 = tk2h only). H200 DIAG 8c5f1376: tk2h d32 -0.75 us every seed, tk2f d1 +0.25 / v1 +0.3 / d16 tie / d32 -0.15 -> off here (the board runs no tk2h); the layer (T=32 tk2h) takes 2
 TWM_KSC_DUAL = 1  # n6s4 (H200 DIAG 3ded8769: v16 -1.9 us every seed, v32 tie): with a K split set for some M, build moe_twm with and without the split code (calls without a split take the smaller one)
 
 
