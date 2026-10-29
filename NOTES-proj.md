@@ -2753,7 +2753,7 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   beats us; nothing to copy. Its overlap model (several CTAs/SM, stream-K, mma.sync at small M) is already what our tk2f/
   twm beat. (Both external yardsticks, CUTLASS ex55 and Humming, are well below twm/tk2f on the H100.)
 
-## n7s13 (2026-10-29 15:20Z-15:45Z): no lead decision after 14:45Z (yardsticks answered in n7s12); short self-pick, no build
+## n7s13 (2026-10-29 15:20Z-15:24Z): no lead decision after 14:45Z (yardsticks answered in n7s12); short self-pick, no build
 - moe board now: #1 dolanzhao 2.689x (5,002 us), pjmullin3 2.685x; ours 2.279x (#176). `okc status` on another team's job
   = "no such job" (no per-shape data for other teams; 'S' in the board = screened).
 - Our latest moe run (r-moe profiles/febfcb1f) per load, judge median vs SGLang vs TASK floor (us): bs1 27.0/77.2/11.4 (2.37x floor),
@@ -2767,3 +2767,7 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   shift+and per output reg + the scale HMUL2 = ~11 ops/8 weights vs today's 12 (moe: 7 ALU/8 minimal) -> no gain at big M.
   FP8 wgmma with E2M1->E4M3 (exact) needs FP8 activations: below SGLang's precision (rules), not pursued.
 - 0 judge runs, 0 Modal. proj still has no lane; asked the lead again (COORD Requests).
+
+## n7s14 (2026-10-29 15:39-15:41Z): idle session
+- No Human decision after 14:45Z (answered in n7s12; ask repeated n7s13). No code, 0 judge runs, 0 Modal. Fixed n7s13's times
+  (it ran 15:20-15:24Z, not to 15:45Z).
