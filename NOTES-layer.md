@@ -2812,3 +2812,42 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   attention excess is verify full (_gw_verify v16/v32 H200 106/196 us vs gather-bound decode full 87/168: ~0.6-0.8% of score
   if it reached the gather rate), but native verify-full kernels tied/lost twice (~/attn s71, s111) and FP8 QK/PV forms are on
   record (~/attn NOTES s33, s81-s90). No new idea there from me this session.
+
+## night7 s1 (2026-10-29 04:50Z-06:15Z): H200 per-kernel timeline of main (lead 04:50Z) + top-5 non-expert excess; v164 RG_XPRE; 0 judge runs
+- main 9d2b3a8 (moe's merge) did not rebuild: moe edited 2 TK2F_REL patch anchors in submission.py, not layer.py. Synced layer.py:
+  `python build.py` == submission.py again. RULE for ports: edit layer.py (or moe_src.py), never only submission.py.
+- Judge profile of today's submit 725fc518 (2.1350x) copied to profiles/ (it lived in moe's /tmp worktree). Its per-kernel rows
+  overlap (PDL), so for gaps: Modal H200 `tools/h200.py . main=submission.py --cmd 'python tools/timeline_all.py submission.py all'`
+  (output gzip+base64 to fit the 5 KB stdout cap), 2.5 GPU-min. Full timeline: muse_decode_layer/dev/n7s1_tl_h200.txt.
+- Segment table, H200 Modal, sliding layers, us (end of previous segment -> end of this one; ideal = 12-bit bytes at 4.3 TB/s
+  achievable, or the BF16 compute floor at ~700 TFLOP/s for T=256 cuBLAS):
+  | seg | d1 | v1 | d16 | d32 | v16 (T=128) | v32 (T=256) |
+  | qkv (1st kernel) | 11.8/6.6 | 11.4/6.6 | 11.8/6.6 | 13.5/6.6 | 15.7/8.8 bf16 | 19.0/14 |
+  | attn+o+bnd1 | 11.9 | 14.6 | 18.8 | 23.0 | 26.6 | 34.1 |
+  | bnd1 -> experts' first work (pooler+router+routing+rms) | 16.6/13.5 | 19.3/13.5 | 19.1/13.5 | 21.2/13.5 | 35.3/~18 | 42.5/~28 |
+  | experts (moe lane) | 26.4 | 59.5 | 79.2 | 71.9 | 151.7 | 203.3 |
+  | tail: expert end -> layer end (norm2+unpool+bnd2) | 6.2/2.3 | 8.9/2.6 | 19.5/11.5 | 20.6/11.5 | 27.1/~15 | 38.3/~26 |
+  | total (Modal) | 72.9 | 113.7 | 148.4 | 150.2 | 253.6 | 337.6 |
+  Full layers: same front/tail plus attention (_gd_full d16 86 / d32 163, _gw_verify v16 100 / v32 190: closed, gather-bound).
+- Top 5 non-expert excess (weighted by score %/us sl+full; upper bounds = removing ALL excess):
+  1. bnd1 -> experts: d1 +3, v1 +6, d16 +6, d32 +8, v16 +17 (FR cuBLAS 27.6 + routing 3.3 + rg 3.6 serial), v32 +15 => ~4.5%.
+     Closed: pr32/pr128/g30sp/fr off/router placement/rms fold (s41 note: tk2f starts 0.3 us after pr1 via TK2FX).
+     Open: T=128/256 routing chain (FR end -> rg end 7.2 v16 / 8.6 v32 us). RG_XPRE below takes ~0.6-0.9 us of it.
+  2. tail: d1 +4, v1 +6, d16 +8, d32 +9, v16 +12, v32 +12 => ~4.4%; closed (UPF/UPF2/UPF3, N2U_BOUNDARY, BND_SPIN, n2u8,
+     bnd-as-epilogue, norm2->unpool fusion, g30 T=256 s100, proj n5s14 oracles: T=32 GEMMs co-bound, T=128 unpool -3.4).
+  3. qkv first kernel: +5..8 us every shape (~2.6%): the per-kernel fixed ramp (fit 3.8 us + B/4.26 TB/s); closed (m1 sweep,
+     g30 qkv T=128 s101, qkv split).
+  4. attn+o+bnd1: free-attention oracle n5s26 (d1 2.4 .. v32 15.8); o+bnd part 4-8 us. NEW this session, DEAD: T=128 o on g30
+     with bnd1 as its PDL secondary (O30_BND_PDL, + CB_HB_TRIG): H100 v16 sl combine end -> bnd1 end base 13.7, g30:o 14.6,
+     + CB_HB_TRIG 12.7 but combine_hb slows by as much (bnd1 end 46.7 vs 46.9): tie. g30 o 9.6-11.5 vs cuBLAS 6.9 us (K=1024:
+     8 stages, ramp-bound). Not kept.
+  5. T=128/256 cuBLAS hand-offs (no PDL): bnd1/bnd2 at T=256 8.2/8.3 us serial vs ~5.5 byte floor; ~0.4 us launch gaps.
+- v164 = RG_XPRE (layer.py text patch of moe_routegathern, #define RG_XPRE): the CTA's X row (FR output; complete before the
+  PDL primary _routing started, since _routing is a plain launch) + sum of squares + gain loads move above griddepcontrol.wait;
+  only ids-dependent work stays after it. H100 timeline rg end after _routing: v16 sl 3.5 -> 2.6, v32 sl 4.9 -> 4.3 us.
+  ab_files 4 rounds (base | xpre): v16 sl 292.9/292.5 | 293.8/291.1, full 443.4 | 442.9, v32 sl 374.1 | 372.3, full 625.9 | 624.8,
+  v1 -0.5 (noise). files_eq: bitwise = base at v16/v32 (d16/d32 diffs = the known base-vs-base atomics nondeterminism, checked).
+  test 13/13. Not checked (~0.05% score: below judge noise); bundle it with the next real change.
+- Next build candidates (ranked): (a) T=128/256 _routing + rg in one launch (routing per CTA, self-resetting grid barrier: all
+  T CTAs co-resident since twm is rg's PDL secondary and launches only after every rg CTA triggered) ~-1.5..2 us v16/v32;
+  (b) T=256 boundaries fused/thinned (FP32 stream bytes): ~-2..3 us each at v32.

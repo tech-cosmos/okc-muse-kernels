@@ -1,7 +1,12 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #35 (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
+BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night7 s1 (10-29): **main = v164** (e5d3272) = moe merge 9d2b3a8 (v163 + twm EPI/KSC2/REL + TK2F_REL 2; submit 725fc518 2.1350x, board
+  stays 2.158 = #50, #1 2.403) + RG_XPRE (rg row loads before its PDL wait: H100 -0.6..-0.9 us v16/v32, bitwise). layer.py synced so
+  build.py reproduces submission.py (moe had edited submission.py only). H200 Modal timeline of all 12 shapes + top-5 non-expert
+  table: NOTES n7s1, dev/n7s1_tl_h200.txt. T=128 g30:o + bnd1 PDL: dead (tie). 10-29 left: 18 checks / 8 submits, Modal layer 2.5/15.
+  NEXT: (a) T=128/256 _routing + rg one launch (grid barrier) ~-2 us; (b) T=256 boundaries ~-2..3 us each. Bundle with v164, then check.
 night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (tools/h200.py) real-routing ab_flag 14/14 inputs
   (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
   unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 7 submits left after v163.
