@@ -107,3 +107,26 @@ first FMA, with and without a concurrent bulk stream, H100 then H200 (Modal afte
 under load, H1's prize at d1 is ~(hops x (today's ~4 - 2)) ~= 8-10 us/layer, and the design is "fewer hops" (fusing
 norm/routing redundantly into consumers, as the synthetic already does for the boundaries) rather than "persistent".
 Caveat to resolve: x-build 17 us in the pooler phase is unexplained (contention with the prefetch stream or a code issue).
+
+## O1 follow-up (f1s1, H100): one hop isolated (tools/fresh/hop.cu) + chain at shallow rings
+hop.cu: 132 persistent CTAs x 64 hops; per hop each CTA writes its slice of an x vector, bumps a counter, spins, then loads
+all of x (32 KB) from L2. Optional producer warp per CTA keeps a 16 KB bulk-copy stream to smem going (depth = stages/SM).
+| bytes in flight | stream TB/s | last arrival -> all CTAs see counter | -> all CTAs hold 32 KB x |
+|---|---|---|---|
+| 0 (idle) | - | 0.54 | 2.02 |
+| 2.2 MB | 2.58 | 0.51 | 2.14 |
+| 4.3 MB | 3.10 | 0.74 | 3.30 |
+| 6.5 MB | 3.15 | 1.15 | 4.83 |
+| 8.7 MB | 3.14 | 1.34 | 6.24 |
+| 13.0 MB | 3.14 | 1.38 | 9.12 |
+| 17.3 MB | 3.13 | 1.47 | 8.6 (p90 14.1) |
+=> HBM saturates at ~4.3 MB in flight on the H100. Anything deeper buys no bandwidth and adds ~0.7 us of hop latency per
+extra MB (bufferbloat). The record already has this: proj s39 (dev/s39/fill.py, "dilation is set by bytes in flight") and
+s40 (throttling g19's own PDL prologue: dead on the H100), s46 (pooler pre-fill: dead). Not new, and never measured on the H200.
+Chain oracle again with the fixed code (ring depth NSTG 2/3/4/10 = 4/6/8/21 MB): B 155.5/155.6/157.0/159.8, A-PDL
+168.3/170.8/172.9/173.8; NOMATH B ~121-123 and A-PDL ~119-121 at every depth. Per hop at NSTG 2: dependency wait 2-3 us
+(drain spread + 0.5 counter) + x build 2-5 us. My synthetic (123 us NOMATH) is SLOWER than our real d1 layer on the H100
+(~85-88 us), so it can't bound the real layer. It only shows that the kernel boundary itself isn't the cost.
+VERDICT for H1 as "persistent megakernel": not supported on the H100 (persistent = PDL + prefill). The hop cost is real
+(~3-8 us), but its parts (drain spread, queueing behind bytes in flight, the activation fetch) are the same in either design.
+Open, cheap: the same two tools on the H200 (knee in MB, hop cost) before closing H1 for good: ~2 GPU-min.
