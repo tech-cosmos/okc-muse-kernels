@@ -3049,3 +3049,28 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - No Human decision since 22:15Z 10-28; Requests n7s1 unanswered. No moe item >= 5 us/call open (n7s1 list, n6s5 audit); left items twm N16 gemm13 epilogue / moe_hot REL are <= ~2 us/call. Layer board #50 (2.158x). 0 judge runs, 0 Modal.
 
 ## n7s12 (2026-10-29 04:16Z - 04:20Z): idle. No Human decision since 22:15Z 10-28; Requests n7s1 unanswered. Re-checked the queue: only <= ~2 us/call items left (twm N16 gemm13 epilogue, moe_hot REL), below judge noise per the lead's 07:35Z line. Layer board #50 (2.158x). 0 judge runs, 0 Modal.
+
+## n7s13 (2026-10-29 04:32Z - ~05:00Z): lead 04:25Z items: layer submit + merge; R1 gate on LAYER routings = FAIL
+- Lead 04:25Z (first answer since 22:15Z): (1) submit moe/layer-twm 8309328 once, merge into main; (2) R1 gate on layer v16/v32.
+- (1) /tmp/n6s5/wt (moe/layer-twm 8309328): muse_decode_layer bench.py test 13/13 PASS (H100). sha1 submission.py e175843f.
+  JUDGE submit 725fc5189c764e31 (muse_decode_layer): 2.1350x (CI 2.103-2.167), score_us 10595; board stays 2.158 (v153).
+  us sl/full: d1 67.6/75.8, d16 129.0/204.7, d32 155.7/306.9, v1 107.1/123.8, v16 256.2/347.3, v32 329.5/511.7
+  (v16/v32 equal or better than 1537125d / 74dcb2bb; d32 sl drew slow). Merged origin/moe/layer-twm into main = 9d2b3a8
+  (merge commit: main had moe-notes commits since the branch point; no muse_decode_layer/ change on main in between, so
+  main's muse_decode_layer/ == 8309328 exactly). Layer main is now v163 + twm EPI/KSC2/REL + TK2F_REL 2.
+- (2) Tool muse_moe_w4a16/tools/n7s13/tlb_layer.py (= n7s1/tlb.py on tools/data/routes.pt verify 16/32 x seeds 7/11/13/17/99,
+  inputs built as tools/n6s3/ab2.py mk()). Build: sed TWM_TL 1 into /tmp/n7s13x/submission.py + copy reference/bench/checks/
+  nvfp4/tools there. Modal 2.2 GPU-min. H200, us (call | twm span | per CTA busy/ramp/gaps/drain | idle):
+    v16 s7 161.0|152.5|132.1/5.2/0.9/14.3|13.4%  s11 159.6|149.3|130.3/4.3/0.6/14.1|12.7%  s13 163.6|152.9|133.4/4.3/0.4/14.8|12.8%
+        s17 156.7|145.4|118.9/4.1/1.0/21.4|18.2%  s99 157.5|149.2|119.9/4.6/1.0/23.7|19.6%   (s17/s99: 432 items, 3.3 waves)
+    v32 s7 187.7|173.4|119.5/24.0/0.3/29.6|31.1%  s11 192.9|177.2|128.0/38.5/0.3/10.4|27.8%  s13 191.7|178.8|130.6/38.4/0.5/9.3|27.0%
+        s17 192.2|179.3|130.8/39.1/0.4/9.0|27.1%  s99 208.9|195.0|143.3/38.7/0.4/12.6|26.5%
+  v32's ramp ~38 us/CTA = the 32 twm CTAs that start after moe_hot (HOT_M 256: 32) leaves its SMs (~155 us each): busy
+  hot work, not idle. Counting ramp ~4: v32 idle ~8-20 % (mean ~10). H100 same tool: v16 13.8-18.6 %, v32 similar.
+  => GATE FAILS (< 20 %) on layer routings too. R1 not built. Biggest piece = v16 drain 14-24 us (wave quantization of 35-45 us
+  items); its only lever (fixed 66 K-split at T=128) was already measured in-layer on the H200: sign flips per routing
+  (NOTES-layer night5 s8/s20).
+- Bundle (lead: check once >= ~4 us/call at v16/v32): only twm N16 gemm13 epilogue (~1-2 us/call) and moe_hot REL are left.
+  v32 call - span is 13-15 vs 8-11 us at v16, about what routegather (+2) and the norm account for, so moe_hot is likely not
+  the critical path and REL there would be <= ~1 us. The bundle can't reach 4 us. Not built.
+- COORD: Judge runs + Results + Requests (lane or STOP) posted. Budget 10-29: layer 2 checks + 2 submits, moe 5 checks, Modal 13.6/60.

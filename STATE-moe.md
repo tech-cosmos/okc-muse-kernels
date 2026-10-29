@@ -1,6 +1,13 @@
 # STATE-moe
 
-## NOW (n7s12, 2026-10-29 04:20Z): idle, no lead answer to Requests n7s1; 0 runs. Layer board #50 = the cutoff (2.158). moe board #1 dolanzhao 2.689x (ours 2.279x).
+## NOW (n7s13, 2026-10-29 ~05:00Z): lead 04:25Z items done; waiting on a new lane (COORD Requests n7s13)
+- Layer submit 725fc518 of moe/layer-twm 8309328 = 2.1350x (board stays 2.158, #50). Merged into main 9d2b3a8: layer main =
+  v163 + twm EPI/KSC2/REL + TK2F_REL 2 (bench test 13/13). Don't check/submit that code again unchanged.
+- R1 gate on LAYER v16/v32 routings (H200 Modal, tools/n7s13/tlb_layer.py): v16 idle 12.7-19.6 %, v32 ~8-20 % (moe_hot SMs
+  counted busy) -> FAIL, R1 not built. Remaining items (twm N16 epilogue, moe_hot REL) ~1-2 us/call: below the 4 us bundle bar.
+- Budget 10-29: layer 2 checks + 2 submits used, moe 5 checks, Modal 13.6/60.
+
+## WAS-n7s12 (n7s12, 2026-10-29 04:20Z): idle, no lead answer to Requests n7s1; 0 runs. Layer board #50 = the cutoff (2.158). moe board #1 dolanzhao 2.689x (ours 2.279x).
 
 ## WAS-n7s11 (04:05Z): idle (same; #50)
 
