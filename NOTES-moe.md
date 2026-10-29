@@ -3444,3 +3444,6 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   (bs8 sweep of 38 variants: g13 none better, g2 -1.3 us).
 - Verdict: our kernel beats the best public Hopper 4-bit MoE kernel by >= 1.4x on the H200 at decode shapes; the moe-board
   #1's edge is unpublished. No GEMM-structure item for proj from this. Modal 10-29: 50/60 GPU-min.
+
+## n7s51 2026-10-29T16:08Z-16:12Z: idle; no lead decision after 15:50Z (Humming yardstick = n7s50, done). 0 judge runs, 0 Modal
+- n7s50's "16:40Z" times are a typo (it ended before 16:08Z). moe board: #1 dolanzhao 2.689x, ours 2.279x (aeba42c5).
