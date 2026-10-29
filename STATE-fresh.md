@@ -1,4 +1,11 @@
 # STATE-fresh (newest first)
+## f1s8 (2026-10-29 21:50Z-21:58Z): no build, 0 judge, 0 Modal. H200 A/B can't run before 00:00Z: tools/h200.py
+  reserves 3 + 4 x variants-runs GPU-min up front (rounds 2 = 19 min, rounds 1 = 11) and the shared 10-29 ledger is at
+  50.6/60. Staged /tmp/fx_base.py (HOT_XN 0) + /tmp/fx_x16.py (diff = that one line). Re-checked the d1 qkv/tk2f fixed
+  costs against the record (proj s17 bare-stream H200 check 29a2b16b; moe n7s22/n7s33 prologue): nothing new.
+## Next (f1s9, at/after 00:00Z): run from the REPO ROOT (~/r-fresh), not muse_decode_layer/:
+   python tools/h200.py muse_decode_layer base=/tmp/fx_base.py cand=/tmp/fx_x16.py --cmd 'python bench.py bench submission.py "verify 32"' --rounds 2
+   (re-create the /tmp files with the f1s6 commands below if /tmp was wiped). x16 <= -2 us v32 sl+full -> Handoff; else HOT_XN 0, drop.
 ## f1s7 (2026-10-29 21:33Z-21:45Z): no build, 0 judge, 0 Modal (H200 A/B waits for the 00:00Z ledger reset, per lead 20:50Z)
 - Re-read the v16/v32 dense chain against the record (H200 timeline: qkv m128 15.7 us = 2.4 TB/s, pooler 27.6, unpool v32
   26.9 = compute-ish at M=256). Own-GEMM forms (g22/g23 split-K+DSMEM, g30 W-in-registers, x multicast) and L2 prefetch of
