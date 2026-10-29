@@ -3024,3 +3024,14 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   head start doesn't shorten the critical path (tk2f end - pr1 end unchanged). DYN would need the same x, so the T=1
   pr1->tk2f bubble is not recoverable by launch order. IDF stays off (IDF_DEFAULT comment updated); throttle not committed.
 - 0 judge runs, 0 Modal. main = v168 (code unchanged except a comment).
+
+## night7 s9 (2026-10-29 08:25Z-08:55Z): no build, 0 judge runs, 0 Modal; v1 T=8 o post-attention latency re-sized = already closed
+- No new Handoffs since n7s8 (moe n7s21 unpool skip DEAD, proj's T=256 compacted unpool = the same GEMM, gated by moe's H200 DIAG).
+- H200 n7s1 timeline: v1 o (g30n MTOK 8) ends 5.9 us (sl) / 7.6 us (full) after attention vs d1 o 3.5 us. H100 now (main v168,
+  2 replays): v1 sl vtk end -> o end 7.3/6.9, full _combine end -> o end 10.7/11.3 us (g30 W ring NW 8 = half the W share).
+  NOT a lever: night5 s5 / s88 measured pr8 (PDL secondary of bnd1, streams its W pre-wait) ends at ~55 us H100 whatever o
+  does (g12 7.4 / g30 NW16 8.8 / NW8 6.2 us post-attention all give the same pr8 end). Only pr8's own stream sets v1's front.
+- d1 full attention (_gd_full 10.7 + _red_fin vs 6.16 us random gather floor, ~0.3% d1 + ~0.25% v1) stays the largest
+  unowned layer-side pool. On paper a native kernel needs tensor-core QK/PV (scalar FP32 QK+PV = ~5.7 us of FMA per SM at
+  16 q heads x 80K x 64, the same as the gather floor) and an fp8 V transpose for the PV B fragments (byte LDS = ~6 us):
+  this is where ~/attn s73's cfl lost. Multi-session; not started without a lead assignment.
