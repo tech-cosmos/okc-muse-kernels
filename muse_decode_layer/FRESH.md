@@ -146,3 +146,44 @@ Also checked: v16 unpool W L2 pre-fill during the twm drain: H200 W-free oracle 
 qkv nvjet 19 us for 9.7 GFLOP (~12 at 800 TFLOP/s) | o 9.4 for 4.3 (~5.4) | pooler+router 33.4 for 19 (~24) | unpool 27
 for 17.2 (~21.5) => dense GEMMs ~25 us over a good-GEMM rate (wave quantization at M=256: qkv has 36 128x128 tiles on 132 SMs)
 | twm+moe_hot ~205 vs ~140 stream => ~65 | glue (routing 3.6, routegather 7.3, moe_norm ~25, 2 boundaries 16.5, attention 15) ~30.
+
+## f1s2 (2026-10-29 19:50-20:20Z): cross-board view + O2 in-layer twm oracles (H100 only; Modal ledger full for 10-29)
+### Where the top layer teams stand on the component boards (okc leaderboard, 19:55Z; our rows there may be stale)
+| layer rank | team | layer | moe | proj | attention |
+|---|---|---|---|---|---|
+| 1 | mpeng19 | 2.418 | #4 2.616 | #30 1.569 | #19 2.740 |
+| 2 | pjmullin3 | 2.403 | #2 2.685 | #15 1.584 | #2 3.032 |
+| 3 | colinlikescode | 2.380 | #6 2.576 | #1 1.637 | #5 2.997 |
+| 9 | zzz0906 | 2.321 | #5 2.590 | #11 1.589 | #4 3.008 |
+| 63 | tech-cosmos | 2.158 | #188 2.279 | #374 1.357 | #102 2.596 |
+Every top-10 layer team is >= ~2.41 moe and (bar 3) >= ~1.55 proj. Our standalone proj row (eb166fc0) is ~cuBLAS at
+m=128/256 (x1.01-1.17 vs SGLang) and 1.03-1.10 on o/qkv at m>=16. Per-load arithmetic: a 1.57 proj team can't be at our
+v16/v32 level unless its d-loads are >= ~1.8x, so they are faster on dense GEMMs SOMEWHERE (which loads: unknowable from the
+board). Bound for v16/v32 from a smem-ingest + split-K-flush model (proj s16: ~50 GB/s/SM L2->smem): x re-reads
+(N/BN) * M * K * 2 B vs reduction flush 132 * BN * M * 4 B, best BN ~256-360 -> realistic -14 us v16 sl, -8 us v32 sl
+over today's cuBLAS = ~+1.2% geomean; proj's g22/g28 record (dead at BN 128) is consistent. Not my pick.
+
+### O2 in-layer twm oracles (TWM_ORC in moe_src.py, default 0 = bitwise main; tools/fresh/run_one.py for ncu)
+H100, bench.py verify loads, us (2 alternating rounds for 0/4/16, spread < 1.5 us); v1 (tk2f, untouched) = control, flat.
+| variant | v16 sl | v16 fu | v32 sl | v32 fu | twm alone at v16 sl (ncu, isolated) | instr |
+|---|---|---|---|---|---|---|
+| base | 297.2 | 444.8 | 368.1 | 624.3 | 245.8 | 77.1M |
+| ORC 1: dq ~free, wgmma kept | 287.3 | 439.9 | 364.1 | 620.5 | 223.9 | 48.6M |
+| ORC 2/3/4/7: stream + skeleton (ptxas drops dq too) | ~277.5 | ~434.5 | ~351 | ~608 | 205.6 | 14.3M |
+| ORC 16: every epilogue skipped at run time | 294.0 | 442.1 | 362.0 | 618.3 | 243.3 | 75.7M |
+| ORC 128: epilogue without global stores | 295.3 | 444.0 | 366.3 | 623.1 | | |
+- Mistake caught: I first read ORC 4 (epilogue compiled out) = -20 us as an i-cache effect (twm is 6-8k SASS, 2.2-2.6k
+  without epilogues; ncu no_instruction stalls 5.4k vs 1.8k cycles/warp). ncu instruction counts show ptxas dead-code-
+  eliminated the (non-volatile) wgmma and then the dq once acc was dead, so ORC 4 = stream-only. Empty `asm volatile`
+  fences (fence_r) do NOT survive into ptxas. A real dq-only oracle needs a value sink (e.g. LOP3-xor of the A regs, stored
+  under an impossible condition).
+- Reading (H100): twm at v16 = 206 us stream + skeleton (596 MB = 2.9 TB/s) + ~22 us dq + ~18 us MMA; in-layer the
+  whole consumer is worth -20 us v16 sl / -17 v32 sl / -10 / -16 full (6.6% / 4.6% of those loads). Epilogue execution
+  is small (-3 v16, -6 v32 sl). On the H100 HBM is slower, so the H200 share is larger (moe n5s20: dq-free alone -22.6 /
+  -23.8 us standalone on the H200).
+- Consistent with moe's microbench (RS-MMA-only 512 cyc/stage = the tensor PEAK at RT4 N32 / RT2 N64; dq ALU 698;
+  both 1007): the MMA is real FLOPs at peak, not padding, and dq + MMA do not overlap (dispatch/RF conflict, moe n7s47).
+  So H2's prize is real (H200 TBD) but needs a structure that overlaps dq with the tensor pipe ACROSS SMs or warps
+  without RF conflict, which nobody here has found. I did not find one in this session either.
+### Next H200 run (Modal, after 00:00Z, ~8 GPU-min): base / ORC 1 / ORC 7 at verify 16/32 sl+full, in-layer
+   (tools/h200.py muse_decode_layer base=submission.py orc1=<copy> orc7=<copy> --cmd 'python bench.py bench submission.py verify').

@@ -97,6 +97,11 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TWM_HOTC 0       // n6s3 (moe 0be4fa0): moe_twm's in-twm hot class compiled out (layer: twm_hot is in no TUNE list); set 1 to use twm_hot
 #define TK2F_REL 2       // n6s6 (moe 5eb1e15+): tk2h gemm13 publishes by a helper warp NC + 1 (H200 DIAG 8c5f1376: tk2h d32 -0.75 us; tk2f 1-group paths +0.3: 2 = tk2h only)
 #define TWM_REL 1        // n6s4 (moe 7d2a079): moe_twm gemm13+gemm2 releases by helper warp 9
+#ifndef TWM_ORC
+#define TWM_ORC 0        // fresh f1s2 ORACLE (timing only, wrong output, never submit): tw_item bit 1 dq ~free (wgmma kept),
+                         // 2 no wgmma / 4 compiled-out epilogue: BOTH also let ptxas drop the dq (ncu: 15M vs 77M instr) = stream-only;
+                         // 16/32/64 runtime-skip all / gemm13 / gemm2 epilogues, 128 epilogue without global stores
+#endif
 #define TWM_KSC 2        // n6s4 (moe 7d2a079): moe_twm built with + without the K-split tail code (picked per call); 0 = never split, 1 = always built in
 #ifndef TK2G_PAR4
 #define TK2G_PAR4 1      // n17: tk2g_bound's 4 calls on 4 warps + 32-bit p (bitwise: same bounds)
@@ -1806,6 +1811,15 @@ __device__ __forceinline__ void tw_epi2(float (&acc)[RT][N / 2], int lane, int w
         }
       }
     __syncwarp();
+#if TWM_ORC & 128  // staging kept, global stores skipped at run time
+    if (gsc != 1234.5f) {
+#pragma unroll
+      for (int r = 0; r < RT; ++r)
+#pragma unroll
+        for (int i = 0; i + 4 < N / 2; ++i) acc[r][i] = acc[r][i + 4];
+      continue;
+    }
+#endif
     if (GATED) {
       // the warp's positions in its 64-column block: lc bit 2 fixed (RT 4: 4-element chunks) or bits 1-2 fixed (RT 2: 2)
       constexpr int CE = H == 2 ? 4 : 2;
@@ -1894,14 +1908,21 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
       for (int jj = 0; jj < KG; ++jj)
 #pragma unroll
         for (int r = 0; r < RT; ++r) {
+#if TWM_ORC & 1
+          { uint32_t* a_ = odd ? afB[jj][r] : afA[jj][r]; const uint32_t q_ = u4get(wv[r], j0 + jj);
+            a_[0] = q_; a_[1] = q_ ^ s0[r]; a_[2] = q_ ^ s1[r]; a_[3] = q_; }
+#else
           if (odd) dq(u4get(wv[r], j0 + jj), s0[r], s1[r], afB[jj][r]);
           else dq(u4get(wv[r], j0 + jj), s0[r], s1[r], afA[jj][r]);
+#endif
         }
       wg_fence();
+#if !(TWM_ORC & 2)
 #pragma unroll
       for (int jj = 0; jj < KG; ++jj)
 #pragma unroll
         for (int r = 0; r < RT; ++r) wgmma_bf16<N>(acc[r], odd ? afB[jj][r] : afA[jj][r], d0 + (j0 + jj) * 2);
+#endif
       wg_commit();
       wg_wait<1>();
 #pragma unroll
@@ -1929,6 +1950,18 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
     for (int i = 0; i < NA; ++i) fence_f(acc[r][i]);
   }
   mbar_arrive(&empty[pst]);
+#if TWM_ORC & 4
+  return;
+#endif
+#if TWM_ORC & 16  // runtime skips (code kept: same i-cache footprint); gsc is never 1234.5
+  if (gsc != 1234.5f) return;
+#endif
+#if TWM_ORC & 32
+  if (!g2 && gsc != 1234.5f) return;
+#endif
+#if TWM_ORC & 64
+  if (g2 && gsc != 1234.5f) return;
+#endif
   const int g = lane >> 2, t = lane & 3;
   if (NW == 16 && GATED) {
     float* xb = reinterpret_cast<float*>(const_cast<char*>(smem) + NSTG * C::STG) + (warp >> 1) * 32 * 32;
