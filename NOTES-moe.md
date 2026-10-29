@@ -3370,3 +3370,5 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   bound before BAL/tk2h absorb part: d1 0.46, v1 1.45, d16 1.53, d32 2.21 us/call; a half-row last wave recovers ~half.
 - Verdict: d16/d32 stream-efficiency lane CLOSED at <= ~1 us/call per item (ph2 extra rows, quantization tail); nothing
   >= the 4 us bundle bar. 0 judge runs, 0 Modal. Budget 10-29: moe checks 9/20.
+## n7s42 (2026-10-29 12:10Z - 12:13Z): idle; no lead decision after 12:00Z (both items done in n7s41, which ended 12:09Z); 0 judge runs, 0 Modal, no code
+- Open items, all below the 4 us bundle bar: ph2 extra rows (~-1 us per extra 8-token group), row-quantization tail (half of 0.5-2.2 us/call). moe needs a new lane or a pause (~/STOP-moe).
