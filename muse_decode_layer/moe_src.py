@@ -2939,7 +2939,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
     int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
-    __nv_bfloat16* __restrict__ Y) {
+    __nv_bfloat16* __restrict__ Y, int per = 0) {
   using HG = TWC<2, true, 8>;
   using HN = TWC<2, false, 8>;
   constexpr int XB = NH * 128, STRIDE = XB + HG::WB + HG::SB;
@@ -2971,6 +2971,10 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   }
   __syncthreads();
   const int nh = s_nh, n13 = nh * HG::NRB, nitems = n13 + nh * HN::NRB;
+  // n7s32 HOT_PER: per > 0 = only max(per >> 8, (per & 255) * nh) CTAs work (<= the grid); the others
+  // exit at once, so their SMs go to moe_twm (the PDL secondary). A fixed 32-CTA grid made calls with 3-4 hot experts
+  // the critical path (H100 v32 sl, 4 hot: 434 vs 335 us at 64 CTAs): the judge's slow v32 draws.
+  if (per > 0 && (int)blockIdx.x >= max(per >> 8, (per & 255) * nh)) return;
   if (warp >= 8) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
     if (warp > 8 || lane != 0) return;
@@ -3050,6 +3054,8 @@ template <bool SA, int NH>
 static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
+  const int per = (grid / 100000) << 8 | (grid / 1000) % 100;  // n7s32 HOT_PER: grid = base * 1e5 + per * 1e3 + CTAs
+  grid %= 1000;
   constexpr int NSTG = 8;
   constexpr int SMEM = NSTG * (NH * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024 + (TWM_EPI ? 8192 : 0);
   static bool init = false;
@@ -3063,7 +3069,7 @@ static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
   return launch_k(moe_hot<NSTG, SA, NH>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
-      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr());
+      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(), per);
 }
 int64_t moe_hot_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                        torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
