@@ -1,3 +1,6 @@
+## n7s47 15:35Z: lead 14:30Z overlap (a)-(e) measured (tools/n7s47/ovl2.py, RESULTS.txt; NOTES n7s47): twm = 0.83x of ALU+MMA
+## already (bar met), but 1.4x of max(ALU,MMA); main stall = DISPATCH on dq ops while HGMMA runs (ncu). No variant closes it;
+## RT2 A-ring D4 -2..-9% per RT2 stage (<= ~1 us/v16 call): bundle item, not built. 0 judge runs.
 ## Session n7s44 (12:52Z): v171 layer check 46362a70 2.1556x (fixed-SGLang 2.1348), not submitted; moe PAUSED (lead 12:45Z). Bundle list in COORD Requests.
 ## n7s35 10:33Z idle (no lead decision since 09:35Z; Handoff moe/layer-hotdyn 130a692 pending layer). 0 runs.
 ## n7s40 11:45Z idle (no lead decision after 11:30Z). Layer board #55 2.158x. HOT_ET branch still a bundle item. 0 runs.

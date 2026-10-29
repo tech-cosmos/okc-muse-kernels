@@ -3385,3 +3385,28 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 
 ## n7s46 2026-10-29T13:17Z
 - Idle: moe paused per lead 12:45Z (no newer decision; ~/STOP-moe not yet touched). 0 judge runs.
+
+## n7s47 2026-10-29T14:55Z-15:35Z: lead 14:30Z overlap re-open, hypotheses (a)-(e) measured on the H100 (tools/n7s47/ovl2.py, RESULTS.txt); 0 judge runs
+- New harness ovl2.py = n6s2 ring.py stage (production dq, RT tiles x 4 k16 groups, LDS of W + scales, SW128 x tile) but
+  each consumer WG has its OWN role and loop and times itself; SASS check per kernel (DEPBAR gsb0 0x0, HGMMA, lmem).
+- Proper controls at 2 WGs (cycles/stage): ALU-only (dq||dq) RT4 N32 698 / RT2 N64 382; MMA-only (RS, constant
+  distinct A) 512 / 512. Production twm 1007 / 711-749 = 0.83 / 0.80-0.84 of ALU+MMA. So the 0.85x bar is already met
+  by today's code (s18's 750+550 -> 1046 was 0.80); the real gap is to max(ALU, MMA) = 698 / 512: twm runs at 1.44x / 1.39-1.46x of it.
+- (a) wait_group: wait<0> 1 set 1024/759-771 (worse); 4 A sets + wait<3> 1022 / 674-683; explicit 2-set pipeline
+  (dq j+1 between commit j and wait<1>) 1046 / 725. Only RT2 gains from D4: N40 -2%, N48 -5%, N56 -8%, N64 -5..9%.
+  RT4 N8/N24 lose (+9..12%, +2%). RT2 D4 uses the same 32 A regs as RT4 D2. Worth <= ~1 us per v16 call (RT2 items
+  = 33-64-token experts only): bundle item, not built.
+- (b) ptxas: no serialization in any valid variant (dep0 2-4 = loop exits). The "fresh A" control (1 LOP3 per A reg
+  then wgmma) is serialized by ptxas (dep0 = 1 per HGMMA): invalid, ignore (same trap as n6s1 DISTA).
+- (c) ncu stall sampling, RT4 N32: twm||twm samples: selected .26, DISPATCH .24, not_selected .13, wait .12, math .09,
+  short_sb .05. Dispatch stalls sit on the dq LOP3 (8.0k) and HMUL2 (7.7k, ~1 stall per issue), SHF, and HGMMA. dq||dq
+  has dispatch .05; dq||mmaC .18. => while HGMMA executes, the SMSP's dispatcher holds back dq instructions (both the ALU
+  and FMA pipes): an issue/RF-port conflict with the in-flight wgmma (most likely its register-resident accumulator /
+  A traffic), not wait_group placement, scoreboards or barriers. Hopper's RF accumulators are the design point; Blackwell's TMEM removes them.
+- (d) FA3 pingpong (WG w bar.sync's before its batch, arrives the other WG's bar after): 1048 / 763: no gain (as s22).
+- (e) no setmaxnreg 1048/733 (tie); 3 consumer WGs, no producer: 981 / 678 per 2 WG-stages (-3% / -9%) but no producer
+  warp and 168 regs: not twm-compatible. 2 twm WGs + a dq-only WG: everything slower.
+- Even fully separated roles don't overlap: dq||mmaC (WG0 dq, WG1 wgmma on untouched A) RT4 N32 dq 581 (alone 409)
+  while mma 449 (alone 324). So warp specialization can't reach max(ALU, MMA) either (and RS needs A in the MMA warp).
+- VERDICT: no variant gets near max(ALU, MMA). Best is RT2 D4 at ~1.32x of max (N64). twm is not rebuilt. Twm consumer
+  rates for proj's CUTLASS yardstick: RT4 N32 32768 w / 1007 cyc = 32.5 w/clk/SM, RT2 N64 16384 / 711-749 = 22-23 w/clk/SM.

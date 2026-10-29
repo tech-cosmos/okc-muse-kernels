@@ -1,0 +1,20 @@
+n7s47 H100, 1 CTA, cycles per twm stage (4 k16 groups x RT tiles), best of 3-5, each WG times itself. ovl2.py; stall_an.py = ncu source-page stall aggregation.
+Controls (2 WGs, separate per-WG loops):            RT4 N32   RT2 N64   RT4 N8
+  dq||dq (ALU only)                                   698       382       698
+  mmaC||mmaC (RS wgmma, constant distinct A)          512       512       417
+  sum / max                                          1210/698  894/512  1115/698
+  twm||twm (production)                              1007      711-749   794     (0.83 / 0.80-0.84 / 0.71 of sum)
+  dq||mmaC (WG0 dq, WG1 wgmma, no fresh A)            581/449   383/382   496/356
+  (a) wait<0>, 1 A set                               1024      759-771   769
+  (a) 4 A sets, wait<3>                              1022      674-683   868-886
+  (a) explicit 2-set pipeline (dq j+1 after commit j) 1046     725-728   864-868
+  (d) FA3 pingpong (named bars around each batch)    1048      763       877
+  (e) no setmaxnreg (384 thr, idle WG2)              1048      733       823
+  (e) 3 consumer WGs, no producer (per 3 WG-stages)  1472      1017      1158   (= 981 / 678 / 772 per 2 WG-stages)
+  mmaF (1 LOP3 per A reg before wgmma): INVALID, ptxas serializes (DEPBAR gsb0 0x0 after every HGMMA)
+RT2 A-ring D4 vs prod: N40 570/581, N48 607/636, N56 634/687, N64 674/711. RT4 N16 894/899, N24 971/951.
+ncu stall sampling (RT4 N32, NST 4096, interval 0), share of samples:
+  twm||twm  : selected .26 dispatch .24 not_sel .13 wait .12 math .09 short_sb .05   (dispatch on LOP3 8.0k, HMUL2 7.7k, HGMMA 4.9k, SHF 2.9k)
+  dq||mmaC  : selected .36 wait .24 dispatch .18 not_sel .08 math .03
+  dq||dq    : selected .35 math .20 not_sel .19 wait .18 dispatch .05
+  mmaC||mmaC: barrier .25 wait .25 dispatch .19 mio .13 selected .13
