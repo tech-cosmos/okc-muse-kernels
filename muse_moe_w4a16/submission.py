@@ -95,6 +95,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TK2F_PFL2K 0  // n5s27: L2 row-prefetch tk2f variants (moe_set_l2h2 + 10000 * d), DIAG builds only
 #define TK2F_SQ4 0  // n14: build the KPS 4 SQ tk2f (36 KB single-copy stages, cfg 402/403 + SQ); DIAG builds only
 #define TWM_PB48 0  // n12: build moe_twm<.., PB 48> (python TWM_PB_M); DIAG builds only (+7 s compile)
+#define TK2F_IDH 0       // n7s22: tk2f ids load before the slut copy (python TK2F_IDH)
 #define TK2F_L2H 0       // s21: tk2f weight-copy L2 hints (python TK2F_L2H): 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only; 4 = evict_last every group of a multi-group expert, evict_first else
 #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
 #define TWM_EPI 0        // n6s3: staged, rolled tw_item epilogue (python TWM_EPI)
@@ -5006,6 +5007,10 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
   const int l2h2 = (PF & 64) && ((l2h >> 4) & 15) ? ((l2h >> 4) & 15) - 1 : l2hv;  // n5s16: bit 12 = DIAG oracle  // n18: gemm2 rows' own mode (moe_set_l2h2)
 #define TK2F_SYNC() do { if (FP) asm volatile("bar.sync 4, %0;" ::"n"(NC * 32) : "memory"); else __syncthreads(); } while (0)
   static_assert(!FP || (!DYN && !FN && GS == 8 && MRG == 0), "FP: static GS 8 path only");
+  // n7s22: the routing's ids load goes out FIRST (it used to wait behind the slut copy's global load: two serial
+  // DRAM trips before the first weight copy; H100 stamps: start -> routed 1.8 us)
+  int idv = 0;
+  if (TK2F_IDH && warp < 8 && tid < nroutes) idv = ids[tid];
   int gen = 0;  // FN: this call's generation (see tk2f_norm); thread 0 only
   if (FN && tid == 0) asm volatile("ld.relaxed.gpu.global.b32 %0, [%1];" : "=r"(gen) : "l"(cnt + 7) : "memory");
   if (!FP || warp < NC)
@@ -5043,7 +5048,7 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
       s_wc[warp][lane] = 0;
       const int i = warp * 32 + lane;
       if (i < nroutes) {
-        const int v = ids[i] - start;
+        const int v = (TK2F_IDH ? idv : ids[i]) - start;
         if (v >= 0 && v < count) e = v;
       }
       const unsigned m = __match_any_sync(0xffffffffu, e);
@@ -5805,10 +5810,11 @@ _CPP = ("int64_t moe_gemm13(int64_t, torch::Tensor, torch::Tensor, torch::Tensor
 
 def _lib():
     global _LIB
-    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL), int(TK2F_REL)))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
+    _LIB = _LIBX.get((int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL), int(TK2F_REL), int(TK2F_IDH)))  # n22: one library per DQW value (DIAG variants switch it): one library per DQW value (DIAG variants switch it)
     if _LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = CUDA_SRC.replace("#define TK2F_L2H 0 ", f"#define TK2F_L2H {int(TK2F_L2H)} ")
+        src = src.replace("#define TK2F_IDH 0 ", f"#define TK2F_IDH {int(TK2F_IDH)} ")
         src = src.replace("#define DQW 0 ", f"#define DQW {int(DQW)} ")
         src = src.replace("#define NORM_EARLY 0 ", f"#define NORM_EARLY {int(NORM_EARLY)} ")
         src = src.replace("#define TWM_L2H 0 ", f"#define TWM_L2H {int(TWM_L2H)} ")
@@ -5834,7 +5840,7 @@ def _lib():
                                       "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa", "moe_set_l2h2", "moe_set_hot", "moe_hot_launch", "moe_stream_launch"],
                            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"],
                            extra_cflags=["-O3"], verbose=False)
-        _LIBX[(int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL), int(TK2F_REL))] = _LIB
+        _LIBX[(int(DQW), int(TWM_EPI), _hotc(), _ksc(), int(TWM_REL), int(TK2F_REL), int(TK2F_IDH))] = _LIB
     return _LIB
 
 
@@ -6076,6 +6082,7 @@ TWM_L2H = 1  # s21: same hints in moe_twm's producer (compile time; evict_last i
 TK2F_ORACLE = 0  # n5s16: DIAG-only oracle (wrong output!): tk2f drops every expert's extra token groups (bounds their cost)
 DQW = 0  # n22: 1 = dq() rotations as mul.wide (FMA pipe) + LOP3: 5 ALU-pipe ops per 8 weights, not 7 (compile time)
 NORM_EARLY = 1  # n4s1: moe_norm after moe_twm waits per token on its experts' gemm2 flags (runs in twm's drain); compile time
+TK2F_IDH = 1  # n7s22: moe_tk2f issues the routing ids load before the slut copy (one DRAM trip off the prologue); bitwise = 0
 TK2F_L2H = 4  # s21: tk2f L2 cache hints on the weight copies (see #define TK2F_L2H; compile time, 0 = off). Bitwise = 0. DRAM bytes at d16/d32 = floor (ncu). moe-only layer routings (H100, 5 seeds): d16 -4.9, d32 -2.8, v1 -1.1, d1 -0.5 us (mode 1: d16 -1.2); layer harness (tuner off) mode 1/4: v1 -4..-6, d16 -0.5/-3.5, d32 0
 TK2F_L2H2_RT = None  # n18: run-time L2 hint mode of tk2f's gemm2 rows (None = as gemm13); SQ needs a DIAG build (TK2F_SQRT)
 TK2F_L2H_RT = None  # n4s3: run-time tk2f L2 hint mode 0..4 (None = TK2F_L2H); passed as cfg + 1000000 * (mode + 1), so the H200 diag / the layer's tuner can pick it
