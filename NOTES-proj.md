@@ -2607,3 +2607,23 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Implication for the big bet: in this piece HBM idle time is not what the 2x-floor excess is made of; whatever sets the d16/d32
   expert start is the chain bnd1 -> rmsnorm -> tk2f (+ tk2f's own ramp), not the pooler/router bytes. Don't extend to qkv/tail on
   this premise without a similar oracle there first (tail is already closed by n5s14 'both' -6 us for pooler+unpool at d32).
+
+## n7s5 (2026-10-29 05:53Z - ~06:50Z): self-picked (no lead answer to n7s4): cuBLASLt config for the layer's T=256 FR GEMM; patch for layer; 0 judge runs, Modal 1.3 GPU-min (proj ~12.1/15 today)
+- Why: the H200 timeline (layer dev/n7s1_tl_h200.txt) shows FR = torch.mm(h, [pooler; hi; lo]^T, FP32 out) [T x 4608 x 8192] on
+  cuBLAS heuristics: T=256 33.4 us (~58% of BF16 peak), T=128 27.6 us. Nobody had screened cuBLASLt configs for this FP32-out shape
+  (the LT_CFG picks are BF16-out per-GEMM shapes).
+- Tool: dev/n7s5/frlt.py (full algo-66 screen, 45,792 configs, FP32 C/D; frlt_cpp.inc = lte_lib with 32F out; self-contained
+  time_graph, so it runs on Modal with no submission build) + frheur.py (all heuristic algos: all 8 are algo 66).
+  H100 cold-L2 graph us: T=256 torch.mm 33.6 -> best 32.86 (tile 183 cl 2); T=128 30.8 -> 29.84 (tile 134 cl 4). Heuristics no better.
+  H200 Modal (`tools/h200.py muse_bf16_proj fr=<overlay> --cmd 'python frlt.py 256,128; python frheur.py 256,128'`):
+  T=256 torch.mm 30.14/30.30 -> best 28.26 (66,125,35,1,0,0,custom 4,cluster 5) = -1.9 us (-6%); T=128 full screen did not run
+  (torch.save to /tmp/pj failed in the container after T=256; fixed); T=128 heuristics: torch.mm 24.6, heur #0 24.5.
+- Layer patch dev/n7s5/ltfr_layer.patch (layer.py + lt_src.cu, applies on main d2bb0c2+): lt_src.cu takes C/D type from out
+  (FP32 or BF16), LT_CFG[("fr", 256)] = the H200 pick, _lt_prepare validates it vs torch.mm FP32, FR branch uses it when lt_ok
+  (TUNE escape {"lt:fr": False}). build OK, bench test 13/13, files_eq verify 32 sl/full 2 seeds BITWISE identical, spy shows the
+  FP32 lt call with the cfg at T=256. H100 ab_files verify 32 4 rounds (TUNE {} both): sl 371.2 -> 372.2, full 627.3 -> 625.6 = noise
+  (expected: H100 gain only 0.7 us standalone). Expected H200 in-layer -1.9 us per v32 layer = ~0.08% score: a bundle item only.
+  Not H200-in-layer A/B'd (would exceed proj's Modal share today): handed to layer (COORD Handoffs).
+- Also done this session: re-read the d1/v1 big-bet side against records: s46 (side filler dilates csl/o), s71 (pr1 SMEM prefill
+  monotonic loss), s17 (m=1 GEMVs at bare TMA stream speed on the H200), layer n7s2 RGR (grid barrier ~1 us > the ~0.3 us PDL
+  launch gap it saves): the T=1/8 'HBM never idle' premise is already refuted piece by piece; no new oracle needed there.
