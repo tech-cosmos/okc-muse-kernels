@@ -1,3 +1,4 @@
+## Session n7s44 (12:52Z): v171 layer check 46362a70 2.1556x (fixed-SGLang 2.1348), not submitted; moe PAUSED (lead 12:45Z). Bundle list in COORD Requests.
 ## n7s35 10:33Z idle (no lead decision since 09:35Z; Handoff moe/layer-hotdyn 130a692 pending layer). 0 runs.
 ## n7s40 11:45Z idle (no lead decision after 11:30Z). Layer board #55 2.158x. HOT_ET branch still a bundle item. 0 runs.
 # STATE-moe

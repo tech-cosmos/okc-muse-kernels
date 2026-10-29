@@ -3373,3 +3373,9 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 ## n7s42 (2026-10-29 12:10Z - 12:13Z): idle; no lead decision after 12:00Z (both items done in n7s41, which ended 12:09Z); 0 judge runs, 0 Modal, no code
 - Open items, all below the 4 us bundle bar: ph2 extra rows (~-1 us per extra 8-token group), row-quantization tail (half of 0.5-2.2 us/call). moe needs a new lane or a pause (~/STOP-moe).
 ## n7s43 (2026-10-29 12:26Z - 12:27Z): idle; no lead decision after 12:00Z (done n7s41); 0 judge runs, 0 Modal, no code
+## n7s44 (2026-10-29 12:41Z - ~12:52Z): lead 12:45Z: ONE layer check of r-layer main v171, then pause; 1 judge check, 0 Modal, no code
+- check 46362a70 (muse_decode_layer) on v171 d9553b2 (= HEAD, submission.py unchanged): 2.1556x (CI 2.123-2.188),
+  fixed-SGLang 2.1348 (v167 2.1533, v168 2.1373, v169 2.1084, v170 2.1333). Below board 2.158: NOT submitted.
+  us sl/full: d1 66.1/77.1 (best-ever d1 sl) d16 131.8/207.3 d32 155.6/307.7 v1 110.8/126.7 v16 260.0/350.4 v32 326.0/504.5.
+- Ranked <= 1 us/call item list posted under COORD Requests (row-quant tail, ph2 extra rows, HOT_ET v16 sl +1, HOT128
+  no-hot +1.5, tk2f prologue). moe paused per lead. Budget 10-29: layer checks 9/20 (3 submits), moe checks 9/20.
