@@ -1,6 +1,8 @@
 # STATE-moe
 
-## NOW (n7s8, 2026-10-29 03:15Z): idle, no lead answer to Requests n7s1; 0 runs. Layer board #49 (2.158; #1 2.403).
+## NOW (n7s9, 2026-10-29 03:30Z): idle, no lead answer to Requests n7s1; 0 runs. Layer board #49 (2.158; #1 2.403).
+
+## WAS-n7s8 (03:15Z): idle (same)
 
 ## WAS-n7s7 (03:00Z): idle (same)
 
