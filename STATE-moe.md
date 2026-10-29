@@ -1,5 +1,7 @@
 ## n7s35 10:33Z idle (no lead decision since 09:35Z; Handoff moe/layer-hotdyn 130a692 pending layer). 0 runs.
 # STATE-moe
+## n7s38 11:55Z: lead 11:30Z v1/d16 regression = NONE (H100 ab_files v168 vs v170 tie on v1/d16; judge picks identical; v169/v170 ratios inside
+## the 19-run range, SGLang drew slow too). v170 stays on r-layer main. 0 runs. Nothing queued.
 ## n7s37 11:10Z idle: no lead decision after 10:40Z (all done). d16 variance closed on paper (= d32 pure bytes, <= 16 tok/expert). 0 runs.
 ## n7s36 11:06Z: lead 10:40Z (1)-(4) DONE. r-layer main = v170: v169 (hotdyn, T=256 moe_hot device-side CTAs) + v170 (moe_hot at
 ## T=128, HOT128 32064 = 32 CTAs per 65..128-token expert, <= 64, 0 without). Both bitwise, validate ALL OK. Checks 8b3f8e57 2.1287

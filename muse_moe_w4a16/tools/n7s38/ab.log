@@ -1,0 +1,62 @@
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 86.3us | {'g10alt:o': 1} 86.6us -> default
+layer tune T=1 full: default 88.1us | {'g10alt:o': 1} 88.3us -> default
+layer tune T=16 sliding: default 219.5us | {'g30n:unpool': True} 217.6us | {'g30n:qkv_gate': True} 221.2us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 219.5us (confirm default 219.4 vs 218.1us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 311.3us | {'g30n:unpool': True} 309.5us | {'g30n:qkv_gate': True} 310.9us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 309.7us (confirm default 311.4 vs 309.7us) -> {'g30n:unpool': True}
+layer tune T=32 sliding: default 212.5us | {'g30kgx:pooler': False} 212.9us | {'g19:o': True} 212.0us | {'tk2h': 3} 214.0us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 212.1us (confirm default 212.3 vs 212.3us) -> default
+layer tune T=32 full: default 429.1us | {'g30kgx:pooler': False} 429.0us | {'g19:o': True} 429.6us | {'tk2h': 3} 430.9us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 429.7us (confirm default 427.8 vs 428.7us) -> default
+layer tune T=8 sliding: default 143.9us | {'g30n:o': False} 144.9us | {'g14alt:qkv_gate': 1} 144.4us -> default
+layer tune T=8 full: default 158.3us | {'g30n:o': False} 159.8us | {'g14alt:qkv_gate': 1} 157.8us (confirm default 158.1 vs 158.0us) -> default
+layer tune T=128 sliding: default 342.2us | {'lt:o': True} 341.8us | {'ltalt:pooler': 2} 340.2us (confirm default 344.1 vs 341.2us) -> {'ltalt:pooler': 2}
+layer tune T=128 full: default 433.8us | {'lt:o': True} 434.0us | {'ltalt:pooler': 2} 432.3us (confirm default 433.1 vs 432.5us) -> {'ltalt:pooler': 2}
+layer tune T=256 sliding: default 388.6us | {'lt:o': True} 390.0us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 389.1us -> default
+layer tune T=256 full: default 624.3us | {'lt:o': True} 625.0us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 622.9us (confirm default 623.9 vs 622.8us) -> {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True}
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 86.0us | {'g10alt:o': 1} 86.4us -> default
+layer tune T=1 full: default 89.5us | {'g10alt:o': 1} 90.1us -> default
+layer tune T=16 sliding: default 219.2us | {'g30n:unpool': True} 217.4us | {'g30n:qkv_gate': True} 221.3us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 219.3us (confirm default 218.4 vs 217.6us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 310.5us | {'g30n:unpool': True} 309.0us | {'g30n:qkv_gate': True} 311.1us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 308.8us (confirm default 311.5 vs 309.1us) -> {'g30n:unpool': True, 'g30n:qkv_gate': True}
+layer tune T=32 sliding: default 211.4us | {'g30kgx:pooler': False} 211.9us | {'g19:o': True} 211.7us | {'tk2h': 3} 212.9us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 211.8us -> default
+layer tune T=32 full: default 429.7us | {'g30kgx:pooler': False} 429.7us | {'g19:o': True} 430.1us | {'tk2h': 3} 430.4us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 430.3us -> default
+layer tune T=8 sliding: default 144.9us | {'g30n:o': False} 145.7us | {'g14alt:qkv_gate': 1} 144.7us (confirm default 144.9 vs 144.3us) -> {'g14alt:qkv_gate': 1}
+layer tune T=8 full: default 157.7us | {'g30n:o': False} 159.6us | {'g14alt:qkv_gate': 1} 156.6us (confirm default 157.7 vs 157.1us) -> {'g14alt:qkv_gate': 1}
+layer tune T=128 sliding: default 342.1us | {'lt:o': True} 341.2us | {'ltalt:pooler': 2} 342.1us (confirm default 341.5 vs 341.5us) -> default
+layer tune T=128 full: default 434.0us | {'lt:o': True} 434.4us | {'ltalt:pooler': 2} 433.9us (confirm default 434.2 vs 434.5us) -> default
+layer tune T=256 sliding: default 388.9us | {'lt:o': True} 387.6us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 388.1us (confirm default 388.7 vs 387.9us) -> {'lt:o': True}
+layer tune T=256 full: default 624.1us | {'lt:o': True} 622.9us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 624.4us (confirm default 624.4 vs 622.8us) -> {'lt:o': True}
+/home/daytona/okc/lib/python3.12/site-packages/torch/cuda/graphs.py:630: UserWarning: The CUDA Graph is empty. This usually means that the graph was attempted to be captured on wrong device or stream. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/cuda/CUDAGraph.cpp:249.)
+  super().capture_end_pre()
+verify 1 sliding   [0]  142.10 ( 141.86)  [1]  141.97 ( 141.66)
+verify 1 full      [0]  158.65 ( 158.43)  [1]  157.60 ( 157.30)
+verify 16 sliding  [0]  293.17 ( 292.90)  [1]  294.71 ( 293.82)
+verify 16 full     [0]  443.38 ( 442.90)  [1]  444.37 ( 443.66)
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 86.6us | {'g10alt:o': 1} 86.1us (confirm default 86.4 vs 86.3us) -> {'g10alt:o': 1}
+layer tune T=1 full: default 88.4us | {'g10alt:o': 1} 88.4us (confirm default 88.1 vs 88.8us) -> default
+layer tune T=16 sliding: default 219.4us | {'g30n:unpool': True} 218.2us | {'g30n:qkv_gate': True} 221.0us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 219.7us (confirm default 219.5 vs 218.3us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 311.6us | {'g30n:unpool': True} 309.5us | {'g30n:qkv_gate': True} 310.5us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 309.9us (confirm default 311.4 vs 310.4us) -> {'g30n:unpool': True}
+layer tune T=32 sliding: default 212.1us | {'g30kgx:pooler': False} 212.6us | {'g19:o': True} 211.8us | {'tk2h': 3} 213.7us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 211.9us (confirm default 212.0 vs 211.9us) -> default
+layer tune T=32 full: default 428.7us | {'g30kgx:pooler': False} 429.5us | {'g19:o': True} 429.3us | {'tk2h': 3} 430.3us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 429.0us -> default
+layer tune T=8 sliding: default 144.0us | {'g30n:o': False} 144.6us | {'g14alt:qkv_gate': 1} 144.6us -> default
+layer tune T=8 full: default 158.2us | {'g30n:o': False} 159.9us | {'g14alt:qkv_gate': 1} 157.6us (confirm default 158.2 vs 157.6us) -> {'g14alt:qkv_gate': 1}
+layer tune T=128 sliding: default 342.7us | {'lt:o': True} 342.1us | {'ltalt:pooler': 2} 340.7us (confirm default 344.2 vs 341.6us) -> {'ltalt:pooler': 2}
+layer tune T=128 full: default 434.0us | {'lt:o': True} 433.2us | {'ltalt:pooler': 2} 431.7us (confirm default 433.3 vs 432.1us) -> {'ltalt:pooler': 2}
+layer tune T=256 sliding: default 387.5us | {'lt:o': True} 388.7us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 388.9us -> default
+layer tune T=256 full: default 625.6us | {'lt:o': True} 624.5us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 623.7us (confirm default 626.5 vs 624.1us) -> {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True}
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 85.7us | {'g10alt:o': 1} 85.9us -> default
+layer tune T=1 full: default 89.7us | {'g10alt:o': 1} 90.0us -> default
+layer tune T=16 sliding: default 219.0us | {'g30n:unpool': True} 217.6us | {'g30n:qkv_gate': True} 221.0us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 219.2us (confirm default 218.6 vs 217.3us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 310.4us | {'g30n:unpool': True} 308.5us | {'g30n:qkv_gate': True} 310.2us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 309.2us (confirm default 310.6 vs 308.8us) -> {'g30n:unpool': True}
+layer tune T=32 sliding: default 211.0us | {'g30kgx:pooler': False} 211.8us | {'g19:o': True} 211.4us | {'tk2h': 3} 213.2us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 211.5us -> default
+layer tune T=32 full: default 429.5us | {'g30kgx:pooler': False} 430.4us | {'g19:o': True} 429.9us | {'tk2h': 3} 430.1us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 430.3us -> default
+layer tune T=8 sliding: default 144.9us | {'g30n:o': False} 145.8us | {'g14alt:qkv_gate': 1} 144.4us (confirm default 145.2 vs 144.5us) -> {'g14alt:qkv_gate': 1}
+layer tune T=8 full: default 157.8us | {'g30n:o': False} 159.5us | {'g14alt:qkv_gate': 1} 157.2us (confirm default 157.8 vs 156.7us) -> {'g14alt:qkv_gate': 1}
+layer tune T=128 sliding: default 341.6us | {'lt:o': True} 341.3us | {'ltalt:pooler': 2} 342.4us (confirm default 342.4 vs 341.4us) -> {'lt:o': True}
+layer tune T=128 full: default 434.1us | {'lt:o': True} 434.3us | {'ltalt:pooler': 2} 433.3us (confirm default 434.4 vs 434.2us) -> default
+layer tune T=256 sliding: default 388.8us | {'lt:o': True} 388.0us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 388.1us (confirm default 389.0 vs 388.0us) -> {'lt:o': True}
+layer tune T=256 full: default 624.4us | {'lt:o': True} 622.5us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 624.4us (confirm default 624.3 vs 622.6us) -> {'lt:o': True}
+/home/daytona/okc/lib/python3.12/site-packages/torch/cuda/graphs.py:630: UserWarning: The CUDA Graph is empty. This usually means that the graph was attempted to be captured on wrong device or stream. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/cuda/CUDAGraph.cpp:249.)
+  super().capture_end_pre()
+decode 16 sliding  [0]  189.24 ( 188.93)  [1]  188.69 ( 188.42)
+decode 16 full     [0]  292.06 ( 291.34)  [1]  292.15 ( 291.70)

@@ -3308,3 +3308,15 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 - d16 variance (left open in n7s36) closed on paper: tk2 family like d32 (pure bytes, corr(resid, top count) 0.07) with <= 16
   tokens/expert, so no hot-expert split to fix. Correction to n7s36: its v16time.py was not committed; logs are in /tmp/n7s36
   (d32.log, v16.log, hot128*.log), not tools/n7s36. 0 judge runs, 0 Modal, no code.
+## n7s38 (2026-10-29 11:25Z - ~11:55Z): lead 11:30Z v1/d16 regression check of v169/v170 -> NO regression (judge draw); 0 judge runs, 0 Modal, no code
+- Code: 6897e13 (v168) -> 7878cc4 (v170) touches only moe_hot (one extra kernel arg + early exit) and the T=128/T=256
+  TUNE_BASE hot values. No T=1/8/16 code, TUNE list or build set changes.
+- Judge T=8/T=16 tuner picks: identical in a5b4ddab (v168), 8b3f8e57 (v169) and 8cea7492 (v170). The T=8 sliding tuner default
+  time swings 94-116 us across the last 20 runs with the same picks (per-run router), e.g. 94.2 (v168) vs 102.1/101.6.
+- Scored ratios SGLang/ours over the last 19 layer runs (tools/n7s38/reg.py): v1 sl 2.338-2.428 (v169/v170 2.343/2.338;
+  0e4ba3c2 had 2.340), v1 full 2.167-2.303 (2.196/2.219), d16 sl 2.044-2.109 (2.048/2.046; board best 3e3b9fd3 2.045),
+  d16 full 2.081-2.158 (2.094/2.126). SGLang itself drew slow on v1 sl in both (271.2/268.7 vs ~260): heavier routers.
+- H100 ab_files v168 vs v170 (r-layer tools/ab_files.py, seed 99, 6 interleaved rounds, log tools/n7s38/ab.log):
+  v1 sl 142.10 vs 141.97, v1 full 158.65 vs 157.60, d16 sl 189.24 vs 188.69, d16 full 292.06 vs 292.15 = tie;
+  v16 sl 293.17 vs 294.71, full 443.38 vs 444.37 (+1.5/+1.0 = the known HOT128 no-hot-expert cost, n7s36: +1.5..2.2;
+  -14..-21 us on the ~1/3 of T=128 inputs with 1-2 hot experts). Verdict: no v171 gate needed; v170 stays.
