@@ -2583,3 +2583,27 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   (the 256-only file, T=128 path = base, also drew +1.2/+1.5: v16 noise ~2 us) -> T=128 left off (TUNE option).
   H200 Modal 1 round (tools/h200.py, bench verify): v32 sl 330.77 -> 328.48 (-2.3), full 511.07 -> 510.02 (-1.05); v1/v16 +-0.4.
   ~0.1% score: a bundle item (lead 04:25Z rule), handed to layer (COORD Handoffs).
+
+## n7s4 (2026-10-29 05:41Z - ~06:35Z): lead 06:00Z BIG BET step-2 GATE for the d16/d32 piece o -> bnd1 -> pooler || router -> routing -> rmsnorm: FAILS (<= ~2-4 us/layer even when the piece is FREE); 0 judge runs, Modal 2.8 GPU-min (proj 10.8/15 today)
+- Question: does a persistent 'HBM-never-idle' kernel with the piece's weights preloaded on chip reach the lead's >= 5 us bar at
+  d16/d32? Oracle ladder on r-layer main (submission.py as of 1bea2ed), generator muse_bf16_proj/dev/n7s4/gate.py, all TUNE = {}:
+  R = router GEMM + routing free (layer free_oracle 'r': outputs kept from the eager warm-up, same routing downstream)
+      + pooler W from L2 (g30k re-reads its first 8 stages; d32 only, d16 pooler is g24 = R is router-free only there)
+      ~ 'all of the piece's weights already on chip, consumers unchanged' = what step 2 could buy at most
+  P = R + pooler without decode/wgmma = pooler AND router free (wrong pooler values; tk2f timing depends on routing only)
+  F = P + o (g30_kernel N 8192 KS 16) W from L2 + no math; bnd1 real. (A first F with b1 kept-outputs was an ARTIFACT: the expert
+      chain then skips the attention wait, d32 full -35 us. F's FULL-layer numbers are still artifacts (-17..-32 us; the o-free
+      g30 in full layers lets the chain run ahead of attention somehow): use F sliding only.)
+- us per layer, base0 -> R / P / F (2 rounds each, ab_files decode, seed 99):
+    H200 Modal: d16 sl 146.4 -> 144.2 / 144.3 / 144.1 | d16 full 220.5 -> 217.6 / 217.7 / (art.)
+                d32 sl 148.2 -> 150.1 / 144.3 / 145.0 | d32 full 306.2 -> 307.7 / 302.1 / (art.)   d1 control +-1.0
+    H100:       d16 sl 190.6 -> 187.6 / 187.8 / 187.3 | d16 full 294.1 -> 291.6 / 291.5
+                d32 sl 186.3 -> 183.2 / 179.8 / 179.6 | d32 full 413.0 -> 410.1 / 405.5   (1st run d32: R -1.5/-2.4, P -4.7/-7.6)
+- Reading (H200): weights on chip + router free = -2.2/-2.9 at d16 (= router free; pooler untouched there), +1.6..+1.8 at d32 (no
+  gain; within-run noise ~1-2). Even the pooler AND router AND o completely free: d16 -2..-3, d32 -3..-4 us per layer. So the
+  piece's ~6-8 us excess over its byte floor (layer n7s1 table) is not removable by on-chip weights; the absolute ceiling of an
+  infinitely fast piece is ~2% of the d16/d32 loads (~0.6% score), a real persistent kernel would get a fraction. STEP 2 GATE FAILS
+  (bar >= 5 us). Agrees with n5s14 (T=32 pooler W-free -0.7) and layer n5s26 (H100 free_r d32 ~0).
+- Implication for the big bet: in this piece HBM idle time is not what the 2x-floor excess is made of; whatever sets the d16/d32
+  expert start is the chain bnd1 -> rmsnorm -> tk2f (+ tk2f's own ramp), not the pooler/router bytes. Don't extend to qkv/tail on
+  this premise without a similar oracle there first (tail is already closed by n5s14 'both' -6 us for pooler+unpool at d32).
