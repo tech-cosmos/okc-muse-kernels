@@ -1,6 +1,12 @@
 # STATE-moe
 
-## NOW (n7s17, 2026-10-29 ~06:05-06:25Z): no new lane since 06:00Z; nothing buildable; 0 runs
+## NOW (n7s18, 2026-10-29 ~06:22-06:50Z): lead 06:50Z task = post ONE big idea (no build): posted (COORD Requests n7s18); 0 runs
+- Idea: skip tokens with 0 local experts in the T=256 unpool (17-21% of v32 tokens on layer routings, y=0 exactly). Derived bound
+  -4.6..-5.9 us per v32 layer (~0.2% layer) if a custom N=kept-count GEMM matches nvjet; pooler half ~0 net (router must go first).
+- Lead's subnormal-code/folded-scale example = production since s1. Unpool in the v16 twm drain: dead on paper (U re-read).
+- Budget 10-29: layer 2 checks + 2 submits, moe 5 checks, Modal 33/60 (moe's 30 used up).
+
+## WAS-n7s17 (n7s17, 2026-10-29 ~06:05-06:25Z): no new lane since 06:00Z; nothing buildable; 0 runs
 - Layer board (API 06:15Z): we are #52 at 2.158 (cut #50 HyperbolicCurve 2.1655; #1 pjmullin3 2.403). The public API has
   no per-shape times for other teams (only speedup / screened_speedup), so the 06:00Z gap can't be split per shape from outside.
 - Re-checked the in-layer H200 timeline (r-layer dev/n7s1_tl_h200.txt) against the twm/tk2f record (n6s2 stage 802 vs ALU 488,

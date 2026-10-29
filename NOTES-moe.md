@@ -3144,3 +3144,17 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - Expert consumer: the only big open number is still the n6s2 non-overlap (twm stage 802 cyc vs ALU floor 488), but every
   form that could separate dq from MMA issue is on record dead (pingpong s22/n6s2, SS smem-bound s19, A ring n6s2, mma.sync
   s18/n6s2, DQW n22). Attention: n7s15/n7s16. No new idea this session; moe should pause until the lead picks a lane.
+
+## n7s18 (2026-10-29 06:22Z - ~06:50Z): lead 06:50Z 'one big idea each' (no build); posted COORD Requests n7s18; 0 judge runs, 0 Modal
+- Layer routings (tools/data/routes.pt, local ids in [0,32) or -1): tokens with ZERO local experts: v32 44-55 of 256 (17-21%),
+  v16 19-33 of 128 (15-26%), d32 1-8 of 32; local pairs/token 1.2-1.8; distinct local experts v16 17-19, v32 18-21, d32 8-11.
+  Their y row is exactly 0 -> f = 0 -> post-unpool norm 0: skipping them is exact.
+- IDEA posted: T=256 unpool (cuBLAS nvjet 128x128, one wave of 128 tiles, 17.2 GFLOP, compute-bound, 26.9/28.4 us sl/full on the
+  H200 timeline r-layer dev/n7s1_tl_h200.txt) as a GEMM over the kept tokens only (U = M side, N = device-side kept count in
+  16-chunks): ~19% less MMA per SM -> -4.6..-5.9 us per v32 layer at nvjet efficiency (~0.2-0.25% layer). Pooler half needs the
+  router split off the FR pooler: +3-5 us chain vs -6 saved = ~0. v16: unpool is g30 HBM-bound (48 MB): 0. Kill: custom GEMM
+  slower than nvjet by > 19% (proj's T=256 record: cuBLAS/LT always won).
+- Dead on paper: unpool during the v16 twm drain (14-24 us of idle SMs): any split of y into early/late experts re-reads all of U
+  (48-64 MB > L2), and T=128 unpool is U-byte-bound -> no gain.
+- The lead's example refactor (codes as BF16 subnormals, scale folded into one BF16 multiplier, power-of-2 FP32 epilogue) is the
+  production dq since s1 (see top of this file; n5s39 minimum search).
