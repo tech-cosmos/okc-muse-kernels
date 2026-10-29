@@ -1,4 +1,5 @@
 ## n7s35 10:33Z idle (no lead decision since 09:35Z; Handoff moe/layer-hotdyn 130a692 pending layer). 0 runs.
+## n7s40 11:45Z idle (no lead decision after 11:30Z). Layer board #55 2.158x. HOT_ET branch still a bundle item. 0 runs.
 # STATE-moe
 ## n7s39 ~12:25Z: self-picked HOT_ET (moe_hot triggers twm before its wait; twm polls a flag): r-layer branch moe/layer-hotet 4a9f62d,
 ## bitwise, test 13/13; H100 pinned A/B v16 sl +1 / full -4, v32 -1.4/-1 us (~-0.05%): BUNDLE item, not on main. 0 runs. NOTES n7s39.

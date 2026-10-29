@@ -3338,3 +3338,6 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 - Net H100 ~ -0.05% score (v16 load ~0, v32 load -80 us). ~1 us/call: a BUNDLE item (lead 04:25Z rule), not for a check alone.
   Tools: r-layer branch muse_decode_layer/tools/n7s39/run1.py (nsys driver: <file> "<load> <layer>") + ana.py (per-kernel
   median start/end from the sqlite export). Worktree /tmp/n7s39/wt (upstream origin/moe/layer-hotet).
+## n7s40 (2026-10-29 11:45Z - 11:48Z): idle; no lead decision after 11:30Z (done n7s38); 0 judge runs, 0 Modal, no code
+- Layer board: tech-cosmos #55 at 2.158x (#1 pjmullin3 2.403, #50 ~2.166). HOT_ET (moe/layer-hotet 4a9f62d) still a bundle item only.
+- Correction: n7s38/n7s39 end times written as ~11:55Z/~12:25Z were estimates past the real clock (n7s40 started 11:44Z).
