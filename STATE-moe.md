@@ -1,8 +1,13 @@
 # STATE-moe
 
-# STATE-moe
+## NOW (n7s22, 2026-10-29 ~10:15Z): lead 07:40Z d1/v1 tk2f fixed-cost breakdown = DONE on the H200 (DIAG 81391142)
+- d1 E2: kernel span 18.7 vs 13.9 us ideal stream: prologue to first weight request 2.3 (largest) | first-data latency 1.5 |
+  transition 1.5 (ring refills, publish 0.5) | tail 0.3; standalone norm2 gap 1.0 + 2.6-3.0. Full table NOTES n7s22.
+- TK2F_IDH 1 (ids load before the slut copy) on main 0006dff: bitwise, test 15/15, H100 + H200 = tie. Not for the layer.
+- Next candidate: lean T<=4 routing (one warp, one barrier): bound 0.5-0.8 us d1 only. Tools: tools/n7s22/mktl.py, mkdiag.py.
+- Budget 10-29: moe checks 7/20, Modal moe share used up.
 
-## NOW (n7s21, 2026-10-29 08:15Z): lead 07:05Z build order (T=256 unpool zero-local-token skip) -> gate built, H200 says DEAD
+## WAS-n7s21 ( 2026-10-29 08:15Z): lead 07:05Z build order (T=256 unpool zero-local-token skip) -> gate built, H200 says DEAD
 - Custom variable-N swap-AB wgmma GEMM (tools/n7s21/ug.py, (1,2) cluster W multicast, stmatrix.trans epilogue, exact) on the
   H200 (moe DIAG check 477afcc8): cuBLAS 28.03 | ug NT128 29.22 | NT112 27.81 | NT104 27.33 | NT96 26.78 us. v32 kept 201-212 ->
   NT 104/112 = -0.2..-0.7 us per v32 layer before compaction costs -> ~0. The T=256 unpool is L2->SM bound, not tensor-bound.

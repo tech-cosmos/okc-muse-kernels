@@ -3197,3 +3197,30 @@ No COORD change since lead 06:50Z task (n7s18 idea already posted). Waiting for 
   cuBLAS/Lt take M on the host and do the full tile for any M <= 128-row tile (n7s20: M 201-212 = M 256 +-1 us on the H100);
   chunks of 16/32 rows re-read all 64 MB of W per chunk.
 - Budget 10-29: moe checks 6/20 (this DIAG), layer 2 checks + 2 submits (+ layer's own), Modal 46.4/60 (moe's 30 used up).
+
+## n7s22 (2026-10-29 08:30Z - ~10:15Z): lead 07:40Z: d1/v1 tk2f fixed-cost breakdown on the H200 (1 moe DIAG check); IDH reorder = tie
+- New tool tools/n7s22/mktl.py (per-CTA %globaltimer stamps in moe_tk2f: start / routed / producer's first TMA (prod1st) /
+  ph1 first data / ph1 end / cnt ok / ph2 first data / end, + moe_norm2 first launch / post-wait / last end via atomics,
+  0.256 us grain) and mkdiag.py (strips the DIAG-only libraries; 'ab' adds the TK2F_IDH A/B = 2 libraries, local prepare
+  235 s: too close to the 300 s cap, not sent). Read: grep diagtl <job log>.
+- TK2F_IDH 1 on main (commit 0006dff): tk2f's ids load is issued before the slut copy (it waited behind the LUT's global
+  load). Bitwise, bench test 15/15. H100: routed 1.79 -> 1.54 us, whole call tie (local diag12 A B A B: 37.2/37.2/37.1/37.1
+  d1, all loads +-0.1). H200 routed still 1.54-1.79: no gain there either. Kept (harmless), not worth a layer port.
+- H200 DIAG 81391142 (stamped copy, 2.2868x as a test run, NEVER submit), medians over CTAs, us from the first CTA start:
+    d1 E2 (s7/s13/s17): routed 1.5-1.8 | prod1st 2.30 | ph1 data 3.84 (max 4.6) | ph1 end 13.06 (min 11.0, max 13.8)
+      | cnt ok 14.34 | ph2 data 14.59 | end 18.4-18.7 (max 18.9; 8 CTAs with one row less end 2 us early)
+      | norm2 launch 19.7-20.0 (1.0 after the last tk2f CTA), its wait ~0, norm2 end 22.3-23.0 | graph event total 27.3-28.0
+    d1 E3 (s11/s99): prod1st 2.30, ph1 end 17.15 (max 18.2), cnt ok 18.4-18.7, end 24.8-25.1, norm end 29.2-29.4, total 34.0-34.7
+    v1 (E6-9): same prologue (prod1st 2.30, data 3.84); ph1end -> cnt ok 0.3-0.8 after the max; norm2 ~2.3-2.6 us.
+    d16/d32: same prologue; ph1 end spread 3.5-4 us (extra-group rows), cnt ok 0.3-0.5 after the max.
+  d1 E2 decomposition (56.6 MB; ideal stream at 4.06 TB/s = 13.9 us; kernel span 18.7): prologue to first weight request
+  2.3 (routing 1.5-1.8 incl. the ids DRAM trip, split + producer start 0.5) | first-data latency 1.5 (9.5 MB burst of 132
+  rings: HBM busy) | ph1 steady 2.3 us/row/CTA = ~4.2 TB/s | transition median ph1 end -> ph2 data 1.5 (the 72 KB ring
+  refills during it; publish latency max ph1 end -> cnt ok 0.5) | ph2 4.0 | tail 0.3. Standalone only: norm2 launch gap 1.0 +
+  run 2.6-3.0, graph ~5 outside the kernels (in-layer that is n2u + the layer's graph).
+  => largest tk2f piece = the 2.3 us prologue before the first weight byte is requested (HBM idle unless a predecessor
+  streams). In-layer (n7s1 timeline) tk2f's CTAs land at pr1's end (rmsnorm PDL overlap only ~0.6 us), so it is exposed;
+  layer's IDF result (early launch = tie) says hiding it under pr1 just moves the HBM bubble (pr1 already saturates HBM).
+- Next cut candidate (not built): lean T<=4 routing (one warp, nroutes <= 32: match_any + ballots, one bar.sync instead
+  of four, producer issues its first TMA straight from warp 0's result): bound ~0.5-0.8 us of the 2.3 at d1 only (~0.1%
+  layer). The rest (ids latency, first-data latency) is DRAM latency.
