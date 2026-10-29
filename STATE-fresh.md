@@ -1,4 +1,14 @@
 # STATE-fresh (newest first)
+## f1s9 (2026-10-29 22:06Z-22:17Z): HOT_XN H200 A/B DONE via a judge check (1 of today's 6, would expire at 00:00Z), 0 Modal
+- Made HOT_XN a runtime T=256 TUNE option: hot grid + HOT_XOFF (1e8) = moe_hot at N 128 for all items (moe_src hot_go
+  `xn`, layer.py `TUNE[256] += ...`). Bitwise on/off (tools/fresh/xoff_eq.py, 4 seeds x sl/full), test 13/13, opt_test T=256 16/16.
+- Check c5419971 (811355c) 2.1258, fixed-SGLang 2.1127 (slow draw on shapes HOT_XN doesn't touch: d1 sl 70.8 vs ~67);
+  not submitted. H200 tuner (synthetic routing, one ~95-token hot expert): XN on vs off v32 sl 324.3 vs 325.8, full 516.9
+  vs 519.6 us (same-log default-vs-confirm noise ~2 us). Weighted ~-1.8 us = ~0.1-0.2%: below the lead's -2 us gate on
+  sliding -> no Handoff; offered as a bundle item (merge HOT_XN 16, drop the TUNE option). Modal A/B CANCELLED.
+- Posted `fresh -> lead`: no lane left with a measured bound >= 1%; pause fresh or name one.
+## Next (f1s10): read COORD Human decisions for a lead answer. If none, stop at once (no idle loops). Profiles of
+   c5419971 are in muse_decode_layer/profiles/. Budget 10-29: layer checks 1/6, Modal 0.3/20.
 ## f1s8 (2026-10-29 21:50Z-21:58Z): no build, 0 judge, 0 Modal. H200 A/B can't run before 00:00Z: tools/h200.py
   reserves 3 + 4 x variants-runs GPU-min up front (rounds 2 = 19 min, rounds 1 = 11) and the shared 10-29 ledger is at
   50.6/60. Staged /tmp/fx_base.py (HOT_XN 0) + /tmp/fx_x16.py (diff = that one line). Re-checked the d1 qkv/tk2f fixed
