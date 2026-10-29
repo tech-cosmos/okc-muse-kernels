@@ -2627,3 +2627,23 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Also done this session: re-read the d1/v1 big-bet side against records: s46 (side filler dilates csl/o), s71 (pr1 SMEM prefill
   monotonic loss), s17 (m=1 GEMVs at bare TMA stream speed on the H200), layer n7s2 RGR (grid barrier ~1 us > the ~0.3 us PDL
   launch gap it saves): the T=1/8 'HBM never idle' premise is already refuted piece by piece; no new oracle needed there.
+
+## night7 s6 (2026-10-29 06:23-07:20Z): lead 06:50Z big-idea task (no build); 0 judge runs, 0 Modal
+- Posted under COORD Requests (proj n7s6): T=128/256 output-gate split. The reference uses qkv's last 1024 rows (gate) only in
+  `_rms(out) * sigmoid(gate)` after attention, and _combine_hb/_combine_bal read the gate from the [T, 2304] qkv buffer. So: first op
+  qkv' (1280 rows) into that buffer (ldd 2304), the gate GEMM on a side stream into the gate columns, event-join before combine.
+- H100 split tax (dev/n7s6/split_tax.py, gate_split.py; torch.mm = cuBLAS default heuristics, CUDA graph, 256 MB flush, median 50,
+  minus a 1-kernel empty graph 5.7 us; GPU lock held only around the replays; one run waited ~25 min behind layer's ab_files):
+  | M | qkv 2304 | qkv' 1280 | gate 1024 | 2 x 1152 halves serial | o K=1024 | o K=512 |
+  | 128 | 23.5 | 15.4 (0.66x) | 12.6 (0.54x) | 31.7 (1.35x) | 9.4 | 5.9 (0.63x) |
+  | 256 | 28.3 | 19.0 (0.67x) | 16.2 (0.57x) | 38.2 (1.35x) | 10.6 | 7.0 (0.66x) |
+  (Absolute H100 numbers are torch-default picks, not the layer's tuned lt; use the ratios.)
+- Bound on the H200 n7s1 timeline (layer dev/n7s1_tl_h200.txt): qkv' saves 5.3 (v16) / 6.3 (v32) us per layer if the gate
+  (~8.6 / ~10.9 us) hides under attention (sl nvs+combine 13.3 / 15.6, full 104 / 194 us). Layer score weights derived from the
+  STATE-layer %/us (full v16 0.0146, v32 0.0115 match sl:full = 3:1 with check 4787d92e times -> sl 0.044 / 0.034 %/us).
+  Ceiling ~0.6% score; realistic 0.2-0.4% (cuBLAS CTAs ~200 KB smem can't co-reside with nvs/_gw_verify CTAs; full _gw_verify is
+  consumer-bound on the H200, so the gate is ~zero-sum there).
+- Full 2-KV-head-group pipeline (qkv -> attn -> o in halves) bounded with the measured tax: <= -4.7 v16 sl / -3.7 v32 sl / -10 / -9
+  full us at free concurrency (<= ~0.6%), 3+ sessions, plus 64-B per-head gathers in nvs (both heads share a 128-B row today).
+  Not recommended.
+- No proj-side idea >= 1% outside the closed lists (n5s14 T=32 GEMM ceiling +1.0%, n7s4 gate).
