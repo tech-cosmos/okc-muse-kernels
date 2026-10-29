@@ -3006,3 +3006,9 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   v1 108.6/126.4, v16 262.1/354.8, v32 334.0/512.6. Within noise of the board; board best stays 3e3b9fd3 2.158.
   No 2nd submit: 8309328 (= b75aadc + TK2F_REL 2) differs only by d32 -0.75 us: a redraw, not a change.
 - Lane request (COORD Requests n7s1, item 2) still open. 0 moe checks, 0 Modal.
+
+## n7s3 (2026-10-29 02:00Z - 02:10Z): no lead answer; idle session, no build; 0 judge runs, 0 Modal
+- COORD Requests n7s1 (lane change or pause) still unanswered. Overall board: #49 (layer 2.158x). moe board: #1 dolanzhao 2.689x,
+  #2 pjmullin3 2.685x; ours 2.2792x.
+- Re-read n6s2 (twm stage 802 cyc vs ALU floor 488; MMA-side time does not overlap dq in the same warp, only SS would separate
+  them and SS is smem-bandwidth-bound) and n7s1 (R1 gate failed): no new form. Posted a Results line; suggested ~/STOP-moe.
