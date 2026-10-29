@@ -1,0 +1,181 @@
+diff --git a/muse_moe_w4a16/submission.py b/muse_moe_w4a16/submission.py
+index c8350af..15a6f56 100644
+--- a/muse_moe_w4a16/submission.py
++++ b/muse_moe_w4a16/submission.py
+@@ -95,6 +95,8 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
+ #define TK2F_PFL2K 0  // n5s27: L2 row-prefetch tk2f variants (moe_set_l2h2 + 10000 * d), DIAG builds only
+ #define TK2F_SQ4 0  // n14: build the KPS 4 SQ tk2f (36 KB single-copy stages, cfg 402/403 + SQ); DIAG builds only
+ #define TWM_PB48 0  // n12: build moe_twm<.., PB 48> (python TWM_PB_M); DIAG builds only (+7 s compile)
++#define TK2F_WAVEK 0     // n7s23: compile the WAVE row order (run-time l2h bit 15, python TK2F_WAVE; DIAG builds only)
++#define TK2F_XPFK 0      // n7s23: compile the XPF probe (run-time l2h bit 14, python TK2F_XPF; DIAG builds only)
+ #define TK2F_IDH 0       // n7s22: tk2f ids load before the slut copy (python TK2F_IDH)
+ #define TK2F_L2H 0       // s21: tk2f weight-copy L2 hints (python TK2F_L2H): 1 = evict_last for non-final 8-token groups of an expert, evict_first else; 2 = evict_last non-final only; 3 = evict_first final only; 4 = evict_last every group of a multi-group expert, evict_first else
+ #define TWM_L2H 0        // s21: moe_twm weight copies with L2 hints (python TWM_L2H)
+@@ -3781,7 +3783,8 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float*
+                                              const __nv_bfloat16* X, void* Out, int* cnt, int need, int r0, int r1,
+                                              const int* s_rs, const int* s_e, const int* s_off, const int* s_srt,
+                                              float* s_red, uint4* smem, uint64_t* full, uint64_t* empty, int& st,
+-                                             int& ph, int& rb, uint64_t* xrdy = nullptr, const int* s_ob = nullptr) {
++                                             int& ph, int& rb, uint64_t* xrdy = nullptr, const int* s_ob = nullptr,
++                                             bool segw = false) {  // n7s23 WAVE: segw = per-segment counters at run time
+   constexpr bool S6 = (PF & 1024) != 0;  // n20: 6-bit scale codes (SQ stages of NC * KPS * 1120 bytes)
+   constexpr bool DT = (PF & 524288) != 0;  // n5s18 DT: 1-group row space, s_ob[a] = the expert's leftover group's first token
+   constexpr int RPE = NRT / 2, NQ = 64 / NC, NS = NQ / KPS, SW = NC * 32, SB = NC * KPS * (S6 ? 1120 : 1152);
+@@ -3807,7 +3810,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float*
+       off = (DT ? s_ob[a] : s_off[e]) + gi * 8;
+       n = min(8, s_off[e + 1] - off);
+       ci = a * 4 + gi;
+-      if (BAL && !GATED) {
++      if ((BAL || segw) && !GATED) {
+         const int* cp = cnt + 64 + seg_start / RPE;
+         int c;
+         do {
+@@ -3945,7 +3948,7 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float*
+         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
+         if (tid == 0) {
+           __threadfence();
+-          atomicAdd(BAL ? cnt + 64 + seg_start / RPE : cnt, R + 1 - max(seg_start, r0));
++          atomicAdd(BAL || segw ? cnt + 64 + seg_start / RPE : cnt, R + 1 - max(seg_start, r0));
+         }
+         }
+       }
+@@ -4980,6 +4983,14 @@ __device__ __forceinline__ int tk2f_proute(const int* __restrict__ ids, int nrou
+   return na;
+ }
+ 
++// n7s23 WAVE: CTA b's rows of a sub-space of n rows split over G CTAs, the n % G extra rows on CTAs [off, off + n % G)
++// mod G (consecutive sub-spaces rotate off, so no CTA collects an extra row in more than ceil(sum / G) sub-spaces)
++__device__ __forceinline__ int2 tk2f_wsplit(int n, int b, int G, int off) {
++  const int q = n / G, r = n % G;
++  const int f0 = max(0, min(b, off + r) - off) + max(0, min(b, off + r - G));
++  const int f1 = max(0, min(b + 1, off + r) - off) + max(0, min(b + 1, off + r - G));
++  return make_int2(b * q + f0, b * q + f1 + q);
++}
+ template <int NC, int NSTG, int KPS, bool DYN, bool FN = false, bool SA = false, int GS = 8, int MRG = 0, int PF = 0>
+ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>()) * 32, 1) moe_tk2f(
+     const uint4* __restrict__ Wq13, const uint32_t* __restrict__ S13, const uint4* __restrict__ Wq2,
+@@ -5202,6 +5213,31 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
+       return;
+     }
+   }
++  // n7s23 WAVE (run-time l2h bit 15; DIAG): the row space as [wave 1 gemm13][wave 2 gemm13][wave 1 gemm2][wave 2 gemm2],
++  // each sub-space split over ALL CTAs (waves = the experts before / from the one nearest half the gemm13 rows), with
++  // per-segment counters: wave 1's gemm2 rows find their gemm13 segments done long ago, and the wave-2 gemm13 straggle
++  // hides under the wave-1 gemm2 rows (the phase barrier was ~1.5 us per CTA at d1, n7s22). x reloads: one segment
++  // visit more per CTA and phase (8 KB per visit at T = 1; ILV n7 died of 64 KB visits at d32).
++  int wa0 = 0, wa1 = 0, wb0 = 0, wb1 = 0;
++  bool wave = false;
++#if TK2F_WAVEK
++  wave = ((l2h >> 15) & 1) && GS == 8 && !DYN && !FP && !REL && !DT && !MRG && !(PF & 65536) && D == 0 && nact >= 2;
++  if (wave) {
++    int k = 1;
++    for (int j = 2; j < nact; ++j)
++      if (abs(2 * s_rs13[j] - n13) < abs(2 * s_rs13[k] - n13)) k = j;
++    const int h13 = s_rs13[k], h2 = s_rs2[k], G = gridDim.x, b = blockIdx.x;
++    int off = 0;
++    int2 r = tk2f_wsplit(h13, b, G, off);
++    a0 = r.x; a1 = r.y; off = (off + h13 % G) % G;
++    r = tk2f_wsplit(n13 - h13, b, G, off);
++    wa0 = h13 + r.x; wa1 = h13 + r.y; off = (off + (n13 - h13) % G) % G;
++    r = tk2f_wsplit(h2, b, G, off);
++    b0 = r.x; b1 = r.y; off = (off + h2 % G) % G;
++    r = tk2f_wsplit(n2 - h2, b, G, off);
++    wb0 = h2 + r.x; wb1 = h2 + r.y;
++  }
++#endif
+   int st = 0, ph = 0;
+   if (warp == NC) {
+     if (lane == 0) {
+@@ -5216,8 +5252,10 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
+         tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, d0, d1, s_rt2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2, s_mg);
+       } else {
+       constexpr int PFD = (PF & 4096) ? 1 + ((PF >> 28) & 3) : 0;  // n5s27 PFL2 (DIAG)
+-      tk2f_produce<512, NC, NSTG, KPS, SQ, S6, S6P>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv, nullptr, PFD);
+-      tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2, nullptr, PFD);
++      for (int p = 0; p < (wave ? 2 : 1); ++p)  // n7s23 WAVE: wave 2's gemm13 rows after wave 1's
++        tk2f_produce<512, NC, NSTG, KPS, SQ, S6, S6P>(Wq13, S13, p ? wa0 : a0, p ? wa1 : a1, s_rs13, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2hv, nullptr, PFD);
++      for (int p = 0; p < (wave ? 2 : 1); ++p)
++        tk2f_produce<256, NC, NSTG, KPS, SQ, S6, S6P>(Wq2, S2, p ? wb0 : b0, p ? wb1 : b1, s_rs2, s_e, smem, full, empty, st, ph, i, nullptr, 0, l2h2, nullptr, PFD);
+       }
+     }
+     return;
+@@ -5322,10 +5360,28 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
+   }
+   if (FP) asm volatile("bar.sync 3, %0;" ::"n"((NC + 1) * 32) : "memory");  // the producer initialized the ring
+   if (FP && a0 >= a1) mbar_arrive(&xrdy);  // no gemm13 rows here: release the producer's gate at once
++  for (int p = 0; p < (wave ? 2 : 1); ++p) {  // n7s23 WAVE
++  if (p) { a0 = wa0; a1 = wa1; }
+   tk2f_consume<512, NC, NSTG, true, KPS, SA, PF, REL>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
+-                                    empty, st, ph, rb, &xrdy);
++                                    empty, st, ph, rb, &xrdy, nullptr, wave);
++  }
++#if TK2F_XPFK
++  // n7s23 XPF (run-time l2h bit 14, DIAG): at this CTA's phase-1 end (its HBM share idles until the slowest CTA's gemm13
++  // rows are published), L2-prefetch its gemm2 rows beyond the ring's first row (<= 2 rows; SQ images only)
++  if ((PF & 512) && !(PF & 1024) && ((l2h >> 14) & 1) && tid == 0) {
++    constexpr int RB = 4 * 8 * 2 * 1152;  // one SQ row (NC 8, KPS 2): 4 stages x 18 KB
++    for (int R = b0 + 1; R < b1 && R < b0 + 3; ++R) {
++      int b = 0;
++      while (s_rs2[b + 1] <= R) ++b;
++      prefetch_l2(reinterpret_cast<const char*>(Wq2) + ((size_t)s_e[b] * 128 + ((R - s_rs2[b]) & 127)) * RB, RB);
++    }
++  }
++#endif
++  for (int p = 0; p < (wave ? 2 : 1); ++p) {  // n7s23 WAVE
++  if (p) { b0 = wb0; b1 = wb1; }
+   tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
+-                                     empty, st, ph, rb);
++                                     empty, st, ph, rb, nullptr, nullptr, wave);
++  }
+   if constexpr ((PF & 262144) != 0) {  // n5s17 ROLE probe P2: the dead TWO branch AFTER the main path
+     if ((l2h >> 13) & 1) {
+       uint4 xf[64 / NC][2];
+@@ -5354,8 +5410,12 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
+ static int g_tk2f_l2h = TK2F_L2H;  // n4s3: tk2f L2 hint mode of the next launch (moe_tk2f_launch: cfg / 1000000 - 1)
+ static int g_tk2f_l2h2 = -1;  // n18: gemm2 rows' L2 hint mode (-1 = as gemm13); kernel arg l2h bits 4+ = mode + 1
+ static int g_tk2f_orc = 0;  // n5s16: DIAG oracle (v + 1000 in moe_set_l2h2)
++static int g_tk2f_wave = 0;  // n7s23 WAVE (DIAG): v + 200000 in moe_set_l2h2
++static int g_tk2f_xpf = 0;  // n7s23 XPF (DIAG): v + 100000 in moe_set_l2h2
+ static int g_tk2f_pfl2 = 0;  // n5s27 PFL2 (DIAG): prefetch distance in rows (v + 10000 * d in moe_set_l2h2)
+ int64_t moe_set_l2h2(int64_t v) {
++  g_tk2f_wave = v >= 150000; v -= 200000 * (int64_t)g_tk2f_wave;
++  g_tk2f_xpf = v >= 50000; v -= 100000 * (int64_t)g_tk2f_xpf;
+   g_tk2f_pfl2 = (int)((v + 5000) / 10000); v -= 10000 * (int64_t)g_tk2f_pfl2;
+   g_tk2f_orc = v >= 500; g_tk2f_l2h2 = (int)(v >= 500 ? v - 1000 : v); return 0;
+ }
+@@ -5378,7 +5438,7 @@ static int64_t tk2f_go(int D, int nr, const void* w13, const void* s13, const vo
+       (const uint4*)w13, (const uint32_t*)s13, (const uint4*)w2, (const uint32_t*)s2, (const uint32_t*)lut,
+       (const float*)gs13, (const float*)gs2, (const __nv_bfloat16*)x, (const int*)ids, nr, start, count, (int*)meta,
+       (int*)sr, (int*)inv, (__nv_bfloat16*)inter, (float*)y, (int*)cnt, D, (const float*)tw, (const float*)w1,
+-      (__nv_bfloat16*)out, nr / 8, eps, g_tk2f_l2h | ((g_tk2f_l2h2 + 1) << 4) | (g_tk2f_orc << 12));
++      (__nv_bfloat16*)out, nr / 8, eps, g_tk2f_l2h | ((g_tk2f_l2h2 + 1) << 4) | (g_tk2f_orc << 12) | (g_tk2f_xpf << 14) | (g_tk2f_wave << 15));
+ }
+ 
+ // s9: moe_tk2f with the post-expert norm fused (FN): writes out [M, H] bf16 directly; no moe_norm2 after it.
+@@ -5827,6 +5887,8 @@ def _lib():
+             src = src.replace("#define TK2F_S6K 0 ", "#define TK2F_S6K 1 ")
+         if DIAG:  # n4s5: the DIAG A/Bs tk2h (TK2H) variants
+             src = src.replace("#define TK2F_SQDEEP 0 ", "#define TK2F_SQDEEP 1 ")  # n5s15
++            src = src.replace("#define TK2F_WAVEK 0 ", "#define TK2F_WAVEK 1 ")  # n7s23
++            src = src.replace("#define TK2F_XPFK 0 ", "#define TK2F_XPFK 1 ")  # n7s23
+             src = src.replace("#define TK2F_PFL2K 0 ", "#define TK2F_PFL2K 1 ")  # n5s27
+             src = src.replace("#define TK2F_ORACLE 0 ", "#define TK2F_ORACLE 1 ")  # n5s16
+             src = src.replace("#define TK2X 0 ", "#define TK2X 2 ")  # n5s16
+@@ -6090,6 +6152,8 @@ TK2F_S6 = 0  # n20 (DEAD on the H200, checks 13b528a8 / c6b296a3: d16 +0.8, d32
+ TK2F_S6P = False  # n20 DIAG: run the padded S6 images (S6P: aligned stage starts, same copy bytes as S6)
+ TK2F_S6P_DIAG = True  # n20: build the S6P images in DIAG builds
+ TK2F_S6_ON = True  # n20: run tk2f / tk2h on them (DIAG A/B: False = the 8-bit SQ stages)
++TK2F_WAVE = 0  # n7s23 (DIAG only): tk2f two-wave row order (l2h bit 15), see moe_tk2f
++TK2F_XPF = 0  # n7s23 (DIAG only): tk2f phase-1-end L2 prefetch of the CTA's further gemm2 rows (l2h bit 14)
+ TK2F_SQ = 1  # n14: tk2f single-copy 18 KB stages (prepare _sq_pack; cfg + 10000000; bitwise = off)
+ TK2F_PFL2 = 0  # n5s27: DIAG only: tk2f L2 prefetch of whole 72 KB SQ rows, distance 1..3 rows; 4 = 18 KB stages one row ahead (0 = off)
+ TK2F = 204  # s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
+@@ -6486,7 +6550,7 @@ def kernel_fn(data, st):
+         if TK2F:
+             c = _tk2f_cfg(M, st)
+             lib.moe_set_l2h2((-1 if TK2F_L2H2_RT is None else TK2F_L2H2_RT) + (1000 if TK2F_ORACLE and DIAG else 0)
+-                             + (10000 * TK2F_PFL2 if DIAG else 0))  # n5s27 PFL2
++                             + (10000 * TK2F_PFL2 if DIAG else 0) + (100000 * TK2F_XPF + 200000 * TK2F_WAVE if DIAG else 0))  # n5s27 PFL2, n7s23 XPF
+             if c >= 10000000:  # n14 SQ
+                 k = "s6p" if c >= 40000000 else "s6" if c >= 20000000 else "sq4" if c % 1000 in (402, 403, 404, 405) else "sq8" if c % 1000 in (104, 106) else "sq"
+                 lib.moe_tk2f_launch(st["w13" + k], st["w13s2"], st["w2" + k], st["w2s2"], st["lut"], st["gs13"], st["gs2"], x,

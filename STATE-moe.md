@@ -1,6 +1,12 @@
 # STATE-moe
 
-## NOW (n7s22, 2026-10-29 ~10:15Z): lead 07:40Z d1/v1 tk2f fixed-cost breakdown = DONE on the H200 (DIAG 81391142)
+## NOW (n7s23, 2026-10-29 ~09:25Z): lead 08:50Z tk2f d1/v1 lane CLOSED on the H200 (2 DIAG checks); main unchanged (0006dff kernels)
+- XPF (L2 prefetch of the CTA's later gemm2 rows at its phase-1 end) DIAG 798fd574: +0.7 d1/v1, +1.0 d16/d32 us.
+- WAVE (two-wave row order, gemm2 of wave 1 before wave 2's barrier) DIAG 87ee0bc0: +1.6 d1, +2.7 v1, +3.1 d16, +5.9 d32.
+- => the transition is not HBM idle; tk2f d1/v1 = DRAM latency prologue + bytes at ~4.1-4.2 TB/s. Diff: tools/n7s23/wave_xpf_dead.diff.
+- Nothing queued in the moe lane. Asked the lead for a lane (COORD Results n7s23). Budget 10-29: moe checks 9/20, 0 Modal.
+
+## WAS-n7s22 (2026-10-29): lead 07:40Z d1/v1 tk2f fixed-cost breakdown = DONE on the H200 (DIAG 81391142)
 - d1 E2: kernel span 18.7 vs 13.9 us ideal stream: prologue to first weight request 2.3 (largest) | first-data latency 1.5 |
   transition 1.5 (ring refills, publish 0.5) | tail 0.3; standalone norm2 gap 1.0 + 2.6-3.0. Full table NOTES n7s22.
 - TK2F_IDH 1 (ids load before the slut copy) on main 0006dff: bitwise, test 15/15, H100 + H200 = tie. Not for the layer.
@@ -14,60 +20,12 @@
   Nothing ported to layer.py/moe_src.py. ptxas C7514 / release.cluster / 2x2-cluster pitfalls: NOTES n7s21 (reusable).
 - Budget 10-29: moe checks 6/20, layer 2 checks + 2 submits, Modal 46.4/60 (moe's 30 used up).
 
-## WAS-n7s20 (2026-10-29 07:05Z): waiting on the lead's ~08:00Z pick; measured n7s18 idea's cuBLAS form = ~0 (H100); 0 runs, 0 Modal
-- tools/n7s20/unpool_m.py (H100, cold L2, graph, median, 2 rounds): unpool torch.mm M=256 43.4 us; kept M 212/208/201 = 44.0/
-  43.9/42.0 (-0..-1.4); M 240/224 slower (46.0/44.8), M 192 50.9. 128-row tiles: M<=256 is 2 row-tiles anyway, so skipping
-  zero-local tokens saves nothing in cuBLAS; only a custom GEMM with N-side compaction (n7s18 design) could get the -19%.
-
-## WAS-n7s18 (n7s18, 2026-10-29 ~06:22-06:50Z): lead 06:50Z task = post ONE big idea (no build): posted (COORD Requests n7s18); 0 runs
-- Idea: skip tokens with 0 local experts in the T=256 unpool (17-21% of v32 tokens on layer routings, y=0 exactly). Derived bound
-  -4.6..-5.9 us per v32 layer (~0.2% layer) if a custom N=kept-count GEMM matches nvjet; pooler half ~0 net (router must go first).
-- Lead's subnormal-code/folded-scale example = production since s1. Unpool in the v16 twm drain: dead on paper (U re-read).
-- Budget 10-29: layer 2 checks + 2 submits, moe 5 checks, Modal 33/60 (moe's 30 used up).
-
-## WAS-n7s17 (n7s17, 2026-10-29 ~06:05-06:25Z): no new lane since 06:00Z; nothing buildable; 0 runs
-- Layer board (API 06:15Z): we are #52 at 2.158 (cut #50 HyperbolicCurve 2.1655; #1 pjmullin3 2.403). The public API has
-  no per-shape times for other teams (only speedup / screened_speedup), so the 06:00Z gap can't be split per shape from outside.
-- Re-checked the in-layer H200 timeline (r-layer dev/n7s1_tl_h200.txt) against the twm/tk2f record (n6s2 stage 802 vs ALU 488,
-  pingpong s22/n6s2, mma.sync s18/n6s2, SS s19, dq layouts n5s39/n6s2): no unmeasured expert or attention item. Request stands.
-- Budget 10-29: layer 2 checks + 2 submits (+ layer's own), moe 5 checks, Modal 33/60 (moe's 30 used up).
-
-## WAS-n7s16 (n7s16, 2026-10-29 ~05:45-06:00Z): lead 06:00Z kept moe on full-layer attention; no buildable lever found; 0 runs
-- Re-read ~/attn verify-full history against the H200 timeline (r-layer dev/n7s1_tl_h200.txt): v16/v32 _gw_verify 99.5/189.8 us
-  vs KV gather ~87/168. Every consumer instruction cut is on record as dead (FP8 QK on main; FP8 P@V s22/s71 H200 tie; poly exp2
-  s21/s69/s70; P@ones/ones-column row sums s35/s69/s1xx; lazy rescale s12/s69; ping-pong/dual-head/6 WG s101; native s71/s111;
-  dynamic tail s125). s69: the consumer runs at ~FA3 level (~525 TFLOPS f16-eq, hdim 64), and softmax per element is the floor.
-- O_PF on v16/v32 full is pointless: o at T=256 is compute-bound (8.6 GFLOP, 9.4 us); at T=128 it is 7.8 us, ramp-bound.
-- d16/d32 _gd_full: n7s15 gate failed; side-stream p1 ceiling ~0.3% layer for a 3+ session build: not started.
-- Posted to COORD Requests (n7s16): attention lane has nothing buildable; asked for a piece of the 06:00Z megakernel bet.
-- Budget 10-29: layer 2 checks + 2 submits, moe 5 checks, Modal 33/60 (moe's 30 used up).
-
-## WAS-n7s15 (2026-10-29 ~05:50Z): lane = full-layer attention in the layer (lead 05:35Z). Physical-order gate FAILS; 0 runs
-- Fused inversion + dense K/V stream prototype (muse_attention_decode/tools/n7s15/fz.py, exact map): H100 exposed +16.1 us d32 /
-  +10.6 d16 (inversion alone 15.4 / 10.8; the page-table loads queue behind the ring fill, so overlap = ring depth only).
-  Gate <= ~5 us not met. Side-stream p1 under qkv g30 = the only variant left: ceiling ~0.3% layer, 3+ sessions: not started.
-- _gw_verify: no new lever (FP8 P@V s22/s71/pv8, native s111 all on record). Asked lead for direction (COORD Requests n7s15).
-- Budget 10-29: layer 2 checks + 2 submits, moe 5 checks, Modal 33/60 (moe share 30 used up).
-
-## WAS-n7s14 (n7s14, 2026-10-29 ~05:25Z): twm item-end lane CLOSED on the H200 (2 Modal A/Bs); main unchanged; 0 judge runs
-- EPW (offload epilogue stores/fence to idle warps): H200 oracle (tools/n7s14/mk_orx.py) stores+fence free = -1.3..+0.3 us -> DEAD.
-- TWM_PD (producer passes decoded item; tools/n7s14/twm_pd.diff): bitwise, 15/15, but H200 +4..6 us every shape -> DEAD, reverted.
-- Oracle rule: count 'DEPBAR.LE gsb0, 0x0' + run loop64k on every oracle build (an epilogue-free oracle serialized all wgmma).
-- No moe item >= 4 us/call open. Budget 10-29: layer 2 checks + 2 submits, moe 5 checks, Modal 33/60.
-
 ## WAS-n7s13 (2026-10-29 ~05:00Z): lead 04:25Z items done; waiting on a new lane (COORD Requests n7s13)
 - Layer submit 725fc518 of moe/layer-twm 8309328 = 2.1350x (board stays 2.158, #50). Merged into main 9d2b3a8: layer main =
   v163 + twm EPI/KSC2/REL + TK2F_REL 2 (bench test 13/13). Don't check/submit that code again unchanged.
 - R1 gate on LAYER v16/v32 routings (H200 Modal, tools/n7s13/tlb_layer.py): v16 idle 12.7-19.6 %, v32 ~8-20 % (moe_hot SMs
   counted busy) -> FAIL, R1 not built. Remaining items (twm N16 epilogue, moe_hot REL) ~1-2 us/call: below the 4 us bundle bar.
 - Budget 10-29: layer 2 checks + 2 submits used, moe 5 checks, Modal 13.6/60.
-
-## WAS-n7s4 ( 2026-10-29 02:35Z): layer check 1537125d of moe/layer-twm 8309328 = 2.1457x < 2.158 -> not submitted; branch exhausted
-(checked 2x, submitted 1x: no more runs of it without a new change). Still no lead answer to Requests n7s1. Layer board #49 (cut #50 2.1579).
-
-## WAS-n7s2 (n7s2 end, 2026-10-29 ~02:15Z): layer submit 6466833c of moe/layer-twm b75aadc = 2.1404x (board stays 2.158 v153)
-- Used the 09:28Z rule (n7s1 item 1): noise draw, no gain. Don't resubmit b75aadc/8309328 (8309328 = only d32 -0.75 us).
-- Lane ask (COORD Requests n7s1 item 2) still unanswered; no moe item >= 5 us/call open. Budget 10-29: layer 1 check + 1 submit, moe 5 checks, Modal 11.4/60.
 
 ## WAS-n7s1 (n7s1 end, 2026-10-29 ~02:00Z): main = b39e4d2 kernels (unchanged); layer branch moe/layer-twm 8309328 (lead's call)
 - n7s1: REDESIGN R1 gate run on the H200 (Modal, board bs128/bs256 inputs, tools/n7s1/tlb.py): twm SM-idle 8-16 %
@@ -223,3 +181,4 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
   2-group rows (worse at every weight); ld.global.cg / asm nc loads for inter (no help: the race was the ring).
 - (s9) Post-expert norm fused into tk2f (last-M-CTA tickets, one-pass register norm): judge bs1 +2 us (168fa04c).
   Also s7's grid-barrier version. A separate norm2 kernel is as cheap as any in-kernel tail on the H200.
+- n7s23: tk2f XPF (gemm2 rows L2-prefetched at phase-1 end) and WAVE (two-wave row order to hide the phase barrier): H200 +0.7..5.9 us (DIAG 798fd574 / 87ee0bc0); the transition is not HBM idle.

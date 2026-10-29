@@ -3224,3 +3224,21 @@ No COORD change since lead 06:50Z task (n7s18 idea already posted). Waiting for 
 - Next cut candidate (not built): lean T<=4 routing (one warp, nroutes <= 32: match_any + ballots, one bar.sync instead
   of four, producer issues its first TMA straight from warp 0's result): bound ~0.5-0.8 us of the 2.3 at d1 only (~0.1%
   layer). The rest (ids latency, first-data latency) is DRAM latency.
+
+## n7s23 (2026-10-29 08:59Z - ~09:25Z): lead 08:50Z step 2 (attack the biggest tk2f d1/v1 gap): both candidates DEAD on the H200; 2 moe DIAG checks
+- XPF (consumer thread 0, at the CTA's phase-1 end = before the gemm2 spin, cp.async.bulk.prefetch.L2 of its gemm2 SQ rows
+  beyond the ring's first row, <= 2 rows): bitwise; H100 d1 tie, others +0.4..1.0. H200 DIAG 798fd574 (A B A B, 5 layer
+  routings each): d1 29.8 -> 30.6/30.5, d16 63.4 -> 64.4, d32 84.2 -> 85.2, v1 63.2/62.9 -> 63.8/63.9 us, every seed.
+- WAVE (row space [wave-1 gemm13][wave-2 gemm13][wave-1 gemm2][wave-2 gemm2], each split over ALL CTAs with rotated
+  remainders, waves = experts before/from the one nearest half the gemm13 rows, per-segment counters cnt[64 + j] at run
+  time): bitwise (maxdiff 0); H100 d1 +0.4, v1 +2.2, d16 +1.5, d32 +7. H200 DIAG 87ee0bc0: d1 30.8 -> 32.4, d16 65.2 -> 68.3,
+  d32 85.6 -> 91.5, v1 65.4 -> 68.1 us, every seed.
+- Reading: the phase-1 -> phase-2 'transition' (1.5 us median per CTA in n7s22) is NOT HBM idle time: the stragglers use the
+  bandwidth (any added traffic there slows them: XPF, like PFL2 n5s27 / UPF3), and pulling gemm2 work forward to hide the
+  barrier costs more than it hides. With the n7s22 prologue already under the rmsnorm in-layer (TK2FX) and IDF/FP dead,
+  tk2f d1/v1 = prologue DRAM latency + rows x 72 KB at ~4.1-4.2 TB/s; the 'last-wave split' bound is the 0.3 us tail and row
+  quantization (5.82 vs 6 rows at d1 E2). Lane CLOSED. Lean T<=4 routing: dead on paper (FP s15 = producer routes for itself
+  lost in-layer; the routing compute is ~0.3-0.5 of the 2.3 us and in-layer overlaps the rmsnorm).
+- Code reverted from main (both were DIAG-only, run-time l2h bits 14/15 behind TK2F_XPFK/TK2F_WAVEK): tools/n7s23/
+  wave_xpf_dead.diff + tools/n7s23/mkdiag.py (DIAG copy builder; apply the diff first).
+- Budget 10-29: moe checks 9/20 (2 this session), 0 Modal.
