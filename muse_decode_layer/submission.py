@@ -10370,16 +10370,17 @@ def _routing(part_ptr, bias_ptr, ls_ptr, ids_ptr, lids_ptr, wts_ptr, T, E: tl.co
             logit += tl.load(part_ptr + (ks * T + t) * E + e)
     score = 1.0 / (1.0 + tl.exp(-logit * MULT))
     key = score + tl.load(bias_ptr + e)
+    kb = key.to(tl.int32, bitcast=True)
+    kb = kb ^ ((kb >> 31) & 0x7FFFFFFF)
+    pk = (kb.to(tl.int64) << 32) | (E - 1 - e).to(tl.int64)
     j = tl.arange(0, TOPK)
     ids = tl.zeros((TOPK,), dtype=tl.int32)
-    picked = tl.zeros((TOPK,), dtype=tl.float32)
     for i in tl.static_range(TOPK):
-        best = tl.max(key, 0)
-        idx = tl.min(tl.where(key == best, e, E), 0)
-        sc = tl.sum(tl.where(e == idx, score, 0.0), 0)
+        best = tl.max(pk, 0)
+        idx = (E - 1 - (best & 0xFFFFFFFF)).to(tl.int32)
         ids = tl.where(j == i, idx, ids)
-        picked = tl.where(j == i, sc, picked)
-        key = tl.where(e == idx, float("-inf"), key)
+        pk = tl.where(e == idx, -9223372036854775807 - 1, pk)
+    picked = tl.gather(score, ids, 0)
     wts = picked / (tl.sum(picked, 0) + REPS)
     ls = tl.load(ls_ptr)
     loc = (ids - ls + E) % E
@@ -10421,7 +10422,7 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     wts = torch.empty((tokens, TOP_K), dtype=torch.float32, device=dev)
     _routing[(tokens,)](part, state["router_bias"], local_start, ids, lids, wts, tokens, E=N_EXPERTS, KS=ks,
                         TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, PDL=rpdl,
-                        num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2, launch_pdl=rpdl)
+                        num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4, launch_pdl=rpdl)
     return ids, lids, wts
 @triton.jit
 def _post_expert_wsum(y_ptr, wts_ptr, lids_ptr, nw_ptr, out_ptr, D: tl.constexpr, TOPK: tl.constexpr,
@@ -17967,7 +17968,7 @@ def _kernel_fn(data, state):
         rpdl = (bkt or rg) and _opt(state, tokens, "route_pdl", ROUTE_PDL)
         _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
                             E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
-                            SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, TRIG=rpdl, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 2)
+                            SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, TRIG=rpdl, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4)
         bucket = _moe_bucket(state, lids, rpdl) if bkt else None
         if gnorm:
             p = pr[:, :D_EXPERT]

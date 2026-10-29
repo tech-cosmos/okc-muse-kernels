@@ -2,6 +2,12 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night7 s5 (10-29): **main = v167** = v165 + proj LTFR (v166, check 93027e57 2.1341x, fixed-SGLang 2.1354 = tie, not submitted)
+  + _routing packed int64 max (bitwise; H100 -0.9 us/call T=16/32, -0.2 T=128/256; validate ALL OK, unchecked: wait for moe's unpool
+  skip bundle). Judge runs draw new input seeds per case (routing differs per run): v32 sl spread 320-378 us on same code.
+  hbm_fold v1/d16 (NOTES n7s5): v1 tail ~10, pr8-wait ~4-5, pr8->tk2f ~4 us; d16 router/pooler drain -> routing -> tk2f ~9 us (H100;
+  proj n7s4's H200 oracle says the d16 piece is worth <= 2-3 us there). ab_files placement noise +-1 us/shape (dup-file A/B).
+  NEXT: lead's 08:00Z big-idea pick; else T<=8 early tk2f + pr1 ids flag + DYN (Requests n7s5, ~0.4-0.5%, 2 sessions).
 night7 s4 (10-29): main unchanged (v165), 0 judge runs, 0 Modal. Lead 06:00Z big-bet step 1 MEASURED: tools/hbm_run.py +
   hbm_fold.py (nsys GPU-metrics DRAM BW folded per replay, NOTES n7s4). H100 d1 sliding: HBM < 50% busy ~26 of 85 us in 5 op-boundary
   bubbles (qkv->o 4.5, o->pr1 2, pr1->tk2f 6, in-tk2f 3, tail 8). Early-tk2f oracle (launch tk2f during pr1): live ids HANG (needs

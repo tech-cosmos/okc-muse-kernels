@@ -2945,3 +2945,32 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   Not built this session. The other d1 bubbles: qkv -> o (4.5 us: csl latency; o W prologue already PDL-streams), tail (8 us:
   tk2f drain + n2u + bnd; UPF/UPF2/UPF3/N2U_BOUNDARY on record dead).
 - 0 judge runs, 0 Modal. main unchanged (v165).
+
+## night7 s5 (2026-10-29 07:12Z-): v166 (LTFR) checked = tie; HBM bubble map v1/d16; _routing packed-max (bitwise, -0.2..-0.9 us/call)
+- v166 (4b68c55) = v165 + proj n7s5 LTFR (r-proj muse_bf16_proj/dev/n7s5/ltfr_layer.patch, patch -p1, build.py): bench test 13/13,
+  files_eq verify 32 bitwise, validate ALL OK (cold prepare 63.2 s). CHECK 93027e57 **2.1341x** (fixed-SGLang 2.1354; v165 check
+  4787d92e 2.1632 / fixed 2.1713): d1 68.4/74.2, d16 123.8/205.7, d32 156.1/304.4, v1 110.9/130.2, v16 259.4/349.8, v32 328.7/507.1;
+  prepare_s 88.2. LTFR invisible in the noise (v32 sl 328.7 vs 320.2). Not submitted. 10-29 left: 16 checks / 7 submits.
+- Judge noise source found: every judge run draws NEW input seeds per case (json case.seed differs run to run), so routing (hot
+  experts) differs between runs; v32 sl over 13 runs of near-identical code: 320-378 us. Not controllable; only kernels that
+  are robust to skew help.
+- hbm_fold (n7s4 tools) on v1 and d16 sliding (H100, main v166, under nsys; replay 140.2 / 189.3 us):
+  v1: HBM < 50% of peak ~34 of 140 us: qkv->vtk/o 11-14 (~3), 17-19 (~1.5), pr8 phase 23-31 at ~1.0-1.4 TB/s (pr8 waiting on
+  o -> bnd -> rmsnorm; ~4-5 us lost), pr8 drain -> tk2f ramp 47-51 (~4), inside tk2f 102-106 (gemm13->gemm2, ~4), tail 129-140
+  (tk2f drain + nu8 + bnd + graph end, ~10). d16: < 50% for ~39 of 189 us: 12-14, 19-21, 25-28 (attention/o hand-offs ~7),
+  **50-59 (~9: pooler/router drain -> _routing -> tk2f ramp)**, 166-169 (tk2f drain -> norm2), 184-189 (tail).
+  H100 single-replay timeline d16 sl: g24 pooler 30.6-57.4 | _router_split 36.6-56.9 | _routing 39.8-60.7 (PDL; ends 3.8 us after
+  the router) | _rmsnorm_gain 57.6-60.1 (parallel) | moe_tk2f 60.9 -> so _routing's post-wait time is on the critical path.
+- _routing packed max (dev/n7s5_routing.py): per top-k step ONE int64 max of (order-preserving key bits << 32 | E-1-e) instead of
+  max + argmin + score-sum (3 reductions), scores tl.gather'ed once. Bitwise 0/360 (T 1..256, forced exact key ties). Graph chain of
+  50 launches, H100 us/launch old -> new: T16 3.86 -> 2.95 (4 warps; 2 warps 3.04), T32 3.85 -> 2.98, T128 2.86 -> 2.64 (1 warp),
+  T256 2.87 -> 2.66. Put into layer.py in place (no flag: bitwise), T<=32 now 4 warps (was 2).
+- In-layer H100 ab_files (6-8 rounds, v166 vs v167): d16 sl 190.0 -> 189.4 / 189.1 -> 188.4, full 292.8 -> 292.0 / 292.2 -> 291.0, v16 sl
+  293.6 -> 291.6, full 442.9 -> 441.4, v32 sl 369.9 -> 368.9, full 624.7 -> 623.7; d32 sl looked +1.9, but a duplicated-file A/B
+  (old, new, old', new') gave 185.0 / 186.2 / 186.0 / 184.4: file-placement noise is +-1 us per shape, so read single-pair
+  ab_files diffs < ~1.5 us as noise. At d32 _routing is off the critical path anyway (H100 timeline: g30k pooler ends after it).
+  files_eq: topk ids identical everywhere; float diffs at d16/d32 full = the known atomics nondeterminism (base vs base differs too).
+- v167 (main) = v166 + packed-max _routing: bench test 13/13, validate ALL OK (cold prepare 66.4 s). NOT checked yet: held for the
+  lead's 07:05Z bundle (moe's T=256 unpool skip) since ~0.9 us/call x 4 loads is below judge noise.
+- Big idea posted (Requests, lead 06:50Z task): T<=8 early tk2f with pr1/pr8 ids release flag + DYN split, ~0.4-0.5%, 2 sessions.
+- 1 judge check (93027e57), 0 submits, 0 Modal. 10-29 left: 16 checks / 7 submits; Modal layer 6.2/15.
