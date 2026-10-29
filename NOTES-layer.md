@@ -2879,3 +2879,35 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   nvf/nverify lost, dtail lost), so a fresh-eyes redesign (like moe's REDESIGN.md: study public FA3/FlashMLA/FlashInfer FP8
   decode kernels, name the structural difference) is the lever, not tuning. Request posted in COORD.
 - 0 judge runs, 0 Modal. 10-29 left: 18 checks / 8 submits (layer), Modal layer 2.5/15 used.
+
+## night7 s3 (2026-10-29 05:21-05:50Z): batch-1 full attention (d1 _gd_full+_red_fin, v1) sized; 3 oracles, all DEAD; 0 judge runs
+- Lane: lead 05:35Z gave layer "(a) routing+rg one launch (n7s2: dead), then the attention plumbing moe needs". moe has posted no
+  plumbing request yet, so I took the unowned batch-1 full-layer attention (latency-bound; my n7s2 sizing ~0.6% d1+v1). Claimed in COORD.
+- H200 batch-1 K/V gather floors (NEW: the ~/attn hdiag3/4/5 diags were never run). tools/n7s3_floor.py (native gather of all
+  80K rows' 128-B K + V through the page table vs rows 0..n-1; CUDA graph, cold L2, median of 40, minus an empty-kernel graph):
+  | d1/v1 full (20.5 MB) | H100 us | H200 (Modal) us |
+  | random (page table), best grid 8x132 x U4 | 7.86 (2.61 TB/s) | 6.16 (3.32 TB/s) |
+  | dense (physical order), best | 7.26 (2.82) | 5.47-5.66 (3.6-3.7) |
+  In-layer H200 (n7s1 timeline): _gd_full 10.7 us + _red_fin tail 3.2 (qkv end -> red_fin end 14.4); v1 qkv end -> _combine end 15.7.
+  So d1 full has ~4.5 us inside _gd_full + ~1 us merge hop over the random floor (~0.3% score at 0.062 %/us); dense saves only
+  ~0.6 us more at batch 1 (physical order is not the batch-1 lever).
+- ORACLE 1 DEAD: _red_fin folded into the o GEMV prologue. Ceiling = skip _red_fin entirely (variants/n7s3_B/C, wrong output):
+  H100 timeline (6 replays each) first-_boundary end base 37.5 (med 37.15) / skip with o PDL at gd start 36.3 / skip with o at gd
+  end 36.8 us -> <= ~1 us before the fused prologue's own L2 trip (~0.5) = ~0.03% score. Not built. (Whole-layer ab_files of
+  the skip variants shows -10 us, but that is garbage attention output changing expert routing: use the segment, not the total.)
+- ORACLE 2 DEAD: L2 prefetch (cp.async.bulk.prefetch.L2 evict_last) of pr1's packed pooler W during d1 full attention, while
+  HBM sits ~60% idle. (a) issued by the resident _red_fin CTA before its wait: +42..80 us (one SM's bulk-prefetch issue is
+  ~0.3-0.5 TB/s and holds the merge). (b) issued by the 512 _gd_full programs (4 KB chunks per lane), 25% / 45% of S+N, at
+  program start / end: H100 ab_files d1 full base 106.16 | 108.54 / 107.05 | 110.60 / 108.70 us. Timeline: _gd_full +3.6..4.4
+  us, pr1 only -1..-1.5 (pr1 end - bnd end 19.0 -> 17.3..18.1): prefetch traffic slows the random gather, and pr1 isn't purely
+  HBM-bound. Same zero-sum as the s-era side-stream prefetch notes.
+- ORACLE 3 DEAD: d1 full _gd_full plan variants on the H200 (only H100 before; v126's aplan covered T=16..256). Variants via
+  ATT_PLAN at T=1 (variants/n7s3ap, all pass the reference check). H100 ab_files 6 rounds: base 106.06, stages 3 106.86, stages 4
+  107.19, splits 1023 105.86, BN16 s4 106.98, splits 255 110.42, BN64 s2 111.60. H200 Modal ab_files 8 rounds (one container):
+  base 87.51, s3 88.14, p1023 87.94, BN16 s4 88.70 -> base plan is the H200 optimum.
+- Left in this pool: only a new batch-1 full kernel reaching the random floor (~-4.5 us d1 full = ~0.28%, v1 similar ~0.25%).
+  ~/attn s73 built a native one (cfl: clusters + cp.async 3 stages + DSMEM/global two-level merge) and lost 19 vs 15.8 us H100
+  (loads-only 12.2, compute 3 us unhidden, merges 4.5). A redo would need: all of an SM's ~155 KB of K/V in flight in ONE trip
+  (fits smem at 132 CTAs), compute pipelined per arriving chunk, and red's atomics merge (0.3-0.4 us) not a two-level merge.
+  Multi-session, history of losses: not started.
+- Modal: layer 6.2 / 15 GPU-min used 10-29 (this session 1.2 + 2.5). 0 judge runs. Main unchanged (v164).
