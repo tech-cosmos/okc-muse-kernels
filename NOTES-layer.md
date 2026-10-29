@@ -3103,3 +3103,8 @@ Cause v16: cudaOccupancyMaxActiveClusters at 384 thr, 1 CTA/SM = 30 clusters of 
 Left (not built): last-CTA-merges via global partials + atomic counter at v16 (fence + atomic + 3x16 KB L2 reads on the
 critical path ~2 us vs combine 3.3) ~-1.3 us v16 sl = ~0.05%, non-deterministic merge order. Lane: verify-sliding attention
 CLOSED (bound per n8s1 was ~5 us stripped, the reachable part is <= ~1.3 us).
+
+## night8 s3 (2026-10-29 21:31Z)
+Idle session: no lead decision after 21:05Z, verify-sliding lane closed in n8s2. Only leftover in it is the v16
+last-CTA global merge (~-1.3 us v16 sl, ~0.05%); also cl=2 at v16 (66 clusters = 132 CTAs, one wave) would still leave a
+2-way merge per row: same order of gain, not built. 0 judge runs, 0 Modal, no code.
