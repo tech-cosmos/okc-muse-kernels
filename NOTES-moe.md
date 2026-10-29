@@ -2920,3 +2920,28 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   * main 7d2a079 = TWM_KSC_DUAL 1 + TWM_REL 1 (bitwise, 15/15). Plain check a4054bf3: 2.2790x (bs1 27.5, bs16 90.9, bs32 125.2,
     bs8 69.4, bs128 197.5, bs256 232.0) = tie with board 2.2792x (big-M better than fc7e86d6's 199.9/235.3, decode drew slow)
     -> NOT submitted (rule). Layer: Handoff posted (TWM_KSC 2 + TWM_REL 1 are pure CUDA #defines once moe_twm is copied).
+
+## n6s5 (2026-10-29 00:13Z - 01:15Z): layer port of the twm i-cache/release wins + i-cache audit (tk2f, K-split code, layer kernels)
+- LAYER PORT (lead 22:15Z item 1), branch moe/layer-twm b75aadc (pushed; = r-layer main v163 + moe cbaa306..7d2a079 twm
+  changes): 3-way `git merge-file` of moe_src.py (layer copy) with moe cbaa306 (base) and 7d2a079; 8 conflicts resolved by
+  tools/n6s5/layer_merge_resolve.py: defines TWM_EPI 1, TWM_HOTC 0 (layer TUNE lists never use twm_hot), TWM_REL 1,
+  TWM_KSC 2 (layer T=256 twf_split 66 -> KS build; T=128 no split -> KS-free build); layer's own SMEM/launch kept (+8 KB
+  staging, kf pick); python side = layer's (layer compiles moe_src via its own _moe__lib, defines are hard-coded).
+  validate --quick ALL OK (cold prepare 66.6 s), files_eq: v16/v32 bitwise = main (decode differs run-to-run as on main),
+  loop64k clean. H100 ab_files 3 rounds: v16 sl 301.1->295.6, full 444.8->443.7; v32 sl 376.7->372.4, full 627.3->625.0.
+  JUDGE check 74dcb2bb (muse_decode_layer): 2.1569x vs board 2.1580 (v153). Per shape: d1 65.0/74.2, d16 127.0/203.8,
+  d32 148.2/289.7, v1 108.1/121.0, v16 260.0/349.3, v32 337.8/502.2 (board run v16 266.6/356.1, v32 335.7/506.4).
+  prepare_s 88.8. Not submitted (lead 22:15Z: submit only if > 2.158). Candidate for the 09:28Z 'within 1% + per-shape
+  evidence' rule: lead's call (COORD Results).
+- tk2f/tk2h I-CACHE: CLEAN. H100 ncu (tools/n5s17/ncu_r.py, layer d32 routings s7/s99): stall_no_instruction per issue
+  sq 0.07/0.08, tk2h W3 (layer T=32) 0.09/0.10 (its 42 KB single loop included), vs long_scoreboard 0.9-1.7. Calibration:
+  twm before n6s3 (EPI 0, HOTC 1, KSC 1, REL 0) 0.25/0.28 at v16/v32, main 0.11/0.22 (tools/n6s5/ncu_r2.py VAR=e0/e1).
+- twm K-split code (v32 still 0.22): KS code present but unused (TWF_SPLIT_M {}, KSC_FORCE 1) 0.24/0.17 vs KS-free 0.11/0.10
+  (H100 twm 198.2/212.5 vs 197.2/205.6 us, s7/s99). Tried (bitwise, 15/15): KS tail only in the RT 4 tw_items (splits are
+  light-only; -620 SASS) + float4 partial stores/loads (-230 more; 8104 -> 7256): no_instr unchanged (0.21/0.17), and
+  Modal H200 ABBA board bs256 +2.9 us (222.0/221.9 -> 225.0/224.9), bs128 tie -> DEAD, reverted. Per-PC samples
+  (tools/n6s5/loopstat2.py on an ncu SourceCounters csv): twm loops past 0x10000 have the LOWEST samples/inst (174-194 vs
+  196-261): layer s29's '>= 64 KB offset is slow' does not show in twm; the extra stalls are outside the MMA loops.
+- Layer non-moe CUDA kernels SASS: pr32 4296, pr8 3984, pr1 3320/2928, g30k 2448, g30 2128, g30n 1800: no large rolled-out
+  rare paths like twm's; nothing to audit further. i-cache lane closed except twm's out-of-loop code at v32 (~1-2 us/call).
+- Budget 10-29: moe board checks 4/20 (n6s4) , layer check 1 (74dcb2bb), Modal 4.1 min (9/60 used).

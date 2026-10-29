@@ -1,6 +1,15 @@
 # STATE-moe
 
-## NOW (n6s4 end, 2026-10-29 ~01:00Z): main 7d2a079 = TWM_KSC_DUAL 1 + TWM_REL 1 (bitwise, 15/15), H200-verified small wins
+## NOW (n6s5 end, 2026-10-29 01:15Z): main unchanged (7d2a079); layer port on BRANCH moe/layer-twm b75aadc
+- Layer port of twm EPI/HOTC0/KSC2/REL (lead 22:15Z item 1): validate ALL OK, v16/v32 bitwise, H100 v16 sl -5.5 / v32 sl -4.3 us.
+  Judge layer check 74dcb2bb 2.1569x (board 2.1580): v16 260.0/349.3 (board run 266.6/356.1), v32 337.8/502.2. Not submitted
+  (rule: > 2.158); asked the lead (COORD Results) whether it goes in under the 09:28Z within-1% rule / merges into layer main.
+- i-cache audit: tk2f/tk2h clean (ncu no_instr 0.07-0.10/issue = twm after the fix); layer non-moe kernels <= 4.3k SASS.
+  twm v32 K-split build still 0.17-0.22: slimming the KS tail (RT4-only + float4 partials) = Modal bs256 +2.9 us: DEAD.
+- NEXT (ranked): (1) tk2f release analog (n6s4 NEXT 1: defer non-final publishes / thread-0 fence stall), H200 DIAG d1/d16/d32/v1;
+  (2) twm N16 gemm13 epilogue 2.2-3.8 us/item; (3) moe_hot REL. Each <= ~2 us/call: weigh against the lead's >= 3% bar.
+
+## WAS-n6s4 (n6s4 end, 2026-10-29 ~01:00Z): main 7d2a079 = TWM_KSC_DUAL 1 + TWM_REL 1 (bitwise, 15/15), H200-verified small wins
 - Judge H200 DIAGs on layer routings: dual (twm without K-split code for calls with no split) v16 -1.9 / v32 tie; REL
   (helper warp 9 releases gemm13+gemm2 items) v16 -0.5 / v32 -1.4 us per call, every seed. Modal board: bs128 -1.7, bs256 -2.5.
   Plain check a4054bf3 2.2790x = tie with board 2.2792x (decode drew slow) -> not submitted. Handoff posted for the layer.
