@@ -2,6 +2,10 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night7 s7 (10-29): main = v168 = v167 + IDF option (off): pr1 routing release flag + early moe_tk2f at T=1 (flag spin,
+  rmsnorm TRIG at start, n2u reads routing after its wait, tail boundary resets flag). Correct (replay 0/80 on, 0/72 off), but
+  H100 d1 +3 us (sl 89.2 vs 86.0, full 109.3 vs 106.3): early tk2f CTAs slow pr1's pooler stream ~3 us. DEAD unless moe's DYN
+  throttles early CTAs. PITFALL: n2u's pre-wait routing loads are safe only because ptxas sinks them (NOTES n7s7). tools/graph_eq.py.
 night7 s6 (10-29): v167 check 59013cf5 2.1553x (fixed-SGLang 2.1482, 2nd best; v16 sl 258.0 / v32 sl 316.7 best ever) < board 2.158:
   not submitted. routing->rmsnorm fusion at T=16/32 sized <= 1 us (already overlap). NEXT: integrate moe TK2F DYN/pr1-flag and proj
   compacted-unpool when handed off; check bundles; submit when a check > 2.158.

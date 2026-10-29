@@ -10169,7 +10169,7 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
               NS: tl.constexpr = 1, SS: tl.constexpr = 0, SPL: tl.constexpr = 1, SEP: tl.constexpr = False,
               sc_ptr=None, ids_ptr=None, tw_ptr=None, SC: tl.constexpr = False, SC_LOCAL: tl.constexpr = 0,
               SC_K: tl.constexpr = 4096, SC_EPS: tl.constexpr = 0.0, rb_ptr=None, x1_ptr=None, a1_ptr=None, b1_ptr=None,
-              NOS: tl.constexpr = 0):
+              NOS: tl.constexpr = 0, rst_ptr=None, RST: tl.constexpr = False):
     """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
     s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32).
     RB: the branch is FP32 (gemv19 output), rounded to BF16 first.
@@ -10220,6 +10220,9 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
             tw8 = tl.load(tw_ptr + sl8)
         if PDL:
             gdc_wait()
+        if RST:
+            if tl.program_id(0) == 0:
+                tl.store(rst_ptr, 0)
         ks = tl.arange(0, NS)
         if SC:
             ssq = tl.load(sc_ptr + sl8, mask=loc8, other=1.0)
@@ -10246,6 +10249,9 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
         return
     if PDL:
         gdc_wait()
+    if RST:
+        if tl.program_id(0) == 0:
+            tl.store(rst_ptr, 0)
     b = tl.load(br_ptr + row * NB + cols, mask=in_b, other=0.0)
     for i in tl.static_range(1, NS):
         b += tl.load(br_ptr + i * SS + row * NB + cols, mask=in_b, other=0.0)
@@ -14360,6 +14366,8 @@ struct Args {
     // h = rmsnorm(s', eps) gain, computed redundantly per block in registers (8 elements per thread).
     const __nv_bfloat16* br; const float* s; const float* alpha; const float* beta; const float* gain;
     float* s_out; __nv_bfloat16* h_out; float eps_post, eps; int bnd;
+    int* rel;  // n7s7 IDF: != nullptr: the routing block st.release's *rel = 1 once ids/lids/wts are written (early readers
+              // acquire-spin on it; the layer's last boundary resets it after its wait)
 };
 
 __device__ __forceinline__ float bsum(float v, float* sm) {  // block sum, 1024 threads, sm >= 32 floats
@@ -14529,6 +14537,11 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
         a.lids[lane] = loc < a.local ? loc : -1;
         a.wts[lane] = mysc / (sum + a.reps);
     }
+    if (a.rel) {  // n7s7 IDF: lanes 0..7's stores, then lane 0's release (cumulative after the warp barrier)
+        __threadfence();
+        __syncwarp();
+        if (lane == 0) asm volatile("st.release.gpu.global.s32 [%0], 1;" :: "l"(a.rel) : "memory");
+    }
     if (lane == 0) *a.cnt = 0;
 }
 
@@ -14668,7 +14681,10 @@ void pr1_launch(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tenso
                 torch::Tensor ls, torch::Tensor ids, torch::Tensor lids, torch::Tensor wts, double mult, double reps,
                 int64_t local, int64_t u, int64_t nv, int64_t pf, int64_t r, int64_t rb, int64_t blocks, int64_t npf, int64_t pdl,
                 std::vector<torch::Tensor> bt, double eps_post, double eps) {
-    // bt = {} or {br bf16 [1, 8192], s fp32, alpha, beta, gain fp32 [8192], s_out fp32, h_out bf16}: fused boundary (BND)
+    // bt = {} or {br bf16 [1, 8192], s fp32, alpha, beta, gain fp32 [8192], s_out fp32, h_out bf16}: fused boundary (BND),
+    // then optionally one more: rel int32 [>=1] (n7s7 IDF release flag)
+    int* rel = nullptr;
+    if (bt.size() == 1 || bt.size() == 8) { TORCH_CHECK(bt.back().scalar_type() == at::kInt, "pr1: rel"); rel = bt.back().data_ptr<int>(); bt.pop_back(); }
     TORCH_CHECK(x.size(0) == 1 && x.size(1) == 8192 && rw.size(0) == 256 && rw.size(1) == 8192, "pr1: shapes");
     const int n = out.size(1);
     TORCH_CHECK((long)n * 8192 <= (long)pr1::MAXC * (blocks - rb) * nv * u * 4096, "pr1: too many chunks per virtual block");
@@ -14677,6 +14693,7 @@ void pr1_launch(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tenso
                 (const float4*)rw.data_ptr(), (const float4*)x32.data_ptr(), logits.data_ptr<float>(), cnt.data_ptr<int>(),
                 bias.data_ptr<float>(), ls.data_ptr<int>(), ids.data_ptr<int>(), lids.data_ptr<int>(), wts.data_ptr<float>(),
                 (float)mult, (float)reps, (int)local, (int)npf};
+    a.rel = rel;
     if (!bt.empty()) {
         TORCH_CHECK(bt.size() == 7 && bt[0].scalar_type() == at::kBFloat16 && bt[1].scalar_type() == at::kFloat &&
                     bt[6].scalar_type() == at::kBFloat16 && bt[0].numel() == 8192 && bt[1].numel() == 8192 && nv == 4, "pr1: BND args");
@@ -15833,6 +15850,38 @@ _a = "\nstatic const char* g_upf = nullptr;"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "\nstatic int g_tk2fpdl = 0;\nint64_t moe_set_tk2fpdl(int64_t v) { g_tk2fpdl = (int)v; return 0; }" + _a)
 _moe__CPP = _moe__CPP + "int64_t moe_set_tk2fpdl(int64_t);"
+_a = "    const char* upf, int upf_rows, int upf_rb, int upf_seg) {\n  static_assert(NC % 8 == 0, \"routing uses warps 0..7 x 32 ids\");"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("int upf_seg) {", "int upf_seg, const int* idf) {"))
+_a = """  {  // routing, as moe_tk2 GATED
+    int e = -1, rank = 0;
+    if (warp < 8) {
+      s_wc[warp][lane] = 0;
+      const int i = warp * 32 + lane;
+      if (i < nroutes) {
+        const int v = ids[i] - start;"""
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, """  if (idf) {  // n7s7 IDF: pr1's routing may still be in flight: acquire its release flag first
+    if (tid == 0) {
+      int v;
+      do {
+        asm volatile("ld.acquire.gpu.global.s32 %0, [%1];" : "=r"(v) : "l"(idf) : "memory");
+        if (!v) __nanosleep(32);
+      } while (!v);
+    }
+    __syncthreads();
+  }
+""" + _a.replace("const int v = ids[i] - start;", "const int v = __ldcg(&ids[i]) - start;"))
+_a = "      (__nv_bfloat16*)out, nr / 8, eps, g_upf, g_upf_rows, g_upf_rb, g_upf_seg);"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("g_upf_seg);", "g_upf_seg, idfx);"))
+_a = "  const bool pdlx = g_tk2fpdl != 0;  // one-shot\n"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a + "  const int* idfx = g_idf;  // n7s7 IDF, one-shot\n  g_idf = nullptr;\n")
+_a = "\nstatic const char* g_upf = nullptr;"
+assert _moe_CUDA_SRC.count(_a) == 1
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "\nstatic const int* g_idf = nullptr;\nint64_t moe_set_idf(int64_t p) { g_idf = (const int*)p; return 0; }" + _a)
+_moe__CPP = _moe__CPP + "int64_t moe_set_idf(int64_t);"
 _a = "int64_t moe_gather_launch(torch::Tensor x, torch::Tensor meta, torch::Tensor sroutes, torch::Tensor xg) {"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, r"""template <bool F32>
@@ -16106,7 +16155,7 @@ def _moe__lib():
                                            "moe_gather_launch", "moe_tw_launch", "moe_twf_launch", "moe_twm_launch", "moe_twq_launch",
                                            "moe_route2_launch", "moe_act_launch", "moe_norm2_launch", "moe_norm3_launch", "moe_set_pdl", "moe_set_blk", "moe_set_sa",
                                            "moe_set_upf", "moe_set_ss", "moe_set_tk2fpdl", "moe_gathern_launch", "moe_route_pdl_launch", "moe_routegathern_launch",
-                                           "moe_set_hot", "moe_hot_launch"],
+                                           "moe_set_hot", "moe_hot_launch", "moe_set_idf"],
                                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3", *NVCC_SPLIT],
                                 extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
@@ -16123,7 +16172,7 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
                                            const float* __restrict__ alpha, const float* __restrict__ beta,
                                            const float* __restrict__ bgain, const float* __restrict__ gain,
                                            float* __restrict__ s2, __nv_bfloat16* __restrict__ hid, int* bc,
-                                           float eps_post, float eps_h) {
+                                           float eps_post, float eps_h, const int* idf) {
     constexpr int K = 4096, NW = 16;
     __shared__ float ssum[NW][8];
     __shared__ float red[NW][R];
@@ -16150,15 +16199,28 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
     bool loc[8];
     float twv[8];
     if (SLOT) {
+        if (!idf) {  // n7s7 IDF: with an early moe_tk2f, read the routing after griddepcontrol.wait (below); a flag spin
+                     // here (+__ldcg loads) cost ~4 us H100 d1 tail. These plain loads are safe only because ptxas
+                     // sinks them below griddepcontrol.wait: forced pre-wait (__ldcg) they read stale routing
+                     // (replay_test d1 3/10 + 5/10 fails)
 #pragma unroll
-        for (int s = 0; s < 8; ++s) {
-            const int e = ids[s] - start;
-            loc[s] = e >= 0 && e < count;
-            twv[s] = tw[s];
+            for (int s = 0; s < 8; ++s) {
+                const int e = ids[s] - start;
+                loc[s] = e >= 0 && e < count;
+                twv[s] = tw[s];
+            }
         }
     }
     asm volatile("griddepcontrol.wait;" ::: "memory");
     if (blockIdx.x == 0 && tid < 128) zc[tid] = 0;
+    if (SLOT && idf) {  // n7s7 IDF: pr1 complete (moe_tk2f completed after its rmsnorm's wait)
+#pragma unroll
+        for (int s = 0; s < 8; ++s) {
+            const int e = __ldcg(ids + s) - start;
+            loc[s] = e >= 0 && e < count;
+            twv[s] = __ldcg(tw + s);
+        }
+    }
     float v[8][8], ss[8];
 #pragma unroll
     for (int s = 0; s < 8; ++s) {
@@ -16306,7 +16368,9 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
 void n2u_launch(torch::Tensor y32, torch::Tensor inv, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1,
                 torch::Tensor gs, int64_t start, int64_t count, double eps, torch::Tensor w, torch::Tensor out,
                 torch::Tensor zc, int64_t rr, int64_t pdl, std::vector<torch::Tensor> bnd, double eps_post, double eps_h) {
-    // bnd: {} (no boundary) or {s1, alpha, beta, bgain, gain, s2, hid, cnt}
+    // bnd: {} (no boundary) or {s1, alpha, beta, bgain, gain, s2, hid, cnt}, then optionally idf int32 (n7s7 IDF)
+    const int* idf = nullptr;
+    if (bnd.size() == 1 || bnd.size() == 9) { idf = bnd.back().data_ptr<int>(); bnd.pop_back(); }
     const bool B = bnd.size() == 8;
     auto P = [&](int i) { return B ? bnd[i].data_ptr() : nullptr; };
     const int n = (int)out.size(1);
@@ -16320,7 +16384,7 @@ void n2u_launch(torch::Tensor y32, torch::Tensor inv, torch::Tensor ids, torch::
         (const float*)tw.data_ptr(), (const float*)w1.data_ptr(), (const float*)gs.data_ptr(), (int)start, (int)count, \
         (float)eps, (const uint4*)w.data_ptr(), (__nv_bfloat16*)out.data_ptr(), (int*)zc.data_ptr(), n, \
         (const float*)P(0), (const float*)P(1), (const float*)P(2), (const float*)P(3), (const float*)P(4), (float*)P(5), \
-        (__nv_bfloat16*)P(6), (int*)P(7), (float)eps_post, (float)eps_h
+        (__nv_bfloat16*)P(6), (int*)P(7), (float)eps_post, (float)eps_h, idf
     if (rr == 3008) cudaLaunchKernelEx(&lc, n2u::n2u<8, true, true>, N2U_ARGS);
     else if (rr == 1008) cudaLaunchKernelEx(&lc, n2u::n2u<8, true>, N2U_ARGS);
     else if (rr == 4) cudaLaunchKernelEx(&lc, n2u::n2u<4>, N2U_ARGS);
@@ -17657,6 +17721,7 @@ def _g12_prepare(state):
     state["ob8_bar"] = torch.zeros(1, dtype=torch.int32, device=dev)
     state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)
     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)
+    state["idf"] = torch.zeros(1, dtype=torch.int32, device=dev)
     state["g13"] = {key: pk for key in list(G13_CFG) + (["o"] if G13_O else []) if (pk := _pack13(w[key])) is not None}
     state["g14"] = {key: pk for key, c in G14_CFG.items() if (pk := _pack14(w[key], 1024 * c[0])) is not None}
     state["g14k"] = {(key, kc): pk for key, v in G14_ALT.items() if key in state["g14"]
@@ -17714,7 +17779,7 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
         return out
     return F.linear(x, w)
 TK2F_SQ_T1 = False
-def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
+def _experts_n2u(x, topk_weights, local_ids, state, bnd=(), idf=False):
     """T = 1: moe_tk2f (as moe_src's kernel_fn) -> n2u (moe_norm2 + unpool slice): the unpool slice output."""
     st = state["moe"]
     lib = st["lib"]
@@ -17732,11 +17797,13 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=()):
         c += (_opt(state, 1, "tk2x", 0) - 6) * 100000000
     elif _opt(state, 1, "tk2x", 0):
         c, w13_, w2_ = _moe__tk2x(_moe__tk2f_w(c, st)[0], st, _opt(state, 1, "tk2x", 0))
+    if idf:
+        lib.moe_set_idf(state["idf"].data_ptr())
     lib.moe_tk2f_launch(w13_, st["w13s2"], w2_, st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"], c)
     f = torch.empty((1, UNPOOL_SLICE), dtype=torch.bfloat16, device=dev)
     _G10["lib"].n2u_launch(y32, inv, ids, topk_weights.float().contiguous(), st["w1"], st["gs2"], 0, LOCAL_EXPERTS,
-                           POST_NORM_EPS, state["unpool_slice"], f, st["cnt"], N2U_CFG[0] + (1000 + 2000 * N2U_PFW) * slot, N2U_CFG[1], list(bnd), POST_NORM_EPS, RMS_EPS)
+                           POST_NORM_EPS, state["unpool_slice"], f, st["cnt"], N2U_CFG[0] + (1000 + 2000 * N2U_PFW) * slot, N2U_CFG[1], list(bnd) + ([state["idf"]] if idf else []), POST_NORM_EPS, RMS_EPS)
     return f
 NU8_DEFAULT = False
 QF32 = True
@@ -17751,6 +17818,7 @@ RF_TRIG_DEFAULT = True
 TK2FX_TOKENS = (1, 8)
 TK2FJ_TOKENS = (16, 32)
 TK2FJ_DEFAULT = True
+IDF_DEFAULT = False
 TK2FX_DEFAULT = True
 NU8_KB = 512
 NU8_X = True
@@ -17793,7 +17861,7 @@ _moe_TWM_ORDER_M = {}
 G19_TRIG_TOKENS = (16, 32)
 G19_TRIG_O_TOKENS = (16, 32)
 BND_SEP_TOKENS = (8,)
-def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None, nos=None):
+def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None, nos=None, rst=None):
     """unpool -> second boundary: (next attention input, stream). nos = (stream, o output, res1 alpha, beta, rb): stream1
     was not stored (NOS): the boundary recomputes it."""
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
@@ -17815,7 +17883,8 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None, nos=None):
                          launch_pdl=pdl, NS=f.shape[0] if f.dim() == 3 else 1, SS=f.shape[1] * UNPOOL_SLICE if f.dim() == 3 else 0,
                          SPL=spl, SEP=sliced and tokens in BND_SEP_TOKENS or sc is not None,
                          **({} if sc is None else dict(sc_ptr=sc[0], ids_ptr=sc[1], tw_ptr=sc[2], SC=True,
-                                                     SC_LOCAL=LOCAL_EXPERTS, SC_K=D_EXPERT, SC_EPS=POST_NORM_EPS)), **nk)
+                                                     SC_LOCAL=LOCAL_EXPERTS, SC_K=D_EXPERT, SC_EPS=POST_NORM_EPS)), **nk,
+                         **({} if rst is None else dict(rst_ptr=rst, RST=True)))
     return hidden, stream2
 def kernel_fn(data, state):
     _G24X.clear()
@@ -17905,6 +17974,9 @@ def _kernel_fn(data, state):
     pr1 = (tokens in PR1_TOKENS and _opt(state, tokens, "pr1", True) and pdl and fp32_router and _GPR1_SRC is not None and not npf
            and (tokens == 1 and "pooler" in state.get("g13", {}) or tokens == 8 and _GPR8_SRC is not None
                 and "pooler" in state.get("g14", {}) and G14_CFG["pooler"][0] == 8))
+    idf = (pr1 and tokens == 1 and _opt(state, 1, "idf", IDF_DEFAULT) and not N2U_BOUNDARY and not TK2_PDL13
+           and 1 in TK2FX_TOKENS and _opt(state, 1, "tk2fx", TK2FX_DEFAULT) and 1 in N2U_TOKENS and _use_moe(1)
+           and bool(_moe_TK2F) and _G10.get("lib") is not None and 1 <= SLICED_UNPOOL_MAX_TOKENS)
     ob8 = (pr1 and tokens == 8 and _GOB8_SRC is not None and _opt(state, tokens, "ob8", OB8) and "g12" in state
            and not (("o", 8) in state.get("g19", {}) and "o" in G19_ON and _opt(state, 8, "g19:o", ("o", 8) not in G19_DEFAULT_OFF))
            and _g27_sel(state, "o", 8) is None and o.shape[1] == 1024
@@ -17994,8 +18066,8 @@ def _kernel_fn(data, state):
                                    ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *PR1_CFG[tokens][:2], _opt(state, tokens, "pr1_pf", PR1_CFG[tokens][2]),
                                    PR1_CFG[tokens][3], _opt(state, tokens, "pr1_rb", PR1_CFG[tokens][4]),
                                    PR1_CFG[tokens][5], _opt(state, tokens, "pr1_npf", PR1_CFG[tokens][6]), 1,
-                                   [a, data["stream"], alpha, beta, state["pre_ffn"], stream1, h] if bnd else [],
-                                   POST_NORM_EPS, RMS_EPS)
+                                   ([a, data["stream"], alpha, beta, state["pre_ffn"], stream1, h] if bnd else [])
+                                   + ([state["idf"]] if idf else []), POST_NORM_EPS, RMS_EPS)
         else:
             pk = state["g14"]["pooler"]
             part = torch.empty(8 * tokens * N_EXPERTS, dtype=torch.float32, device=dev)
@@ -18054,6 +18126,7 @@ def _kernel_fn(data, state):
     nu8 = _nu8_on(state, tokens)
     tk2fx = (pr1 and pdl and not tk2_pdl and tokens in TK2FX_TOKENS and _use_moe(tokens) and _moe_TK2F
              and _opt(state, tokens, "tk2fx", TK2FX_DEFAULT))
+    assert not idf or tk2fx
     tk2fj = (not pr1 and not tk2_pdl and tokens in TK2FJ_TOKENS and tokens <= TK2_MAX_TOKENS and _use_moe(tokens)
              and _moe_TK2F and _opt(state, tokens, "tk2fj", TK2FJ_DEFAULT))
     if tk2fj:
@@ -18072,8 +18145,8 @@ def _kernel_fn(data, state):
         p = pooled
     else:
       _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=rpdl,
-                             TRIG=tk2_pdl, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
-                             launch_pdl=rpdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 and not nu8d else 0, TRIG2=tk2fx or tk2fj,
+                             TRIG=tk2_pdl or idf, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
+                             launch_pdl=rpdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 and not nu8d else 0, TRIG2=(tk2fx or tk2fj) and not idf,
                              zl_ptr=y32[65] if nu8d else None, ids_ptr=local_ids if nu8d else None, ZL=LOCAL_EXPERTS if nu8d else 0,
                              zr_ptr=zr, ZR=zr.shape[1] if zr is not None else 0,
                              ZRP=triton.next_power_of_2(zr.shape[1]) if zr is not None else 1)
@@ -18096,8 +18169,8 @@ def _kernel_fn(data, state):
             _experts_n2u(p, topk_weights, local_ids, state, (stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"],
                                                              stream2, hidden, state["n2u_cnt"]))
             return hidden, stream2, topk_ids
-        f = _experts_n2u(p, topk_weights, local_ids, state)
-        return _tail(None, stream1, h, tokens, state, pdl, nos=nos, f=f) + (topk_ids,)
+        f = _experts_n2u(p, topk_weights, local_ids, state, idf=idf)
+        return _tail(None, stream1, h, tokens, state, pdl, nos=nos, f=f, rst=state["idf"] if idf else None) + (topk_ids,)
     if nu8:
         f, sc = _experts_nu8(p, topk_weights, local_ids, state, y32)
         return _tail(None, stream1, h, tokens, state, pdl, nos=nos, f=f, sc=sc) + (topk_ids,)

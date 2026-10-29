@@ -82,6 +82,8 @@ struct Args {
     // h = rmsnorm(s', eps) gain, computed redundantly per block in registers (8 elements per thread).
     const __nv_bfloat16* br; const float* s; const float* alpha; const float* beta; const float* gain;
     float* s_out; __nv_bfloat16* h_out; float eps_post, eps; int bnd;
+    int* rel;  // n7s7 IDF: != nullptr: the routing block st.release's *rel = 1 once ids/lids/wts are written (early readers
+              // acquire-spin on it; the layer's last boundary resets it after its wait)
 };
 
 __device__ __forceinline__ float bsum(float v, float* sm) {  // block sum, 1024 threads, sm >= 32 floats
@@ -251,6 +253,11 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
         a.lids[lane] = loc < a.local ? loc : -1;
         a.wts[lane] = mysc / (sum + a.reps);
     }
+    if (a.rel) {  // n7s7 IDF: lanes 0..7's stores, then lane 0's release (cumulative after the warp barrier)
+        __threadfence();
+        __syncwarp();
+        if (lane == 0) asm volatile("st.release.gpu.global.s32 [%0], 1;" :: "l"(a.rel) : "memory");
+    }
     if (lane == 0) *a.cnt = 0;
 }
 
@@ -390,7 +397,10 @@ void pr1_launch(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tenso
                 torch::Tensor ls, torch::Tensor ids, torch::Tensor lids, torch::Tensor wts, double mult, double reps,
                 int64_t local, int64_t u, int64_t nv, int64_t pf, int64_t r, int64_t rb, int64_t blocks, int64_t npf, int64_t pdl,
                 std::vector<torch::Tensor> bt, double eps_post, double eps) {
-    // bt = {} or {br bf16 [1, 8192], s fp32, alpha, beta, gain fp32 [8192], s_out fp32, h_out bf16}: fused boundary (BND)
+    // bt = {} or {br bf16 [1, 8192], s fp32, alpha, beta, gain fp32 [8192], s_out fp32, h_out bf16}: fused boundary (BND),
+    // then optionally one more: rel int32 [>=1] (n7s7 IDF release flag)
+    int* rel = nullptr;
+    if (bt.size() == 1 || bt.size() == 8) { TORCH_CHECK(bt.back().scalar_type() == at::kInt, "pr1: rel"); rel = bt.back().data_ptr<int>(); bt.pop_back(); }
     TORCH_CHECK(x.size(0) == 1 && x.size(1) == 8192 && rw.size(0) == 256 && rw.size(1) == 8192, "pr1: shapes");
     const int n = out.size(1);
     TORCH_CHECK((long)n * 8192 <= (long)pr1::MAXC * (blocks - rb) * nv * u * 4096, "pr1: too many chunks per virtual block");
@@ -399,6 +409,7 @@ void pr1_launch(torch::Tensor s, torch::Tensor nb, torch::Tensor h, torch::Tenso
                 (const float4*)rw.data_ptr(), (const float4*)x32.data_ptr(), logits.data_ptr<float>(), cnt.data_ptr<int>(),
                 bias.data_ptr<float>(), ls.data_ptr<int>(), ids.data_ptr<int>(), lids.data_ptr<int>(), wts.data_ptr<float>(),
                 (float)mult, (float)reps, (int)local, (int)npf};
+    a.rel = rel;
     if (!bt.empty()) {
         TORCH_CHECK(bt.size() == 7 && bt[0].scalar_type() == at::kBFloat16 && bt[1].scalar_type() == at::kFloat &&
                     bt[6].scalar_type() == at::kBFloat16 && bt[0].numel() == 8192 && bt[1].numel() == 8192 && nv == 4, "pr1: BND args");

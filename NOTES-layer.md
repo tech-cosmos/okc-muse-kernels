@@ -2984,3 +2984,27 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   pole (67.2), routing done at 65.5. The two hand-offs already overlap: fused form <= ~1 us d16, 0 d32. Not built.
 - v1 sl H100: o (g30) 14.5-26.5, bnd ends 29.6, pr8 19.5-50.7 (pre-wait L2 prefetch already, pr8_npf 220), tk2f 51.1 (tk2fx PDL).
 - 1 judge check, 0 submits, 0 Modal. 10-29 left: 15 checks / 7 submits.
+
+## night7 s7 (2026-10-29 ~07:45Z-): IDF = pr1 routing release flag + early moe_tk2f at T=1 (producer side of the TK2F DYN lane)
+- Built (layer.py + pr1_src.cu, TUNE option "idf", IDF_DEFAULT False, T=1 pr1 + tk2fx + n2u path only):
+  pr1's routing block: ids/lids/wts stores, __threadfence + __syncwarp, lane 0 st.release.gpu state["idf"][0] = 1 (pr1_launch
+  takes the flag as an extra last element of its bt list). _rmsnorm_gain triggers at its START (TRIG) instead of after its wait
+  (TRIG2), so moe_tk2f launches during pr1. moe_tk2f (text patch, new last kernel arg `idf`, host one-shot moe_set_idf like
+  g_tk2fpdl): thread 0 acquire-spins on the flag before its routing, __syncthreads, ids via __ldcg. n2u: in IDF mode reads the
+  routing AFTER its griddepcontrol.wait (__ldcg). The tail _boundary resets the flag after its wait (RST; all readers done).
+- Correct: replay_test IDF on 0/80 (d1 sl+full, router seeds 11, 7), bench test 13/13 (IDF off), replay_test all 12 shapes 0/72
+  (IDF off). tools/graph_eq.py (new: per-file child processes, same fresh inputs, graph replays, rel L2 per output): IDF vs v167
+  d1 sl bitwise 15/15; d1 full 1/15 replays at 3e-3 (v167 vs v167 control bitwise): a timing-dependent accumulation order
+  (eager main vs main already differs at d1, files_eq), not routing (ids output identical).
+- TIMING: H100 ab_files 6 rounds: IDF d1 sl 89.18 vs 86.01, full 109.31 vs 106.28 = **+3 us LOSS**. Timeline: tk2f starts 31.8
+  (during pr1) vs 45; pr1 +2.5..3.8 us slower (tk2f's early CTAs stream W while the pr1 pooler still streams: zero-sum HBM, as the
+  n7s4 oracle), tk2f ends +0..2.4. With static T=1 split nothing is gained; DYN (moe) could only win the pr1 drain bubble, and
+  the early CTAs already cost pr1 ~3 us, so I rate the lane DEAD unless DYN early CTAs throttle until pr1's pooler drains.
+  IDF off = v167 timing (ab_files 4 rounds x 2 orders, all 6 sliding shapes: within placement noise).
+- PITFALL found (main is fine): n2u's pre-wait SLOT routing reads (ids[s], tw[s]) are correct ONLY because ptxas sinks the plain
+  loads below griddepcontrol.wait. Forced pre-wait as __ldcg they read stale routing: replay_test d1 3/10 sl + 5/10 full FAIL.
+  So the n2u comment 'pr1's routing complete before tk2f passed its wait' does not hold for n2u's launch time. Comment added in
+  n2u. Any future edit that keeps those loads above the wait (e.g. volatile/.cg/asm) breaks d1.
+- n2u flag spin (all 512 threads polling ld.acquire, then 1 thread + __syncthreads) cost ~+4 us in the d1 tail: removed (reads
+  after the wait instead).
+- 0 judge runs, 0 Modal. main = v168 = v167 + IDF option (off; build differs only in the off-path n2u/tk2f/pr1 text).
