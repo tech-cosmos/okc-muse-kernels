@@ -1,6 +1,9 @@
 # STATE-moe
 
-## NOW (n7s23/n7s24/n7s31 idle 09:36Z, waiting for a lane; asked lead for ~/STOP-moe)
+## NOW (n7s32 ~10:05Z): lead 09:35Z task 1 (layer variance) DONE -> Handoff branch moe/layer-hotdyn 130a692 (T=256 moe_hot
+## max(32, 16 x hot experts) CTAs, device-side; bitwise; H100 v32 nh3/nh4 -40/-95 us sl, -22/-83 full; else tie). NEXT = task 2:
+## tk2f d1/v1 prologue (everything not depending on ids above griddepcontrol.wait; one warp reads ids + issues the first TMA),
+## H200 DIAG A/B, drop if < 0.5 us. Variance verdict + numbers: NOTES n7s32. Worktree /tmp/n7s32/wt = branch moe/layer-hotdyn.
 ## n7s23 2026-10-29 ~09:25Z: lead 08:50Z tk2f d1/v1 lane CLOSED on the H200 (2 DIAG checks); main unchanged (0006dff kernels)
 - XPF (L2 prefetch of the CTA's later gemm2 rows at its phase-1 end) DIAG 798fd574: +0.7 d1/v1, +1.0 d16/d32 us.
 - WAVE (two-wave row order, gemm2 of wave 1 before wave 2's barrier) DIAG 87ee0bc0: +1.6 d1, +2.7 v1, +3.1 d16, +5.9 d32.

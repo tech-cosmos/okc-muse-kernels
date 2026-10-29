@@ -3248,3 +3248,24 @@ No COORD change since lead 06:50Z task (n7s18 idea already posted). Waiting for 
   compression re-checked against the record (codes 4.0 bits, S6 scales dead n20). Asked the lead to pause moe (COORD Requests n7s24).
 
 ## n7s31 (2026-10-29 09:34Z - 09:37Z): idle; no lead decision since 08:55Z; 0 judge runs, 0 Modal, no code.
+
+## n7s32 (2026-10-29 09:50Z - ~10:05Z): lead 09:35Z task 1 = layer VARIANCE -> found + fixed one cause (moe_hot at T=256); 0 judge runs, 0 Modal
+- Data: 22 layer judge runs with json+log in ~/r-layer/muse_decode_layer/profiles (tools/n7s32/var.py, v2-v5.py).
+  Per-shape run speedup sd over the 22 runs (includes code changes v153..v168): d1 sl/fu 1.2/1.3 %, d16 0.7/1.1, d32 1.0/2.7,
+  v1 1.2/1.2, v16 2.4/2.0, v32 sl 3.0 / fu 1.8 %. Within a run each rep is a fresh input (per-rep corr(ours, SGLang) 0.8-0.95 on
+  most shapes: the paired ratio cancels it); the router (router_seed from reference.weights_fields) is per RUN and only matched
+  to the target mean routes/distinct within 1.5 %: its routing STRUCTURE (how many experts are 65..128 tokens) is free.
+- Tuner picks / drops: every pick is a near-tie (<= ~1 %), no link to slow draws (b87bd6aa tuner T=256 sl 318 vs 4787d92e 317.5
+  yet scored 362 vs 320); g30kgx dropped in af87d466 / a5b4ddab, both normal runs. Not the cause.
+- d32 full (low per-rep corr 0.34): SGLang is bimodal per rep (~605 vs ~730 us), ours steady -> its swing is SGLang's draw.
+- v32 slow draws (b87bd6aa 362 / f824b925 378 / 4937830f 362 vs ~320-335): judge profile reps show moe_hot at 233-239 us there
+  (~110 / ~155 us in normal runs = 1 / 2 hot experts). Local H100 (tools/n7s32/hotdist.py, hottime2.py; routers via
+  generate_weights(router_seed=1000+r)): 12 routers x 6 inputs at T=256 have 0-4 hot experts (nh >= 3 in 18/72), some >128-token
+  experts. Fixed 32-CTA moe_hot with nh 4: 430 us vs 335 at 64 CTAs; nh 3: 378 vs 343. Per-expert scaling 32/expert (96/128
+  grid) fixes nh 3-4 but costs +4..8 us at nh 2 (router 11).
+- FIX (branch moe/layer-hotdyn 130a692, layer.py + moe_src.py): moe_hot gets `per` (packed in the grid arg: base*1e5 + per*1e3 +
+  grid); CTAs >= max(base, per*nh) exit right after reading meta (their SMs go to moe_twm). TUNE_BASE T=256 hot = HOT256 =
+  3216064 (= max(32, 16*nh) CTAs of a 64 grid). H100 v32 sl: nh4 429.6 -> 334.4, nh3 377.6 -> 337.2 / 394.9 -> 384.8, full nh4
+  675.9 -> 592.7, nh3 623.4 -> 600.8; nh 0-2 and >128-token cases tie (+-1.8). Bitwise equal to hot 32 (hoteq.py, routers 6/4,
+  sl + full); bench test 13/13. Expected: ~25 % of routers have nh >= 3 -> fewer slow v32 draws + ~0.3-0.8 % on mean score.
+- Not done: task 2 (tk2f prologue above griddepcontrol.wait at d1/v1).
