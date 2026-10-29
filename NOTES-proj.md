@@ -2710,3 +2710,28 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 
 ## n7s11 (2026-10-29 09:37-09:40Z): idle session
 - Still no Human decision since 08:55Z; proj n7s9/n7s10 requests (lane or ~/STOP-proj) stand. No code, 0 judge runs, 0 Modal.
+
+## n7s12 (2026-10-29 14:55Z-): lead 14:30Z CUTLASS sm90 mixed-input yardstick (then 14:45Z: Humming)
+- CUTLASS v4.4.2 cloned to /tmp/cutlass (setup only). Modified ex55 (55_hopper_int4_bf16_gemm.cu) in dev/n7s12: TileShape
+  (TM, TN=tokens, 64) by -D, SCHED 0 = Cooperative (2 consumer WGs) / 1 = Pingpong, MODE 0 convert-only / 1 scale-only,
+  shuffled (reordered) weights as the example recommends, E2M1 by -DCUTLASS_MIXED_DTYPE_E2M1 (LUT path). Timing: 30 x
+  (10 back-to-back runs) under the GPU lock, median; every run verified (Passed) vs CUTLASS's own BF16 reference GEMM.
+  Build: dev/n7s12/build.sh NAME "-D..." (~70 s each, parallel ok). Raw: sweep1.txt (4 shapes x 16 builds), sweep2.txt.
+- Group size must be a multiple of tile K (64), so scales are g=128 BF16 (NVFP4 is g16 FP8): CUTLASS gets FEWER scale ops
+  than us = optimistic for it. H100 SM clock under this load = 1875 MHz (700 W cap, nvidia-smi -lms): w/clk/SM below uses 1.875.
+- Results, H100, weights/clk/SM (TB/s of INT4+scale+x bytes), best tile per N = Cooperative 128xN (Pingpong 64xN is
+  ~0.55-0.75x of it everywhere):
+    shape (W rows x K x experts)   N16          N32          N64          N128
+    INT4 conv-only 8192x4096x8     17.4 (2.24)  17.0 (2.20)  15.8 (2.07)  11.9 (1.61)
+    INT4 g128     8192x4096x8      15.7 (2.02)  14.5 (1.88)  12.9 (1.70)  10.4 (1.41)
+    INT4 g128     16896x8192x1     15.2 (1.95)  14.4 (1.85)  12.7 (1.64)  10.7 (1.40)   (1 tile/SM, long K)
+    E2M1 g128     8192x4096x8        -          10.1 (1.31)   9.3 (1.22)    -
+  Long-K single-wave (consumer steady state) = same rate as the 8-expert stream => CUTLASS is consumer-bound at
+  1.3-2.2 TB/s on the H100 (HBM 3.35), never HBM-bound at our shapes.
+- Vs twm consumer (moe s18 mb_wgmma, RT4 N32 'both' 1046 cyc / 16K w = 15.7 w/clk/SM; N8 20.7): CUTLASS on our format
+  (E2M1) is 0.64x of twm at N32; even INT4 without any scale (an easier job) is only 1.08x. Gate (>= 1.2x at N16-64): FAILS.
+  Not a design to copy.
+- Overlap hint (weak, no ncu here): INT4 g128 cyc/weight 0.066 (N16) -> 0.094 (N128): +0.028 while the tensor work at
+  peak (2048 BF16 FMA/clk/SM) grows by +0.055. Additive would give ~0.12 at N128, max() ~0.063: measured is halfway,
+  i.e. Cooperative's 2 consumer WGs (each 64 rows of the tile, own dq + wgmma, wait<K_BLOCK_MAX-1>) hide ~half of the
+  added tensor time behind the other WG's convert. Consistent with lead's survey ('overlap across WGs, not within one').
