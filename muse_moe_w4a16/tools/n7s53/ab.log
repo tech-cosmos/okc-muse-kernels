@@ -1,0 +1,34 @@
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 89.7us -> default
+layer tune T=1 full: default 88.7us -> default
+layer tune T=8 sliding: default 143.2us -> default
+layer tune T=8 full: default 156.9us -> default
+layer tune T=16 sliding: default 220.0us -> default
+layer tune T=16 full: default 311.4us -> default
+layer tune T=32 sliding: default 212.3us -> default
+layer tune T=32 full: default 428.9us -> default
+layer tune T=128 sliding: default 342.6us -> default
+layer tune T=128 full: default 434.8us -> default
+layer tune T=256 sliding: default 387.6us -> default
+layer tune T=256 full: default 622.7us -> default
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 89.6us -> default
+layer tune T=1 full: default 89.5us -> default
+layer tune T=8 sliding: default 144.4us -> default
+layer tune T=8 full: default 158.3us -> default
+layer tune T=16 sliding: default 219.2us -> default
+layer tune T=16 full: default 311.1us -> default
+layer tune T=32 sliding: default 212.8us -> default
+layer tune T=32 full: default 428.9us -> default
+layer tune T=128 sliding: default 376.3us -> default
+layer tune T=128 full: default 461.2us -> default
+layer tune T=256 sliding: default 417.5us -> default
+layer tune T=256 full: default 656.0us -> default
+/home/daytona/okc/lib/python3.12/site-packages/torch/cuda/graphs.py:630: UserWarning: The CUDA Graph is empty. This usually means that the graph was attempted to be captured on wrong device or stream. (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/cuda/CUDAGraph.cpp:249.)
+  super().capture_end_pre()
+verify 1 sliding   [0]  141.65 ( 141.55)  [1]  141.44 ( 141.17)
+verify 1 full      [0]  158.58 ( 158.45)  [1]  157.50 ( 157.17)
+verify 16 sliding  [0]  293.62 ( 293.15)  [1]  319.67 ( 318.77)
+verify 16 full     [0]  445.54 ( 444.64)  [1]  456.95 ( 455.62)
+verify 32 sliding  [0]  369.71 ( 367.31)  [1]  402.65 ( 400.96)
+verify 32 full     [0]  623.61 ( 622.98)  [1]  658.16 ( 656.40)

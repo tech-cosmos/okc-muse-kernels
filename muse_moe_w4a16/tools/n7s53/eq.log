@@ -1,0 +1,39 @@
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 85.7us | {'g10alt:o': 1} 85.4us (confirm default 85.9 vs 85.4us) -> {'g10alt:o': 1}
+layer tune T=1 full: default 88.5us | {'g10alt:o': 1} 88.7us -> default
+layer tune T=16 sliding: default 219.6us | {'g30n:unpool': True} 218.4us | {'g30n:qkv_gate': True} 221.5us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 219.6us (confirm default 219.2 vs 218.0us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 311.6us | {'g30n:unpool': True} 309.8us | {'g30n:qkv_gate': True} 311.5us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 309.9us (confirm default 312.3 vs 310.2us) -> {'g30n:unpool': True}
+layer tune T=32 sliding: default 212.3us | {'g30kgx:pooler': False} 212.7us | {'g19:o': True} 211.6us | {'tk2h': 3} 214.2us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 211.8us (confirm default 212.6 vs 212.2us) -> {'g19:o': True}
+layer tune T=32 full: default 429.2us | {'g30kgx:pooler': False} 429.3us | {'g19:o': True} 428.4us | {'tk2h': 3} 429.9us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 428.6us (confirm default 428.2 vs 428.4us) -> default
+layer tune T=8 sliding: default 143.3us | {'g30n:o': False} 143.8us | {'g14alt:qkv_gate': 1} 143.9us -> default
+layer tune T=8 full: default 157.8us | {'g30n:o': False} 158.4us | {'g14alt:qkv_gate': 1} 156.8us (confirm default 157.9 vs 157.2us) -> {'g14alt:qkv_gate': 1}
+layer tune T=128 sliding: default 342.5us | {'lt:o': True} 342.1us | {'ltalt:pooler': 2} 343.1us (confirm default 343.1 vs 342.2us) -> {'lt:o': True}
+layer tune T=128 full: default 432.9us | {'lt:o': True} 433.0us | {'ltalt:pooler': 2} 432.6us (confirm default 432.4 vs 432.4us) -> default
+layer tune T=256 sliding: default 387.3us | {'lt:o': True} 388.6us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 389.8us -> default
+layer tune T=256 full: default 623.2us | {'lt:o': True} 624.2us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 623.2us -> default
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 84.2us | {'g10alt:o': 1} 83.9us (confirm default 84.4 vs 83.9us) -> {'g10alt:o': 1}
+layer tune T=1 full: default 88.7us | {'g10alt:o': 1} 88.5us (confirm default 88.9 vs 88.5us) -> {'g10alt:o': 1}
+layer tune T=16 sliding: default 219.1us | {'g30n:unpool': True} 217.2us | {'g30n:qkv_gate': True} 220.6us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 219.1us (confirm default 219.3 vs 217.6us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 311.7us | {'g30n:unpool': True} 309.5us | {'g30n:qkv_gate': True} 311.2us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 309.9us (confirm default 311.5 vs 309.4us) -> {'g30n:unpool': True}
+layer tune T=32 sliding: default 212.8us | {'g30kgx:pooler': False} 212.7us | {'g19:o': True} 212.8us | {'tk2h': 3} 214.0us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 213.0us (confirm default 212.6 vs 212.9us) -> default
+layer tune T=32 full: default 429.9us | {'g30kgx:pooler': False} 430.1us | {'g19:o': True} 429.4us | {'tk2h': 3} 429.3us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 429.8us (confirm default 429.5 vs 429.1us) -> {'tk2h': 3}
+layer tune T=8 sliding: default 144.6us | {'g30n:o': False} 145.2us | {'g14alt:qkv_gate': 1} 145.1us -> default
+layer tune T=8 full: default 157.6us | {'g30n:o': False} 158.2us | {'g14alt:qkv_gate': 1} 156.9us (confirm default 157.5 vs 157.0us) -> {'g14alt:qkv_gate': 1}
+layer tune T=128 sliding: default 376.2us | {'lt:o': True} 376.2us | {'ltalt:pooler': 2} 376.5us (confirm default 373.1 vs 372.5us) -> {'lt:o': True}
+layer tune T=128 full: default 461.8us | {'lt:o': True} 461.5us | {'ltalt:pooler': 2} 461.4us (confirm default 461.8 vs 460.9us) -> {'ltalt:pooler': 2}
+layer tune T=256 sliding: default 417.3us | {'lt:o': True} 415.4us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 415.1us (confirm default 417.2 vs 416.1us) -> {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True}
+layer tune T=256 full: default 655.3us | {'lt:o': True} 655.5us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 655.8us -> default
+verify 1 sliding 0 [0.001953125, 0.0005606710910797119, 0]
+verify 1 sliding 1 [0.001953125, 0.0013016760349273682, 0]
+verify 1 full 0 [0.0, 1.5139579772949219e-05, 0]
+verify 1 full 1 [0.0, 0.0, 0]
+verify 16 sliding 0 [0.0, 0.0, 0]
+verify 16 sliding 1 [0.0, 0.0, 0]
+verify 16 full 0 [0.0, 0.0, 0]
+verify 16 full 1 [0.0, 0.0, 0]
+verify 32 sliding 0 [0.0, 0.0, 0]
+verify 32 sliding 1 [0.0, 0.0, 0]
+verify 32 full 0 [0.0, 0.0, 0]
+verify 32 full 1 [0.0, 0.0, 0]
+not identical: 3

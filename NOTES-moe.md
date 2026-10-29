@@ -3449,3 +3449,14 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 - n7s50's "16:40Z" times are a typo (it ended before 16:08Z). moe board: #1 dolanzhao 2.689x, ours 2.279x (aeba42c5).
 
 ## n7s52 2026-10-29T16:24Z-16:27Z: idle; no lead decision after 15:50Z (Humming yardstick = n7s50, done). 0 judge runs, 0 Modal
+
+## n7s53 2026-10-29T16:40Z-17:05Z: lead 16:45Z "build the bundle" -> nothing buildable wins; no v172, 0 judge runs, 0 Modal
+- Table: muse_moe_w4a16/tools/n7s53/RESULTS.txt (+ ab logs, both dead diffs vs r-layer f61be2b moe_src.py).
+- RT2 A-ring D4 (n7s47's microbench winner) in the layer's tw_item: bitwise, but ptxas C7511 serializes moe_twm's wgmma
+  pipeline (168-reg cap), also at N <= 40/48; H100 pinned A/B v16 +26/+11, v32 +33/+35 us. DEAD. In moe_hot<128> only:
+  compiles clean, v32 tie, v16 +3.7 sl / -4 full with moe_hot idle (layout noise). DEAD.
+- HOT128 with no hot expert: still +2.5 us v16 full (sl tie) vs hot off. Fix would need routing counts before moe_hot's
+  wait; at T=128 route+gather is one launch (rg) -> no cheap fix (~0.6 us/load weighted). Dropped.
+- Item 5 (tk2f prologue) in-layer bound ~0 (n7s33 IDF oracle): dropped. Items 1 (half-row last wave) and 2 (ph2 extra rows
+  at L2 cost) need tk2f row-scheduler surgery (race history s7/s10) for <= ~1 us/call each: not built this session.
+- No layer check: no code changed (rule: never check/submit unchanged code). moe paused per lead 16:45Z.

@@ -1,0 +1,10 @@
+n7s53 (2026-10-29 16:40Z-17:05Z): lead 16:45Z bundle into r-layer v172. H100, r-layer main v171 (f61be2b), tools/ab_files.py
+"verify" 10 rounds, seed 99, TUNE pinned to defaults ({} per T) in both files. us median.
+RT2 A-ring D4 (twm_d4_dead.diff: tw_item RT 2 KG 1, 4 A sets + wait<3>, empty arrive after group 3): bitwise (files_eq verify 16/32).
+  ptxas: C7511 "wgmma serialized due to insufficient register resources for the wgmma pipeline" in all 4 moe_twm builds,
+  also with D4 only at N <= 48 or N <= 40; twm MMA loop crosses 64 KB. ab.log: v16 sl 293.6 -> 319.7, full 445.5 -> 457.0,
+  v32 sl 369.7 -> 402.7, full 623.6 -> 658.2. DEAD (twm's 168-reg cap; the n7s47 microbench had no other live code).
+D4 in moe_hot<128> only (hot_d4_dead.diff, N == 128): no C751x, no spills. ab_d4h.log: v32 369.1/623.4 -> 368.7/623.9 (tie),
+  v16 (no T=128 hot expert at seed 99, moe_hot does no work) sl 293.7 -> 297.4, full 445.9 -> 441.9 = layout side effect. DEAD.
+HOT128 no-hot cost now (v171 vs HOT128 = 0, ab_hot.log, 12 rounds): v16 sl 293.9 vs 294.2, full 445.7 vs 443.2 (+2.5 full).
+  No cheap fix: at T=128 the layer runs route+gather fused (rg), so moe_hot can't see the counts before its PDL wait.

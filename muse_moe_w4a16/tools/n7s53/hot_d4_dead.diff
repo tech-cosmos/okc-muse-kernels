@@ -1,0 +1,63 @@
+diff --git a/muse_decode_layer/moe_src.py b/muse_decode_layer/moe_src.py
+index 3b66d74..94d8994 100644
+--- a/muse_decode_layer/moe_src.py
++++ b/muse_decode_layer/moe_src.py
+@@ -97,6 +97,8 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
+ #define TWM_HOTC 0       // n6s3 (moe 0be4fa0): moe_twm's in-twm hot class compiled out (layer: twm_hot is in no TUNE list); set 1 to use twm_hot
+ #define TK2F_REL 2       // n6s6 (moe 5eb1e15+): tk2h gemm13 publishes by a helper warp NC + 1 (H200 DIAG 8c5f1376: tk2h d32 -0.75 us; tk2f 1-group paths +0.3: 2 = tk2h only)
+ #define TWM_REL 1        // n6s4 (moe 7d2a079): moe_twm gemm13+gemm2 releases by helper warp 9
++#define TWM_D4 1         // moe n7s53 (n7s47 (a)): RT 2 tw_item with 4 A-register sets + wgmma.wait_group 3 (H100 mb RT2 N40-64 -2..-9%/stage); bitwise
++#define TWM_D4N 128      // n7s53: D4 only at N 128 (moe_hot<128>; twm N40-64: ptxas C7511 serializes its wgmma pipeline at 168 regs)
+ #define TWM_KSC 2        // n6s4 (moe 7d2a079): moe_twm built with + without the K-split tail code (picked per call); 0 = never split, 1 = always built in
+ #ifndef TK2G_PAR4
+ #define TK2G_PAR4 1      // n17: tk2g_bound's 4 calls on 4 warps + 32-bit p (bitwise: same bounds)
+@@ -1855,6 +1857,8 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
+ #pragma unroll
+     for (int i = 0; i < NA; ++i) acc[r][i] = 0.f;
+   uint32_t afA[KG][RT][4], afB[KG][RT][4];
++  constexpr bool D4 = TWM_D4 && RT == 2 && KG == 1 && N == TWM_D4N;
++  uint32_t afD[D4 ? 4 : 1][RT][4];
+   int pst = -1;
+ #pragma unroll 1
+   for (int kc = 0; kc < nkc; ++kc) {
+@@ -1886,6 +1890,28 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
+       }
+     }
+     const uint64_t d0 = sw128_desc(sb);
++    if constexpr (D4) {
++      // n7s53: k16 group j uses A set j; wait<3> keeps 3 groups in flight. Set j is rewritten one stage later, after
++      // group j's wait (<= 3 newer groups pending), and the previous stage's smem is released after group 3's wait.
++#pragma unroll
++      for (int j = 0; j < 4; ++j) {
++#pragma unroll
++        for (int r = 0; r < RT; ++r) dq(u4get(wv[r], j), s0[r], s1[r], afD[j][r]);
++        wg_fence();
++#pragma unroll
++        for (int r = 0; r < RT; ++r) wgmma_bf16<N>(acc[r], afD[j][r], d0 + j * 2);
++        wg_commit();
++        wg_wait<3>();
++#pragma unroll
++        for (int r = 0; r < RT; ++r)
++#pragma unroll
++          for (int i = 0; i < 4; ++i) fence_r(afD[(j + 1) & 3][r][i]);
++        if (j == 3 && pst >= 0) mbar_arrive(&empty[pst]);
++      }
++      pst = st;
++      if (++st == NSTG) { st = 0; ph ^= 1; }
++      continue;
++    }
+ #pragma unroll
+     for (int j0 = 0; j0 < 4; j0 += KG) {
+       // ring slot = group parity (KG == 4: stage parity, tracked by kc)
+@@ -1925,6 +1951,11 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
+     for (int jj = 0; jj < KG; ++jj)
+ #pragma unroll
+       for (int i = 0; i < 4; ++i) { fence_r(afA[jj][r][i]); fence_r(afB[jj][r][i]); }
++    if constexpr (D4)
++#pragma unroll
++      for (int j = 0; j < 4; ++j)
++#pragma unroll
++        for (int i = 0; i < 4; ++i) fence_r(afD[j][r][i]);
+ #pragma unroll
+     for (int i = 0; i < NA; ++i) fence_f(acc[r][i]);
+   }

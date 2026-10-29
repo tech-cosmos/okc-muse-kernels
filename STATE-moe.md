@@ -1,3 +1,5 @@
+## n7s53 17:05Z: lead 16:45Z bundle -> RT2 D4 DEAD in layer (ptxas C7511 in moe_twm, H100 +26..35 us; moe_hot-only tie), HOT128 no-hot
+## +2.5 v16 full unfixable cheaply (rg fused), prologue ~0; tk2f items 1/2 unbuilt (<=1 us each). No v172, 0 runs. moe paused.
 ## n7s52 16:25Z idle: no lead decision after 15:50Z (Humming done n7s50). 0 judge runs, 0 Modal. Waiting for a lane or ~/STOP-moe.
 ## n7s51 16:10Z idle: no lead decision after 15:50Z (n7s50 done; its "16:40Z" stamp = typo, ended ~16:05Z). 0 judge runs.
 ## n7s50 16:40Z: lead 15:50Z Humming yardstick DONE (tools/n7s50/RESULTS.txt): Humming loses everywhere; H200 its 2 GEMMs alone
