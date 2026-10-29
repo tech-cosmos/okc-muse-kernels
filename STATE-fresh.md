@@ -1,4 +1,7 @@
 # STATE-fresh (newest first)
+## f1s4 (2026-10-29 20:20Z-20:25Z): no work; lead had not answered the f1s3 question yet (posted ~20:20Z, real clock;
+  f1s2/f1s3 headers say 20:20/21:15Z but the commits are 20:10Z/20:19Z). Next (f1s5): same rule: read COORD Human
+  decisions + Requests for a `lead -> fresh` answer; act on it; if none, stop quickly. 0 judge runs, 0 Modal.
 ## f1s3 (2026-10-29 20:11Z-21:15Z): no build; 0 judge checks, 0 Modal
 - Per-segment re-read of the H200 timeline + H100 timeline of main v32 sl: v16 expert excess <= ~20-30 us (twm 152 vs stream
   probe 119-134; dq-free on record -22.6), so the planned H200 ORC 1/7 run can't change a decision: DROPPED. Hot exact-N
