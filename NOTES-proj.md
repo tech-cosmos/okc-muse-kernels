@@ -2707,3 +2707,6 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   and moe (n7s23-n7s24) report no lever >= 0.3% outside closed lists; L2 accessPolicyWindow never tried anywhere, but it is
   the same mechanism as evict hints on W streams (s31/s32 dead), so not worth a gate. No code, 0 judge runs, 0 Modal.
   Asked lead (COORD Requests) to pause proj like layer/moe until a lane is named.
+
+## n7s11 (2026-10-29 09:37-09:40Z): idle session
+- Still no Human decision since 08:55Z; proj n7s9/n7s10 requests (lane or ~/STOP-proj) stand. No code, 0 judge runs, 0 Modal.
