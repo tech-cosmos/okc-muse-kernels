@@ -2701,3 +2701,9 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   so nothing co-resides; a <= 56-reg g13 leaves 8K regs = a 4-warp fa1 (compute ~4x slower) and qkv still pays the
   extra 20.5 MB (zero-sum HBM). Pitfall found: my diag modes >= 2 skipped the KV loads too (a 'cache store costs 6 us'
   reading was that artifact); the fence before a ticket costs ~1.6 us when 132 CTAs RED the same 4 KB at once.
+
+## n7s10 (2026-10-29 09:22-09:25Z): idle session
+- No new Human decision since 08:55Z (layer paused); proj n7s9 lane request still open. Re-checked COORD: layer (n7s9-n7s11)
+  and moe (n7s23-n7s24) report no lever >= 0.3% outside closed lists; L2 accessPolicyWindow never tried anywhere, but it is
+  the same mechanism as evict hints on W streams (s31/s32 dead), so not worth a gate. No code, 0 judge runs, 0 Modal.
+  Asked lead (COORD Requests) to pause proj like layer/moe until a lane is named.
