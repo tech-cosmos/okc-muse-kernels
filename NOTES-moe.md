@@ -3035,3 +3035,6 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 ## n7s7 (2026-10-29 02:55Z - 03:00Z): idle
 - No new Human decision since 22:15Z; Requests n7s1 (lane / pause) still unanswered. Layer board: we are #49 at 2.158x
   (#1 pjmullin3 2.403x). No moe item >= 5 us/call is open (n7s1 list; i-cache audit done n6s5). 0 judge runs, 0 Modal.
+
+## n7s8 (2026-10-29 03:11Z - 03:15Z): idle
+- No new Human decision since 10-28 22:15Z; Requests n7s1 unanswered. Every moe item >= 5 us/call measured dead (n7s1 list). Layer board #49 (2.158x). 0 judge runs, 0 Modal.
