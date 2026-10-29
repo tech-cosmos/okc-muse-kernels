@@ -2647,3 +2647,15 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   full us at free concurrency (<= ~0.6%), 3+ sessions, plus 64-B per-head gathers in nvs (both heads share a 128-B row today).
   Not recommended.
 - No proj-side idea >= 1% outside the closed lists (n5s14 T=32 GEMM ceiling +1.0%, n7s4 gate).
+
+## night7 s7 (2026-10-29 07:12-07:35Z): lead 07:05Z 'post head-group bound, build if >= 0.5%': NOT built (dead); T=128 FR screen; 0 judge runs, Modal 1.3 GPU-min
+- Correction to n7s6: the gate can NOT hide under T=128/256 attention. Paths (attn_src.py): v16 sl = nvs + _combine_hb, v32 sl = nvscl
+  (2-CTA cluster merge reads the gate inside the kernel), full = _gw_verify gbal (2 progs/SM) + _combine_bal (or _gw_merge in-kernel
+  when fused). nvs: cuobjdump -res-usage REG 160 x 384 threads = 61.4K of 65.5K regs per SM on 128 of 132 SMs (grid S*B*2 = 128 at
+  v16): a cuBLAS gate CTA can't co-reside, so the side-stream gate gets ~4 SMs during nvs and runs after it. Gain = minus the split tax
+  (qkv' + gate = 1.21x qkv, n7s6 table): a LOSS. KV-head-group pipeline hits the same wall. A cross-stream device flag wait inside
+  the attention kernel (to read a late gate) could hang if spinning CTAs hold every SM: not allowed.
+- T=128 FR (torch.mm FP32 out, [128 x 4608 x 8192]) cuBLASLt full screen on H200 Modal (`tools/h200.py muse_bf16_proj
+  fr=muse_bf16_proj/dev/n7s5 --cmd 'python frlt.py 128'`, 1.3 GPU-min, 48 s screen): torch.mm 24.00/24.32, best 23.58
+  (algo 66 tile 134 stages 35 splitK 1, cluster 4), next 23.94-24.03: -0.5 us = noise level, not added to LTFR.
+- Asked lead for a lane; offered to build layer n7s4's TK2F DYN at T=1 + pr1 ids release flag (~2-3 us d1/v1) if layer agrees.
