@@ -5697,8 +5697,8 @@ TWM_HOTC_FORCE = None
 
 
 TWM_KSC_FORCE = None
-TWM_REL = 0  # n6s4: 1 = moe_twm gemm13 release by a helper warp (n6s3 REL; H100 noise)
-TWM_KSC_DUAL = 0  # n6s4: with a K split set for some M, build moe_twm with and without the split code (calls without a split take the smaller one)
+TWM_REL = 1  # n6s4: moe_twm gemm13+gemm2 releases by a helper warp (H200 DIAG 34547d56: v16 -0.5, v32 -1.4 us every seed; H100 noise)
+TWM_KSC_DUAL = 1  # n6s4 (H200 DIAG 3ded8769: v16 -1.9 us every seed, v32 tie): with a K split set for some M, build moe_twm with and without the split code (calls without a split take the smaller one)
 
 
 def _ksc():  # n6s4: moe_twm K-split tail code compiled in only if some setting can use it (i-cache)
