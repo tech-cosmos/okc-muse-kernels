@@ -2,6 +2,11 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night7 s4 (10-29): main unchanged (v165), 0 judge runs, 0 Modal. Lead 06:00Z big-bet step 1 MEASURED: tools/hbm_run.py +
+  hbm_fold.py (nsys GPU-metrics DRAM BW folded per replay, NOTES n7s4). H100 d1 sliding: HBM < 50% busy ~26 of 85 us in 5 op-boundary
+  bubbles (qkv->o 4.5, o->pr1 2, pr1->tk2f 6, in-tk2f 3, tail 8). Early-tk2f oracle (launch tk2f during pr1): live ids HANG (needs
+  pr1 ids flag); stale-ids timing form = TIE (static T=1 tk2f split). NEXT candidate: TK2F DYN at T=1 + pr1 ids release flag
+  (ceiling ~2-3 us H200 d1/v1, ~0.4%); first run hbm_fold on v1/d16 to see if the bubble pattern holds there.
 night7 s3 (10-29): **main = v165** (d2bb0c2) = v164 + proj BNOS (T=256 bnd thinning, v32 bitwise): check 4787d92e 2.1632x, submit b87bd6aa 2.1219x
   (low draw, board stays 2.158; don't resubmit unchanged). 10-29 left: 17 checks / 7 submits, Modal layer 6.2/15. Batch-1 full attention sized + 3 oracles DEAD (NOTES n7s3):
   H200 gather floor 20.5 MB random 6.16 / dense 5.5 us vs in-layer _gd_full 10.7 + _red_fin 3.2; _red_fin->o fusion <= 1 us;
@@ -33,21 +38,6 @@ night5 s28: no build, 0 runs: pr1/qkv at d1 sit on the H200 bulk-stream fit (3.8
   bounded <= 1 us; T=256 b1/b2 byte cut 0.04%. Lane-change request posted (lead 09:20Z). 10-28 left: 5 checks / 7 submits.
 night5 s27: no build, 0 runs: H100 v32 sl timeline (experts 235 of 385 us); remaining gaps are expert-kernel
   (proj TWS drain, moe closed); lane request n5s26 still open. 10-28 left: 5 checks / 7 submits.
-night5 s26: H100 in-layer FREE-piece oracles (tools/free_oracle.py, NOTES n5s26 table): us saved sl/full: attention d1 2.4/13,
-  d16 7.3/124, d32 14.1/243, v1 3.3/18, v16 11.4/133, v32 15.8/253; glue b1+r+b2 sl d1 1.4, d16 7.2, d32 2.9, v1 5.3, v16 13.4,
-  v32 32.3 (T=256 boundaries ~2/3 bytes). BND_W32_MIN (32-warp boundary at T>=128, standalone -0.8 us) = in-layer TIE: dead.
-  No layer-lane piece has a reachable >= 1%. 0 judge runs, 0 Modal. 10-28 left: 5 checks / 7 submits.
-night5 s25: H200 judge DIAG 0dc9b93f (TK2F_ORX probes on c3a234a, flag off on main, never submit) of moe n5s32's tk2f oracles:
-  ornc-orz d1 7.3, v1 11.8, d16 22.1, d32 37.1 us sl, but (moe n5s33, BRA tie) that is the no-data consumer chain, not a gain;
-  b-orn (free stream) only 3-14 us -> consumer and stream BALANCED on the H200; lever closed. 10-28 left: 5 checks / 7 submits.
-night5 s23: v163 SCORED 7693598b 2.1311x (board best stays v153 2.1580x). H100 in-layer PREFIX ORACLE (tools/prefix_oracle.py,
-  NOTES n5s23 table): experts = 45-65% of every sliding layer, excess over stream floor d1 12 / v1 15 / d16 15 / d32 20 / v16 40 /
-  v32 41 us H100 = the only >= 1% items (moe/proj lanes); every layer-lane segment is <= ~0.5% from its floor. Lane request posted.
-night5 s22: no build, 0 judge runs: H200 (Modal) real-input T=128 A/B: g30:unpool off +2.2..3.6, fr off +0.9..2.2 us
-  on 6/6 inputs: T=128 base {fr, g30:unpool, rg} confirmed, NEXT 4 CLOSED. proj claimed NEXT 3 (pr128) 07:50Z.
-night5 s21: no build, 0 judge runs. H200 (Modal) standalone ranking of T=128 g30 forms (NOTES n5s21 table): R2 dead, qkv
-  split dead (reduce +3.7 us), unpool g30 is +1.1 us vs cuBLAS standalone on H200 (main keeps it for the in-layer PDL overlap),
-  pooler FP32-slab g30 -4.6 us vs cuBLAS -> only pays with the router's hi/lo rows inside it (NEXT 3). fr False at T=128: H100 tie.
 Older session summaries (night5 s1-s19, s85-s107): NOTES-layer.md.
 
 ## Per-load H200 us vs the s12 floor (board run 19ebde23 = v108; lead 05:07Z request; s74)

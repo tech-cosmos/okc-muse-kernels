@@ -2918,3 +2918,30 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   CHECK 4787d92e **2.1632x** (> board 2.1580): d1 66.6/75.3, d16 123.8/203.8, d32 148.9/307.7, v1 107.7/120.7, v16 265.2/347.9,
   v32 320.2/490.1. SUBMIT b87bd6aa **2.1219x** (low draw: v32 sl 361.9 / full 533.7, d16 full 211.4 on the same code). Board stays
   3e3b9fd3 2.1580. Don't resubmit v165 unchanged. 10-29 left after: 17 checks / 7 submits.
+
+## night7 s4 (2026-10-29 05:52Z-): lead 06:00Z BIG-BET step 1 = measured HBM-busy profile (H100, d1 sliding) + early-tk2f oracle
+- New tools: tools/hbm_run.py (replays one shape N times: 512 MB flush, ~25 us spin, replay) under
+  `nsys profile --gpu-metrics-devices=cuda-visible --gpu-metrics-frequency=200000 --gpu-metrics-set=gh100 --cuda-graph-trace=node`
+  (nsys = /usr/local/cuda-13.0/bin/nsys), then `nsys export --type sqlite` and tools/hbm_fold.py <sqlite> <reps>: folds the 5 us
+  DRAM read+write % samples onto the replay start (least squares, 0.5 us bins). Sampler drops ~70% of the time (1 s gaps):
+  use >= 15000 replays. Calibration: sample timestamps lag by ~5 us (the flush kernel's rising edge): OFF_US=5.
+  Check: bytes integrated over the d1 sliding replay = 187.9 MB (expected ~190): the profile is trustworthy.
+- H100 d1 sliding (main v165, TUNE on, under nsys 84.9 us): HBM >= 80% of peak (3.35 TB/s) only 48.5 of 84.9 us; < 50% for ~26 us
+  in 5 bubbles at op boundaries: qkv drain -> o/csl (10-14.5 us, ~4.5), o -> pr1 (20-22, ~2), **pr1 drain -> tk2f ramp (39-47, ~6)**,
+  inside tk2f (66-70, ~3: gemm13 -> gemm2 hand-off), tail tk2f drain + n2u + bnd (75-85, ~8). 188 MB at the busy rate (3.2 TB/s)
+  = 59 us vs 85: the d1 non-streaming time is ~26 us H100 (~30%). So at d1 the 'HBM idle at op boundaries' premise HOLDS
+  (unlike proj n7s4's d16/d32 piece).
+- Early-tk2f oracle at T=1 (fills the pr1 -> tk2f bubble by launch order): rmsnorm triggers tk2f at its START (TRIG) instead of
+  after its wait (TRIG2), so tk2f CTAs land on SMs freed by pr1's router blocks (~mid pr1). 1st form (tk2f reads the live ids)
+  HANGS: CTAs read ids while pr1's routing block writes them -> inconsistent per-CTA routing -> the gemm2 cnt == 256 waits never
+  complete. RULE: any early tk2f needs a release flag from pr1's routing block (ids/lids/wts written, then flag), acquire-spun by
+  tk2f before routing. Timing-only form (/tmp files, not kept; tk2f reads a persistent copy of the previous call's ids, copy
+  in both variants): H100 timeline tk2f starts 31.8 us (during pr1) vs 46.3, but ends 33.7 us after pr1 ends (base 34.2) and
+  pr1 is +1.7 us slower; ab_files 4 rounds d1 sl 88.73 -> 88.25, full 109.05 -> 108.51 = TIE. Why: tk2f's T=1 split is static
+  per blockIdx (TK2F 204, non-DYN): early CTAs finish their fixed share early, CTAs landing at pr1's end still do a full share.
+- => To turn the measured d1 bubble (~5 us H100 pr1 drain + tk2f ramp) into time, tk2f at T=1 would need DYN work stealing
+  (TK2F_DYN, which n2u's y32 order currently rules out at M = 1) + the pr1 ids flag; even then early CTAs take HBM from pr1
+  (zero-sum while pr1 streams), so the ceiling is the drain bubble only: ~2-3 us H200 d1 (~0.4% score), similar at v1 (pr8).
+  Not built this session. The other d1 bubbles: qkv -> o (4.5 us: csl latency; o W prologue already PDL-streams), tail (8 us:
+  tk2f drain + n2u + bnd; UPF/UPF2/UPF3/N2U_BOUNDARY on record dead).
+- 0 judge runs, 0 Modal. main unchanged (v165).
