@@ -3044,3 +3044,6 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 
 ## n7s10 (2026-10-29 03:43Z - 03:50Z): idle
 - No Human decision since 22:15Z 10-28; COORD Requests n7s1 (lane / pause) unanswered. Re-read REDESIGN 6c/6d + n6s5 i-cache audit: no moe item >= 5 us/call open. Layer board slipped to #50 (2.158x, exactly the top-50 cut; #1 pjmullin3 2.403x). 0 judge runs, 0 Modal.
+
+## n7s11 (2026-10-29 04:00Z - 04:05Z): idle
+- No Human decision since 22:15Z 10-28; Requests n7s1 unanswered. No moe item >= 5 us/call open (n7s1 list, n6s5 audit); left items twm N16 gemm13 epilogue / moe_hot REL are <= ~2 us/call. Layer board #50 (2.158x). 0 judge runs, 0 Modal.
