@@ -7725,7 +7725,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
     int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
-    __nv_bfloat16* __restrict__ Y, int per = 0) {
+    __nv_bfloat16* __restrict__ Y, int per = 0, int xn = 1) {
   using HG = TWC<2, true, 8>;
   using HN = TWC<2, false, 8>;
   constexpr int XB = NH * 128, STRIDE = XB + HG::WB + HG::SB;
@@ -7822,12 +7822,12 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     // fresh f1s6 HOT_XN: the padded tokens' MMA work (moe n5s21: N 128 for 65..128-token experts) is skipped; the x box
     // stays 128 rows, so only the wgmma N and the accumulator count change (rows >= nv were never stored: exact)
     if constexpr (NH == 128 && HOT_XN == 16) {
-      if (nv <= 80) HOT_ITEM(80);
+      if (xn && nv <= 80) HOT_ITEM(80);
       else if (nv <= 96) HOT_ITEM(96);
       else if (nv <= 112) HOT_ITEM(112);
       else HOT_ITEM(128);
     } else if constexpr (NH == 128 && HOT_XN == 8) {
-      if (nv <= 72) HOT_ITEM(72);
+      if (xn && nv <= 72) HOT_ITEM(72);
       else if (nv <= 80) HOT_ITEM(80);
       else if (nv <= 88) HOT_ITEM(88);
       else if (nv <= 96) HOT_ITEM(96);
@@ -7866,6 +7866,8 @@ template <bool SA, int NH>
 static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
+  const int xn = grid < 100000000;  // fresh f1s9: grid + 1e8 = HOT_XN off for this call (tuner A/B)
+  grid %= 100000000;
   const int per = (grid / 100000) << 8 | (grid / 1000) % 100;  // n7s32 HOT_PER: grid = base * 1e5 + per * 1e3 + CTAs
   grid %= 1000;
   constexpr int NSTG = 8;
@@ -7881,7 +7883,7 @@ static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
   return launch_k(moe_hot<NSTG, SA, NH>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
-      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(), per);
+      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(), per, xn);
 }
 int64_t moe_hot_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                        torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
@@ -17543,6 +17545,7 @@ TUNE = {1: ({}, {"g10alt:o": 1}),
         8: ({}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}),
         128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}),
         256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
+HOT_XOFF = 100000000
 HOT256 = 3216064
 HOT128 = 32064
 _T8N = {"cslpw": True, "pr8_npf": 220}
@@ -17554,6 +17557,7 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
              (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
              (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
              (256, True): {"hot": HOT256, "rg": True, "twf_split": 66}, (256, False): {"hot": HOT256, "rg": True, "twf_split": 66}}
+TUNE[256] += ({"hot": HOT256 + HOT_XOFF},)
 CSL_PW_TOKENS = (16,)
 CSL_PW_CARVE = False
 if _moe_TK2F_DIAG:
