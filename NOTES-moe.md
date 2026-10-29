@@ -3168,3 +3168,32 @@ No COORD change since lead 06:50Z task (n7s18 idea already posted). Waiting for 
   the kept count gains 0..1.4 us (H100) and can lose (M224/240). The n7s18 bound (-4.6..-5.9 us) needs a custom GEMM that spreads the
   reduced work over all SMs (N-side compaction): that is the whole build, and proj's T=256 record says cuBLAS/LT always won. Weak.
 - First run waited > 10 min on /tmp/okc-gpu.lock (another agent's ab_files.py held it ~40 min); rerun with python -u in the background.
+## n7s21 (2026-10-29 07:07Z - ...): lead 07:05Z BUILD order (T=256 unpool zero-local-token skip): GEMM gate built + measured
+- Gate kernel tools/n7s21/ug.py (env knobs; GEN=file writes the CUDA source): f[t][n] = x[t] . W[n], swap-AB (A = W 128 rows,
+  B = x NT tokens, both TMA SW128, wgmma m64nNTk16 SS), CTA = 128 W rows x NT tokens, producer warp + 2 consumer WGs, NS 6,
+  MC=1: (1,2) cluster over the 2 token tiles with W TMA multicast (each CTA loads 64 W rows for both), stmatrix.trans epilogue.
+  Exact vs FP32 ref (bf16 rounding only). NT = ceil(kept/2) rounded to 8: kept 201-212 -> NT 104/112.
+- Pitfalls found (all fixed in ug.py, reuse for any wgmma kernel):
+  * remote mbarrier.arrive with .release.cluster = 3x slower kernel (117 vs 43 us); plain mbarrier.arrive.shared::cluster is fine.
+  * ptxas C7514 (every HGMMA serialized, DEPBAR gsb0 0x0) when the epilogue converts the accumulators with __float2bfloat16_rn
+    (F2FP packs in place into the accumulator regs): +5 us. Fix: cvt.rn.bf16x2.f32 in inline asm into separate u32 regs.
+    Summing all accumulators (FADD) does NOT trigger it. Check: ninja -v with -Xptxas=-v | grep C7514.
+  * 2x2 cluster (W multicast over tokens + x multicast over features): correct but 34 us (vs 19): at most 30 four-CTA clusters
+    are resident on 132 SMs (GPC layout), so 128 CTAs run in 2 waves. Dead at this tile count.
+  * no multicast (MC=0) 22.4 vs MC=1 19.1 us (warm K=2048 proxy): the GEMM is L2->SM bound, like nvjet (2x1 cluster, ncu
+    lts 178 MB vs ours 287 MB without multicast).
+- H100 (cold = torch.sum flush (read-only); zero_() flush leaves dirty L2 lines and adds ~8 us of write-back to every kernel):
+  K4096 cold: cuBLAS 32.2 | ug128 33.1 | ug112 32.7 | ug104 32.9 | ug96 32.6 us -> -25% MMA buys nothing on the H100.
+  K2048 warm (compute proxy): cuBLAS 18.6 | ug128 19.2 | ug104 18.1.
+- H200 (moe-board DIAG check 477afcc8, tools/n7s21/mkdiag_ug.py; outputs correct, passed, 2.2969x: a DIAG, never submit it;
+  log in tools/n7s21/h200/): K4096 cold: cuBLAS 28.03 | ug128 29.22 | ug112 27.81 | ug104 27.33 | ug96 26.78 us
+  (warm 29.06 | 30.43 | 29.31 | 28.86 | 28.35; K2048 cold 18.30 | 19.04 | 18.34 | 18.02 | 17.57).
+- VERDICT: n7s18 idea DEAD. The v32 kept counts (201-212) need NT 104/112 -> -0.2..-0.7 us per v32 layer before paying for the
+  compaction (routing scan + moe_norm compacted writes + zeroing the skipped f rows); the n7s18 bound (-4.6..-5.9) assumed a
+  compute-bound nvjet, but the T=256 unpool is L2->SM bound on the H200 too (-19% MMA = -2.5%; -25% = -4.5%). Our same-work
+  kernel is +4% vs nvjet (ug128 29.2 vs 28.0). Nothing built in layer.py/moe_src.py. v16 (T=128): g30 is HBM-bound (U re-read):
+  skipped rows cut nothing there (n7s18), not measured again.
+- The lead's cuBLASLt fallback (fixed-M GEMM on padded chunks, leftover chunks early-exiting on a device count) can't exist:
+  cuBLAS/Lt take M on the host and do the full tile for any M <= 128-row tile (n7s20: M 201-212 = M 256 +-1 us on the H100);
+  chunks of 16/32 rows re-read all 64 MB of W per chunk.
+- Budget 10-29: moe checks 6/20 (this DIAG), layer 2 checks + 2 submits (+ layer's own), Modal 46.4/60 (moe's 30 used up).

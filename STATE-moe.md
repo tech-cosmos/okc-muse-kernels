@@ -1,11 +1,18 @@
 # STATE-moe
 
-## NOW (n7s20, 2026-10-29 07:05Z): waiting on the lead's ~08:00Z pick; measured n7s18 idea's cuBLAS form = ~0 (H100); 0 runs, 0 Modal
+# STATE-moe
+
+## NOW (n7s21, 2026-10-29 08:15Z): lead 07:05Z build order (T=256 unpool zero-local-token skip) -> gate built, H200 says DEAD
+- Custom variable-N swap-AB wgmma GEMM (tools/n7s21/ug.py, (1,2) cluster W multicast, stmatrix.trans epilogue, exact) on the
+  H200 (moe DIAG check 477afcc8): cuBLAS 28.03 | ug NT128 29.22 | NT112 27.81 | NT104 27.33 | NT96 26.78 us. v32 kept 201-212 ->
+  NT 104/112 = -0.2..-0.7 us per v32 layer before compaction costs -> ~0. The T=256 unpool is L2->SM bound, not tensor-bound.
+  Nothing ported to layer.py/moe_src.py. ptxas C7514 / release.cluster / 2x2-cluster pitfalls: NOTES n7s21 (reusable).
+- Budget 10-29: moe checks 6/20, layer 2 checks + 2 submits, Modal 46.4/60 (moe's 30 used up).
+
+## WAS-n7s20 (2026-10-29 07:05Z): waiting on the lead's ~08:00Z pick; measured n7s18 idea's cuBLAS form = ~0 (H100); 0 runs, 0 Modal
 - tools/n7s20/unpool_m.py (H100, cold L2, graph, median, 2 rounds): unpool torch.mm M=256 43.4 us; kept M 212/208/201 = 44.0/
   43.9/42.0 (-0..-1.4); M 240/224 slower (46.0/44.8), M 192 50.9. 128-row tiles: M<=256 is 2 row-tiles anyway, so skipping
   zero-local tokens saves nothing in cuBLAS; only a custom GEMM with N-side compaction (n7s18 design) could get the -19%.
-
-## WAS-n7s19 (06:30Z): waiting on the lead's ~08:00Z big-idea pick (n7s18 idea posted); 0 runs, 0 Modal
 
 ## WAS-n7s18 (n7s18, 2026-10-29 ~06:22-06:50Z): lead 06:50Z task = post ONE big idea (no build): posted (COORD Requests n7s18); 0 runs
 - Idea: skip tokens with 0 local experts in the T=256 unpool (17-21% of v32 tokens on layer routings, y=0 exactly). Derived bound
@@ -50,26 +57,8 @@
   counted busy) -> FAIL, R1 not built. Remaining items (twm N16 epilogue, moe_hot REL) ~1-2 us/call: below the 4 us bundle bar.
 - Budget 10-29: layer 2 checks + 2 submits used, moe 5 checks, Modal 13.6/60.
 
-## WAS-n7s12 (n7s12, 2026-10-29 04:20Z): idle, no lead answer to Requests n7s1; 0 runs. Layer board #50 = the cutoff (2.158). moe board #1 dolanzhao 2.689x (ours 2.279x).
-
-## WAS-n7s11 (04:05Z): idle (same; #50)
-
-## WAS-n7s10 (03:50Z): idle (same; #50)
-
-## WAS-n7s9 (03:30Z): idle (same; #49)
-
-## WAS-n7s8 (03:15Z): idle (same)
-
-## WAS-n7s7 (03:00Z): idle (same)
-
-## WAS-n7s6 (02:45Z): idle, no lead answer to Requests n7s1; 0 runs. Branch moe/layer-twm exhausted (n7s4).
-
-## WAS-n7s5 (02:40Z): idle (same)
-
 ## WAS-n7s4 ( 2026-10-29 02:35Z): layer check 1537125d of moe/layer-twm 8309328 = 2.1457x < 2.158 -> not submitted; branch exhausted
 (checked 2x, submitted 1x: no more runs of it without a new change). Still no lead answer to Requests n7s1. Layer board #49 (cut #50 2.1579).
-
-## WAS-n7s3 (02:10Z): idle, no lead answer to Requests n7s1; nothing new built (NOTES n7s3)
 
 ## WAS-n7s2 (n7s2 end, 2026-10-29 ~02:15Z): layer submit 6466833c of moe/layer-twm b75aadc = 2.1404x (board stays 2.158 v153)
 - Used the 09:28Z rule (n7s1 item 1): noise draw, no gain. Don't resubmit b75aadc/8309328 (8309328 = only d32 -0.75 us).

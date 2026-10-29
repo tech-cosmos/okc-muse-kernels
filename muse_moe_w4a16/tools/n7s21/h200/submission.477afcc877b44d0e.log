@@ -1,0 +1,7 @@
+ugdiag build 36.9 s
+/tmp/muse_moe_w4a16-ycg5n827/run/submission.py:6906: UserWarning: An output with one or more elements was resized since it had shape [1], which does not match the required output shape []. This behavior is deprecated, and in a future PyTorch release outputs will not be resized unless they have zero elements. You can explicitly reuse an out tensor t by resizing it, inplace, to zero elements with t.resize_(0). (Triggered internally at /__w/pytorch/pytorch/aten/src/ATen/native/Resize.cpp:30.)
+  torch.sum(flush, 0, out=sink)
+ugdiag K4096 cold: cublas256 28.03 | ug128 29.22 | ug112 27.81 | ug104 27.33 | ug96 26.78 | maxerr 0.0156 0.0156 0.0156 0.0156 0.0156
+ugdiag K4096 warm: cublas256 29.06 | ug128 30.43 | ug112 29.31 | ug104 28.86 | ug96 28.35 | maxerr 0.0156 0.0156 0.0156 0.0156 0.0156
+ugdiag K2048 cold: cublas256 18.30 | ug128 19.04 | ug112 18.34 | ug104 18.02 | ug96 17.57 | maxerr 0.0152 0.0152 0.0147 0.0147 0.0147
+ugdiag K2048 warm: cublas256 17.70 | ug128 18.53 | ug112 17.66 | ug104 17.47 | ug96 16.99 | maxerr 0.0152 0.0152 0.0147 0.0147 0.0147
