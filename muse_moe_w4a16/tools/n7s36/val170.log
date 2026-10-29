@@ -1,0 +1,11 @@
+validate /home/daytona/r-layer/muse_decode_layer/submission.py -> logs /tmp/validate/submission_py_105900
+test    OK   0/13 bad    (7 s)
+scored  OK   0/12 bad    (7 s)
+opt     OK   0/40 bad    (12 s)
+tk2f    OK   0/300 bad    (5 s)
+replay  OK   0/240 bad    (43 s)
+route   OK   0/240 bad  worst gap 0.0256 drop-lead 0.0179  (32 s)
+fuzz    OK   0/58 bad    (18 s)
+prep    OK   0/1 bad  67.3 s  (70 s)
+NOTES: ALL OK: bench test 13/13, scored 0/12, opt_test 0/40, tk2f_stress 0/300, replay 0/240, route_judge 0/240 (worst gap 0.0256 drop-lead 0.0179), stream_fuzz 0/58, cold prepare 67.3 s
+DONE

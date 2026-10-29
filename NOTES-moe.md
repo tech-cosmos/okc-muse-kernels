@@ -3286,3 +3286,21 @@ No COORD change since lead 06:50Z task (n7s18 idea already posted). Waiting for 
 
 ## n7s35 2026-10-29T10:33Z
 Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/layer-hotdyn 130a692 awaits layer (STOP-layer present). 0 judge runs, 0 Modal, no code.
+
+## n7s36 (2026-10-29 10:48Z - 11:06Z): lead 10:40Z tasks: hotdyn into layer main (v169), check; v16 variance -> moe_hot at T=128 (v170), check
+- (1) r-layer main: cherry-pick of 130a692 (main had not touched muse_decode_layer since its base) = f0602f9 v169; build.py
+  reproduces submission.py; validate --quick ALL OK (13/13, tk2f 0/300, replay 0/240, route 0/240, fuzz 0/58, prepare 73.7 s).
+- (2) check 8b3f8e57 2.1287x (CI 2.097-2.161; fixed-SGLang 2.1074, lowest of the list: v1 115.8/131.3, d16 full 210.5 drew
+  slow, shapes hotdyn doesn't touch); v32 moe_hot 106 us (1 hot expert: hotdyn not exercised). Not submitted.
+- (4) v16 (T=128, twm) per-router study, H100 (tools/n7s36/v16time.py <sub> <routers> <inputs>, env BATCH QLEN LAYER TB=json
+  merged into TUNE_BASE[T]): 12 routers x 4 inputs sl: t = 7.80 x distinct + 165 (r 0.86, resid sd 10.5); + n65 term: 8.97 x
+  distinct + 12.2 x (experts with 65..128 tokens) + 139 (resid 8.0). 15/48 inputs have n65 >= 1 (router 4: 2 experts 66-84).
+  moe_hot at T=128 (hot TUNE value base*1e5+per*1e3+grid; base 0 = no CTA works when nh = 0):
+    sl:   16032 n65=1 -8.8, 24048 -14.6, 32064 -14..-19; n65=2: 16032 -21..-30, 32064 -21, 32048 -15; n65=0 +1.4..2.6 for all
+    full (routers 4,5,0): 32064 n65=2 -15.1, n65=1 ~0, n65=0 +1.5; 32048 -12.5 / -1.0 / +1.8.
+  Bitwise vs hot off (tools/n7s36/hoteq128.py, routers 4,5,10,0 x sl/full x 2 inputs): 16/16 equal, check OK.
+  -> layer v170: TUNE_BASE (128, *) hot = HOT128 = 32064. validate ALL OK (prepare 67.3 s). check 8cea7492 2.1250x
+  (CI 2.093-2.157, fixed-SGLang 2.1317); v16 sl 257.2 / full 348.1; judge router had no T=128 hot expert (moe_hot 1.7 us).
+- d32 (T=32, tk2h): 10 routers x 3 inputs: t = 7.78 x distinct + 122 (r 0.98, resid sd 3.7, corr(resid, top count) 0.07):
+  pure bytes, no structural fix. d16 not run (same tk2 family, max 16 tokens/expert).
+- Logs: tools/n7s36/*.log. Nothing queued for moe; layer main carries v169+v170 for the next board run.

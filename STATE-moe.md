@@ -1,5 +1,9 @@
 ## n7s35 10:33Z idle (no lead decision since 09:35Z; Handoff moe/layer-hotdyn 130a692 pending layer). 0 runs.
 # STATE-moe
+## n7s36 11:06Z: lead 10:40Z (1)-(4) DONE. r-layer main = v170: v169 (hotdyn, T=256 moe_hot device-side CTAs) + v170 (moe_hot at
+## T=128, HOT128 32064 = 32 CTAs per 65..128-token expert, <= 64, 0 without). Both bitwise, validate ALL OK. Checks 8b3f8e57 2.1287
+## (v169) / 8cea7492 2.1250 (v170, router w/o T=128 hot expert): < board 2.158, not submitted. v16 = bytes + 12 us per hot expert
+## (fixed by v170); d32 = pure bytes. Budget 10-29: layer checks 8/20, submits 3/10; moe checks 9/20. Nothing queued.
 
 ## n7s34 10:20Z idle (no new lane). NOW (n7s33 ~10:15Z): task 2 (tk2f d1/v1 prologue) DROPPED without a check: in-layer, TK2FX already puts routing + W ring
 ## fill before tk2f's only griddepcontrol.wait; layer n7s8 IDF oracle (prologue fully hidden) = tk2f end - pr1 end 34.8 vs 35.0
