@@ -2659,3 +2659,22 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   fr=muse_bf16_proj/dev/n7s5 --cmd 'python frlt.py 128'`, 1.3 GPU-min, 48 s screen): torch.mm 24.00/24.32, best 23.58
   (algo 66 tile 134 stages 35 splitK 1, cluster 4), next 23.94-24.03: -0.5 us = noise level, not added to LTFR.
 - Asked lead for a lane; offered to build layer n7s4's TK2F DYN at T=1 + pr1 ids release flag (~2-3 us d1/v1) if layer agrees.
+## night7 s8 (2026-10-29 07:31-08:35Z): lead 07:40Z gate 'N-compacted T=256 unpool GEMM vs nvjet': GATE FAILS (tie); 0 judge runs, Modal 1.0 GPU-min
+- Built dev/n7s8/uc.py + uc2.py: out[tok, 8192] BF16 = y[tok, 4096] @ U^T over NT compacted tokens (NT compile-time multiple of
+  16). Swap-AB wgmma SS (U rows = M, tokens = N), TMA SW128 x boxes, U repacked in prepare-style to contiguous pre-swizzled
+  16 KB stages (pack(): chunk c of row r at c ^ (r & 7); plain cp.async.bulk). uc.py form 1: 64 rows/CTA, 1 consumer WG,
+  x multicast over CL=2. uc2.py form 2 (better): 2-CTA cluster = one 128-row tile with K split in halves, 2 consumer WGs,
+  'giver' WG parks FP32 acc in smem, peer 'keeper' adds via ld.shared::cluster, BF16 stores. Correct (form 1 bitwise vs
+  torch.mm; form 2 max |d| 0.0156 = one BF16 ulp from the K-split sum order).
+- H100 is the WRONG proxy here: the T=256 unpool is HBM-bound on the H100 (U 64 MB; torch.mm M=256 28.6 us = a plain 64 MB
+  read). Harness pitfall: a zero_() L2 flush leaves dirty lines whose write-back eats the next kernel's bandwidth
+  (37 vs 28.6 us): flush with a READ (torch.sum), as bench.py does.
+- **H200 Modal (1.0 GPU-min, `tools/h200.py muse_bf16_proj uc=<dir with uc.py uc2.py> --cmd 'python uc2.py 208,256 3,4'`)**:
+  torch.mm M=256 24.96, M=208 27.42 (cuBLAS at the kept count LOSES 2.5 us); ours NT=208 NS=4 25.28 (NS=3 30.75),
+  NT=256 NS=4 28.42. => compacted-ours ties nvjet M=256 (+0.3 us); the gate needs <= 22.0. FAIL.
+- Where ours loses (H100 no-load modes, compute side = H200's): MMA-only NT=208 22.2 us = loop 15.1 (89% of tensor peak
+  13.4) + skeleton 3.8 (launch, cluster init; no loads/MMA, K=256) + epilogue 3.3 (BF16 stage + stores 1.6, park +
+  cluster barrier + DSMEM read 1.7). Under real loads on the H200 the loop is ~18 us. Realistic cuts: st.async remote
+  park with mbarrier complete_tx (no mid cluster barrier; needs a separate 53 KB park region, fits at NS=4: 226 KB),
+  TMA-store epilogue: ~-1.5..2 us -> ~23.3 vs 25.0 = ~-1.7 us = ~0.08% layer, before the routing-side compaction and
+  boundary changes, i-cache/compile cost of per-NT variants. Not worth a multi-session build: not continued.
