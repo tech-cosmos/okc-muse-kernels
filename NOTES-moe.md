@@ -3118,3 +3118,19 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   kernel plus layer plumbing (stream fork, 2.6 MB-per-call scratch). Not started: below what a multi-session build should pay.
 - _gw_verify (lead's next item): FP8 P@V is on record (s22 ceiling -10 us all-L2, s71 native H200 tie, exp/pv8 slower), native
   pipelined consumers lost in 5 layouts (s111). No new lever from me.
+
+## n7s16 (2026-10-29 05:45Z - 06:00Z): lead 06:00Z "attention lane stands": re-audit, no build, 0 judge runs, 0 Modal
+- H200 timeline of main (r-layer dev/n7s1_tl_h200.txt): v16 full _gw_verify 16.7-116.2 (99.5), _combine_bal ends +4.3 us, o 7.8,
+  bnd 4.9, pooler 26.3; v32 full _gw_verify 189.8, combine +4.4, o 9.4 (T=256: 256x4096x4096x2 = 8.6 GFLOP, compute-bound).
+- Verify-full consumer: every instruction cut I could name is already measured dead in ~/attn NOTES: poly exp2 (s21, s69 native
+  163 -> 173/183), P@ones row sums (s35 exa 5, s69 175-181, ones-column ceiling 0.5 us), lazy rescale (s12, s69 -3% only in a
+  microbench), f16x2 ex2 (no packed MUFU on sm_90), FP8 P@V (s22/s71 H200 tie), ping-pong/dual-head/6 WGs (s101), native kernels
+  (s71, s111), dynamic tail (s125). s122: tensor and MUFU pipes overlap (10-24% mutual slowdown), so the gap is the
+  QK -> softmax -> PV chain latency, already at FA3 level (s69: ~525 TFLOPS f16-equivalent).
+- New idea checked on paper: L2/SMEM prefetch of o's W during the gbal end spread (HBM idle there). Dead: o at T=256 is
+  compute-bound (9.4 us for 8.6 GFLOP); at T=128 it is 7.8 us, mostly ramp; layer s34 O_PF on _gd_full lost too.
+- d16/d32 tail checked for an expert-side lever: d32 unpool after norm2 = 14.7 us for 64 MB (at the ~4.3 TB/s floor; g30 is
+  a PDL secondary that already preloads), so SMEM preloading of unpool W in tk2f's drain has nothing to win. d16/d32
+  bnd1 -> tk2f: routing ends 3.2 us after the pooler at d16 (router_split 14.2 beside the pooler, _routing 4.1): this is proj's
+  n7s4 claim (oracle ladder), so I'm not duplicating it.
+- Result: nothing buildable in the attention lane at >= 0.3% layer. Asked lead for a piece of the 06:00Z megakernel bet.

@@ -1,6 +1,16 @@
 # STATE-moe
 
-## NOW (n7s15, 2026-10-29 ~05:50Z): lane = full-layer attention in the layer (lead 05:35Z). Physical-order gate FAILS; 0 runs
+## NOW (n7s16, 2026-10-29 ~05:45-06:00Z): lead 06:00Z kept moe on full-layer attention; no buildable lever found; 0 runs
+- Re-read ~/attn verify-full history against the H200 timeline (r-layer dev/n7s1_tl_h200.txt): v16/v32 _gw_verify 99.5/189.8 us
+  vs KV gather ~87/168. Every consumer instruction cut is on record as dead (FP8 QK on main; FP8 P@V s22/s71 H200 tie; poly exp2
+  s21/s69/s70; P@ones/ones-column row sums s35/s69/s1xx; lazy rescale s12/s69; ping-pong/dual-head/6 WG s101; native s71/s111;
+  dynamic tail s125). s69: the consumer runs at ~FA3 level (~525 TFLOPS f16-eq, hdim 64), and softmax per element is the floor.
+- O_PF on v16/v32 full is pointless: o at T=256 is compute-bound (8.6 GFLOP, 9.4 us); at T=128 it is 7.8 us, ramp-bound.
+- d16/d32 _gd_full: n7s15 gate failed; side-stream p1 ceiling ~0.3% layer for a 3+ session build: not started.
+- Posted to COORD Requests (n7s16): attention lane has nothing buildable; asked for a piece of the 06:00Z megakernel bet.
+- Budget 10-29: layer 2 checks + 2 submits, moe 5 checks, Modal 33/60 (moe's 30 used up).
+
+## WAS-n7s15 (2026-10-29 ~05:50Z): lane = full-layer attention in the layer (lead 05:35Z). Physical-order gate FAILS; 0 runs
 - Fused inversion + dense K/V stream prototype (muse_attention_decode/tools/n7s15/fz.py, exact map): H100 exposed +16.1 us d32 /
   +10.6 d16 (inversion alone 15.4 / 10.8; the page-table loads queue behind the ring fill, so overlap = ring depth only).
   Gate <= ~5 us not met. Side-stream p1 under qkv g30 = the only variant left: ceiling ~0.3% layer, 3+ sessions: not started.
