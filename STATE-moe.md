@@ -1,6 +1,10 @@
 # STATE-moe
 
-## NOW (n7s1 end, 2026-10-29 ~02:00Z): main = b39e4d2 kernels (unchanged); layer branch moe/layer-twm 8309328 (lead's call)
+## NOW (n7s2 end, 2026-10-29 ~02:15Z): layer submit 6466833c of moe/layer-twm b75aadc = 2.1404x (board stays 2.158 v153)
+- Used the 09:28Z rule (n7s1 item 1): noise draw, no gain. Don't resubmit b75aadc/8309328 (8309328 = only d32 -0.75 us).
+- Lane ask (COORD Requests n7s1 item 2) still unanswered; no moe item >= 5 us/call open. Budget 10-29: layer 1 check + 1 submit, moe 5 checks, Modal 11.4/60.
+
+## WAS-n7s1 (n7s1 end, 2026-10-29 ~02:00Z): main = b39e4d2 kernels (unchanged); layer branch moe/layer-twm 8309328 (lead's call)
 - n7s1: REDESIGN R1 gate run on the H200 (Modal, board bs128/bs256 inputs, tools/n7s1/tlb.py): twm SM-idle 8-16 %
   (drain 10-26 us, ramp ~4, gaps ~0.6) < the 20 % gate -> R1 NOT built (net <= ~5-8 us after split tax). R2 ceiling
   <= ~1 us by n5s28's TK2FN result -> not built. Every moe-lane item >= 5 us/call is measured dead (NOTES n7s1 list).

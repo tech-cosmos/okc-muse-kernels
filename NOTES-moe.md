@@ -2996,3 +2996,13 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - routegather is 3.0 us (bs128) / 5.0 us (bs256) on the judge profile (a4054bf3), serial before twm; a faster T=256
   routing (one counting CTA + parallel gather) is worth <= ~2 us at bs256 (~0.15 % board); in-layer the layer's
   moe_gathern does the pre-expert norm too. Not built.
+
+## n7s2 (2026-10-29 01:50Z - 02:15Z): no lead answer; 09:28Z-rule layer submit of moe/layer-twm b75aadc = 2.1404x (board stays 2.158)
+- Evidence for the submit: check 74dcb2bb (b75aadc, sha1 0fa21c09) vs board run 3e3b9fd3 absolute us: d1 65.0/74.2 vs 66.3/75.0,
+  d16 127.0/203.8 vs 129.9/205.9, d32 148.2/289.7 vs 155.7/308.2, v1 108.1/121.0 vs 110.6/122.6, v16 260.0/349.3 vs 266.6/356.1,
+  v32 337.8/502.2 vs 335.7/506.4: ours faster on 5/6; ratio 2.1569 < 2.158 only because the board run's SGLang drew slow (v16).
+  Rule 09:28Z (a) within 1%, (b) per-shape wins, (c) validate ALL OK (n6s5) -> submitted (layer 1/10 today).
+- SUBMIT 6466833cd973413b: 2.1404x (CI 2.108-2.173), prepare_s 88.4. us: d1 67.5/76.4, d16 123.3/203.5, d32 144.4/300.9,
+  v1 108.6/126.4, v16 262.1/354.8, v32 334.0/512.6. Within noise of the board; board best stays 3e3b9fd3 2.158.
+  No 2nd submit: 8309328 (= b75aadc + TK2F_REL 2) differs only by d32 -0.75 us: a redraw, not a change.
+- Lane request (COORD Requests n7s1, item 2) still open. 0 moe checks, 0 Modal.
