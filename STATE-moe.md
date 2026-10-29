@@ -1,13 +1,17 @@
 # STATE-moe
 
-## NOW (n6s5 end, 2026-10-29 01:15Z): main unchanged (7d2a079); layer port on BRANCH moe/layer-twm b75aadc
-- Layer port of twm EPI/HOTC0/KSC2/REL (lead 22:15Z item 1): validate ALL OK, v16/v32 bitwise, H100 v16 sl -5.5 / v32 sl -4.3 us.
-  Judge layer check 74dcb2bb 2.1569x (board 2.1580): v16 260.0/349.3 (board run 266.6/356.1), v32 337.8/502.2. Not submitted
-  (rule: > 2.158); asked the lead (COORD Results) whether it goes in under the 09:28Z within-1% rule / merges into layer main.
-- i-cache audit: tk2f/tk2h clean (ncu no_instr 0.07-0.10/issue = twm after the fix); layer non-moe kernels <= 4.3k SASS.
-  twm v32 K-split build still 0.17-0.22: slimming the KS tail (RT4-only + float4 partials) = Modal bs256 +2.9 us: DEAD.
-- NEXT (ranked): (1) tk2f release analog (n6s4 NEXT 1: defer non-final publishes / thread-0 fence stall), H200 DIAG d1/d16/d32/v1;
-  (2) twm N16 gemm13 epilogue 2.2-3.8 us/item; (3) moe_hot REL. Each <= ~2 us/call: weigh against the lead's >= 3% bar.
+## NOW (n6s6 end, 2026-10-29 ~01:40Z): main b39e4d2 (= 7d2a079 kernels; TK2F_REL 0); layer branch moe/layer-twm 8309328
+- n6s6 TK2F_REL (tk2f/tk2h gemm13 publishes by a helper warp; tools/n6s6/patch_rel.py ports it to any copy): judge DIAG
+  8c5f1376: tk2h (layer T=32) d32 -0.75 us every seed; tk2f 1-group paths d1/v1 +0.25..0.3, d16 tie. moe default 0; layer
+  branch has TK2F_REL 2 (tk2h only), validate ALL OK. ~0.1% layer score: not worth a check on its own.
+- Layer branch moe/layer-twm = v163 + twm EPI/KSC2/REL (check 74dcb2bb 2.1569x vs board 2.1580, v16 -6.6/-6.8 us) + TK2F_REL 2.
+  Waiting on the lead (COORD Results n6s5): submit under the 09:28Z rule / merge into layer main? We are #49 overall, #50/#51
+  at 2.158/2.157: one noise draw away from dropping out of the top 50.
+- tk2f release lever: CLOSED (n6s6). Remaining moe items each <= ~2 us/call: (1) twm N16 gemm13 epilogue 2.2-3.8 us/item
+  (N24 duplicated gated body, store drain); (2) moe_hot REL. Tools new: tools/n6s6/ab_dec.py (paired H100 decode A/B,
+  bitwise), mkdiag_trel.py (decode-only DIAG, 2 libs: judge prepare 225 s), sass_tk2f.py, rundiag.py.
+- GIT: worktree /tmp/n6s5/wt is on moe/layer-twm (upstream set to origin/moe/layer-twm in n6s6; before that `git pull
+  --rebase` there rebased onto main: never pull in it without checking upstream).
 
 ## WAS-n6s4 (n6s4 end, 2026-10-29 ~01:00Z): main 7d2a079 = TWM_KSC_DUAL 1 + TWM_REL 1 (bitwise, 15/15), H200-verified small wins
 - Judge H200 DIAGs on layer routings: dual (twm without K-split code for calls with no split) v16 -1.9 / v32 tie; REL
@@ -21,12 +25,9 @@
 - NEXT (ranked): (1) tk2f release analog (bar.sync 2 + thread-0 fence at each segment end stalls the next row's bar.sync 1;
   no idle warp in tk2f: defer the non-final publishes / merge into the CTA-end publish when !BAL), H200 DIAG on d1/d16/d32/v1;
   (2) remaining twm epilogue (N16 gemm13 2.2-3.8 us/item: N24's duplicated gated body, store drain); (3) moe_hot same REL.
-- Board stays 2.2792x (aeba42c5). Checks used 10-29: 4 of 20 (3 DIAG + 1 plain); submits 0 of 10. Modal 5/60 min.
-- Earlier (n6s3): TWM_EPI + TWM_HOTC (on main, default on): H200 v16 -4.3 / v32 -4.5 us per call. a60019d submitted 2.2792x.
+- Board stays 2.2792x (aeba42c5). Checks used 10-29 (after n6s6): moe 5 of 20 (4 DIAG + 1 plain), layer 1; submits 0. Modal 9/60 min.
 - Tools: tools/n6s3/ab2.py A.py B.py (paired H100 A/B, board bs128/256 + layer v16/v32, max|A-B|); tools/n6s4/sass.py <file>;
   /tmp/n6s4/rundiag.py <diag copy> (local run of a DIAG prepare). The judge REJECTS `import reference`.
-
-## WAS (n5s34-n5s40): tk2f consumer, twm dq cut, dq superoptimizer (8 int + 4 HMUL2 per 8 weights is minimal), dequant-once: all CLOSED (NOTES)
 
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
