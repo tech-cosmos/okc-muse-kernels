@@ -3161,3 +3161,10 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 
 ## n7s19 (2026-10-29 06:30Z)
 No COORD change since lead 06:50Z task (n7s18 idea already posted). Waiting for the ~08:00Z pick. 0 judge runs, 0 Modal.
+
+## n7s20 (2026-10-29 06:45-07:05Z): no COORD change; measured the n7s18 idea's easy form on the H100; 0 judge runs, 0 Modal
+- tools/n7s20/unpool_m.py: T=256 unpool as torch.mm (y[M,8192] @ W[8192,4096]), cold L2 (256 MB flush), CUDA graph, median of 60,
+  2 rounds: M256 43.4, M240 46.0, M224 44.9, M212 43.9, M208 44.0, M201 42.0, M192 50.9 us. So compacting rows and calling cuBLAS at
+  the kept count gains 0..1.4 us (H100) and can lose (M224/240). The n7s18 bound (-4.6..-5.9 us) needs a custom GEMM that spreads the
+  reduced work over all SMs (N-side compaction): that is the whole build, and proj's T=256 record says cuBLAS/LT always won. Weak.
+- First run waited > 10 min on /tmp/okc-gpu.lock (another agent's ab_files.py held it ~40 min); rerun with python -u in the background.

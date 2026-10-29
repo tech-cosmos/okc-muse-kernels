@@ -1,6 +1,11 @@
 # STATE-moe
 
-## NOW (n7s19, 2026-10-29 06:30Z): waiting on the lead's ~08:00Z big-idea pick (n7s18 idea posted); nothing new in COORD; 0 runs, 0 Modal
+## NOW (n7s20, 2026-10-29 07:05Z): waiting on the lead's ~08:00Z pick; measured n7s18 idea's cuBLAS form = ~0 (H100); 0 runs, 0 Modal
+- tools/n7s20/unpool_m.py (H100, cold L2, graph, median, 2 rounds): unpool torch.mm M=256 43.4 us; kept M 212/208/201 = 44.0/
+  43.9/42.0 (-0..-1.4); M 240/224 slower (46.0/44.8), M 192 50.9. 128-row tiles: M<=256 is 2 row-tiles anyway, so skipping
+  zero-local tokens saves nothing in cuBLAS; only a custom GEMM with N-side compaction (n7s18 design) could get the -19%.
+
+## WAS-n7s19 (06:30Z): waiting on the lead's ~08:00Z big-idea pick (n7s18 idea posted); 0 runs, 0 Modal
 
 ## WAS-n7s18 (n7s18, 2026-10-29 ~06:22-06:50Z): lead 06:50Z task = post ONE big idea (no build): posted (COORD Requests n7s18); 0 runs
 - Idea: skip tokens with 0 local experts in the T=256 unpool (17-21% of v32 tokens on layer routings, y=0 exactly). Derived bound
