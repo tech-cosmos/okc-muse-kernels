@@ -1,0 +1,29 @@
+n7s48 H100 (lead 14:45Z overlap items f/g/h). cycles per twm stage per WG (4 k16 groups x RT tiles), 1 CTA, best of 3.
+"SM w/clk" = weights per SM clock = (#WGs on the SM) x RT x 4096 / cyc. Production twm = 2 consumer WGs (+ producer WG).
+ovl3.py / ovl3b.py (ovl2 body, shared stage, no producer):         RT4 N32   RT2 N64   RT2 N32   RT4 N16
+  1 CTA, 2 twm WGs (base)                         SM cyc/2 WG-stg  977       704       549       872
+  1 CTA, 4 twm WGs (512 thr -> 128 regs, 0 lmem)                   915 -6%   614 -13%  490 -11%  785 -10%
+  2 CTAs/SM x 2 WGs (264 CTAs)                                     946       655       505       835   (CTA-to-CTA skew: max/med 1.35)
+  2 CTAs/SM x 1 WG                                                 981       676       532       844   (= base: same 8 warps/SM)
+  4 WGs + 1 extra warp (544 thr -> 120 regs, models a producer warp)
+                                                                  1751 lmem82  845 lmem34  490      801
+  3 WGs + 1 warp                                                   974       640       507       803
+  => 4 WGs/SM gain 6-13% ONLY at 128 regs with NO producer; with a producer warp RT4 N32 / RT2 N64 spill + serialize.
+     RT2 N32 at 4WG (fits) = 33.4 w/clk = base RT4 N32 33.5: no gain. RT4 N16 +7% but N16 is HBM-bound already.
+ovl4.py (each WG feeds its OWN ring: an elected consumer thread issues cp.async.bulk + mbarrier wait; per-WG code path
+so the wgmma desc stays uniform -- with a threadIdx-derived ring base ptxas emits 43 R2UR and everything runs 1.45x slower):
+                                                  RT4 N32 2WG/4WG    RT2 N64 2WG/4WG   (cyc/stage/WG)
+  static (no copies)                              1022 / 1916        721 / 1287
+  self-fed full stage copy                        1400 / 2382       1069 / 1731
+  self-fed 16-byte copy (sync cost only)          1417 / 2374       1073 / 1727
+  WG bar.sync only                                1049 / 1856        698 / 1267
+  bulk issue only (no wait)                       1371 / 2347       1016 / 1666
+  elected arrive + mbarrier wait only             1198 / 2092        799 / 1419
+  => a cp.async.bulk issued from a consumer thread costs ~300-350 cyc/stage by itself (arrive+wait another ~100-180),
+     independent of bytes: self-fed 4WG = 27.5 / 18.9 SM w/clk < production 2WG 32.1 / 22.7. Same lesson as s17's
+     inline-producer twq (2x slower). (f) DEAD.
+(g) CUTLASS K_BLOCK_MAX slices + wait<K-1> = n7s47 (a) "4 A sets, wait<3>": RT2 only -2..-9% (bundle item), RT4 loses.
+(h) ptxas -v on the layer's production moe library (r-layer main f61be2b, all 115 entries): NO C7510/C7512/C7514/C7515
+    advisory. moe_twm 168 regs, 30-33 LDL/STL all outside the HGMMA region (producer/prologue/epilogue, known).
+    Trap found on the way: C7515 ("non-wgmma instructions defining accumulator registers") hits microbench kernels
+    whose WG paths are not split per WG; check any new twm variant with -Xptxas -v.

@@ -3410,3 +3410,19 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   while mma 449 (alone 324). So warp specialization can't reach max(ALU, MMA) either (and RS needs A in the MMA warp).
 - VERDICT: no variant gets near max(ALU, MMA). Best is RT2 D4 at ~1.32x of max (N64). twm is not rebuilt. Twm consumer
   rates for proj's CUTLASS yardstick: RT4 N32 32768 w / 1007 cyc = 32.5 w/clk/SM, RT2 N64 16384 / 711-749 = 22-23 w/clk/SM.
+
+## n7s48 2026-10-29T15:17Z-16:20Z: lead 14:45Z overlap items (f) 2 CTAs/SM / 4 WGs per SM, (g) K_BLOCK_MAX, (h) C7514 grep (H100; 0 judge runs)
+- Full table: muse_moe_w4a16/tools/n7s48/RESULTS.txt (ovl3.py/ovl3b.py = ovl2 body with NWG/CPB; ovl4.py = per-WG self-fed rings).
+- (f) 4 consumer WGs per SM (1 CTA x 4 or 2 CTAs x 2) beat 2 WGs by 6% (RT4 N32), 13% (RT2 N64), 10-11% (RT2 N32, RT4 N16)
+  per SM, but only at 128 regs with no producer at all. 2 CTAs x 1 WG = base (same warps/SM). With a producer warp
+  (544 thr -> 120 regs) RT4 N32 and RT2 N64 spill and serialize (1751 / 845); RT2 N32 fits but 4WG RT2 N32 = 33.4 w/clk
+  = production RT4 N32 33.5. Feeding each WG's own ring from an elected consumer thread: cp.async.bulk issue alone costs
+  ~300-350 cyc/stage (byte-independent; 16-B copies cost the same), wait ~100-180 => 4WG self-fed 27.5/18.9 w/clk <
+  production 32.1/22.7. DEAD (matches s17 twq inline producer). s17's twq (640 thr, 96 regs) already covered the
+  producer-WG version.
+- (g) = n7s47 (a) D4/wait<3> (RT2 -2..-9% bundle item). (h) layer moe library (r-layer f61be2b) ptxas -v: no C75xx anywhere;
+  moe_twm spills only outside the HGMMA loop.
+- Microbench traps: a threadIdx-derived smem ring base makes the wgmma descriptor non-uniform (43 R2UR, 1.45x slower);
+  C7515 serialization when per-WG paths aren't split. Give each WG its own code path (compile-time offsets).
+- Verdict for the lead's 14:30Z question: on Hopper, the twm consumer can't get closer to max(ALU, MMA) by schedule
+  (n7s47) or by more warps per SM (n7s48: RF is full at 4 WGs x 128 regs, leaving nothing for a producer). twm unchanged.
