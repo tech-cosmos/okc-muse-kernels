@@ -10159,6 +10159,7 @@ POOLER_BMM = {16: 2, 32: 2}
 GEMV_PDL_SECONDARY = {(1, True): ("unpool_slice", "o"), (1, False): ("unpool_slice", "o"), (8, True): ("o", "unpool_slice"),
                       (8, False): ("unpool_slice",)}
 BND_SPLIT = {(1, 1): 4, (1, 2): 4, (8, 1): 2, (8, 2): 2, (16, 1): 4, (16, 2): 4, (32, 1): 2, (32, 2): 2}
+BND_NOS_TOKENS = (256,)
 LOCAL_FALLBACK = False
 @triton.jit
 def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr, h_ptr, h32_ptr,
@@ -10167,7 +10168,8 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
               PF_NT: tl.constexpr = 512, RB: tl.constexpr = False, TRIG: tl.constexpr = False,
               NS: tl.constexpr = 1, SS: tl.constexpr = 0, SPL: tl.constexpr = 1, SEP: tl.constexpr = False,
               sc_ptr=None, ids_ptr=None, tw_ptr=None, SC: tl.constexpr = False, SC_LOCAL: tl.constexpr = 0,
-              SC_K: tl.constexpr = 4096, SC_EPS: tl.constexpr = 0.0):
+              SC_K: tl.constexpr = 4096, SC_EPS: tl.constexpr = 0.0, rb_ptr=None, x1_ptr=None, a1_ptr=None, b1_ptr=None,
+              NOS: tl.constexpr = 0):
     """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
     s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32).
     RB: the branch is FP32 (gemv19 output), rounded to BF16 first.
@@ -10176,7 +10178,11 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
     NS > 1 (RB): the branch is the sum of NS FP32 split-K slabs SS elements apart (nu8).
     SPL > 1 (s33 BND_SPLIT): SPL programs per row, each computes the row's norms redundantly and stores its N / SPL slice.
     SC (s59 NU8D, with SEP): the branch is sum over the row's 8 route slots j (local: 0 <= ids < SC_LOCAL) of
-    tw_j rsqrt(sc[j] / SC_K + SC_EPS) br[j] (br = nu8 D's per-slot unpool rows [T * 8][NB], sc its sums of squares)."""
+    tw_j rsqrt(sc[j] / SC_K + SC_EPS) br[j] (br = nu8 D's per-slot unpool rows [T * 8][NB], sc its sums of squares).
+    NOS (proj n7s3, BND_NOS_TOKENS; NB = N, no SEP): 1 = the first boundary skips its FP32 s' store (the second boundary's
+    input stream, 8 MB at T=256) and stores rb (one FP32 per row) to rb_ptr instead; 2 = the second boundary recomputes that
+    stream from the layer input stream s_ptr, the o output x1_ptr (BF16 [T, N]), res1 a1/b1 and rb, with the first boundary's
+    FP32 ops (bitwise the same s')."""
     if TRIG:
         gdc_launch_dependents()
     if PF > 0:
@@ -10195,6 +10201,9 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
     if BGAIN:
         bgain = tl.load(bgain_ptr + cols, mask=in_b, other=0.0)
     s = tl.load(s_ptr + row * N + cols)
+    if NOS == 2:
+        x1 = tl.load(x1_ptr + row * N + cols).to(tl.float32)
+        s = tl.load(a1_ptr + cols) * s + tl.load(b1_ptr + cols) * (x1 * tl.load(rb_ptr + row))
     if SEP:
         jb = tl.arange(0, NB)
         mine_b = (jb // (N // SPL)) == tl.program_id(0) % SPL
@@ -10246,8 +10255,12 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
     if BGAIN:
         b = b * bgain
     rb = tl.rsqrt(tl.sum(b * b, 0) / N + EPS_POST)
+    if NOS == 1:
+        if tl.program_id(0) % SPL == 0:
+            tl.store(rb_ptr + row, rb)
     s = alpha * s + beta * (b * rb)
-    tl.store(s_out_ptr + row * N + cols, s, mask=mine)
+    if NOS != 1:
+        tl.store(s_out_ptr + row * N + cols, s, mask=mine)
     rs = tl.rsqrt(tl.sum(s * s, 0) / N + EPS)
     h = s * rs * gain
     tl.store(h_ptr + row * N + cols, h.to(tl.bfloat16), mask=mine)
@@ -17768,8 +17781,9 @@ _moe_TWM_ORDER_M = {}
 G19_TRIG_TOKENS = (16, 32)
 G19_TRIG_O_TOKENS = (16, 32)
 BND_SEP_TOKENS = (8,)
-def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
-    """unpool -> second boundary: (next attention input, stream)."""
+def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None, nos=None):
+    """unpool -> second boundary: (next attention input, stream). nos = (stream, o output, res1 alpha, beta, rb): stream1
+    was not stored (NOS): the boundary recomputes it."""
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
     if f is None:
         trig = not sliced and _opt(state, tokens, "g19trig", tokens in G19_TRIG_TOKENS)
@@ -17782,13 +17796,14 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None):
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]
     spl = _opt(state, tokens, "bspl2", BND_SPLIT.get((tokens, 2), 1))
-    _boundary[(tokens * spl,)](f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
+    nk = {} if nos is None else dict(x1_ptr=nos[1], a1_ptr=nos[2], b1_ptr=nos[3], rb_ptr=nos[4], NOS=2)
+    _boundary[(tokens * spl,)](f, stream1 if nos is None else nos[0], alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
                          NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
                          EPS_POST=POST_NORM_EPS, EPS=RMS_EPS, PDL=pdl, RB=f.dtype == torch.float32, num_warps=16,
                          launch_pdl=pdl, NS=f.shape[0] if f.dim() == 3 else 1, SS=f.shape[1] * UNPOOL_SLICE if f.dim() == 3 else 0,
                          SPL=spl, SEP=sliced and tokens in BND_SEP_TOKENS or sc is not None,
                          **({} if sc is None else dict(sc_ptr=sc[0], ids_ptr=sc[1], tw_ptr=sc[2], SC=True,
-                                                     SC_LOCAL=LOCAL_EXPERTS, SC_K=D_EXPERT, SC_EPS=POST_NORM_EPS)))
+                                                     SC_LOCAL=LOCAL_EXPERTS, SC_K=D_EXPERT, SC_EPS=POST_NORM_EPS)), **nk)
     return hidden, stream2
 def kernel_fn(data, state):
     _G24X.clear()
@@ -17895,13 +17910,18 @@ def _kernel_fn(data, state):
         if a is None:
             a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)
     bnd = ob8 or pr1 and tokens == 1 and _opt(state, tokens, "pr1bnd", PR1_BND) and a.dtype == torch.bfloat16
+    nos = None
     if not bnd:
       spl = _opt(state, tokens, "bspl1", BND_SPLIT.get((tokens, 1), 1))
+      if (not fp32_router and not npf and a.dtype == torch.bfloat16 and a.shape[1] == HIDDEN
+              and _opt(state, tokens, "bnos", tokens in BND_NOS_TOKENS)):
+          nos = (data["stream"], a, alpha, beta, torch.empty(tokens, dtype=torch.float32, device=dev))
       _boundary[(tokens * spl + npf,)](a, data["stream"], alpha, beta, alpha, state["pre_ffn"], stream1, h, h32,
                                NB=HIDDEN, N=HIDDEN, BGAIN=False, H32=fp32_router, EPS_POST=POST_NORM_EPS, EPS=RMS_EPS,
                                PDL=pdl or otrig, pf_ptr=state["router"], PF=npf, RB=a.dtype == torch.float32,
                                TRIG=pr1 or (BOUNDARY_TRIG and ("pooler", tokens) in state.get("g19", {}) and "pooler" in G19_ON), num_warps=16,
-                               launch_pdl=pdl or otrig, SPL=spl)
+                               launch_pdl=pdl or otrig, SPL=spl,
+                               **({} if nos is None else dict(rb_ptr=nos[4], NOS=1)))
     main_stream, side_stream = torch.cuda.current_stream(), state["side_stream"]
     if tokens in ROUTER_AFTER_POOLER and pdl:
         pooled = _linear(h, dense["pooler"], "pooler", state)
@@ -17918,7 +17938,7 @@ def _kernel_fn(data, state):
             for t in (pooled, p):
                 t.record_stream(side_stream)
         moe = _experts_moe(p, topk_weights, local_ids, state)
-        return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
+        return _tail(moe, stream1, h, tokens, state, pdl, nos=nos) + (topk_ids,)
     if (not fp32_router and state.get("pool_router") is not None
             and _opt(state, tokens, "fr", tokens in FUSED_ROUTER_TOKENS)):
         pr = torch.mm(h, state["pool_router"].t(), out_dtype=torch.float32)
@@ -17941,7 +17961,7 @@ def _kernel_fn(data, state):
                                      XS=D_EXPERT + 2 * N_EXPERTS, ROUND=True, num_warps=8)
         moe = _experts_moe(p, wts, lids, state, bucket, gnorm) if _use_moe(tokens) else (
             _experts_marlin if HAVE_SGL else _experts_local)(p, wts, lids, state)
-        return _tail(moe, stream1, h, tokens, state, pdl) + (ids,)
+        return _tail(moe, stream1, h, tokens, state, pdl, nos=nos) + (ids,)
     pr32 = False
     if pr1:
         pooled = torch.empty((tokens, D_EXPERT), dtype=torch.bfloat16, device=dev)
@@ -18051,6 +18071,7 @@ def _kernel_fn(data, state):
             t.record_stream(side_stream)
     if (tokens in N2U_TOKENS and _use_moe(tokens) and _moe_TK2F and _G10.get("lib") is not None
             and tokens <= SLICED_UNPOOL_MAX_TOKENS):
+        assert nos is None
         if N2U_BOUNDARY:
             stream2 = torch.empty_like(stream1)
             hidden = torch.empty_like(h)
@@ -18059,13 +18080,13 @@ def _kernel_fn(data, state):
                                                              stream2, hidden, state["n2u_cnt"]))
             return hidden, stream2, topk_ids
         f = _experts_n2u(p, topk_weights, local_ids, state)
-        return _tail(None, stream1, h, tokens, state, pdl, f=f) + (topk_ids,)
+        return _tail(None, stream1, h, tokens, state, pdl, nos=nos, f=f) + (topk_ids,)
     if nu8:
         f, sc = _experts_nu8(p, topk_weights, local_ids, state, y32)
-        return _tail(None, stream1, h, tokens, state, pdl, f=f, sc=sc) + (topk_ids,)
+        return _tail(None, stream1, h, tokens, state, pdl, nos=nos, f=f, sc=sc) + (topk_ids,)
     if _use_moe(tokens):
         moe = _experts_moe(p, topk_weights, local_ids, state, bucket, gnorm)
     else:
         moe = (_experts_marlin if HAVE_SGL else _experts_local)(p, topk_weights, local_ids, state)
-    return _tail(moe, stream1, h, tokens, state, pdl) + (topk_ids,)
+    return _tail(moe, stream1, h, tokens, state, pdl, nos=nos) + (topk_ids,)
 _PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]
