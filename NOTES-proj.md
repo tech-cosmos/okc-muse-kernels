@@ -2534,3 +2534,19 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   4 weights, lookup >= 2 PRMT per output: >= 14 per 8 weights. DEAD. Not microbenched (lead's bar: only if <= 12).
 - => all three dq routes on record (shift/rotate tiling moe s27/n5s21, IMAD/FMA-pipe moe n22, PRMT LUT here) are above or at
   today's 12. The H200 dq-free -22.6/-23.8 us stays an unreachable ceiling. proj has no >= 1% item; lane ask stands.
+
+## n7s1 (2026-10-29 04:51Z - ~05:45Z): lead 04:50Z lane = REDESIGN R2 (column-stationary gemm2 + in-register norm, bs1-32): ceiling measured, CLOSED; 0 judge runs, Modal 3.6 GPU-min
+- Where R2's gain could come from in the LAYER (main 9d2b3a8): T=1 already fuses moe_norm2 into the unpool GEMV (n2u), T=8
+  fuses norm3 + the unpool slice (nu8). Only T=16/32 (d16/d32) still run moe_tk2f -> moe_norm3 (PDL secondary) -> unpool.
+  So R2's in-layer ceiling = what norm3 costs at d16/d32.
+- Oracle (dev/n7s1/mk_n3one.py): base0 = main with TUNE = {}; n3one = same with norm3/norm2 launched on out[:1] (one block:
+  keeps the counter zeroing and the PDL launch/wait/exit; drops the y32 reload, the norm math and 31 of 32 blocks). Checked the
+  path is taken: M16 cfg 11184204 and M32 10143004 both reach the patched norm3 call (d32 output differs; d16 0 diff = the
+  freed out block of the base run reused in the same process, stale correct values).
+- us per layer, base -> n3one (B-A):
+    H100 ab_files 4 rounds:  d16 sl 190.23 -> 189.93 (-0.3) | d16 full 293.42 -> 294.24 (+0.8) | d32 sl 185.55 -> 184.84 (-0.7) | d32 full 413.81 -> 412.59 (-1.2)
+    H200 Modal 1 round:      d16 sl 145.81 -> 145.31 (-0.5) | d16 full 220.58 -> 219.47 (-1.1) | d32 sl 148.72 -> 147.81 (-0.9) | d32 full 306.51 -> 305.66 (-0.85)
+    (d1, path untouched = the noise: H100 -0.2/-0.3, H200 +0.3/-1.3)
+- Verdict: R2's whole prize in-layer is <= ~1 us per d16/d32 layer (~0.5% of those 4 shapes, ~0.2% score) BEFORE paying its
+  grid barrier (~1.5 us, REDESIGN's own number) -> net <= 0. Agrees with moe n7s1 (<= ~1 us) and layer s42 (column-split
+  norm3 <= ~1 us). Standalone muse_moe bs1-32 gains (norm2 3.2 us there) do not carry: the layer already hides/fuses it. Not built.
