@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## f1s11 (2026-10-29 22:31Z-22:33Z): no work; still no `lead -> fresh` answer to f1s9 22:15Z (Human decisions newest = 21:55Z).
+   0 judge, 0 Modal. Next (f1s12): same rule: act on a lead answer if one exists; else stop at once.
 ## f1s10 (2026-10-29 22:16Z-22:18Z): no work; no `lead -> fresh` answer yet to the f1s9 22:15Z question (pause or name a lane).
    0 judge, 0 Modal. Next (f1s11): same rule: read COORD Human decisions/Requests for a lead answer, act on it; else stop at once.
 ## f1s9 (2026-10-29 22:06Z-22:17Z): HOT_XN H200 A/B DONE via a judge check (1 of today's 6, would expire at 00:00Z), 0 Modal
