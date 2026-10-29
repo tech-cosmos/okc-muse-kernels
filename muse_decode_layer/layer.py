@@ -521,6 +521,7 @@ ROUTING_WARPS_1_MIN_TOKENS = 33  # s39: _routing on 1 warp (shuffle-only reducti
 ROUTE_PDL = True  # s39: moe_route as a PDL secondary of _routing at T > 32 (see the moe_route patch); _routing as a PDL
 # secondary of the router (pr3 at T=128; _router_split at ROUTE_PDL_SPLIT_TOKENS)
 ROUTE_PDL_SPLIT_TOKENS = (16, 32)
+RG_XPRE = True  # n7s1: moe_routegathern loads its X row + gain before griddepcontrol.wait (X = FR output, done before _routing)
 RG_DEFAULT = False  # s52: T > 32 with GNORM: route + gathern in one launch (moe_routegathern; moe s33 RG); TUNE option "rg" at
 # T=256 (H100 ab v32 sl/full with twf_split 1022: -4.6/-7.1, with 66: -5.5/-8.3 us; alone ~tie). T=128: +1.8 us (the
 # bucketing is hidden on the side stream there; RG puts it on the main path)
@@ -1598,7 +1599,7 @@ _moe__CPP = _moe__CPP + "int64_t moe_set_ss(int64_t);"
 # producer's first weight stages overlap the rmsnorm + launch gap; the consumers wait before their first x read (x =
 # the rmsnorm's output, read with __ldcg: __ldg/.nc gets hoisted above griddepcontrol.wait, NOTES s14). Without the
 # PDL launch attribute the wait is a no-op. Host static g_tk2fpdl (moe_set_tk2fpdl) read by tk2f_go at launch/capture.
-_a = ("  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,\n")
+_a = ("  tk2f_consume<512, NC, NSTG, true, KPS, SA, PF, REL>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,\n")
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, '  asm volatile("griddepcontrol.wait;" ::: "memory");  // s27 TK2FX: x is the PDL predecessor\'s output\n' + _a)
 _a = """        if (GATED) {
@@ -1607,7 +1608,7 @@ _a = """        if (GATED) {
 """
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, _a.replace("__ldg", "__ldcg"))
-_a = "  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1) * 32, SMEM, st, false,"
+_a = "  return launch_k(moe_tk2f<NC, NSTG, KPS, DYN, FN, SA, GS, MRG, PF>, grid, (NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>()) * 32, SMEM, st, false,"
 assert _moe_CUDA_SRC.count(_a) == 1
 _moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "  const bool pdlx = g_tk2fpdl != 0;  // one-shot\n  g_tk2fpdl = 0;\n" + _a.replace("st, false,", "st, pdlx,"))
 _a = "\nstatic const char* g_upf = nullptr;"
@@ -1684,7 +1685,7 @@ _moe__CPP = _moe__CPP + "int64_t moe_gathern_launch(torch::Tensor, torch::Tensor
 # ids / X are PDL-producer data: __ldcg only (NOTES s14: .nc loads get hoisted above griddepcontrol.wait).
 _a = "int64_t moe_gathern_launch(torch::Tensor x, torch::Tensor gain, torch::Tensor meta, torch::Tensor sroutes,"
 assert _moe_CUDA_SRC.count(_a) == 1
-_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, r"""template <bool F32>
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "#define RG_XPRE %d\n" % int(RG_XPRE) + r"""template <bool F32>
 __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nroutes, int count, const void* X,
                                                         const float* __restrict__ gain, int* __restrict__ meta,
                                                         int* __restrict__ sroutes, uint32_t* __restrict__ XG, float eps, long xs) {
@@ -1692,11 +1693,12 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
   __shared__ float s_r[8];
   const int tid = threadIdx.x, tok = blockIdx.x, lane = tid & 31;
   if (tid < 32) { cnt[tid] = 0; pre[tid] = 0; }
+#if !RG_XPRE
   asm volatile("griddepcontrol.wait;" ::: "memory");
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   __syncthreads();
+#endif
   const int lim = tok * 8;
-  const int mye = tid < 8 ? __ldcg(ids + lim + tid) : -1;
   // this token's row: load + sum of squares while the counts settle
   const size_t row = (size_t)tok;
   float v[KD / 2 / 256][2];
@@ -1717,6 +1719,15 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
     v[i][0] = f.x; v[i][1] = f.y;
     ss = fmaf(f.x, f.x, fmaf(f.y, f.y, ss));
   }
+#if RG_XPRE  // n7s1: X (the FR GEMM output) and gain were complete before the PDL primary (_routing, a plain launch) began
+  float2 gp[KD / 2 / 256];
+#pragma unroll
+  for (int i = 0; i < KD / 2 / 256; ++i) gp[i] = __ldg(reinterpret_cast<const float2*>(gain) + sw[i]);
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  __syncthreads();
+#endif
+  const int mye = tid < 8 ? __ldcg(ids + lim + tid) : -1;
   for (int b = 0; b < nroutes; b += 256 * 8) {  // uniform trip count: __match_any_sync below
     int ev[8];
 #pragma unroll
@@ -1778,7 +1789,11 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
   uint32_t o32[KD / 2 / 256];
 #pragma unroll
   for (int i = 0; i < KD / 2 / 256; ++i) {
+#if RG_XPRE
+    const float2 g = gp[i];
+#else
     const float2 g = __ldg(reinterpret_cast<const float2*>(gain) + sw[i]);
+#endif
     const __nv_bfloat162 b = __floats2bfloat162_rn(v[i][0] * r * g.x, v[i][1] * r * g.y);
     o32[i] = *reinterpret_cast<const uint32_t*>(&b);
   }

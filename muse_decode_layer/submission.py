@@ -10488,6 +10488,7 @@ GNORM_DEFAULT = True
 ROUTING_WARPS_1_MIN_TOKENS = 33
 ROUTE_PDL = True
 ROUTE_PDL_SPLIT_TOKENS = (16, 32)
+RG_XPRE = True
 RG_DEFAULT = False
 BKT_DEFAULT = True
 BUCKET_SIDE_MAX_TOKENS = 16
@@ -15880,7 +15881,7 @@ int64_t moe_gathern_launch(torch::Tensor x, torch::Tensor gain, torch::Tensor me
 _moe__CPP = _moe__CPP + "int64_t moe_gathern_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double);"
 _a = "int64_t moe_gathern_launch(torch::Tensor x, torch::Tensor gain, torch::Tensor meta, torch::Tensor sroutes,"
 assert _moe_CUDA_SRC.count(_a) == 1
-_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, r"""template <bool F32>
+_moe_CUDA_SRC = _moe_CUDA_SRC.replace(_a, "#define RG_XPRE %d\n" % int(RG_XPRE) + r"""template <bool F32>
 __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nroutes, int count, const void* X,
                                                         const float* __restrict__ gain, int* __restrict__ meta,
                                                         int* __restrict__ sroutes, uint32_t* __restrict__ XG, float eps, long xs) {
@@ -15888,11 +15889,12 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
   __shared__ float s_r[8];
   const int tid = threadIdx.x, tok = blockIdx.x, lane = tid & 31;
   if (tid < 32) { cnt[tid] = 0; pre[tid] = 0; }
+#if !RG_XPRE
   asm volatile("griddepcontrol.wait;" ::: "memory");
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   __syncthreads();
+#endif
   const int lim = tok * 8;
-  const int mye = tid < 8 ? __ldcg(ids + lim + tid) : -1;
   // this token's row: load + sum of squares while the counts settle
   const size_t row = (size_t)tok;
   float v[KD / 2 / 256][2];
@@ -15913,6 +15915,15 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
     v[i][0] = f.x; v[i][1] = f.y;
     ss = fmaf(f.x, f.x, fmaf(f.y, f.y, ss));
   }
+#if RG_XPRE  // n7s1: X (the FR GEMM output) and gain were complete before the PDL primary (_routing, a plain launch) began
+  float2 gp[KD / 2 / 256];
+#pragma unroll
+  for (int i = 0; i < KD / 2 / 256; ++i) gp[i] = __ldg(reinterpret_cast<const float2*>(gain) + sw[i]);
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  __syncthreads();
+#endif
+  const int mye = tid < 8 ? __ldcg(ids + lim + tid) : -1;
   for (int b = 0; b < nroutes; b += 256 * 8) {  // uniform trip count: __match_any_sync below
     int ev[8];
 #pragma unroll
@@ -15974,7 +15985,11 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
   uint32_t o32[KD / 2 / 256];
 #pragma unroll
   for (int i = 0; i < KD / 2 / 256; ++i) {
+#if RG_XPRE
+    const float2 g = gp[i];
+#else
     const float2 g = __ldg(reinterpret_cast<const float2*>(gain) + sw[i]);
+#endif
     const __nv_bfloat162 b = __floats2bfloat162_rn(v[i][0] * r * g.x, v[i][1] * r * g.y);
     o32[i] = *reinterpret_cast<const uint32_t*>(&b);
   }
