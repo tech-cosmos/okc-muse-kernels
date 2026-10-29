@@ -3058,3 +3058,32 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   Attention board #1-#4 are ~15% faster than our attention (1233 vs ~1482 us/step), i.e. ~2.4% of the layer if it carried
   over; attention lane closed by moe n7s15/n7s16 and ~/attn s114/s125, so this is only a pointer for the lead.
 - main = v168 unchanged (checked a5b4ddab 2.1540x). 10-29 left: 14 checks / 7 submits.
+
+## night8 s1 (2026-10-29 ~21:10Z-, lead 21:05Z task): in-layer verify-SLIDING attention ORACLES (H100, no build, 0 judge runs)
+Tools: tools/n8/orc_mk.py (variants/orc_*.py text patches of submission.py), tools/n8/attn_orc.py (in-layer segment timer:
+qkv-GEMM end -> o-GEMM start, 4 rounds x 5 cold-L2 profiled graph replays, files interleaved; the 'replay' column is NOT
+comparable across oracles: garbage attention output changes routing -> expert time), tools/n8/stamp_mk.py + stamp_rd.py
+(per-CTA globaltimer stamps inside nvs, v16 path; nvs_dbg reads nv::g_st). v16 = nvs S=4 (128 CTAs) + _combine_hb (O_PF 0.5);
+v32 = nvscl (S=2, 2-CTA cluster DSMEM merge, no combine).
+| variant (us, median) | v16 sl attn | v32 sl attn |
+|---|---|---|
+| base | 13.4 | 15.0 |
+| A: consumers skip QK/softmax/PV (loads only) | 11.9 | 13.8 |
+| B: no _combine_hb | 10.1 | (n/a) |
+| AB | 9.5 | 13.7 |
+| C: KV rows L2-resident (same 64 rows every tile), real math | 12.8 | 13.3 |
+| E: nvs returns after barrier init (+ combine) | 4.9 | (patch missed nvscl) |
+| EB: empty nvs, no combine = launch floor incl. o launch | 1.8 | |
+| AB + no Q prologue / no V transpose / no partial stores / L2 KV | 9.4 / 9.3 / 9.3 / 8.9 | |
+| W: seq_lens + page-table window + KV window warmed in L2 before qkv (index_select) | 12.9 | 15.3 |
+| S=2 + 2-CTA cluster at v16 (O_PF off) / O_PF off alone / S=2 no cluster | 13.7 / 13.1 / 14.4 | v32 S=2 no cluster 16.9 |
+Stamps inside nvs at v16 (us after the first CTA's entry; base / warm W): page table staged 2.3 / 1.7; tile 0 ready 4.4 / 3.8;
+tiles 1-3 +0.7 each; consumer end 8.1 / 7.7; last CTA 8.6 / 8.3. Q prologue done at 1.9 (parallel to pt staging).
+Reading: the lead's oracle bound (loads + MMAs kept, merge/epilogue stripped) = v16 -3.9 (combine -3.3 of it), v32 -1.2:
+~5 us H100 total, but it's almost all the v16 combine. Inside nvs, math is 1.2-1.5, bytes 0.6-1.7, Q/transpose/stores
+~0.2 each. The rest is a serial per-CTA latency chain seq -> page table (2.3) -> first KV gather (2.1) -> 4 tiles at ~0.7,
+and warming it all in L2 cuts only ~0.6 (the gather hop stays ~2.1 us from L2: TLB / gather issue, not DRAM). A design
+with fewer, longer CTAs (one per (request, KV head), window resident, no split) lengthens that chain (S=2 cluster at v16
+already loses +0.6). Only the v16 combine is cuttable: a 4-CTA-cluster nvs (S=4 DSMEM merge, like nvscl) + O_PF port,
+expected ~-2 us v16 sl after cluster cost = ~0.08% score. Below the 4 us gate in practice; NOT built. Lane closed unless the
+lead wants that ~0.1% item queued for a bundle.
