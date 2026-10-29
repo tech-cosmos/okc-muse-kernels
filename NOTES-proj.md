@@ -2678,3 +2678,26 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   park with mbarrier complete_tx (no mid cluster barrier; needs a separate 53 KB park region, fits at NS=4: 226 KB),
   TMA-store epilogue: ~-1.5..2 us -> ~23.3 vs 25.0 = ~-1.7 us = ~0.08% layer, before the routing-side compaction and
   boundary changes, i-cache/compile cost of per-NT variants. Not worth a multi-session build: not continued.
+
+## night7 s9 (2026-10-29 08:34-09:30Z): self-pick (no lane after n7s8): native d1 FULL attention gate -> DEAD; 0 judge, 0 Modal
+- Why: layer n7s9 named d1/v1 full attention (_gd_full + _red_fin, H200 qkv end -> red_fin end 14.4 us vs 6.16 us random
+  gather floor) as the largest unowned pool (~0.5% d1+v1). Idea: 1 CTA per SM holds its whole KV slice in smem
+  (80K rows x 256 B / 132 = 152 KB), gathered pre-wait (PDL under qkv g13), then mma QK/PV, CTA merge, RED at ref max 0.
+- Built dev/n7s9/fa1.cu + fa1.py (test | bench | kvwarm): 132 CTAs x 512 thr, page table staged in smem, cp.async 16 B
+  gather into swizzled smem (K: chunk ^ (r&1)<<2, V: chunk ^ ((r>>1)&3)<<1, conflict-free fragment loads), QK/PV on
+  mma.sync m16n8k16 f16 (e4m3x2 -> f16x2 cvt exact; bf16-rounded q -> f16 exact; P f16; FP32 acc; d permuted so one
+  LDS.128 feeds 4 QK k-steps and one LDS.64 per token row feeds 8 PV n-tiles via prmt), warp max, CTA merge, red.add.v4
+  into 4 replicas at reference 0 (flag if |m| > 100 log2), ticket epoch counter, last CTA: v_scale, RMSNorm, sigmoid
+  gate, bf16 out, re-zero; the last CTA (fewest tokens) handles the new token (k RMS + FP8 store into the cache row).
+  Correct: 6 cases (ctx 10..80000, kv_scale 1/64, soft/normal) rel_l2 1.6e-3, FP8 cache rows bitwise.
+- H100 (graph, cold L2 read-flush, minus empty graph): fa1 18.3 us vs layer attn_src.kernel_fn (_gd_full+_red_fin)
+  13.7. Breakdown: loads only 10.5 (pt stage + gather; floor 7.86) | everything except loads 12.2 (cold code/pt/qkv
+  trips + compute + tail). L2-warm: loads 2.7, compute 3.6, +merge 4.0, +REDs+fence 5.6 (was 7.5 with scalar RED:
+  red.add.v4 = -1.9 us; 32 replicas worse than 4), +ticket/finisher ~2.0 -> 10.0. With ONLY the KV in L2 (kvwarm: a
+  gather pass first, i.e. what a KV_PF in qkv g13 would give): fa1 13.0 vs attn_src 10.9 (attn_src gains 2.9 from L2).
+- Verdict: DEAD. fa1's post-load serial phases (~7-8 us cold) exceed the whole margin; even fully pipelined (compute
+  under the gather) the bound is ~loader 8-10.5 + tail 3.6 = 11.5-14 vs 13.7 (<= ~-2 us H100, ~0.1% layer). The big
+  version (gather in smem under qkv) is blocked: qkv g13<2,4,1,8192,1> = 1024 thr x 60 regs (64 alloc) = the whole RF,
+  so nothing co-resides; a <= 56-reg g13 leaves 8K regs = a 4-warp fa1 (compute ~4x slower) and qkv still pays the
+  extra 20.5 MB (zero-sum HBM). Pitfall found: my diag modes >= 2 skipped the KV loads too (a 'cache store costs 6 us'
+  reading was that artifact); the fence before a ticket costs ~1.6 us when 132 CTAs RED the same 4 KB at once.
