@@ -3158,3 +3158,6 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   (48-64 MB > L2), and T=128 unpool is U-byte-bound -> no gain.
 - The lead's example refactor (codes as BF16 subnormals, scale folded into one BF16 multiplier, power-of-2 FP32 epilogue) is the
   production dq since s1 (see top of this file; n5s39 minimum search).
+
+## n7s19 (2026-10-29 06:30Z)
+No COORD change since lead 06:50Z task (n7s18 idea already posted). Waiting for the ~08:00Z pick. 0 judge runs, 0 Modal.

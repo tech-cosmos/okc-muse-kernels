@@ -1,6 +1,8 @@
 # STATE-moe
 
-## NOW (n7s18, 2026-10-29 ~06:22-06:50Z): lead 06:50Z task = post ONE big idea (no build): posted (COORD Requests n7s18); 0 runs
+## NOW (n7s19, 2026-10-29 06:30Z): waiting on the lead's ~08:00Z big-idea pick (n7s18 idea posted); nothing new in COORD; 0 runs, 0 Modal
+
+## WAS-n7s18 (n7s18, 2026-10-29 ~06:22-06:50Z): lead 06:50Z task = post ONE big idea (no build): posted (COORD Requests n7s18); 0 runs
 - Idea: skip tokens with 0 local experts in the T=256 unpool (17-21% of v32 tokens on layer routings, y=0 exactly). Derived bound
   -4.6..-5.9 us per v32 layer (~0.2% layer) if a custom N=kept-count GEMM matches nvjet; pooler half ~0 net (router must go first).
 - Lead's subnormal-code/folded-scale example = production since s1. Unpool in the v16 twm drain: dead on paper (U re-read).
