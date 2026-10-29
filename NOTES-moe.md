@@ -3382,3 +3382,6 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 
 ## n7s45 2026-10-29T13:01Z
 - Idle: moe paused per lead 12:45Z (no newer decision; ~/STOP-moe not yet touched). 0 judge runs.
+
+## n7s46 2026-10-29T13:17Z
+- Idle: moe paused per lead 12:45Z (no newer decision; ~/STOP-moe not yet touched). 0 judge runs.
