@@ -2974,3 +2974,13 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   lead's 07:05Z bundle (moe's T=256 unpool skip) since ~0.9 us/call x 4 loads is below judge noise.
 - Big idea posted (Requests, lead 06:50Z task): T<=8 early tk2f with pr1/pr8 ids release flag + DYN split, ~0.4-0.5%, 2 sessions.
 - 1 judge check (93027e57), 0 submits, 0 Modal. 10-29 left: 16 checks / 7 submits; Modal layer 6.2/15.
+
+## night7 s6 (2026-10-29 07:45Z-): v167 checked; hbm_fold summary posted; glue-fusion idea sized dead
+- CHECK 59013cf5 (v167, 1f12ceb) **2.1553x** (fixed-SGLang 2.1482; v166 2.1362, v165 2.1721, board 3e3b9fd3 2.1241 fixed):
+  d1 67.2/74.7, d16 127.4/205.6, d32 162.6/310.5, v1 108.2/123.4, v16 258.0/345.8, v32 316.7/494.5; < board 2.1580 -> not submitted.
+  v16 sl 258.0 and v32 sl 316.7 are our best ever for those shapes; d32 sl 162.6 drew slow (148.9 in v165's check).
+- Sized (H100 timelines, no build): fusing _routing into the pre-expert _rmsnorm_gain at T=16/32. d16 sl: pooler ends 58.2,
+  router 57.6, _routing 60.5, rmsnorm 58.9-61.4 (parallel, TUNE tk2fj off at d16 sl), tk2f 62.0; d32 sl: g30k pooler is the long
+  pole (67.2), routing done at 65.5. The two hand-offs already overlap: fused form <= ~1 us d16, 0 d32. Not built.
+- v1 sl H100: o (g30) 14.5-26.5, bnd ends 29.6, pr8 19.5-50.7 (pre-wait L2 prefetch already, pr8_npf 220), tk2f 51.1 (tk2fx PDL).
+- 1 judge check, 0 submits, 0 Modal. 10-29 left: 15 checks / 7 submits.
