@@ -3304,3 +3304,7 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 - d32 (T=32, tk2h): 10 routers x 3 inputs: t = 7.78 x distinct + 122 (r 0.98, resid sd 3.7, corr(resid, top count) 0.07):
   pure bytes, no structural fix. d16 not run (same tk2 family, max 16 tokens/expert).
 - Logs: tools/n7s36/*.log. Nothing queued for moe; layer main carries v169+v170 for the next board run.
+## n7s37 (2026-10-29 11:08Z - 11:12Z): idle; no lead decision after 10:40Z (tasks 1-4 done in n7s36)
+- d16 variance (left open in n7s36) closed on paper: tk2 family like d32 (pure bytes, corr(resid, top count) 0.07) with <= 16
+  tokens/expert, so no hot-expert split to fix. Correction to n7s36: its v16time.py was not committed; logs are in /tmp/n7s36
+  (d32.log, v16.log, hot128*.log), not tools/n7s36. 0 judge runs, 0 Modal, no code.
