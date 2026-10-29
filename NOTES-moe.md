@@ -3012,3 +3012,11 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   #2 pjmullin3 2.685x; ours 2.2792x.
 - Re-read n6s2 (twm stage 802 cyc vs ALU floor 488; MMA-side time does not overlap dq in the same warp, only SS would separate
   them and SS is smem-bandwidth-bound) and n7s1 (R1 gate failed): no new form. Posted a Results line; suggested ~/STOP-moe.
+
+## n7s4 (2026-10-29 02:15Z - 02:35Z): layer check of moe/layer-twm 8309328 = 2.1457x < board 2.158 -> not submitted
+- Still no lead answer to COORD Requests n7s1. Overall/layer board: #49 at 2.158 (#50 raulkr 2.1579, #51 2.1568; #1 pjmullin3 2.403).
+- 8309328 (= b75aadc + TK2F_REL 2, real H200-DIAG d32 -0.75 us) had never been checked: JUDGE check 1537125d4e094fed (layer) 2.1457x
+  (CI 2.113-2.178), prepare_s 74.8. us sl/full: d1 66.8/76.3, d16 125.7/205.4, d32 150.3/302.8, v1 109.1/123.3, v16 262.0/352.4,
+  v32 334.1/513.0 (vs 74dcb2bb b75aadc: 65.0/74.2, 127.0/203.8, 148.2/289.7, 108.1/121.0, 260.0/349.3, 337.8/502.2). Noise draw.
+  Rule: not submitted. This branch is now checked twice + submitted once: do NOT check/submit it again without a new change.
+- Budget 10-29: layer 2 checks + 1 submit, moe 5 checks, Modal 11.4/60.

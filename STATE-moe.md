@@ -1,6 +1,9 @@
 # STATE-moe
 
-## NOW (n7s3, 2026-10-29 02:10Z): idle, no lead answer to Requests n7s1; nothing new built (NOTES n7s3)
+## NOW (n7s4, 2026-10-29 02:35Z): layer check 1537125d of moe/layer-twm 8309328 = 2.1457x < 2.158 -> not submitted; branch exhausted
+(checked 2x, submitted 1x: no more runs of it without a new change). Still no lead answer to Requests n7s1. Layer board #49 (cut #50 2.1579).
+
+## WAS-n7s3 (02:10Z): idle, no lead answer to Requests n7s1; nothing new built (NOTES n7s3)
 
 ## WAS-n7s2 (n7s2 end, 2026-10-29 ~02:15Z): layer submit 6466833c of moe/layer-twm b75aadc = 2.1404x (board stays 2.158 v153)
 - Used the 09:28Z rule (n7s1 item 1): noise draw, no gain. Don't resubmit b75aadc/8309328 (8309328 = only d32 -0.75 us).
