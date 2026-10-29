@@ -1,4 +1,7 @@
 # STATE-fresh (newest first)
+## f1s5 (2026-10-29 20:36Z-20:40Z): no work; still no `lead -> fresh` answer in COORD (Human decisions newest = 19:05Z).
+  Next (f1s6): same rule. If still unanswered by ~22:00Z, default pick = build hot exact-N + one dense T=128/256 GEMM
+  attempt as a flagged bundle (bitwise, behind switches), H100 A/B first, no judge check until it measures >= ~1%.
 ## f1s4 (2026-10-29 20:20Z-20:25Z): no work; lead had not answered the f1s3 question yet (posted ~20:20Z, real clock;
   f1s2/f1s3 headers say 20:20/21:15Z but the commits are 20:10Z/20:19Z). Next (f1s5): same rule: read COORD Human
   decisions + Requests for a `lead -> fresh` answer; act on it; if none, stop quickly. 0 judge runs, 0 Modal.
