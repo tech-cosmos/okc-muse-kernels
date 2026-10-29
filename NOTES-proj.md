@@ -2550,3 +2550,15 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Verdict: R2's whole prize in-layer is <= ~1 us per d16/d32 layer (~0.5% of those 4 shapes, ~0.2% score) BEFORE paying its
   grid barrier (~1.5 us, REDESIGN's own number) -> net <= 0. Agrees with moe n7s1 (<= ~1 us) and layer s42 (column-split
   norm3 <= ~1 us). Standalone muse_moe bs1-32 gains (norm2 3.2 us there) do not carry: the layer already hides/fuses it. Not built.
+
+## n7s2 (2026-10-29 04:59Z - ~05:20Z): self-picked item while layer's H200 per-kernel table (lead 04:50Z) is pending: T=256 unpool L2 pre-fill BOUNDED, not built; 0 judge runs, 0 Modal
+- Idea: at T=256 the unpool is cuBLAS lt (67 MB BF16 [8192,4096]) with no PDL pre-wait prologue, so unlike T=128's g30 (NORME_TRIG,
+  layer s101) it cannot use twm's ~10-26 us drain. Prefetching part of its W into L2 during the drain (UPF-style, but twm stragglers
+  are consumer-bound, not stream-bound like tk2f's, which is why UPF/UPF2/UPF3 died at T<=32) could have been different.
+- Bound (dev/n7s2/l2bound.py, H100, graph: 256 MB flush -> read the first P MB of W -> F.linear m256; gemm = T(all) - T(flush+pf)):
+  P 0/10/20/30/40 MB -> 34.3/33.1/31.9/29.8/30.0 us (k-prefix of every row), 34.5/34.1/31.9/30.3/30.2 (row prefix). (The pf reads via
+  .float() also write a float copy through L2, so this slightly understates; still) the m256 unpool is near COMPUTE-bound
+  (17.2 GFLOP in 34 us ~ 0.5 PF/s); W fully hot saves <= ~4-5 us/call H100, less on the H200 (faster HBM, same tensor rate).
+- Value: <= ~4 us on v32 sl/full (335/512 us) = ~0.15% score before any straggler/HBM-competition cost. DEAD, not built.
+- Same reasoning closes the other T=256 GEMMs (qkv ~9.7 GFLOP, FR pooler 17 GFLOP): compute-bound at m256, 12-bit bytes don't help.
+- => proj still has no >= 1% item; waiting for layer's H200 table to name a projection/glue piece (COORD Requests n7s1).
