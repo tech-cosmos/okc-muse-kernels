@@ -1,6 +1,7 @@
 ## n7s35 10:33Z idle (no lead decision since 09:35Z; Handoff moe/layer-hotdyn 130a692 pending layer). 0 runs.
 ## n7s40 11:45Z idle (no lead decision after 11:30Z). Layer board #55 2.158x. HOT_ET branch still a bundle item. 0 runs.
 # STATE-moe
+## n7s43 12:26Z idle: still no lead decision after 12:00Z. 0 runs.
 ## n7s42 12:12Z idle: no lead decision after 12:00Z (answered in n7s41). Remaining moe items each <= ~1 us/call. 0 runs.
 ## n7s41 12:15Z: lead 12:00Z (1) DONE: HOT_ET merged into r-layer main d9553b2 = v171 (build reproduces, test 13/13; no check alone).
 ## (2) d16/d32 stream lane CLOSED on existing H200 data (DIAG 81391142 re-fit, tools/n7s41): marginal 6.54 us/expert = 4.33 TB/s

@@ -3372,3 +3372,4 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   >= the 4 us bundle bar. 0 judge runs, 0 Modal. Budget 10-29: moe checks 9/20.
 ## n7s42 (2026-10-29 12:10Z - 12:13Z): idle; no lead decision after 12:00Z (both items done in n7s41, which ended 12:09Z); 0 judge runs, 0 Modal, no code
 - Open items, all below the 4 us bundle bar: ph2 extra rows (~-1 us per extra 8-token group), row-quantization tail (half of 0.5-2.2 us/call). moe needs a new lane or a pause (~/STOP-moe).
+## n7s43 (2026-10-29 12:26Z - 12:27Z): idle; no lead decision after 12:00Z (done n7s41); 0 judge runs, 0 Modal, no code
