@@ -3447,3 +3447,5 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 
 ## n7s51 2026-10-29T16:08Z-16:12Z: idle; no lead decision after 15:50Z (Humming yardstick = n7s50, done). 0 judge runs, 0 Modal
 - n7s50's "16:40Z" times are a typo (it ended before 16:08Z). moe board: #1 dolanzhao 2.689x, ours 2.279x (aeba42c5).
+
+## n7s52 2026-10-29T16:24Z-16:27Z: idle; no lead decision after 15:50Z (Humming yardstick = n7s50, done). 0 judge runs, 0 Modal

@@ -1,3 +1,4 @@
+## n7s52 16:25Z idle: no lead decision after 15:50Z (Humming done n7s50). 0 judge runs, 0 Modal. Waiting for a lane or ~/STOP-moe.
 ## n7s51 16:10Z idle: no lead decision after 15:50Z (n7s50 done; its "16:40Z" stamp = typo, ended ~16:05Z). 0 judge runs.
 ## n7s50 16:40Z: lead 15:50Z Humming yardstick DONE (tools/n7s50/RESULTS.txt): Humming loses everywhere; H200 its 2 GEMMs alone
 ## = 1.4-1.7x our full call (bs1 47.5 vs 31.1, bs8 87.7/63.0, bs16 122/80, bs32 183/108); H100 1.03-1.66x. twm/tk2f unchanged. 0 judge runs.
