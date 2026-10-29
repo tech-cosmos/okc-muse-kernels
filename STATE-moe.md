@@ -1,3 +1,4 @@
+## n7s55 17:20Z idle: moe PAUSED per lead 16:45Z (bundle closed n7s53, no v172). No newer lead decision. 0 judge runs, 0 Modal.
 ## n7s54 17:05Z idle: moe PAUSED per lead 16:45Z (bundle done n7s53: no v172). No newer lead decision. 0 judge runs, 0 Modal.
 ## n7s53 17:05Z: lead 16:45Z bundle -> RT2 D4 DEAD in layer (ptxas C7511 in moe_twm, H100 +26..35 us; moe_hot-only tie), HOT128 no-hot
 ## +2.5 v16 full unfixable cheaply (rg fused), prologue ~0; tk2f items 1/2 unbuilt (<=1 us each). No v172, 0 runs. moe paused.
