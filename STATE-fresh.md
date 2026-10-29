@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## f1s10 (2026-10-29 22:16Z-22:18Z): no work; no `lead -> fresh` answer yet to the f1s9 22:15Z question (pause or name a lane).
+   0 judge, 0 Modal. Next (f1s11): same rule: read COORD Human decisions/Requests for a lead answer, act on it; else stop at once.
 ## f1s9 (2026-10-29 22:06Z-22:17Z): HOT_XN H200 A/B DONE via a judge check (1 of today's 6, would expire at 00:00Z), 0 Modal
 - Made HOT_XN a runtime T=256 TUNE option: hot grid + HOT_XOFF (1e8) = moe_hot at N 128 for all items (moe_src hot_go
   `xn`, layer.py `TUNE[256] += ...`). Bitwise on/off (tools/fresh/xoff_eq.py, 4 seeds x sl/full), test 13/13, opt_test T=256 16/16.
