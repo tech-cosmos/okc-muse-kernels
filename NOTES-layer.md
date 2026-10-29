@@ -3008,3 +3008,19 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - n2u flag spin (all 512 threads polling ld.acquire, then 1 thread + __syncthreads) cost ~+4 us in the d1 tail: removed (reads
   after the wait instead).
 - 0 judge runs, 0 Modal. main = v168 = v167 + IDF option (off; build differs only in the off-path n2u/tk2f/pr1 text).
+
+## night7 s8 (2026-10-29 08:11Z-): IDF lane CLOSED on the right mechanism (pooler-progress throttle + n2u diagnostic); 0 judge runs
+- Built (not kept, /tmp/n7s8): IDF + throttle: pr1's routing release became red.release.add 1<<20 and every pr1 pooler block
+  atomicAdd(rel, 1) at its end; moe_tk2f spins until rel >= (1<<20) + IDF_THR (then __threadfence), so early tk2f CTAs stream
+  W only once THR of the 100 pooler blocks (pr1_rb 32) are done. Correct (replay_test d1 0/10 x seeds 11,7, THR 85).
+- H100 ab_files 6 rounds, d1 sl | full: base 85.70 | 106.18; THR 0 90.00 | 109.45; 50 89.50 | 109.54; 85 90.45 | 109.85;
+  97 89.60 | 109.93. The throttle changes nothing => n7s7's 'pr1 slowed by early tk2f W stream' was WRONG.
+- H100 timelines d1 sl base | THR97: pr1 end 44.6 | 47.0, tk2f end 79.4 | 82.0 (tk2f end - pr1 end 34.8 | 35.0 = same),
+  n2u end - tk2f end 4.4 | 8.3 (!), layer 85.7 | 92.2. Diagnostic variant: IDF THR97 but n2u gets no idf pointer (reads the
+  routing as base: plain loads; under IDF possibly racy, timing only): d1 sl base 84.49 | IDF 89.41 | IDF+n2u-base 85.14.
+  So ~4.3 us of IDF's loss is n2u's post-wait __ldcg routing path (in-kernel, not HBM). Same diagnostic at THR 0/50/97, 6 rounds:
+  d1 sl 86.18 | 86.48 / 86.47 / 86.77, full 105.98 | 106.14 / 105.95 / 105.90 = TIE at best.
+- => Early tk2f at T=1 buys nothing even with free n2u reads: tk2f can't compute before pr1's pooled x + rmsnorm, and its ring
+  head start doesn't shorten the critical path (tk2f end - pr1 end unchanged). DYN would need the same x, so the T=1
+  pr1->tk2f bubble is not recoverable by launch order. IDF stays off (IDF_DEFAULT comment updated); throttle not committed.
+- 0 judge runs, 0 Modal. main = v168 (code unchanged except a comment).

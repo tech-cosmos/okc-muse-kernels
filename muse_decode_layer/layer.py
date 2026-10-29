@@ -3767,6 +3767,8 @@ TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rms
 TK2FJ_TOKENS = (16, 32)  # s27: the same at T = 16/32 after joining the router's side stream before the rmsnorm
 TK2FJ_DEFAULT = True  # H100 ab_files 5 rounds: d16 212.4/313.3 -> 209.9/313.8, d32 205.7/433.8 -> 203.7/432.0 us
 IDF_DEFAULT = False  # n7s7 IDF (T = 1): early moe_tk2f on pr1's routing release flag (see the moe_set_idf patch). TUNE option "idf"
+# n7s8: DEAD. With n2u reading the routing as in base, IDF ties base (H100 d1 sl/full, also with tk2f throttled until 0/50/97
+# of 100 pr1 pooler blocks finished); the n7s7 +3 us was n2u's post-wait __ldcg routing path (+4.3 us), not HBM contention.
 TK2FX_DEFAULT = True  # H100 ab_files 6 rounds: d1 90.4/112.8 -> 89.9/111.8, v1 154.0/167.7 -> 152.1/167.8 us
 NU8_KB = 512
 NU8_X = True  # sums of squares in nu8 (blocks 0..7 + a counter) instead of moe_tk2f PF 20 (H100: its epilogue +2.4 us)

@@ -2,6 +2,9 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night7 s8 (10-29): IDF lane CLOSED: pooler-progress throttle (tk2f waits for 0/50/85/97 of 100 pr1 pooler blocks) = no change
+  (all +4 us); the loss is n2u's post-wait routing reads (+4.3 us); with base n2u reads IDF ties base (H100 d1, NOTES n7s8).
+  Early tk2f at T=1 is dead by mechanism (x not ready before pr1+rmsnorm). 0 runs. main = v168.
 night7 s7 (10-29): main = v168 = v167 + IDF option (off): pr1 routing release flag + early moe_tk2f at T=1 (flag spin,
   rmsnorm TRIG at start, n2u reads routing after its wait, tail boundary resets flag). Correct (replay 0/80 on, 0/72 off), but
   H100 d1 +3 us (sl 89.2 vs 86.0, full 109.3 vs 106.3): early tk2f CTAs slow pr1's pooler stream ~3 us. DEAD unless moe's DYN
