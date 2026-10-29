@@ -130,3 +130,19 @@ Chain oracle again with the fixed code (ring depth NSTG 2/3/4/10 = 4/6/8/21 MB):
 VERDICT for H1 as "persistent megakernel": not supported on the H100 (persistent = PDL + prefill). The hop cost is real
 (~3-8 us), but its parts (drain spread, queueing behind bytes in flight, the activation fetch) are the same in either design.
 Open, cheap: the same two tools on the H200 (knee in MB, hop cost) before closing H1 for good: ~2 GPU-min.
+
+## O1 on the H200 (Modal, 0.3 GPU-min, same binaries): H1 CLOSED
+hop.cu: in flight 0 / 2.2 / 4.3 / 6.5 / 8.7 / 13.0 / 17.3 MB -> stream - / 3.00 / 4.31 / 4.57 / 4.61 / 4.63 / 4.63 TB/s;
+counter seen 0.51 / 0.51 / 0.70 / 0.80 / 0.86 / 0.83 / 0.86 us; 32 KB x in every CTA 1.89 / 2.08 / 2.82 / 3.74 / 4.64 /
+6.27 / 8.38 us. Knee ~6.5 MB (H100 ~4.3), then +~0.45 us of hand-off latency per extra MB.
+chain_oracle NOMATH: NSTG 2 (4 MB) B 106.0 / A-PDL 104.1 / plain 124.3; NSTG 10 (21 MB) B 101.6 / A-PDL 101.3 / plain 115.8
+(bytes 44.5 us at 4.3). With math NSTG 2: B 151.4 / A-PDL 161.7 / plain 171.2. B beats PDL only when the consumer math is
+slow (prefill overlaps compute), which our tuned kernels don't need.
+=> A persistent / HBM-never-idle layer kernel buys nothing over today's PDL kernels with pre-wait prefill, on either GPU.
+Hop costs are drain spread + queueing behind bytes in flight + the activation fetch, and both designs pay them.
+Also checked: v16 unpool W L2 pre-fill during the twm drain: H200 W-free oracle already on record at -3.4 us/v16 (proj n5s14).
+
+## Where the excess is at v16/v32 (largest: 112-188 us/layer), from the H200 timeline, v32 sl, for the next pick
+qkv nvjet 19 us for 9.7 GFLOP (~12 at 800 TFLOP/s) | o 9.4 for 4.3 (~5.4) | pooler+router 33.4 for 19 (~24) | unpool 27
+for 17.2 (~21.5) => dense GEMMs ~25 us over a good-GEMM rate (wave quantization at M=256: qkv has 36 128x128 tiles on 132 SMs)
+| twm+moe_hot ~205 vs ~140 stream => ~65 | glue (routing 3.6, routegather 7.3, moe_norm ~25, 2 boundaries 16.5, attention 15) ~30.

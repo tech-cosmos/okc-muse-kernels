@@ -11,10 +11,12 @@
 - Then isolated one hop (tools/fresh/hop.cu, H100): counter 0.5 us + 32 KB x 1.5 us idle; HBM saturates at ~4.3 MB in
   flight, and each extra MB adds ~0.7 us of hop latency (bufferbloat = proj s39's finding, so not new). The chain at shallow rings:
   persistent still = PDL. H1 "persistent megakernel" NOT supported on the H100; the 17 us x-build was in-flight queueing.
+- H200 (Modal 0.3 GPU-min): knee ~6.5 MB in flight; persistent = PDL (101.6 vs 101.3 NOMATH). H1 CLOSED. FRESH.md 'O1 on the H200'.
 ## Next (f1s2)
-1. Decide H1 on the H200: run hop.cu + chain_oracle.cu on Modal (~2 GPU-min; nvcc in the judge image?). If the H200
-   knee/hop numbers match the H100's, close H1 and say so in COORD.
+1. O2: size and locate the v16/v32 excess on the H200, in-layer: twm stream-only / dq-free / MMA-free (find moe's DIAG
+   switches in moe_src.py first), plus per-kernel rooflines (dense GEMMs at M=128/256 look ~25 us over a good-GEMM rate at v32).
+2. Then pick ONE build for session 3 and post it as `fresh -> lead` in COORD Requests.
 2. Modal H200 (after 00:00Z; my cap 20 GPU-min/day; shared ledger was 50.3/60 on 10-29): chain + hop micro.
 3. If hop >= ~2 us under load: design = fewer hops (redundant norms/routing in consumers), list the layer's hops per load.
    Post the table + pick under COORD Requests as `fresh -> lead`.
-## Budget 10-29: layer checks 0/6 used, Modal 0/20.
+## Budget 10-29: layer checks 0/6 used, Modal 0.3/20 (shared ledger 51/60).
