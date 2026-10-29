@@ -205,3 +205,29 @@ Re-read the H200 timeline (dev/n7s1_tl_h200.txt) per segment instead of per load
 - Wave/SM balance at v32: twm grid = 132 with dynamic tickets, so the SMs moe_hot frees are refilled; not an idle gap.
 Conclusion: every lever this fresh review produced (H1 persistent chain, H2 twm consumer, hot exact-N, dense ingest, hot/twm
 balance) is closed or below ~1% on the record, and I can't name a flaw in those measurements. Nothing to build here.
+
+## f1s6 (2026-10-29 20:52Z-): lead 20:50Z BUILD: (1) CUTLASS dense T=128/256 GEMMs, (2) hot exact-N
+### (1) CUTLASS sm90 BF16 GEMM gate: FAILS on the H100 (not shipped, no H200 run)
+- Image: CUTLASS headers are not in a package I can confirm from here (deep_gemm 0.2.1 / flashinfer 0.7.0 / tilelang are in
+  the image, proj s25 `_diag_ext`; their bundled cutlass include dirs unverified). Moot: the gate failed first.
+- tools/fresh/cutlass/cg.cu (CollectiveBuilder, swap-AB: D^T[N,tok] = W[N,K] x^T, K-major both; knobs TM TN TK CM CN,
+  SCHED coop/pingpong, SK persistent/stream-K, OUTF32; runtime mode: 1x = stream-K splits/decomp nondeterministic, 10x
+  = explicit split-K as a batch of K slices into FP32 slabs + torch reduce, 20x = same with W repacked slice-major),
+  build.sh (35 s/variant, parallel), cgb.py (cold-L2 graph A/B vs F.linear and the layer's LT_CFG cuBLASLt pick).
+- Pitfalls: stream-K/split-K workspace flags must be zeroed before EVERY launch (else the 2nd launch spins forever);
+  Deterministic reduction serializes the splits; pingpong + stream-K doesn't build. Sanity: 8192x4096x8192 = 729 TFLOP/s
+  (c256), so the builds are healthy; small M is the problem.
+- H100 us (best CUTLASS of 8 builds x 3 modes | lt pick): qkv m128 25.1 | 17.8, m256 26.8 | 19.7; o m128 10.9 | 9.6,
+  m256 13.0 | 11.6; pool m128 32.3 | 27.3, m256 32.3 | 30.1; unp m128 28.2 | 26.9, m256 31.5 | 29.9. Raw /tmp/fcg/sweep1.txt.
+  Persistent 128x128 qkv m128 (18 tiles) = 41 us = ~100 GB/s per CTA; split-K 4..16 slices 29-41 us (the 2nd wave + the
+  slab reduce eat the gain); W repacked slice-major (contiguous boxes) = no change, so it is not DRAM page locality.
+  cuBLASLt's nvjet (same TMA warp-specialized design, tuned) is simply better here; with DeepGEMM (proj s25) and own
+  g22/g23 (proj s16/s28) also losing, the T=128/256 dense GEMM lane has no public or own kernel ahead of cuBLASLt.
+### (2) hot exact-N: BUILT behind HOT_XN (moe_src.py), default 16; H100 neutral, H200 A/B pending
+- moe_hot (NH 128: experts with 65..128 tokens at T=256) dispatched each item at wgmma N = nv rounded up to 16 (80/96/112/128;
+  HOT_XN 8 = 72..128 step 8; 0 = the old N 128). The x box stays 128 rows; only the wgmma N and the accumulator count change.
+  _gen_wgmma now emits every N 8..128 (adds 104/112/120). Bitwise = HOT_XN 0 at verify 32 sl+full (files_eq: x16 4 seeds,
+  x8 2 seeds). Bench routings: hot experts 91/74, 97/73, 94/76 tok -> x16 drops ~80 padded tokens per call (moe n5s21
+  model: full exact-N ~-3.7 us per v32 call on the H200; its N104 probe measured -2.3).
+- H100 ab_files verify 32, 5 rounds (base / x16 / x8): sl 368.5 / 367.5 / 367.9, full 621.8 / 624.4 / 625.0 = noise (the
+  H100 is DRAM-bound at v32, moe n5s21: not a proxy). Needs the H200.

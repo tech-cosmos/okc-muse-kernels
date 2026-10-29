@@ -7241,6 +7241,7 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 #define TWM_TL 0
 #endif
 #ifndef HOT_EMU
+#define HOT_XN 16  // fresh f1s6: moe_hot (NH 128) items at wgmma N = nv rounded up to HOT_XN (16: 80/96/112/128; 0 = N 128 always)
 #define HOT_ET 1  // n7s39: moe_hot (per > 0) triggers moe_twm (hx) before its own wait; twm polls meta[67] bit 30
 #define HOT_EMU 0  // s29: H200-proxy emulation in moe_twm/moe_hot (tests only; see moe_twm)
 #endif
@@ -7816,8 +7817,28 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int g2 = item >= n13, it = g2 ? item - n13 : item, nrb = g2 ? HN::NRB : HG::NRB;
     const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e], nv = s_off[e + 1] - off;
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
-    tw_item<2, 1, NH, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb,
-                                                           gsc, sroutes, g2 ? Y : Inter, g2);
+#define HOT_ITEM(NN) tw_item<2, 1, NN, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, \
+                                                                           nv, off, rb, gsc, sroutes, g2 ? Y : Inter, g2)
+    // fresh f1s6 HOT_XN: the padded tokens' MMA work (moe n5s21: N 128 for 65..128-token experts) is skipped; the x box
+    // stays 128 rows, so only the wgmma N and the accumulator count change (rows >= nv were never stored: exact)
+    if constexpr (NH == 128 && HOT_XN == 16) {
+      if (nv <= 80) HOT_ITEM(80);
+      else if (nv <= 96) HOT_ITEM(96);
+      else if (nv <= 112) HOT_ITEM(112);
+      else HOT_ITEM(128);
+    } else if constexpr (NH == 128 && HOT_XN == 8) {
+      if (nv <= 72) HOT_ITEM(72);
+      else if (nv <= 80) HOT_ITEM(80);
+      else if (nv <= 88) HOT_ITEM(88);
+      else if (nv <= 96) HOT_ITEM(96);
+      else if (nv <= 104) HOT_ITEM(104);
+      else if (nv <= 112) HOT_ITEM(112);
+      else if (nv <= 120) HOT_ITEM(120);
+      else HOT_ITEM(128);
+    } else {
+      HOT_ITEM(NH);
+    }
+#undef HOT_ITEM
     if (!g2) {
       asm volatile("fence.proxy.async.global;" ::: "memory");
       asm volatile("bar.sync 1, 256;" ::: "memory");
@@ -9562,7 +9583,7 @@ int64_t moe_norm3_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw,
 """
 def _moe__gen_wgmma():
     out = ["template <int N> __device__ __forceinline__ void wgmma_bf16(float* d, const uint32_t* a, uint64_t desc);"]
-    for n in list(range(8, 104, 8)) + [128]:
+    for n in range(8, 136, 8):
         na = n // 2
         dl = ", ".join(f"%{i}" for i in range(na))
         al = ", ".join(f"%{na + i}" for i in range(4))

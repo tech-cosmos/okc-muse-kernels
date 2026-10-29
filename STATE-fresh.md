@@ -1,4 +1,14 @@
 # STATE-fresh (newest first)
+## f1s6 (2026-10-29 20:52Z-21:30Z): lead 20:50Z = BUILD (1) dense T=128/256 GEMMs via CUTLASS, (2) hot exact-N. 0 judge, 0 Modal
+- (1) CUTLASS sm90 gate FAILS on the H100: best of 8 builds x 3 modes loses to the LT_CFG cuBLASLt pick on all 8 shapes
+  (qkv m128 25.1 vs 17.8, m256 26.8 vs 19.7; o +1.1/+1.4; pool m128 32.3 vs 27.3, m256 32.3 vs 30.1; unp +1.3/+1.6 us).
+  Not shipped. Tools tools/fresh/cutlass (cg.cu, build.sh, cgb.py; CUTLASS 4.4.2 headers at /tmp/cutlass). FRESH.md f1s6.
+- (2) hot exact-N BUILT: moe_src.py HOT_XN 16 (default on; 0 = old). Bitwise vs 0 at verify 32; bench test 13/13. H100 A/B neutral (DRAM-bound proxy). Commit on branch fresh.
+## Next (f1s7, after 00:00Z): H200 A/B of HOT_XN 0 vs 16 at verify 32 (~6-8 GPU-min):
+   cp submission.py /tmp/fx_x16.py; sed 's/#define HOT_XN 16 /#define HOT_XN 0 /' submission.py > /tmp/fx_base.py;
+   python tools/h200.py muse_decode_layer base=/tmp/fx_base.py cand=/tmp/fx_x16.py --cmd 'python bench.py bench submission.py "verify 32"' --rounds 2
+   If x16 <= -2 us on v32 sl+full: post Handoff (lead merges, bundles into a check). If neutral: set HOT_XN 0 and drop.
+   Dense GEMM lane: closed for CUTLASS; nothing else queued from it.
 ## f1s5 (2026-10-29 20:36Z-20:40Z): no work; still no `lead -> fresh` answer in COORD (Human decisions newest = 19:05Z).
   Next (f1s6): same rule. If still unanswered by ~22:00Z, default pick = build hot exact-N + one dense T=128/256 GEMM
   attempt as a flagged bundle (bitwise, behind switches), H100 A/B first, no judge check until it measures >= ~1%.
