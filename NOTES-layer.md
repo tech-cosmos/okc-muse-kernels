@@ -3035,3 +3035,14 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   unowned layer-side pool. On paper a native kernel needs tensor-core QK/PV (scalar FP32 QK+PV = ~5.7 us of FMA per SM at
   16 q heads x 80K x 64, the same as the gather floor) and an fp8 V transpose for the PV B fragments (byte LDS = ~6 us):
   this is where ~/attn s73's cfl lost. Multi-session; not started without a lead assignment.
+
+## night7 s10 (2026-10-29 08:32Z-09:20Z): v168 (main, never checked) judge check; no build
+- Re-read the lane record (d1 full _gd_full: ~/attn s118/s119 + moe s32-s35 'all-L2' -1.2 us = latency chain, not bytes;
+  T=8 pr8 already mma.sync + 2-instr DEC3 decode): no new lever >= 0.3% found; nothing built.
+- main v168 (6897e13): bench test 13/13, validate --quick ALL OK (replay 0/240, route 0/240, fuzz 0/58, cold prepare 74.6 s).
+- CHECK a5b4ddab **2.1540x** [2.122, 2.186] (fixed-SGLang 2.1343; v167 2.1502): d1 67.3/76.6, d16 129.4/208.5, d32 154.3/297.8,
+  v1 109.6/123.3, v16 267.6/347.2, v32 330.4/503.8 = noise vs v167 (IDF plumbing off costs nothing). < board 2.158: not submitted.
+- FYI: 'layer g30kgx dropped (build or records): pooler 32 104' appears in 3 of the last ~12 judge logs (af87d466, aba95f63,
+  a5b4ddab), never locally: the g30kgx build fails now and then on the judge host (records are deterministic). Fallback is the
+  plain g30k pooler (tuner picks between them anyway, ~1 us at T=32); not a correctness issue. Worth a look if T=32 pins rely on it.
+- tools/fixed_sglang_score.py: added a5b4ddab. 10-29 left: 14 checks / 7 submits.

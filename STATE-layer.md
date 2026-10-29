@@ -2,6 +2,8 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night7 s10 (10-29): main v168 checked a5b4ddab 2.1540x (fixed-SGLang 2.1343) < board 2.158: not submitted. No build (no lever
+  >= 0.3% found). Judge sometimes drops g30kgx (build flake, 3/12 logs; graceful fallback). 10-29 left: 14 checks / 7 submits.
 night7 s9 (10-29): no build, 0 runs. v1 T=8 o post-attention latency (H200 5.9 sl / 7.6 full us) re-sized = closed
   (pr8 end is set by its own pre-wait W stream, s88 / n5s5). Layer lane: nothing >= 0.3% left; d1/v1 full attention native
   kernel (~0.5%, multi-session, s73 lost) needs a lead assignment. main = v168 unchanged.
