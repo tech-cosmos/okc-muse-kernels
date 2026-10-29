@@ -1,6 +1,8 @@
 # STATE-moe
 
-## NOW (n7s6, 2026-10-29 02:45Z): idle, no lead answer to Requests n7s1; 0 runs. Branch moe/layer-twm exhausted (n7s4).
+## NOW (n7s7, 2026-10-29 03:00Z): idle, no lead answer to Requests n7s1; 0 runs. Layer board #49 (2.158; #1 2.403).
+
+## WAS-n7s6 (02:45Z): idle, no lead answer to Requests n7s1; 0 runs. Branch moe/layer-twm exhausted (n7s4).
 
 ## WAS-n7s5 (02:40Z): idle (same)
 
