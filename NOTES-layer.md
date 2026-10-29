@@ -2911,3 +2911,10 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   (fits smem at 132 CTAs), compute pipelined per arriving chunk, and red's atomics merge (0.3-0.4 us) not a two-level merge.
   Multi-session, history of losses: not started.
 - Modal: layer 6.2 / 15 GPU-min used 10-29 (this session 1.2 + 2.5). 0 judge runs. Main unchanged (v164).
+- v165 (d2bb0c2) = v164 (RG_XPRE) + proj n7s3 BNOS handoff (r-proj e11cc44 muse_bf16_proj/dev/n7s3/bnos_layer.patch, applied to
+  layer.py with patch -p0, build.py): T=256 bnd1 skips its 8 MB FP32 stream store (stores rb per row), bnd2 recomputes it bitwise.
+  test 13/13; files_eq: v32 bitwise = main (other diffs = the known atomics nondeterminism, main vs main differs at v1 sl too);
+  H100 ab_files 4 rounds v32 sl 373.2 -> 370.7, full 625.4 -> 623.8, v1/v16 noise.
+  CHECK 4787d92e **2.1632x** (> board 2.1580): d1 66.6/75.3, d16 123.8/203.8, d32 148.9/307.7, v1 107.7/120.7, v16 265.2/347.9,
+  v32 320.2/490.1. SUBMIT b87bd6aa **2.1219x** (low draw: v32 sl 361.9 / full 533.7, d16 full 211.4 on the same code). Board stays
+  3e3b9fd3 2.1580. Don't resubmit v165 unchanged. 10-29 left after: 17 checks / 7 submits.

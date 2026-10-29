@@ -2,7 +2,8 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-night7 s3 (10-29): main unchanged (v164), 0 judge runs, Modal layer 6.2/15. Batch-1 full attention sized + 3 oracles DEAD (NOTES n7s3):
+night7 s3 (10-29): **main = v165** (d2bb0c2) = v164 + proj BNOS (T=256 bnd thinning, v32 bitwise): check 4787d92e 2.1632x, submit b87bd6aa 2.1219x
+  (low draw, board stays 2.158; don't resubmit unchanged). 10-29 left: 17 checks / 7 submits, Modal layer 6.2/15. Batch-1 full attention sized + 3 oracles DEAD (NOTES n7s3):
   H200 gather floor 20.5 MB random 6.16 / dense 5.5 us vs in-layer _gd_full 10.7 + _red_fin 3.2; _red_fin->o fusion <= 1 us;
   pooler W L2 prefetch during attention zero-sum (gd +4, pr1 -1.5); d1 plan variants on H200 all lose. Only a new native
   batch-1 kernel at the random floor is left (~0.25% each d1/v1; ~/attn s73 native cfl lost).
