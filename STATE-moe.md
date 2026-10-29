@@ -1,6 +1,13 @@
 # STATE-moe
 
-## NOW (n7s14, 2026-10-29 ~05:25Z): twm item-end lane CLOSED on the H200 (2 Modal A/Bs); main unchanged; 0 judge runs
+## NOW (n7s15, 2026-10-29 ~05:50Z): lane = full-layer attention in the layer (lead 05:35Z). Physical-order gate FAILS; 0 runs
+- Fused inversion + dense K/V stream prototype (muse_attention_decode/tools/n7s15/fz.py, exact map): H100 exposed +16.1 us d32 /
+  +10.6 d16 (inversion alone 15.4 / 10.8; the page-table loads queue behind the ring fill, so overlap = ring depth only).
+  Gate <= ~5 us not met. Side-stream p1 under qkv g30 = the only variant left: ceiling ~0.3% layer, 3+ sessions: not started.
+- _gw_verify: no new lever (FP8 P@V s22/s71/pv8, native s111 all on record). Asked lead for direction (COORD Requests n7s15).
+- Budget 10-29: layer 2 checks + 2 submits, moe 5 checks, Modal 33/60 (moe share 30 used up).
+
+## WAS-n7s14 (n7s14, 2026-10-29 ~05:25Z): twm item-end lane CLOSED on the H200 (2 Modal A/Bs); main unchanged; 0 judge runs
 - EPW (offload epilogue stores/fence to idle warps): H200 oracle (tools/n7s14/mk_orx.py) stores+fence free = -1.3..+0.3 us -> DEAD.
 - TWM_PD (producer passes decoded item; tools/n7s14/twm_pd.diff): bitwise, 15/15, but H200 +4..6 us every shape -> DEAD, reverted.
 - Oracle rule: count 'DEPBAR.LE gsb0, 0x0' + run loop64k on every oracle build (an epilogue-free oracle serialized all wgmma).

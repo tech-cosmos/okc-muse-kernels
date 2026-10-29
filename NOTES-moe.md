@@ -3092,3 +3092,29 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
 - Modal today: 33/60 GPU-min (this session 13.3 incl. an invalid run). Judge: 0 runs.
 - Remaining twm item-end time is wgmma drain + silu + REL arrive + next-item wait: no lever left that is not on record dead
   (NM, dual accumulators exceed regs at N32, K-split pieces). Big-M per-item lane CLOSED.
+
+## n7s15 (2026-10-29 05:20Z - 05:50Z): lead 05:35Z lane (full-layer attention, _gd_full d16/d32): physical-order GATE FAILS; 0 judge runs, 0 Modal
+- Read ~/attn NOTES s80 (H200 dense 144.7 vs random ~162-166 us at d32 full bytes), s84 (bucketing 42+ us), s99 (per-program
+  sort dead), s114 (atomic-free multi-split p1 10.1 + map 8 = 18 us H100; L2-prefetch sweep dead). The one route not on record:
+  FUSE the inversion into the streaming kernel so the dense K/V ring fill hides it. Prototype tools/n7s15/fz.{cu,py}
+  (muse_attention_decode/): 132 CTAs x (24 work warps + 1 producer warp), CTA w = physical window w (WS rows); producer
+  streams the window's K+V densely from t=0 (cp.async.bulk, 2 x 256-row or 4 x 128-row stages = 128 KB); work warps: p1
+  (slice = 1/4 (d32) or 1/8 (d16) of one request's page-table row, smem counting sort by window, u16 offsets + run starts
+  written coalesced), grid barrier (monotonic counter), map build from 128 runs of ~160 entries (16-B loads), then a stand-in
+  consumer. Inversion verified exact (map == torch inverse, d16 + d32).
+- H100, CUDA graph, cold L2 (us):
+  | | dense stream only | + fused inversion | exposed | inversion alone (no stream): p1 / barrier / map / total |
+  | d32 full bytes | 228.2 | 244.3 | +16.1 | 10.2 / 1.8 / 3.4 / 15.4 (page-table loads alone 7.2) |
+  | d16 full bytes | 117.3 | 128.0 | +10.6 | 6.1 / 1.4 / 2.8 / 10.8 (loads alone 4.9) |
+  CH 128 x 4 = CH 256 x 2. With the stream running, p1 is ~7 us SLOWER (17.4 vs 10.2 at d32): the page-table loads queue behind
+  the 17 MB ring fill, so overlap buys only the ring depth (~4-5 us). Big slices fixed s114's map build (8 -> 3 us), but p1
+  is bounded below by the page-table read itself (H100 7.2 us in-kernel; H200 ~5).
+- Verdict vs the lead's <= ~5 us gate: FAIL (H100 exposed 16 / 10.6 us; H200 maybe ~11 / ~7). Best case d32 full 163 ->
+  ~145 + ~8 exposed + ~4 merge = ~157 (-6 us x 16 layers = -0.8% of the d32 load), d16 ~-2 us: ~0.15% layer score, before
+  the mixed-request consumer (unbuilt; s73/s92 native decode-full kernels lost to _gd_full).
+- The one variant left: p1 as a separate small kernel on a side stream co-running with the full layer's qkv g30 (14 us d32,
+  11.5 d16; grid N/64 x G30_S, so some SMs may be free), with only the map build in the attention kernel (~3 us, under the ring
+  fill). Ceiling ~-10 us d32 / ~-5 d16 per full layer = ~0.3% layer score, needing a 3+ session native mixed-request decode-full
+  kernel plus layer plumbing (stream fork, 2.6 MB-per-call scratch). Not started: below what a multi-session build should pay.
+- _gw_verify (lead's next item): FP8 P@V is on record (s22 ceiling -10 us all-L2, s71 native H200 tie, exp/pv8 slower), native
+  pipelined consumers lost in 5 layouts (s111). No new lever from me.
