@@ -3028,3 +3028,6 @@ ncu us (d16 s7 / d16 s99), stall_no_instruction samples in ():
   bs128 23.1, bs256 23.1; 28.3 MB each) vs a4054bf3: effective 2.7 / 3.57 / 3.66 / 3.36 / 3.31 / 2.82 TB/s. Every part of
   the gap (fixed 14 us decode, extra groups, big-M consumer) is on record dead (n5s15-n5s31, n6s1-n7s1); codes are uniform
   4.0 bit (no lossless lever, s?/n20). Nothing new to build; suggest ~/STOP-moe until the lead names a lane.
+
+## n7s6 (2026-10-29 02:40Z - 02:45Z): no lead answer; idle; 0 judge runs, 0 Modal
+- COORD Requests n7s1 still unanswered (last Human decision 22:15Z 10-28, all items done). No new evidence, nothing built.
