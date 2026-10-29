@@ -3087,3 +3087,19 @@ with fewer, longer CTAs (one per (request, KV head), window resident, no split) 
 already loses +0.6). Only the v16 combine is cuttable: a 4-CTA-cluster nvs (S=4 DSMEM merge, like nvscl) + O_PF port,
 expected ~-2 us v16 sl after cluster cost = ~0.08% score. Below the 4 us gate in practice; NOT built. Lane closed unless the
 lead wants that ~0.1% item queued for a bundle.
+
+## night8 s2 (2026-10-29 21:24Z-21:45Z): v16 4-CTA cluster merge BUILT + DEAD (cluster occupancy); 0 judge runs, 0 Modal
+No lead reply to n8s1, so I built the one item n8s1 left: nvscl with cluster size 4 at verify 16 (S=4: rank r finishes warp r's
+16 rows; the 3 other warps each push 4.6 KB o/m/l by one cp.async.bulk DSMEM copy into rank w's new xo3 slot; owner merges
+the 3 in FP32 and writes the gated/normalized output; no _combine_hb) + O_PF ported into nvscl. Patch: tools/n8/cl4_patch.py
+(applies to attn_src.py @2bbed9b; plus a _verify_nvs cl=4 branch and a TUNE nvscl4 option, not kept). Correct: bench test
+13/13, scored_test verify 16 sliding 4/4 PASS, cl4 vs combine layer output rel diff ~2.5e-4 (merge order).
+H100 in-layer (tools/n8/attn_orc.py 6x5, base/cl4/base): v16 sl attn 13.5 -> 22.3 us (+8.7), v32 sl 15.0 -> 16.6 (+1.6).
+Cause v16: cudaOccupancyMaxActiveClusters at 384 thr, 1 CTA/SM = 30 clusters of 4 (120 CTAs) at ANY smem 150-227 KB
+(cl 2: 66 = 132 CTAs): GPC SM counts aren't multiples of 4, so 128 CTAs = 2 waves. H200 is the same GH100 132-SM part
+(expect the same). Cause v32 (cl=2 path, unchanged logic): +13.8 KB xo3 takes nvscl smem from ~186 KB to ~200 KB > the
+196 KB carveout step -> L1 60 -> 28 KB (cp.async.ca gathers): nvscl is L1-sensitive; shrinking it below 164 KB would need
+-22 KB (xo/xo2 aliasing gives 18 KB at most and races the peer's push): not pursued.
+Left (not built): last-CTA-merges via global partials + atomic counter at v16 (fence + atomic + 3x16 KB L2 reads on the
+critical path ~2 us vs combine 3.3) ~-1.3 us v16 sl = ~0.05%, non-deterministic merge order. Lane: verify-sliding attention
+CLOSED (bound per n8s1 was ~5 us stripped, the reachable part is <= ~1.3 us).

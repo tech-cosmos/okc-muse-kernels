@@ -2,6 +2,9 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night8 s2 (10-29): v16 4-CTA cluster nvs merge BUILT + DEAD: max 30 clusters of 4 resident (120 CTAs < 128) -> 2 waves,
+  H100 v16 sl attn 13.5 -> 22.3 us; extra 13.8 KB smem also cost v32 +1.6 (nvscl crosses the 196 KB carveout; L1-sensitive).
+  Reverted (tools/n8/cl4_patch.py kept). Verify-sliding lane CLOSED: last-CTA global merge ~-1.3 us v16 (0.05%) not built.
 night8 s1 (10-29): lead 21:05Z verify-sliding attention lane: ORACLES only (H100, NOTES n8s1), 0 runs, no build. Bound
   (stripped nvs): v16 sl -3.9 us (combine 3.3 of it), v32 sl -1.2. nvs body = serial seq->pt (2.3)->KV gather (2.1)->tiles
   latency chain; L2-warm all of it -0.4/-0.6 only; math/stores/transposes small. Only item: v16 4-CTA cluster merge + O_PF
