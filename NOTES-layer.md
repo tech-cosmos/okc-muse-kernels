@@ -2851,3 +2851,31 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
 - Next build candidates (ranked): (a) T=128/256 _routing + rg in one launch (routing per CTA, self-resetting grid barrier: all
   T CTAs co-resident since twm is rg's PDL secondary and launches only after every rg CTA triggered) ~-1.5..2 us v16/v32;
   (b) T=256 boundaries fused/thinned (FP32 stream bytes): ~-2..3 us each at v32.
+
+## night7 s2 (2026-10-29 05:10-06:05Z): RGR built + measured DEAD; attention-full sized as the biggest layer-lane pool
+- RGR = n7s1 NEXT (a): Triton _routing moved into moe_routegathern (template RT: per-CTA sigmoid/top-8 bitwise = Triton's
+  lowering: logit = (0 + hi) + lo, x * -MULT * log2e, ex2.approx, + 1, div.full; top-8 on u64 (monotone key << 32 | 255 - id)
+  warp max; weight sum in Triton's butterfly order ((p0+p4)+(p2+p6))+((p1+p5)+(p3+p7)), div.full), then an epoch-counter
+  grid barrier per T (T=128/256 CTAs co-resident), then rg as before. Bitwise = v164 at v16/v32 (3 seeds each, files_eq),
+  test 13/13, rg_eq: every fr+rg input identical. H100 ab_files 4 rounds v164 | RGR: v16 sl 293.2 | 294.9, full 443.8 | 443.4,
+  v32 sl 372.6 | 375.3, full 624.8 | 626.0 -> LOSES. Timeline v32 sl (TUNE {}): FR end -> rg end 8.0 (v164) vs 9.5 us; the
+  barrier alone ~1.0 us (no-barrier probe 8.5). Why: rg was already a PDL secondary launched under _routing with its X loads
+  pre-wait (RG_XPRE), so the fusion only saves a ~0.3 us launch gap and pays the barrier. Code kept as
+  muse_decode_layer/dev/n7s2_rgr.diff (against v164 layer.py/moe_src.py); main unchanged (v164).
+- n7s1 NEXT (b) T=256 boundaries: already bounded at n5s28 (stream-byte cut b1/b2 0.04%): bnd = 24 MB (FP32 stream r+w 16,
+  BF16 branch 4, h 4) at 8.2 us H200 = 2.9 TB/s; recomputing stream1 in bnd2 saves net 4 MB = ~1 us = 0.04%. Not built.
+- Sizing (H200 Modal timeline dev/n7s1_tl_h200.txt; KV bytes = batch x 80K x 2 heads x 64 x (K+V) x 1 B = 256 B/token;
+  floor = gather at 4.4 TB/s; %/us from the STATE table):
+  | full shape | attn kernel us | KV MB | floor us | excess | %/us | score % |
+  | d1  | _gd_full+_red_fin 12.6 end | 20.5 | ~6 (latency) | ~5 | 0.062 | 0.3 |
+  | v1  | _attn_split+_combine ~14  | 20.5 | ~6 | ~8 | 0.039 | 0.3 |
+  | d16 | _gd_full 86.1 (3.8 TB/s) | 328 | 74.5 | 11.6 | 0.029 | 0.34 |
+  | d32 | _gd_full 163.3 (4.0 TB/s) | 655 | 149 | 14 | 0.020 | 0.28 |
+  | v16 | _gw_verify 99.5 + bal tail | 328 | 74.5 | ~29 | 0.014 | 0.41 |
+  | v32 | _gw_verify 189.8 + bal tail | 655 | 149 | ~43 | 0.011 | 0.47 |
+  Sum ~2.1% (the only layer-lane pool > 1%; sliding attention free-oracle ~3% but latency-bound, 30% of it ~1%).
+  Context: muse_attention_decode board #1 3.054x vs ours 2.596x (17.6% geomean): others' attention IS faster. Verify full
+  (_gw_verify, consumer-bound on the H200: ~0.9%) is the biggest piece. ~/attn NOTES s1-s126 mined it hard (FP8 QK, native
+  nvf/nverify lost, dtail lost), so a fresh-eyes redesign (like moe's REDESIGN.md: study public FA3/FlashMLA/FlashInfer FP8
+  decode kernels, name the structural difference) is the lever, not tuning. Request posted in COORD.
+- 0 judge runs, 0 Modal. 10-29 left: 18 checks / 8 submits (layer), Modal layer 2.5/15 used.
