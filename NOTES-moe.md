@@ -3269,3 +3269,15 @@ No COORD change since lead 06:50Z task (n7s18 idea already posted). Waiting for 
   675.9 -> 592.7, nh3 623.4 -> 600.8; nh 0-2 and >128-token cases tie (+-1.8). Bitwise equal to hot 32 (hoteq.py, routers 6/4,
   sl + full); bench test 13/13. Expected: ~25 % of routers have nh >= 3 -> fewer slow v32 draws + ~0.3-0.8 % on mean score.
 - Not done: task 2 (tk2f prologue above griddepcontrol.wait at d1/v1).
+
+## n7s33 (2026-10-29 10:00Z - ~10:15Z): lead 09:35Z task 2 (tk2f d1/v1 prologue above griddepcontrol.wait) = DROPPED on existing oracles; 0 judge runs, 0 Modal, no code
+- In-layer (r-layer layer.py TK2FX, s27) moe_tk2f is already a PDL secondary of the pre-expert rmsnorm, and its ONLY
+  griddepcontrol.wait sits right before tk2f_consume<512> (x = rmsnorm output): lut copy, mbarrier init, ids load, the
+  routing and the producer's whole W ring fill already run before the wait. So the lead's restructuring is in place.
+- Bound for any further prologue cut in-layer = layer n7s8 IDF + throttle oracle (tk2f routed and its ring full long before
+  pr1 ends): H100 tk2f end - pr1 end 34.8 (base) vs 35.0 us; with n2u's routing path made equal, d1 sl/full = tie. => ~0.
+- Standalone bound: s15 FP (the producer warp routes for itself and issues its first TMA at once = the lead's 'one warp reads
+  ids + first TMA') gained d1 -0.2 / v1 -0.4 us on H100 and LOST in the layer harness (+0.2..1.8 us). n7s22: the routing compute
+  is ~0.3-0.5 of the 2.3 us prologue; the rest is DRAM latency (ids, first data). Both < the lead's 0.5 us drop line.
+- No H200 DIAG spent: the standalone gain is below 0.5 us, and in the layer the oracle bound is 0.
+- Pending from n7s32: Handoff branch moe/layer-hotdyn 130a692 (T=256 moe_hot device-side CTA count) awaits the layer's integration.

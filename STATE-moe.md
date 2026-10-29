@@ -1,6 +1,10 @@
 # STATE-moe
 
-## NOW (n7s32 ~10:05Z): lead 09:35Z task 1 (layer variance) DONE -> Handoff branch moe/layer-hotdyn 130a692 (T=256 moe_hot
+## NOW (n7s33 ~10:15Z): task 2 (tk2f d1/v1 prologue) DROPPED without a check: in-layer, TK2FX already puts routing + W ring
+## fill before tk2f's only griddepcontrol.wait; layer n7s8 IDF oracle (prologue fully hidden) = tk2f end - pr1 end 34.8 vs 35.0
+## us (bound ~0); standalone s15 FP = -0.2/-0.4 us H100 (< 0.5 line). Open: Handoff moe/layer-hotdyn 130a692 for layer to integrate.
+## Nothing else queued in the moe lane; budget 10-29 moe checks 9/20.
+## WAS (n7s32 ~10:05Z): lead 09:35Z task 1 (layer variance) DONE -> Handoff branch moe/layer-hotdyn 130a692 (T=256 moe_hot
 ## max(32, 16 x hot experts) CTAs, device-side; bitwise; H100 v32 nh3/nh4 -40/-95 us sl, -22/-83 full; else tie). NEXT = task 2:
 ## tk2f d1/v1 prologue (everything not depending on ids above griddepcontrol.wait; one warp reads ids + issues the first TMA),
 ## H200 DIAG A/B, drop if < 0.5 us. Variance verdict + numbers: NOTES n7s32. Worktree /tmp/n7s32/wt = branch moe/layer-hotdyn.
