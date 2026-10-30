@@ -3188,3 +3188,17 @@ Lane B follow-up, no code: the n11s1 nearby-shape cliff (decode T=2/4 sl 149/132
 SGLang's own d1 (T=1) is 171/183 us sl/full on the H200 (STATE), and its T=2/4 can only be >= that, while our H100 numbers
 are an upper bound for the H200. Also the held-out reruns use the same 12 shapes (lead 03:50Z: same ctx/spread/dist), so it
 does not touch the score. Lane B fully closed. No lead line after 03:50Z: paused. 0 judge runs, 0 Modal.
+
+## night12 s1 (2026-10-30 09:04Z-~10:35Z): lead 09:10Z DEFNORM lane (fable #11, deferred pre-expert rmsnorm). GATE NOT MET, no build. 0 judge runs, 0 Modal.
+- H100 timeline (tools/timeline.py, main v173 submission.py, seed 99, cold L2), the pooler -> rmsnorm -> tk2f hop:
+  d1 sl: pr1 22.3-44.7, rmsnorm (pr1's PDL secondary) ends 45.8, tk2f (rmsnorm's PDL secondary, TK2FX) starts 45.2 -> hop 1.1 us.
+  v1 sl: pr8 ends 50.7, rmsnorm ends 52.4, tk2f starts 51.1 -> hop 1.7 us.
+  d16 sl: pooler g24 ends 56.4, router_split 56.6 -> _routing ends 59.6 = rmsnorm end 59.6: ROUTING-bound, defnorm saves ~0.
+  d32 sl: pooler g30k ends 66.5, routing 66.0, rmsnorm ends 69.5 -> ~3 us, BUT g30k is stream-K with FP32 slab output: no CTA
+  owns final values, so the per-token sum of squares can't come from the pooler epilogue (needs the summed row: = XN, dead s12).
+- Oracle ORC_NONORM (tools/n12/orc_nonorm.patch: T=1/8 pr1/pr8 path skips _rmsnorm_gain, tk2f becomes pr1/pr8's PDL secondary)
+  HANGS on the H100 (decode 1 sliding, timeout 300 s; baseline 86.1 us), same as n7s4's early-tk2f-on-live-pr1 hang. Not debugged.
+- Bound instead from the record: s12 XN (norm inside tk2f's prologue, i.e. no norm kernel) measured -0.4..-0.8 us vs the same
+  binary at d1/v1 ('the rmsnorm launch is already hidden'). So defnorm's upper bound <= ~1.1 us d1 sl / ~1.7 v1 sl (H100), minus
+  pr1/pr8 epilogue sumsq atomics + a separate tk2f instantiation (XN: changing the shared one cost d16/d32 1-2 us).
+  Score bound <= ~0.18% (d1) + 0.16% (v1) + full layers ~0.1%, realistic ~half. Gate (>= 1.5 us d1 sl) NOT met: lane closed.

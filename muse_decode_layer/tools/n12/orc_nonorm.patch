@@ -1,0 +1,21 @@
+diff --git a/muse_decode_layer/layer.py b/muse_decode_layer/layer.py
+index 027fb27..5bccd8b 100644
+--- a/muse_decode_layer/layer.py
++++ b/muse_decode_layer/layer.py
+@@ -3778,6 +3778,7 @@ VTK_QF32 = True  # s38: the T=8 sliding attention (vtk) takes the g19 m8 qkv in
+ NVS_CL = True  # s85: verify-32 sliding on moe s31's 2-CTA cluster nvs (attn_src _NVSCL; H200 standalone -1.1..-1.4 us). TUNE nvscl
+ QF32_NDS = True  # s29: also at T=32 (nds sliding templated on the qkv type; full = the same Gluon path as T=16)
+ RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 -> 109.9 (8 rounds), 112.3 -> 110.7 (4)
++ORC_NONORM = False  # n12 defnorm ORACLE (timing only, wrong output): drop the T=1/8 pre-expert rmsnorm
+ TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
+ TK2FJ_TOKENS = (16, 32)  # s27: the same at T = 16/32 after joining the router's side stream before the rmsnorm
+ TK2FJ_DEFAULT = True  # H100 ab_files 5 rounds: d16 212.4/313.3 -> 209.9/313.8, d32 205.7/433.8 -> 203.7/432.0 us
+@@ -4167,6 +4168,8 @@ def _kernel_fn(data, state):
+         zr = _G24X.pop()
+     if gnorm:
+         p = pooled  # s27 GNORM: the rmsnorm runs inside the experts' gather
++    elif ORC_NONORM and pr1 and tk2fx:
++        pass  # n12 ORACLE ONLY (wrong output): no pre-expert rmsnorm, moe_tk2f becomes pr1/pr8's PDL secondary
+     else:
+       _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=rpdl,
+                              TRIG=tk2_pdl or idf, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
