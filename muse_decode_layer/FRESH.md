@@ -337,3 +337,20 @@ twm RT4 stage = 16 HGMMA m64nNk16 per WG). H100 SM cycles (moe n11a: H100 = H200
 - Gate fails for all three. Not built. Open question for the lead (not a build): does #1's 0.76x imply they avoid acc reads
   (e.g. a legal reading of "accumulators FP32" with f16 partials per k-chunk -- banned for us by the 10-24 ruling), or fewer
   RF reads per dq op? Can't be decided by microbench.
+
+## x3 (2026-10-30 07:54Z-08:15Z): lead 08:10Z lane "register read-port contention" (rfport), Step 1 (H100 microbench)
+Tool tools/fresh/xd/conc4.py (= conc.py + roles 7-11). 1 CTA, WG0 HGMMA RS m64nNk16 loop (scale-d 1, 16 HGMMA/stage) ||
+WG1 loop of 112 LOP3/stage (16 independent chains x 7). SASS checked per role (cuobjdump; loop body = 112 LOP3 each):
+(a) `LOP3 R, R, Rb, Rc` 3 regs, no reuse; (b) `LOP3 R, R, imm, Rc` 2 regs; (c) `LOP3 R, R, UR, RZ` 1 vector reg;
+(d) 3 regs with b/c = same register for 16 back-to-back instrs (93/112 `.reuse` on both); (e) 2 regs + imm, c reused (88/112).
+All five alone: 235-236 cyc/stage. WG1 cyc/stage next to HGMMA:
+  | N  | a 3reg | b 2reg+imm | c 1reg | d 3reg reuse | e 2reg reuse |
+  | 8  | 341    | 318        | 307    | 321          | 316          |
+  | 32 | 402    | 398        | 391    | 419          | 425          |
+  | 64 | 505    | 500        | 497    | 547          | 560          |
+Verdict: NOT CONFIRMED. The prediction was (c)/(d) near 235 while (a) climbs to ~500; instead 1-read LOP3 is within 2% of
+3-read at N32/N64, and reuse-cache hits make it slightly WORSE (+5-12%). The slowdown is per ALU instruction, not per
+register source read, so a dq rewrite for fewer RF reads cannot help; instruction count stays the cost metric (the record's
+model). Step 2 not started (lead's rule). Still unexplained: why acc reads (scale-d 0 removes the slowdown, x1) tax
+instruction issue rather than operand reads: plausibly the HGMMA owns the SMSP's RF read path / dispatch in bursts so any
+vector-RF instruction waits regardless of its operand count. Not a lever either way.
