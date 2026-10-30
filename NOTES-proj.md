@@ -2821,3 +2821,10 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   tie cuBLAS because their win is the pre-wait stream) and (b) T=128/256 (v16 1.18x, v32 1.15x on the board): the same nvjet
   in the layer, ~0.5-0.9% layer if a GEMM reached bytes+2.5 us at m128 — every own/public attempt on record lost or tied.
 - 0 judge runs. Modal 11.2 GPU-min (timed out, no data).
+
+## n9s2 (2026-10-30 02:14-02:20Z, night9 session 2): idle, no lead decision after n9s1's table
+- COORD: newest Human decision is 01:55Z (fresh's v172 merge/submit); none answers proj n9s1 (gate not met; options (a)/(b)).
+- Re-checked option (a) (v16 12-bit swap-AB split-K GEMM) against the record before prototyping: it is g22 (s16, swap-AB wgmma,
+  W decoded to regs: per-SM smem ingest W 12 KB + x box 16 KB/stage at ~47-50 GB/s/SM = THE limit; cluster x multicast halves
+  L2 reads, not smem ingest) and g28 (s64, x as A / W decoded into smem: ~0.3 us/stage mbarrier role chain). A DSMEM split-K
+  reduce changes neither wall, so no stream-only prototype was run. Waiting for the lead. No code, 0 judge runs, 0 Modal.
