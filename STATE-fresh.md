@@ -122,3 +122,5 @@
 2. Modal H200 (after 00:00Z; my cap 20 GPU-min/day; shared ledger was 50.3/60 on 10-29): chain + hop micro.
 3. If hop >= ~2 us under load: design = fewer hops (redundant norms/routing in consumers), list the layer's hops per load.
    Post the table + pick under COORD Requests as `fresh -> lead`.
+## f1s20 (2026-10-30 02:15Z-02:22Z): idle stop; proj n9s1 (02:20Z) posted its dense table: gate not met, no build for fresh; option (a) v16 qkv+FR 12-bit GEMM awaits the lead. 0 judge, 0 Modal.
+   Next (f1s21): stay paused unless a lead line after 01:55Z names a fresh lane (e.g. proj's option (a) handed to fresh).
