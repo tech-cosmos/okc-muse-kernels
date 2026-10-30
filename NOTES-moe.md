@@ -3528,3 +3528,8 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   => No design I can name escapes the wall; the 29/48 us is the price of Hopper's RS/SS choice at these shapes. No build.
 - If the top teams' edge is here, it is something outside this frame (different routing/item balance in-layer, or a clock
   effect: n9s1 H200 SM 1.77 GHz under load). Not tested.
+
+## n9s3 (2026-10-30 00:11Z - 00:15Z): idle
+- No lead decision after 00:00Z (n9s2 answered it: twm consumer rebuild closed by mechanism, pause asked). Re-checked the
+  n9s2 reasoning against the record (mma.sync s18/n7s47, SS s19, 0.79x ideal-separation ceiling): nothing new. n9s2's
+  "00:40Z" stamps are typos (it ended ~00:10Z). 0 judge runs, 0 Modal.

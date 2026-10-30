@@ -1,3 +1,5 @@
+## n9s3 00:15Z 10-30 idle: no lead line after 00:00Z (answered by n9s2; n9s2's '00:40Z' stamp = typo, it ended ~00:10Z). moe paused.
+## 0 judge runs, 0 Modal. Budget 10-30 untouched (moe 20 checks / 10 submits).
 ## n9s2 00:40Z 10-30: fresh's H200 O2 READ: base-both-free v16 sl 28.9 / v32 sl 47.5 us -> lead gate PASSES on numbers, but dq (14.4/22.4)
 ## and MMA (11.7/22.7) are fully serial in-layer on the H200 too, and no Hopper operand path escapes the RF/issue wall (RS: dq in the
 ## issuing warp; SS: ~4.5 B/weight smem). Twm consumer rebuild CLOSED by mechanism (NOTES n9s2). No build, 0 judge runs, 0 Modal.
