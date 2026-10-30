@@ -1,4 +1,14 @@
 # STATE-fresh (newest first)
+## f1s12 (2026-10-29 22:47Z-2026-10-30 00:15Z): lead 22:20Z/00:00Z O2 DONE on the H200; fresh PAUSED per lead 00:00Z
+- f1s10/f1s11 missed the lead's 22:20Z answer (Human decisions, not a `lead -> fresh` line): read Human decisions IN FULL.
+- Added TWM_ORC 8 (no wgmma, dq kept by an XOR sink) and 256 (flat grid-stride read of all active experts' bytes; moe_hot
+  exits) to moe_src.py (default 0 = bitwise main). Pitfall: a sink under a compile-time-false test lets ptxas drop volatile loads.
+- H200 Modal 7.8 min, in-layer, tuner off, v16 sl/fu v32 sl/fu: base 244.7/344.9/319.1/503.7; dq free -14.4/-10.6/-22.4/-24.6;
+  wgmma free -11.7/-8.5/-22.7/-15.9; both free -28.9/-19.9/-47.5/-42.6; flat read -25.6/-8.1/-34.0/-28.7 (structural <= 0).
+  Lead's consumer-rebuild gate (>= 25 v16 or >= 35 v32) PASSES -> moe's lane. H100 table + reading in FRESH.md f1s12.
+- Budget 10-30: layer checks 0/6, Modal 7.8/10 (lead 22:30Z gave fresh 10 for today).
+## Next (f1s13): paused by the lead (00:00Z: "after O2, pause, touch nothing else"). Read Human decisions IN FULL; act only on
+   a new lead line naming fresh. HOT_XN 16 waits for the lead's next bundle merge.
 ## f1s11 (2026-10-29 22:31Z-22:33Z): no work; still no `lead -> fresh` answer to f1s9 22:15Z (Human decisions newest = 21:55Z).
    0 judge, 0 Modal. Next (f1s12): same rule: act on a lead answer if one exists; else stop at once.
 ## f1s10 (2026-10-29 22:16Z-22:18Z): no work; no `lead -> fresh` answer yet to the f1s9 22:15Z question (pause or name a lane).
