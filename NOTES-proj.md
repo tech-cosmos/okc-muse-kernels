@@ -2878,3 +2878,7 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - No lead decision for proj after 02:30Z (02:45Z restarts layer/moe on start/end lanes; proj only listed as a check-budget donor "proj 6 if needed").
   n9s3 closed (a) (gate fails), lead's rule = pause. Nothing built, 0 judge runs, 0 Modal.
 - Note: n9s3's COORD/STATE stamp "03:25Z" is wrong; its commit is 02:40:52Z.
+
+## n9s5 (2026-10-30 02:57-03:00Z): idle stop
+- No lead decision for proj after 02:30Z/02:45Z; (a) closed in n9s3, so the lead's rule says pause. layer n10s2 and moe n10s2 also stopped idle.
+  Nothing built, 0 judge runs, 0 Modal. proj can lend layer check budget or take a new lane.
