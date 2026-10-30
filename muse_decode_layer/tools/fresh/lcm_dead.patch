@@ -1,0 +1,196 @@
+diff --git a/muse_decode_layer/attn_src.py b/muse_decode_layer/attn_src.py
+index d8067c6..0c6a179 100644
+--- a/muse_decode_layer/attn_src.py
++++ b/muse_decode_layer/attn_src.py
+@@ -1358,6 +1358,76 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const QT* __restri
+     }
+ }
+ 
++#if NV_HALF
++// fresh f1s15 (LCM): the last of a (request, KV head)'s S CTAs to finish merges all S splits' partials in split
++// order (as _combine_hb: FP32, exp2 weights, / l, * v_scale, per-head RMS, * sigmoid(gate)) and writes out: no
++// _combine_hb launch. Called by consumer warpgroup 1 (128 threads) after it stored its partials.
++template <int SM>  // SM = S (splits), compile-time so every load is in flight at once
++__device__ __forceinline__ void lcm_merge(uint32_t* flag, const __nv_bfloat16* __restrict__ qkv, const float* pacc,
++                                          const float* pml, float vs, __nv_bfloat16* __restrict__ out, int* cnt,
++                                          int bb, int H, int qkv_w) {
++    // Both consumer warpgroups (256 threads): warp wq owns rows 8wq..8wq+7, half-warp hw 4 of them, lane j 4 d's.
++    const int t = threadIdx.x - 128, lane = t & 31, wq = t >> 5, hw = lane >> 4, j = lane & 15;
++    __threadfence();
++    asm volatile("bar.sync 5, 256;" ::: "memory");
++    if (t == 0) {
++        const int old = atomicAdd(cnt + bb * 2 + H, 1);
++        if (old == SM - 1) atomicExch(cnt + bb * 2 + H, 0);
++        *flag = old == SM - 1;
++    }
++    asm volatile("bar.sync 5, 256;" ::: "memory");
++    if (!*flag) return;
++#ifdef LCM_SKIP
++    return;
++#endif
++    __threadfence();
++    const int hq = (qkv_w / HD - 4) / 2, d = j * 4, r0 = wq * 8 + hw * 4;
++    const long long base = ((long long)bb * 2 + H) * SM * MR;
++    // Every load (S splits' acc quads, one (m, l) pair per lane, gates) is issued before any math: one L2 round trip.
++    float4 a[4][SM];
++    uint2 g[4];
++    float2 mlv = make_float2(-1e30f, 0.f);
++    if (j < 4 * SM) mlv = __ldcg(reinterpret_cast<const float2*>(pml + (base + (j % SM) * MR + r0 + j / SM) * 2));
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++        const int r = r0 + i, tok = bb * 8 + (r >> 3), hd = H * 8 + (r & 7);
++#pragma unroll
++        for (int s = 0; s < SM; ++s) a[i][s] = __ldcg(reinterpret_cast<const float4*>(pacc + (base + s * MR + r) * HD + d));
++        g[i] = *reinterpret_cast<const uint2*>(qkv + (long long)tok * qkv_w + (hq + 4) * HD + hd * HD + d);
++    }
++#pragma unroll
++    for (int i = 0; i < 4; ++i) {
++        const int r = r0 + i, tok = bb * 8 + (r >> 3), hd = H * 8 + (r & 7);
++        float m[SM], l[SM];
++#pragma unroll
++        for (int s = 0; s < SM; ++s) {
++            m[s] = __shfl_sync(0xffffffff, mlv.x, hw * 16 + i * SM + s);
++            l[s] = __shfl_sync(0xffffffff, mlv.y, hw * 16 + i * SM + s);
++        }
++        float mx = m[0];
++#pragma unroll
++        for (int s = 1; s < SM; ++s) mx = fmaxf(mx, m[s]);
++        float den = 0.f, o0 = 0.f, o1 = 0.f, o2 = 0.f, o3 = 0.f;
++#pragma unroll
++        for (int s = 0; s < SM; ++s) {
++            const float wt = ex2(m[s] - mx);
++            den += wt * l[s]; o0 += wt * a[i][s].x; o1 += wt * a[i][s].y; o2 += wt * a[i][s].z; o3 += wt * a[i][s].w;
++        }
++        const float sc = vs / den;
++        o0 *= sc; o1 *= sc; o2 *= sc; o3 *= sc;
++        float ss = o0 * o0 + o1 * o1 + o2 * o2 + o3 * o3;
++#pragma unroll
++        for (int k = 8; k > 0; k >>= 1) ss += __shfl_xor_sync(0xffffffff, ss, k);
++        const float rn = rsqrtf(ss / HD + 1e-5f);
++        const __nv_bfloat162 g01 = *reinterpret_cast<const __nv_bfloat162*>(&g[i].x), g23 = *reinterpret_cast<const __nv_bfloat162*>(&g[i].y);
++        const __nv_bfloat162 y01 = __floats2bfloat162_rn(o0 * rn / (1.f + __expf(-__low2float(g01))), o1 * rn / (1.f + __expf(-__high2float(g01))));
++        const __nv_bfloat162 y23 = __floats2bfloat162_rn(o2 * rn / (1.f + __expf(-__low2float(g23))), o3 * rn / (1.f + __expf(-__high2float(g23))));
++        *reinterpret_cast<uint2*>(out + ((long long)tok * hq + hd) * HD + d) =
++            make_uint2(*reinterpret_cast<const uint32_t*>(&y01), *reinterpret_cast<const uint32_t*>(&y23));
++    }
++}
++#endif
++
+ template <int NS, int LAG, typename QT>
+ __global__ void __launch_bounds__(384, NV_MINB) nvs(const QT* __restrict__ qkv, const float* __restrict__ cs,
+                                               uint8_t* __restrict__ kc, uint8_t* __restrict__ vc,
+@@ -1365,7 +1435,8 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const QT* __restrict__ qkv,
+                                               const long long* __restrict__ loc, const int* __restrict__ pt,
+                                               const int* __restrict__ seq, float* __restrict__ pacc,
+                                               float* __restrict__ pml, float qk_scale, int S, int ch, int maxp,
+-                                              int qkv_w, int win, const uint8_t* __restrict__ pf, long long pfb, int qss) {
++                                              int qkv_w, int win, const uint8_t* __restrict__ pf, long long pfb, int qss,
++                                              __nv_bfloat16* __restrict__ out, int* cnt) {
+     extern __shared__ __align__(1024) uint8_t smraw[];
+     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
+     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+@@ -1392,6 +1463,13 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const QT* __restrict__ qkv,
+         asm volatile("setmaxnreg.inc.sync.aligned.u32 %0;\n" ::"n"(NV_CREGS));
+         consumer<NS, QT>(sm, wg - 1, qkv, cs, wg == 1 ? r0 : r1, split, S, qkv_w, qk_scale * ks[0], win, pacc, pml, kc, vc,
+                      loc, ks[0], vsc[0], H, r0.n, qss);
++        if constexpr (std::is_same<QT, __nv_bfloat16>::value) {
++            if (out != nullptr) {  // fresh f1s15 LCM (xo is free: consumer 1 already merged it into its registers)
++                uint32_t* fl = reinterpret_cast<uint32_t*>(sm.xo);
++                if (S == 4) lcm_merge<4>(fl, qkv, pacc, pml, vsc[0], out, cnt, bb, H, qkv_w);
++                else lcm_merge<2>(fl, qkv, pacc, pml, vsc[0], out, cnt, bb, H, qkv_w);
++            }
++        }
+     }
+ #else
+     const Range rg = rng(seq, blockIdx.x / S, split, ch, win);
+@@ -1414,7 +1492,7 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const QT* __restrict__ qkv,
+ void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor ks, torch::Tensor vsc,
+          torch::Tensor loc, torch::Tensor pt,
+          torch::Tensor seq, torch::Tensor pacc, torch::Tensor pml, double qk_scale, int64_t S, int64_t ch, int64_t win,
+-         int64_t pf_ptr, int64_t pf_bytes, int64_t qss) {
++         int64_t pf_ptr, int64_t pf_bytes, int64_t qss, int64_t out_ptr, int64_t cnt_ptr) {
+     // Producer lag NV_LAG (1) at every S: LAG 2 at 4 splits was H100 -0.18 us but H200 +0.2 (check 9249146d, verify 32).
+     // qss > 0 (layer s72): qkv = FP32 slab 0 of 2 split-K slabs qss elements apart, summed at the loads.
+     const int smem = (int)sizeof(nv::Smem<NV_NS>) + 1024;
+@@ -1428,7 +1506,9 @@ void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
+             (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(), \
+             (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(), \
+             (const int*)seq.data_ptr(), (float*)pacc.data_ptr(), (float*)pml.data_ptr(), (float)qk_scale, (int)S, (int)ch, \
+-            (int)pt.size(1), (int)qkv.size(-1), (int)win, (const uint8_t*)pf_ptr, (long long)pf_bytes, (int)qss); }
++            (int)pt.size(1), (int)qkv.size(-1), (int)win, (const uint8_t*)pf_ptr, (long long)pf_bytes, (int)qss, \
++            (__nv_bfloat16*)out_ptr, (int*)cnt_ptr); }
++    TORCH_CHECK(!out_ptr || (!qss && NV_HALF && (S == 2 || S == 4)), "nvs: LCM needs bf16 qkv, NV_HALF, S 2 or 4");
+     if (qss) { TORCH_CHECK(qkv.scalar_type() == at::kFloat, "nvs: QSS needs FP32 slabs"); NVS_LAUNCH(nv::qs2) }
+     else { TORCH_CHECK(qkv.scalar_type() == at::kBFloat16, "nvs: qkv bf16"); NVS_LAUNCH(__nv_bfloat16) }
+ }
+@@ -1438,7 +1518,7 @@ try:
+         name="muse_nvs_a2s13h_" + __import__("hashlib").sha256(_NVS_SRC.encode()).hexdigest()[:10],
+         cpp_sources="void nvs(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, int64_t, "
+-                    "int64_t, int64_t, int64_t, int64_t);",
++                    "int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);",
+         cuda_sources=_NVS_SRC, functions=["nvs"],
+         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], extra_cflags=["-O3"], verbose=False)
+ except Exception as _e:  # noqa: BLE001
+@@ -2190,6 +2270,7 @@ except Exception as _e:  # noqa: BLE001
+     _NVSCL = None
+ assert '#define NV_HALF 1' in _NVSCL_SRC and '#define NV_STAMP 0' in _NVSCL_SRC
+ NVS_CL_BATCH = 32  # cl from this batch on (S 2)
++NVS_LCM = True  # fresh f1s15: nvs CTAs merge the splits themselves (last CTA per (request, KV head)), no _combine_hb
+ NVS_MIN_BATCH = 16  # verify sliding from this batch on nvs (verify 32: H100 paired -1.66 us, H200 16.64 -> 15.28/15.07;
+ # verify 16 with 8 splits: H100 paired -0.38 us in s9 (6/7), but the H200 tied 12.63 vs 12.63 in check baea7057)
+ 
+@@ -4732,10 +4813,13 @@ def _verify_nvs(data, cfg):
+                    data["v_scale"], data["cache_loc"], data["page_table"], data["seq_lens"], pacc, pml,
+                    cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], out, 1)
+         return out  # the 2-CTA clusters merged the 2 splits and wrote out
++    lcm = data.get("nvs_lcm", NVS_LCM) and NVS_HALF and not data.get("qkv_ss", 0) and qkv.dtype == torch.bfloat16
+     _NVS.nvs(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], data["k_scale"],
+              data["v_scale"], data["cache_loc"], data["page_table"], data["seq_lens"], pacc, pml,
+              cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, S, chunk, cfg["window"], *data.get("o_pf", (0, 0)),
+-             data.get("qkv_ss", 0))
++             data.get("qkv_ss", 0), *((out.data_ptr(), _counters(batch * hkv, device, "lcm").data_ptr()) if lcm else (0, 0)))
++    if lcm:
++        return out  # fresh f1s15: the last CTA of each (request, KV head) merged the S splits and wrote out
+     _combine_hb[(batch * length, hq // 2)](
+         qkv, pacc, pml, data["v_scale"], out,
+         HQ=hq, HKV=hkv, G=hq // hkv, L=length, M=rows, D=d, S=S, S_PAD=triton.next_power_of_2(S), SB=S, HB=2,
+diff --git a/muse_decode_layer/layer.py b/muse_decode_layer/layer.py
+index 580a3ab..142fa92 100644
+--- a/muse_decode_layer/layer.py
++++ b/muse_decode_layer/layer.py
+@@ -3321,7 +3321,7 @@ TUNE = {1: ({}, {"g10alt:o": 1}),
+         32: ({}, {"g30kgx:pooler": False}, {"g19:o": True}, {"tk2h": 3},
+              {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}),
+         8: ({}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}),
+-        128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}),
++        128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}, {"nvslcm": False, "sl": True}),  # fresh f1s15: LCM escape (H200 A/B)
+         256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
+ # n5s10 (lead 03:25Z: judge prepare_s <= 220 s; drop options the H200 tuner hasn't picked in the last 3 checks): TUNE lists
+ # cut to the picks of checks bb8ea548 / 60f02748 / submit 3e3b9fd3 (+ escapes back to the old base); the full old lists are in
+@@ -3345,7 +3345,6 @@ TUNE = {1: ({}, {"g10alt:o": 1}),
+ # moe n7s32: moe_hot at T=256 on max(32, 16 x hot experts) CTAs, at most 64 (device-side; was a fixed 32): calls with 3-4
+ # hot (65..128-token) experts made moe_hot the critical path (H100 v32 sl 4 hot 430 -> 334, 3 hot 378 -> 337, full 4 hot
+ # 676 -> 593 us; 1-2 hot tie; bitwise). These are the judge's slow v32 draws (moe_hot 233-239 us in b87bd6aa/725fc518).
+-HOT_XOFF = 100000000  # fresh f1s9: added to a hot grid = moe_hot at N 128 for every item (HOT_XN off)
+ HOT256 = 3216064  # base * 1e5 + per-expert * 1e3 + grid (moe_src hot_go); 32 = the old fixed grid
+ # moe n7s36: moe_hot at T=128 too, on 32 CTAs per hot (65..128-token) expert, at most 64, none (exits at once) when there is
+ # none: per router seed ~1/4 of T=128 routings have 1-2 such experts (layer v16 time +12 us each beyond its bytes). H100
+@@ -3360,8 +3359,6 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
+              (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
+              (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
+              (256, True): {"hot": HOT256, "rg": True, "twf_split": 66}, (256, False): {"hot": HOT256, "rg": True, "twf_split": 66}}  # s65: proj s53 gemv24 at T=16 (all 4 GEMMs) / T=32 (pooler+unpool):
+-TUNE[256] += ({"hot": HOT256 + HOT_XOFF},)  # fresh f1s9: H200 tuner A/B of HOT_XN (moe_hot wgmma N = tokens rounded to 16) vs
+-# N 128 always (bitwise-equal outputs). T=256 only: the synthetic top expert has ~95 tokens there, < 65 at T=128.
+ # n5s4: g30n o (T=32 sl+full, T=16 full; 12-bit o, W ring filled under PDL before the attention ends): H100 ab_flag TUNE {}, 4 rounds
+ # x seeds 99/7 (3 runs): d32 sl -1.6/-1.5, -1.9/-1.8, full -2.2/-1.8; d16 full -2.4/-2.4, d16 sl +0.8/+0.7 (vs g27: option only).
+ # Escape options {g30n:o: False} (+ lt:o) in TUNE[16]/TUNE[32]: g30n is checked before g27/g24/lt for o, so lt:o/g27:o options need it off.
+@@ -3948,7 +3945,7 @@ def _kernel_fn(data, state):
+             w = e30[1][0]
+         o_pf = (w.data_ptr(), int(w.numel() * w.element_size() * pf_frac) & ~15)
+     o = attn_kernel_fn({
+-        "o_pf": o_pf, "csl_pw": csl_pw, "nvs_cl": _opt(state, tokens, "nvscl", NVS_CL),
++        "o_pf": o_pf, "csl_pw": csl_pw, "nvs_cl": _opt(state, tokens, "nvscl", NVS_CL), "nvs_lcm": _opt(state, tokens, "nvslcm", NVS_LCM),
+         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
+         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
+         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],

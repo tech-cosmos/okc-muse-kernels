@@ -17601,7 +17601,6 @@ TUNE = {1: ({}, {"g10alt:o": 1}),
         8: ({}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}),
         128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}),
         256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
-HOT_XOFF = 100000000
 HOT256 = 3216064
 HOT128 = 32064
 _T8N = {"cslpw": True, "pr8_npf": 220}
@@ -17613,7 +17612,6 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
              (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
              (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
              (256, True): {"hot": HOT256, "rg": True, "twf_split": 66}, (256, False): {"hot": HOT256, "rg": True, "twf_split": 66}}
-TUNE[256] += ({"hot": HOT256 + HOT_XOFF},)
 CSL_PW_TOKENS = (16,)
 CSL_PW_CARVE = False
 if _moe_TK2F_DIAG:
