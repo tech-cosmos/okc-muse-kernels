@@ -1,3 +1,7 @@
+## n11a 04:20Z 10-30: lead 03:50Z LANE A DONE (diag only, NOTES n11a, tools/n11a): leaders' edge is NOT an FP8 shortcut:
+## FP8 x alone fails 1.5% (2.6% rms/GEMM; W fold + x 3.4%); cheapest scaled FP8 consumer (F2 LUT fold) only 0.88-0.92x twm
+## cycles (bs128/256 -> ~188/~225 us proj. vs #1 ~155/188): dq ALU is the wall in both. Only scale-free F0 (0.55x) reaches it.
+## => 'a legal faster design exists'. moe paused. 0 judge runs, Modal 1.1 GPU-min.
 ## n10s4 04:05Z 10-30: lead 03:20Z bundle DONE: v173 (= v172 + IDW + CUDA bnd2 at T=8) on main 8841e7d; check 335f3f26 2.1657 raw /
 ## 2.1398 fixed-SGLang (< v172 2.1607): NOT submitted. H100 A/B d16/d32 -0.5, v1 -0.4 us. moe PAUSED. 1 layer check, 0 Modal.
 ## n10s3 03:12Z 10-30 idle: still no lead line after 02:45Z (END lane closed n10s1; IDW Handoff moe/end 78898bb open). moe paused. 0 judge runs, 0 Modal.

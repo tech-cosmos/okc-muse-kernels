@@ -3585,3 +3585,37 @@ Idle stop: no lead decision after 02:45Z; END lane closed n10s1. 0 judge runs, 0
   (v1/v16/v32 swing 6-11 us between the two v172 runs too). H200 profile v1: bnd2 4.8 us vs Triton second boundary ~4.6 = tie.
 - Merged to main per lead (H100 A/B never worse): origin/main 8841e7d (rebased over layer n11s1/s2; build.py reproduces).
 - moe paused.
+
+## n11a (2026-10-30 04:06Z-04:20Z): lead 03:50Z LANE A "is the leaders' edge a precision shortcut?" (DIAG ONLY: never checked/submitted/merged); 0 judge runs, Modal 1.1 GPU-min
+- Method: twm STAGE microbench (tools/n11a/ovl8.py, base n7s47 ovl2.py: same weight bytes per stage, 8 smem stages,
+  2 consumer WGs, cycles/stage per WG) with FP8 roles (wgmma m64nNk32 e4m3, RS A, x tile in smem):
+  F0 = e2m1 -> e4m3 by bit masks only (exact code * 2^-6; block scale NOT applied = oracle, not NVFP4);
+  F1 = block scale folded lossily: f16 masks + HMUL2 + cvt.rn.satfinite.e4m3x2.f16x2 (+ pack);
+  F2 = cheapest fold found: per (row, stage) 8-byte LUT of e4m3(code_k * s) built from s and e4m3(1.5 s) by byte adds
+  (exponent shifts), dq = 1 PRMT LUT + 2 LOP3 per 4 weights (weights repacked: magnitudes as prmt selectors, signs at
+  byte bit 7). F1/F2 have the same single rounding (code * s -> e4m3).
+- cycles/stage (H100 = H200 exactly; tools/n11a/h100_sweep.txt, h200_sweep_raw.txt):
+  | item     | BF16 twm (prod) | FP8 F2 (LUT fold) | FP8 F0 (no scale) | FP8 F1 | BF16 dq-only / FP8 F2 dq-only | BF16 / FP8 mma-only |
+  | RT4 N8   | 802 | 747 | 443 |      |         |         |
+  | RT4 N16  | 888 | 796 | 517 |      |         |         |
+  | RT4 N24  | 941 | 852 | 490 |      |         |         |
+  | RT4 N32  | 987 | 869 | 511 | 1041 | 700/708 | 513/261 |
+  | RT2 N40  | 580 | 483 | 305 |      | 393/359 | 383/202 |
+  | RT2 N48  | 635 | 508 | 325 |      |         |         |
+  | RT2 N64  | 739 | 527 | 358 | 609  | 393/358 | 512/256 |
+- Weighted by the board routings (bs128/bs256 seeds 7,8,9,801,802; per expert: <= 32 tokens RT4 N=ceil8, else RT2 64-token
+  passes): consumer cycles vs twm: F2 0.895-0.923 (bs128), 0.877-0.898 (bs256); F0 0.545-0.560 (both).
+  => projected (twm is consumer-bound on the H200, n9s1): F2 ~ -8..-10% of the twm kernel -> bs128 ~188-190, bs256 ~225 us
+  (+ an x -> e4m3 quant pass) vs ours 204/248 vs #1's implied ~155/188. F0 (block scales dropped) would be stream-bound
+  (~150-165) but it is not NVFP4 at all.
+- Precision (tools/n11a/precision.txt, one 4096x4096 GEMM, 256 tokens, rel L2 vs exact): W fold e4m3(code*s) alone 2.2%,
+  x per-token e4m3 alone 2.5-2.7%, both 3.3-3.5% (normal / wide scales / outlier channels alike) > the 1.5% output bound
+  (ours: 0.000-0.0015). FP8 activations alone already fail (e4m3's 3-bit mantissa = ~2.6% rms whatever the scale grain).
+- VERDICT: the leaders' edge is NOT an FP8 precision shortcut: (1) any FP8-activation path fails the judge's 1.5% check on
+  every timed call; (2) even ignoring that, the cheapest FP8 path that applies the block scale cuts only ~9-11% of consumer
+  cycles, because dq ALU stays the wall (F2 dq-only 708 ~ BF16 dq-only 700 at RT4; FP8 only halves the MMA, which twm
+  already overlaps ~80%). Only dropping the block scales (F0) reaches the implied times. => 'a legal faster design exists':
+  at bs128 #1 needs <= ~0.76x our consumer cycles per weight with an exact BF16 (or FP16) operand: i.e. a dq at ~0.5-0.6x
+  of our 9 ops / 8 weights, or a way to run dq off the issuing warps (both closed on record for us: z3 floor, RS/SS wall).
+  Untested guesses for what they do differently: none found here; this diag rules the shortcut out, nothing more.
+- Note: an FP16-operand path (HMMA f16) has the same dq and MMA cost as BF16; e4m3 x e2m1-with-scale has no Hopper MMA.
