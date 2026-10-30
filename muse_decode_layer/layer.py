@@ -934,6 +934,7 @@ _G27 = {}
 _GPR1_SRC = None  # @@GPR1@@
 _GPR8_SRC = None  # @@GPR8@@
 _GOB8_SRC = None  # @@GOB8@@
+_GBND2_SRC = None  # @@GBND2@@
 # proj's gemv19 (g19_src.cu = r-proj dev/gemv19.cu @6996d0c): m = 16/32 GEMM over the 12-bit weights, FP32 out zeroed
 # in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
 # kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
@@ -1283,6 +1284,10 @@ def _g10_lib():
                 src = src + "\n" + _GOB8_SRC.replace("OB8_CONFIGS", "OB8_CASE(%d)" % G12_CFG["o"][2])
             else:
                 src = src + "\nvoid ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t) {}\n"
+            if _GBND2_SRC is not None and BND2_TOKENS:
+                src = src + "\n" + _GBND2_SRC
+            else:
+                src = src + "\nvoid bnd2_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, std::vector<torch::Tensor>, int64_t, double, double, double, int64_t, int64_t) {}\n"
             _G10["lib"] = load_inline(
                 name="layer_g10_" + hashlib.sha256(src.encode()).hexdigest()[:12],
                 cpp_sources="void g10_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, "
@@ -1307,8 +1312,10 @@ def _g10_lib():
                             + ("void pr8_launch(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
                                "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                                "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else "")
+                            + "void bnd2_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                            "torch::Tensor, std::vector<torch::Tensor>, int64_t, double, double, double, int64_t, int64_t);\n"
                             + "void ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t);\n",
-                cuda_sources=src, functions=["ob8_gemm", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
+                cuda_sources=src, functions=["bnd2_launch", "ob8_gemm", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "r3_router", "g17_gemv", "n2u_launch", "nu8_launch", "pj_router3", "g19_gemm", "pr1_launch"]
                 + (["pr8_launch"] if _GPR1_SRC is not None and _GPR8_SRC is not None else []),
                 extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3", *NVCC_SPLIT], verbose=False)
         except Exception as e:  # noqa: BLE001
@@ -3835,6 +3842,10 @@ _moe_TWM_ORDER_M = {}  # s15: moe's H200 proxy (s16): order 76 at T=256 (r-moe 4
 
 G19_TRIG_TOKENS = (16, 32)  # s57: the g19 unpool triggers at start, the second boundary is its PDL secondary
 G19_TRIG_O_TOKENS = (16, 32)  # s57: the same for the g19 o GEMM (T=16 sliding pick) and the first boundary
+# moe n10s1 BND2 (bnd2_src.cu, g10 lib): CUDA second boundary (thread = 16 columns, pre-wait loads pinned above the
+# wait) instead of the Triton _boundary; tokens -> programs per row. H100 in-layer v1 sl -0.55 us (6 rounds); d1 +0.25 (off)
+BND2_TOKENS = {8: 8}
+BND2_CFGS = (101, 102, 104, 108, 121, 122, 124, 128, 801, 802, 804, 808, 811, 812, 814, 818)  # = bnd2_launch's cases
 BND_SEP_TOKENS = (8,)  # s57 SEP: the T=8 second boundary loads nu8's 8 slabs as an [8, 1024] tile (H100 ab_flag v1 -1.0/-1.1 us; T=1 tie)
 
 
@@ -3853,6 +3864,13 @@ def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None, nos=None, rst=No
     hidden = torch.empty_like(h)
     alpha, beta = state["res2"]
     spl = _opt(state, tokens, "bspl2", BND_SPLIT.get((tokens, 2), 1))  # s74: TUNE option
+    b2 = _opt(state, tokens, "bnd2", BND2_TOKENS.get(tokens, 0))  # TUNE option: 0 = Triton
+    lib = _G10.get("lib") if b2 and _GBND2_SRC is not None else None
+    cfg = (1 if f.shape[-1] == 1024 else 8) * 100 + (2 if sc is not None else (1 if f.dtype == torch.float32 else 0)) * 10 + b2
+    if lib is not None and pdl and nos is None and rst is None and f.dim() == 2 and cfg in BND2_CFGS:
+        lib.bnd2_launch(f, stream1, alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden,
+                        list(sc) if sc is not None else [], LOCAL_EXPERTS, POST_NORM_EPS, POST_NORM_EPS, RMS_EPS, cfg, 1)
+        return hidden, stream2
     nk = {} if nos is None else dict(x1_ptr=nos[1], a1_ptr=nos[2], b1_ptr=nos[3], rb_ptr=nos[4], NOS=2)
     _boundary[(tokens * spl,)](f, stream1 if nos is None else nos[0], alpha, beta, state["post_ffn"], state["next_pre_attn"], stream2, hidden, hidden,
                          NB=UNPOOL_SLICE if sliced else HIDDEN, N=HIDDEN, BGAIN=True, H32=False,
