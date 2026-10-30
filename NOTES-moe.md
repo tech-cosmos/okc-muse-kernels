@@ -3625,3 +3625,6 @@ Idle stop: no lead decision after 02:45Z; END lane closed n10s1. 0 judge runs, 0
   Re-read the dq/overlap record (n5s39 z3 floor 8 int + 4 HMUL2 per 8 w; n7s47/48 RS/SS wall; n6s1 serial big-M floor bs128 ~125 /
   bs256 ~160 us, under #1's implied ~155/188). So #1's edge has to be consumer efficiency (twm is at 0.83x of serial ALU+MMA per stage,
   1.4x of max), not a cheaper dq. I can't name a mechanism that is not already dead on record, so nothing was built. moe paused. 0 judge runs, 0 Modal.
+
+## n11c 2026-10-30T04:36Z idle stop
+No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Modal.

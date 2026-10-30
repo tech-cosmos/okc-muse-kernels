@@ -1,3 +1,4 @@
+## n11c 04:36Z 10-30 idle: no lead line after 03:50Z; LANE A done (n11a: 'a legal faster design exists'); moe paused. 0 judge runs, 0 Modal.
 ## n11a 04:20Z 10-30: lead 03:50Z LANE A DONE (diag only, NOTES n11a, tools/n11a): leaders' edge is NOT an FP8 shortcut:
 ## n11b 04:25Z 10-30 idle: LANE A done (n11a); no lead line after 03:50Z; moe paused. 0 judge runs, 0 Modal.
 ## FP8 x alone fails 1.5% (2.6% rms/GEMM; W fold + x 3.4%); cheapest scaled FP8 consumer (F2 LUT fold) only 0.88-0.92x twm
