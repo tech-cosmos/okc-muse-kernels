@@ -3500,3 +3500,31 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   The consumer ceiling = 481 MB / 128 us = 3.75 TB/s-eq at v16 s99 vs HBM ~4.3: the gate quantity H200 (base - both-free)
   is bounded by base - stream time ~= 132 - (481/4.3 + ~8) ~= 12-17 us at v16 (my estimate; fresh's H200 O2 is the
   measurement). Clock note: an H200 at 1.77 GHz under this load means instruction count is the lever, as on record.
+
+## n9s2 (2026-10-30 00:07Z - ~00:40Z): fresh's H200 O2 read for the lead 00:00Z consumer-rebuild gate; gate PASSES, design CLOSED by mechanism; no build; 0 judge runs, 0 Modal (fresh's run, 7.8 min on the shared ledger)
+- fresh's H200 in-layer O2 (/tmp/fresh12/h200.txt, bench.py verify, us):
+    shape        base   dq-free  mma-free  both-free  flat-read
+    v1 sl       112.3   112.3    112.4     112.1      112.3
+    v1 full     126.8   126.4    126.8     126.3      126.6
+    v16 sl      244.7   230.3    233.0     215.8      219.1
+    v16 full    344.9   334.3    336.4     325.0      336.8
+    v32 sl      319.1   296.7    296.4     271.6      285.1
+    v32 full    503.7   479.2    487.8     461.1      475.0
+  base - both-free: v16 sl 28.9 / full 19.9; v32 sl 47.5 / full 42.6 => GATE (>= 25 v16 OR >= 35 v32) PASSES.
+  dq alone 14.4 / 22.4 (v16 / v32 sl), MMA alone 11.7 / 22.7: sum 26.1 / 45.1 ~= both 28.9 / 47.5, i.e. on the H200 in-layer
+  dq and wgmma are fully SERIAL (zero overlap), the same as every H100 microbench. Flat read is SLOWER than both-free (219 vs 216,
+  285 vs 272): twm's structure already streams better than a naive grid-stride read; it is all consumer, as n9s1's counters said.
+- Design vs the consumer wall (the lead's "say why a new design escapes it"). A consumer = dq (7 ALU + 4 HMUL2 per 8 weights,
+  n5s39 proven minimal over all searched families) + MMA on the dq'd A. Two ways to feed the tensor core on Hopper:
+  (1) A from registers (RS wgmma / mma.sync): the issuing warp must hold A, so it does the dq -> ncu DISPATCH stall on dq
+      LOP3/HMUL2 while its own HGMMA is in flight (n7s47). Cross-warp variants still share the SMSP's RF/dispatch: pingpong
+      1048/763 (= none), 2-4 CTAs/SM (n7s48 spills / self-fed rings +300 cyc), 4 A sets + wait<3> (-2..-9% RT2 only; in-layer
+      C7511 +26..35 us, n7s53), mma.sync (+19% at N32). Even WG0 dq-only || WG1 MMA on untouched A gives only 0.79x of serial.
+  (2) A from smem (SS wgmma): the MMA warps do no dq, but A in bf16 is 2 B/weight written + 2 B read on top of the 0.5 B FP4
+      ring: ~4.5 B/weight = ~1000 cyc per RT4 stage at 128 B/clk (s19 mb_ws, separate dq/MMA warps: full ~= T + M, 2206 vs
+      twm 1046 at RT4 N32). DSMEM/stmatrix move the same bytes through the same smem port.
+  No third operand path exists on sm_90 (no TMEM; FP8/INT8 wgmma need coarser activations, banned; FP16 A needs FP16 x, banned;
+  scale-on-accumulator costs as many FFMA as the HMUL2 it saves). Shrinking MMA work = N padding only (HOT_XN: -1.5 us, bundled).
+  => No design I can name escapes the wall; the 29/48 us is the price of Hopper's RS/SS choice at these shapes. No build.
+- If the top teams' edge is here, it is something outside this frame (different routing/item balance in-layer, or a clock
+  effect: n9s1 H200 SM 1.77 GHz under load). Not tested.
