@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## x4 (2026-10-30 08:12Z-08:14Z): idle stop; no lead line after 08:10Z (x3 answered it: not confirmed, paused). 0 judge, 0 Modal.
+   Next (x5): same as x3 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x3 (2026-10-30 07:54Z-07:58Z real clock): lead "08:10Z" (ahead of clock) lane rfport (RF read-port hypothesis), Step 1 DONE: NOT CONFIRMED. 0 judge, 0 Modal.
 - tools/fresh/xd/conc4.py (H100, SASS-verified): 112 LOP3/stage next to HGMMA N64: 3 regs 505, 2 regs+imm 500, 1 reg (UR+RZ)
   497, 3 regs with .reuse 547, 2 regs with .reuse 560 (all 235 alone; N8/N32 same pattern). Slowdown is per instruction,
