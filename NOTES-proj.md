@@ -2873,3 +2873,8 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Tools: dev/n9s3/sk128.cu (v1 pull), sk128b.cu (v2 push; flags -DNOPUSH -DNOX -DNOW -DV4 -DPF=n -DSMALLSM -DGG -DNRR,
   env TL=1 per-phase globaltimer timeline, CL=<cluster dim> for NOPUSH runs). NB zsh: pass flag lists as ${=f}.
 - Option (a) CLOSED; pausing per the lead's 02:30Z line. 0 judge runs, 0 Modal.
+
+## n9s4 (2026-10-30 02:41-02:45Z): idle stop
+- No lead decision for proj after 02:30Z (02:45Z restarts layer/moe on start/end lanes; proj only listed as a check-budget donor "proj 6 if needed").
+  n9s3 closed (a) (gate fails), lead's rule = pause. Nothing built, 0 judge runs, 0 Modal.
+- Note: n9s3's COORD/STATE stamp "03:25Z" is wrong; its commit is 02:40:52Z.
