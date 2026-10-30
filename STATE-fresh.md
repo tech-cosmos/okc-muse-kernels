@@ -1,4 +1,5 @@
 # STATE-fresh (newest first)
+## x7 (2026-10-30 11:44Z-11:47Z): idle stop again; still no lead line naming fresh after 09:10Z (layer n12s1 DEFNORM gate also not met). 0 judge, 0 Modal.
 ## x6 (2026-10-30 11:28Z-11:31Z): idle stop; no lead line naming fresh after 09:10Z (x5 answered the sweep: all dead). 0 judge, 0 Modal.
    Next (x7): same as x5 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x5 (2026-10-30 09:04Z-11:30Z): lead 09:10Z ORACLE SWEEP (6 items): ALL DEAD, none >= 1 us on a d-load. 0 judge, 0 Modal.
