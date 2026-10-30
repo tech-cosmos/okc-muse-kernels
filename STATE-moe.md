@@ -1,3 +1,5 @@
+## n10s4 04:05Z 10-30: lead 03:20Z bundle DONE: v173 (= v172 + IDW + CUDA bnd2 at T=8) on main 8841e7d; check 335f3f26 2.1657 raw /
+## 2.1398 fixed-SGLang (< v172 2.1607): NOT submitted. H100 A/B d16/d32 -0.5, v1 -0.4 us. moe PAUSED. 1 layer check, 0 Modal.
 ## n10s3 03:12Z 10-30 idle: still no lead line after 02:45Z (END lane closed n10s1; IDW Handoff moe/end 78898bb open). moe paused. 0 judge runs, 0 Modal.
 ## n10s2 02:57Z 10-30 idle: no lead line after 02:45Z; LAYER END lane closed in n10s1 (its '04:15Z' stamp = typo, ended ~02:53Z).
 ## moe paused. Open: IDW Handoff (moe/end 78898bb) for the lead/layer to bundle. 0 judge runs, 0 Modal.

@@ -3569,3 +3569,19 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 
 ## n10s3 2026-10-30T03:12Z
 Idle stop: no lead decision after 02:45Z; END lane closed n10s1. 0 judge runs, 0 Modal.
+
+## n10s4 (2026-10-30 03:26Z-04:05Z): lead 03:20Z bundle -> v173 on main (8841e7d); 1 layer check, 0 submits, 0 Modal
+- v173 = v172 + IDW (moe/end 78898bb cherry-pick) + BND2: muse_decode_layer/bnd2_src.cu (= tools/n10s1/bnd2_src.cu, the
+  volatile-pin version; NOT /tmp/moeend/cb's, whose dead red[0] pin can be dropped) embedded via build.py's "BND2" entry, built
+  into the g10 lib (bnd2_launch), used by _tail for BND2_TOKENS = {8: 8} (TUNE 'bnd2', 0 = Triton) when pdl, no nos/rst, 2-D f
+  and cfg in BND2_CFGS. SASS checked: s/alpha/beta/gains/ids/tw LDG.CONSTANT above ACQBULK; branch/sc loads STRONG.GPU after.
+- bench test 13/13. H100 ab_files "" 6 rounds, v172/v173 then v173/v172 (deltas v173 - v172, mean of both orders):
+  d1 -0.03/-0.05, d16 -0.45/-0.53, d32 -0.48/-0.68, v1 -0.44/-0.22, v16 +0.94 (position bias: [1] slower in both)/-0.01, v32 -0.47/+0.04.
+- files_eq v172 vs v173: bitwise at d1 (tuner off; with tuner a different d1-full pick showed 0.03), d32/v16/v32; d16/d32 1-ulp
+  = A-vs-A control (v172 vs v172 copy); v1 ~1e-6 stream / up to 1 BF16 ulp hidden (bnd2 reduction order).
+- CHECK 335f3f26 (8841e7d content) 2.1657x raw [2.133, 2.198], fixed-SGLang 2.1398 (/tmp/n10s4/fx.py = /tmp/fx.py + this job;
+  v172 check 8b4e6cf7 2.1628 on the same SGLang set) -> NOT submitted (lead: submit only if fixed > 2.1607). Per shape vs v172
+  check: d16 -1.4/-1.3, d32 -0.7/-1.5 (also below the v172 submit), d1 +0.4/+2.1, v1 +3.0/+7.5, v16 +6.5/+2.5, v32 +4.8/+0.1
+  (v1/v16/v32 swing 6-11 us between the two v172 runs too). H200 profile v1: bnd2 4.8 us vs Triton second boundary ~4.6 = tie.
+- Merged to main per lead (H100 A/B never worse): origin/main 8841e7d (rebased over layer n11s1/s2; build.py reproduces).
+- moe paused.
