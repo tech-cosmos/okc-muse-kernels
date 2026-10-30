@@ -3182,3 +3182,9 @@ Idle session: still no lead line after 02:45Z (all three lanes idle per COORD). 
   judge-like routers PASS (H100, tests_seeds.py). Nearby shapes (tools/n11/nearby.py, H100): 44 cases (T=1..256, b 2/4/24/48/64,
   q_len 4, ctx 40K/120K/200K) all PASS; only visible cliff: decode T=2/4 (149/132 us sl vs T=1 77, T=8 139: generic path) - no SGLang
   locally to say if that's 'much slower' than SGLang there.
+
+## night11 s2 (2026-10-30 04:03Z)
+Lane B follow-up, no code: the n11s1 nearby-shape cliff (decode T=2/4 sl 149/132 us H100 vs T=1 77) is NOT below SGLang:
+SGLang's own d1 (T=1) is 171/183 us sl/full on the H200 (STATE), and its T=2/4 can only be >= that, while our H100 numbers
+are an upper bound for the H200. Also the held-out reruns use the same 12 shapes (lead 03:50Z: same ctx/spread/dist), so it
+does not touch the score. Lane B fully closed. No lead line after 03:50Z: paused. 0 judge runs, 0 Modal.
