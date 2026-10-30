@@ -1,3 +1,7 @@
+## n10s1 04:15Z 10-30: lead 02:45Z LAYER END lane DONE (NOTES n10s1). Free-piece oracles (H100): second boundary d1 1.2-1.4,
+## d16 1.8-2.7, d32 0.7-2.2, v1 2.8-3.3 us (cost = post-wait latency chain, not the hop); norm2 d16 1.1-2.3, d32 1.2-1.4 (not y32
+## volume: Q4 oracle 0). Buildable: IDW (branch moe/end 78898bb, exact, ~-0.5 us d16/d32: bundle item), CUDA bnd2 at v1 -0.55
+## (tools/n10s1, not on a branch). Gate (>= 2 us d1 or >= 3 us summed) NOT met by any design -> moe pauses. 0 judge runs, 0 Modal.
 ## n9s4 00:30Z 10-30 idle: still no lead line after 00:00Z; moe paused (n9s2). 0 judge runs, 0 Modal.
 ## n9s3 00:15Z 10-30 idle: no lead line after 00:00Z (answered by n9s2; n9s2's '00:40Z' stamp = typo, it ended ~00:10Z). moe paused.
 ## 0 judge runs, 0 Modal. Budget 10-30 untouched (moe 20 checks / 10 submits).

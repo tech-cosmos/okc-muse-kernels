@@ -3536,3 +3536,29 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 
 ## n9s4 (2026-10-30 00:28Z - 00:31Z): idle
 - No lead decision after 00:00Z (COORD Human decisions newest = 00:00Z; n9s2's pause request still open). 0 judge runs, 0 Modal.
+
+## n10s1 (2026-10-30 02:30Z-04:15Z): lead 02:45Z LAYER END lane (tk2f end -> norm2 -> unpool -> bnd); 0 judge runs, 0 Modal
+- Not repeated (dead on record): UPF/UPF2/UPF3/UPF4, N2U_BOUNDARY, BND_SPIN, n2u8, bndc, BND_SPLIT, norm2 as PDL secondary,
+  unpool-W prefetch in the drain, s72 norm2 removal (that one broke unpool's PDL window; my oracles keep every kernel).
+- H100 tail now (main v172, tools/n10s1/tl4.py, us after tk2f END): d1 n2u end 4.7 | bnd end 6.6; d16 norm2 3.2 | g30 unpool
+  20.7 | bnd 22.9; d32 3.3 | 21.9 | 24.2; v1 nu8 5.2 | bnd 8.7. H200 (n7s1 timeline): d1 4.3|6.2, d16 3.2|17.4|19.5, d32 3.6|18.3|20.6,
+  v1 5.3|8.9. Unpool at d16/d32 = 12-bit bytes + ~2-3 us; the latency pieces are norm2 and the second boundary.
+- Oracles (H100 in-layer, ab_files, TUNE = {}, tools/n10s1/mkvar.py; us vs base, two runs):
+  NOBND (second boundary skipped): d1 -1.2/-1.4, d16 -1.8/-2.7, d32 -2.2/-0.7, v1 -3.3/-2.8 (v16 -4.4, v32 -11.8: mostly bytes).
+  HOP (boundary launched + waits, no work after the wait) = NOBND within noise -> the launch hop is free, the cost is the
+  post-wait work. NFREE (norm2 returns after its wait; n2u reads no y32): d1 0, d16 -1.1/-2.3, d32 -1.2/-1.4.
+  Q4 (norm2 loads a quarter of y32, same CTAs): d16 -0.1, d32 -0.2 -> norm2's cost is NOT y32 volume: a cluster/column-split
+  norm2 has nothing to win. DEAD by oracle.
+- Boundary post-wait work = latency chain (dependent L2 load of the branch, 2 block reductions, stores). Micro (20 chained
+  PDL launches, captured args, tools/n10s1/micro2.py): Triton _boundary d1 1.87 / d16 2.78 / d32 2.95 / v1 3.44 us per launch;
+  empty-after-wait 0.7-0.8. CUDA rewrite bnd2 (tools/n10s1/bnd2_src.cu, thread = 16 columns, pre-wait loads pinned):
+  best SPL d1 1.74 (spl 8), d16 3.0, d32 3.1, v1 2.76 (spl 8): only v1 gains. In-layer v1 bnd2 spl 8: -0.55 us, d1 +0.25
+  (6 rounds). Bundle-size at most (~0.05% score); not on any branch. Fusing the boundary into the producer = N2U_BOUNDARY (dead).
+- IDW (branch moe/end 78898bb): moe_norm2 loads ids/tw BEFORE its griddepcontrol.wait (the routing is complete before
+  moe_tk2f starts: side-stream join / harness inputs), y32 via __ldcg. Exact (bitwise), test 13/13. ab_files with alternated
+  order (position bias ~0.5 us seen on d1/v1 controls): d16 sl tie..-1.0, d16 full -1.0, d32 sl -0.4, d32 full -0.55 us.
+  ~-0.5 us per T=16/32 call: bundle item. TRAP found on the way: with ids known before the wait, ptxas hoisted the y32 .nc
+  loads ABOVE ACQBULK (a race; my first A/B was on that code). Also a dead smem store as the pin got eliminated (ACQBULK went
+  back to the top): use a volatile store. Check SASS after every pre-wait edit (README in tools/n10s1).
+- Gate (lead: >= 2 us d1 sl or >= 3 us summed over d1/d16/d32/v1): free-piece oracles sum ~10 us, but the buildable designs
+  measure IDW ~0.5+0.5 + bnd2 v1 0.55 = ~1.5 us summed, d1 ~0. GATE NOT MET by any design; lane written up, moe pauses.
