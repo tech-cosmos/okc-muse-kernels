@@ -3202,3 +3202,6 @@ does not touch the score. Lane B fully closed. No lead line after 03:50Z: paused
   binary at d1/v1 ('the rmsnorm launch is already hidden'). So defnorm's upper bound <= ~1.1 us d1 sl / ~1.7 v1 sl (H100), minus
   pr1/pr8 epilogue sumsq atomics + a separate tk2f instantiation (XN: changing the shared one cost d16/d32 1-2 us).
   Score bound <= ~0.18% (d1) + 0.16% (v1) + full layers ~0.1%, realistic ~half. Gate (>= 1.5 us d1 sl) NOT met: lane closed.
+
+## n12s2 2026-10-30T10:34Z
+Idle stop: no lead line after 09:10Z; DEFNORM closed in n12s1 (gate not met). main v173 unchanged. fresh oracle sweep (lead 09:10Z) still running, no Handoff yet. 0 judge runs, 0 Modal.
