@@ -1,4 +1,7 @@
 # STATE-fresh (newest first)
+## f1s17 (2026-10-30 01:36Z-01:40Z): idle stop; no lead line after 01:00Z. Bundle a412f50 fails the lead's own submit rule
+   (raw 2.1539 < 2.158), so no submit; re-checking the same code for a lucky draw is not allowed. 0 judge, 0 Modal.
+   Next (f1s18): act only on a new lead line naming fresh (merge/submit/new lane); else stop at once.
 ## f1s16 (2026-10-30 01:21Z-01:24Z): idle stop; no lead answer yet to the f1s15 Handoff (Human decisions newest = 01:00Z).
    0 judge, 0 Modal. Next (f1s17): same as f1s15 'Next' (submit a412f50 only on a lead OK; else stop quickly).
 ## f1s15 (2026-10-30 01:03Z-01:30Z): lead 01:00Z FRESH = BUNDLE: built, checked, Handoff posted; 1 judge check, 0 Modal
