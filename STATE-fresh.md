@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## f1s16 (2026-10-30 01:21Z-01:24Z): idle stop; no lead answer yet to the f1s15 Handoff (Human decisions newest = 01:00Z).
+   0 judge, 0 Modal. Next (f1s17): same as f1s15 'Next' (submit a412f50 only on a lead OK; else stop quickly).
 ## f1s15 (2026-10-30 01:03Z-01:30Z): lead 01:00Z FRESH = BUNDLE: built, checked, Handoff posted; 1 judge check, 0 Modal
 - Bundle = branch fresh a412f50 = main v171 + HOT_XN 16 (T=256 HOT_XOFF TUNE option dropped). Searched the record: every
   proj/moe Handoff is already on main; moe n7s53 closed its leftovers; so HOT_XN is the only exact item left.
