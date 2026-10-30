@@ -1,4 +1,14 @@
 # STATE-fresh (newest first)
+## x1 (2026-10-30 07:12Z-08:35Z): lead 07:20Z lane "EXACT new expert-kernel design", session 1. 0 judge, 0 Modal.
+- Merged main v173 (8841e7d) into branch fresh. H100 microbenches tools/fresh/xd/{pipes,conc,conc2,conc3}.py; write-up
+  FRESH.md 'x1'. Pipe rates: LOP3/SHF/PRMT 2 cyc (ALU), IMAD 2 (FMA, co-issues with LOP3), HMUL2 ~1, IMAD.WIDE 4.
+- NEW mechanism: an HGMMA in flight slows ALU work in another WG ~1.3-2.2x (grows with N, same for SS and RS); with scale-d 0
+  (no accumulator read) the slowdown almost vanishes => dq/MMA serialization = FP32 accumulator reads through the RF.
+- Gate (<= 0.80x twm consumer at bs128+bs256) FAILS for all 3 candidates: pipe-balance (1 rotate via IMAD.WIDE) ~0.93x;
+  overlap blocked by acc reads (fixed per MAC; FP16 acc banned); lead's (a) cluster dq / (c) tile shape fail by arithmetic.
+  Posted Results + `fresh -> lead` in COORD. Per the lead's rule: gate fails -> fresh pauses itself.
+## Next (x2): paused. Act only on a new lead line naming fresh. If the lead wants more on this lane, the cheapest open test is
+   ncu RF-bank/dispatch metrics on conc.py roles (1,3) vs (8,3) to confirm the acc-read reading on hardware counters.
 ## f1s19 (2026-10-30 01:59Z-02:01Z): idle stop; no lead line after 01:55Z, proj's table not posted yet. 0 judge, 0 Modal.
    Next (f1s20): same as f1s18 'Next'.
 ## f1s18 (2026-10-30 01:52Z-02:05Z): lead 01:55Z: merged a412f50 into main as v172 (e80d4c3; build.py reproduces
