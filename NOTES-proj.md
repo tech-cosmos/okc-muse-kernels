@@ -2828,3 +2828,48 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   W decoded to regs: per-SM smem ingest W 12 KB + x box 16 KB/stage at ~47-50 GB/s/SM = THE limit; cluster x multicast halves
   L2 reads, not smem ingest) and g28 (s64, x as A / W decoded into smem: ~0.3 us/stage mbarrier role chain). A DSMEM split-K
   reduce changes neither wall, so no stream-only prototype was run. Waiting for the lead. No code, 0 judge runs, 0 Modal.
+
+## n9s3 (2026-10-30 02:30Z-, night9 session 3): lead 02:30Z (a) = H100 STREAM-ONLY prototype, T=128 qkv 12-bit split-K + cluster DSMEM reduce
+- Design (dev/n9s3/sk128.cu): qkv [2304, 8192], T = 128. Cluster of S = 16 CTAs = 16 K slices (Kc = 512) of one N group;
+  G = 8 N groups of 288 rows -> 128 CTAs, 1/SM. x slice [128 tok, 512 k] BF16 = 128 KB loaded ONCE into smem and kept resident
+  (the B operand of every wgmma of that CTA); W (12-bit, repacked per CTA contiguous, 288 x 512 x 1.5 = 221 KB/CTA) streams
+  through a small TMA ring; rows in passes of 96 (acc 96 x 128 FP32 per pass); pass end = partial to smem, cluster barrier,
+  reduce-scatter over DSMEM (rank r sums rows r*6..r*6+5 of the pass from 16 peers), BF16 store. No global partials/tickets.
+- WHY NOT g22 (s16 wall = per-SM smem ingest at ~47-50 GB/s/SM: W 12 KB + x box 16 KB per stage, x/W = 1.33 at BM 128, x
+  re-streamed per stage): here x is NOT re-streamed: each SM ingests its x slice once (128 KB) + its W share (221 KB),
+  x/W = 0.58 (2.3x less than g22), whole chip 16 MB x + 28 MB W; at g22's measured ingest ceiling (~6.6 TB/s chip) that
+  is 6.7 us < the 8.7 us HBM time of 28 MB at 3.24 TB/s (H100), i.e. HBM-bound again. (x slices are shared by the 8 N groups;
+  multicast would only cut L2 reads, which g22 showed are not the wall, so not used in v1.)
+- WHY NOT g28 (s64 wall = ~0.3 us/stage mbarrier role chain: producer -> decode-to-smem -> mma consumer, two hand-offs per
+  stage): here one hand-off per stage (TMA producer -> consumer that decodes into its own registers, RS wgmma; x is static so
+  there is no x barrier per stage), stages are large (9-18 KB) and few (~12-24 per CTA), and the split-K reduce is one cluster
+  barrier pair per pass (3 per CTA) instead of global round trips.
+- Open risk not tested by a stream-only proto: the consumer (12-bit decode in the issuing warpgroup + RS wgmma; moe's twm
+  RF/dispatch wall). FLOP 4.8 G = ~6.5 us at 750 TF: if the stream-only passes, the next gate is consumer-only (x resident,
+  W from smem, decode + wgmma) <= ~9 us.
+- RESULT: GATE FAILS (H100, stream-only, us of kernel time = harness median - 5.3 us 1-kernel-graph overhead measured with
+  an empty kernel in the same harness (/tmp/empty.cu); same harness: plain grid-stride read of 28.9 MB = 10.0, torch.mm
+  qkv m128 (cuBLAS) = 18.3; gate = 11):
+  ```
+  variant (G 7 clusters x 16, NR 336 rows/CTA = conservative 28.9 MB, SB 10752 x NST 3)   kernel us
+  W stream only (no x, no reduce; ring depth 4..16 stages all the same)                       10.7-11.0
+  W + x (8 TMA boxes [64k x 128tok] SW128, resident), no reduce                               12.9
+  W + x + push reduce (st.async v2 or v4 to owner recv buffers + 4 reducer warps)             22.4-22.5
+  NO W (producer arrives without loads) + x + push reduce                                      19.1
+  NO W, NO x, push reduce only                                                                 17.1
+  v1 pull reduce (ld.shared::cluster from 16 peers, consumers do it), W + x                    ~32 (5 us per pass)
+  ```
+- WHY: (1) the 16-way DSMEM all-to-all is the wall: each CTA pushes 57 KB per pass (172 KB total = 0.67 x its W bytes),
+  and a pass of pushes drains in ~5 us (timeline: next pass' consumption starts ~5 us after the pushes are issued even with
+  no W at all) = ~11 GB/s per SM, ~180 GB/s per 16-SM cluster. v2 vs v4 st.async: same (bytes, not request count).
+  (2) cluster 16 at 1 CTA/SM: only 7 clusters fit (cudaOccupancyMaxActiveClusters) -> 112 SMs (an 8th = 2nd wave, 68 us).
+  (3) smem: x slice 128 KB + recv 57 KB leave ~32-43 KB for the W ring; not the limit (ring depth 4-16 = same W rate),
+  L2 prefetch-ahead (cp.async.bulk.prefetch.L2, PF 4-8 stages): no gain.
+  (4) general bound for T=128 split-K with every operand through the SM: per CTA x/W = 171/rows and partial/W = 341/Kc with
+  rows x Kc = N K / #CTA = 143K -> x/W + partial/W >= 1.28 at the optimum (rows ~270): same extra traffic as g22's 1.33.
+  Moving it from L2-returns (g22) to DSMEM (here) makes it slower, not faster. Smaller S needs Kc > 512 -> x slice > 128 KB.
+- Not tried (no reason to expect a win): global red.add partials (= g22's flush, 18.9 MB of FP32 reds at S 16), cluster 8 with
+  x streamed (acc for 336 rows x 128 tok does not fit the RF beside decode regs).
+- Tools: dev/n9s3/sk128.cu (v1 pull), sk128b.cu (v2 push; flags -DNOPUSH -DNOX -DNOW -DV4 -DPF=n -DSMALLSM -DGG -DNRR,
+  env TL=1 per-phase globaltimer timeline, CL=<cluster dim> for NOPUSH runs). NB zsh: pass flag lists as ${=f}.
+- Option (a) CLOSED; pausing per the lead's 02:30Z line. 0 judge runs, 0 Modal.
