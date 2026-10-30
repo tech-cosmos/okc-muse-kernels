@@ -1,0 +1,269 @@
+h200: reserved 14 min (23 of 60 used today before this run)
+NVIDIA H200
+
+===== main (rc 0)
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 70.0us | {'g10alt:o': 1} 69.8us (confirm default 70.0 vs 69.9us) -> {'g10alt:o': 1}
+layer tune T=1 full: default 73.6us | {'g10alt:o': 1} 73.4us (confirm default 73.3 vs 74.0us) -> default
+layer tune T=16 sliding: default 166.6us | {'g30n:unpool': True} 165.5us | {'g30n:qkv_gate': True} 168.0us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 167.0us (confirm default 166.6 vs 165.7us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 230.8us | {'g30n:unpool': True} 230.0us | {'g30n:qkv_gate': True} 230.1us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 230.0us (confirm default 231.0 vs 229.9us) -> {'g30n:unpool': True}
+layer tune T=32 sliding: default 166.8us | {'g30kgx:pooler': False} 167.9us | {'g19:o': True} 167.2us | {'tk2h': 3} 169.2us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 167.0us -> default
+layer tune T=32 full: default 316.6us | {'g30kgx:pooler': False} 317.8us | {'g19:o': True} 316.9us | {'tk2h': 3} 317.7us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 317.1us -> default
+layer tune T=8 sliding: default 116.4us | {'g30n:o': False} 117.6us | {'g14alt:qkv_gate': 1} 117.2us -> default
+layer tune T=8 full: default 128.3us | {'g30n:o': False} 128.7us | {'g14alt:qkv_gate': 1} 128.7us -> default
+layer tune T=128 sliding: default 291.7us | {'lt:o': True} 291.6us | {'ltalt:pooler': 2} 291.6us (confirm default 291.4 vs 291.8us) -> default
+layer tune T=128 full: default 351.6us | {'lt:o': True} 351.0us | {'ltalt:pooler': 2} 350.7us (confirm default 351.0 vs 350.2us) -> {'ltalt:pooler': 2}
+layer tune T=256 sliding: default 335.1us | {'lt:o': True} 334.0us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 333.4us (confirm default 336.0 vs 334.4us) -> {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True}
+layer tune T=256 full: default 510.9us | {'lt:o': True} 510.4us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 510.7us (confirm default 530.1 vs 530.1us) -> default
+TUNEPICKS {'1s': {'g10alt:o': 1}, '16s': {'g30n:unpool': True}, '16f': {'g30n:unpool': True}, '128f': {'ltalt:pooler': 2}, '256s': {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True}}
+  super().capture_end_pre()
+# router 0 prepared at 114s
+R 0 | decode 1 sliding | seed   801 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 64.5 notune 64.8
+R 0 | decode 1 sliding | seed  1801 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 70.8 notune 71.2
+R 0 | decode 1 sliding | seed  2801 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 64.7 notune 64.7
+R 0 | decode 1 sliding | seed  3801 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 64.1 notune 65.0
+R 0 | decode 1 full   | seed   802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 73.0
+R 0 | decode 1 full   | seed  1802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 73.3
+R 0 | decode 1 full   | seed  2802 | routes    4 dist  4 nh 0+0 top [1, 1, 1] | main 86.0
+R 0 | decode 1 full   | seed  3802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 72.9
+R 0 | decode 16 sliding | seed   803 | routes   24 dist  6 nh 0+0 top [7, 6, 4] | main 110.0 notune 109.6
+R 0 | decode 16 sliding | seed  1803 | routes   24 dist  8 nh 0+0 top [10, 5, 2] | main 131.5 notune 131.7
+R 0 | decode 16 sliding | seed  2803 | routes   27 dist 12 nh 0+0 top [11, 3, 2] | main 156.1 notune 156.2
+R 0 | decode 16 sliding | seed  3803 | routes   24 dist 10 nh 0+0 top [6, 3, 3] | main 141.0 notune 140.8
+R 0 | decode 16 full  | seed   804 | routes   25 dist  7 nh 0+0 top [11, 4, 4] | main 204.3 notune 204.3
+R 0 | decode 16 full  | seed  1804 | routes   29 dist  6 nh 0+0 top [9, 8, 6] | main 200.2 notune 200.1
+R 0 | decode 16 full  | seed  2804 | routes   27 dist  8 nh 0+0 top [11, 4, 3] | main 211.4 notune 211.9
+R 0 | decode 16 full  | seed  3804 | routes   24 dist  7 nh 0+0 top [11, 5, 4] | main 203.5 notune 203.5
+R 0 | decode 32 sliding | seed   805 | routes   43 dist  7 nh 0+0 top [13, 9, 8] | main 143.0
+R 0 | decode 32 sliding | seed  1805 | routes   55 dist 11 nh 0+0 top [17, 8, 7] | main 163.5
+R 0 | decode 32 sliding | seed  2805 | routes   49 dist  6 nh 0+0 top [18, 10, 9] | main 137.9
+R 0 | decode 32 sliding | seed  3805 | routes   47 dist  7 nh 0+0 top [20, 9, 7] | main 141.7
+R 0 | decode 32 full  | seed   806 | routes   44 dist  9 nh 0+0 top [10, 10, 6] | main 303.4
+R 0 | decode 32 full  | seed  1806 | routes   50 dist 11 nh 0+0 top [16, 8, 5] | main 319.3
+R 0 | decode 32 full  | seed  2806 | routes   48 dist  8 nh 0+0 top [18, 10, 7] | main 298.7
+R 0 | decode 32 full  | seed  3806 | routes   54 dist  9 nh 0+0 top [18, 10, 6] | main 308.4
+R 0 | verify 1 sliding | seed   807 | routes   12 dist  8 nh 0+0 top [2, 2, 2] | main 114.0
+R 0 | verify 1 sliding | seed  1807 | routes   12 dist  9 nh 0+0 top [3, 2, 1] | main 119.7
+R 0 | verify 1 sliding | seed  2807 | routes   12 dist  5 nh 0+0 top [4, 4, 2] | main 94.6
+R 0 | verify 1 sliding | seed  3807 | routes   12 dist  8 nh 0+0 top [3, 2, 2] | main 106.6
+R 0 | verify 1 full   | seed   808 | routes   13 dist  7 nh 0+0 top [6, 2, 1] | main 115.6
+R 0 | verify 1 full   | seed  1808 | routes   16 dist 10 nh 0+0 top [4, 3, 2] | main 141.5
+R 0 | verify 1 full   | seed  2808 | routes   11 dist  6 nh 0+0 top [3, 3, 2] | main 114.8
+R 0 | verify 1 full   | seed  3808 | routes   15 dist  9 nh 0+0 top [5, 2, 2] | main 128.2
+R 0 | verify 16 sliding | seed   809 | routes  161 dist 16 nh 0+0 top [39, 19, 17] | main 247.4 hot0 244.7 hotxn0 245.4
+R 0 | verify 16 sliding | seed  1809 | routes  163 dist 20 nh 0+0 top [52, 28, 15] | main 252.3 hot0 251.5 hotxn0 252.4
+R 0 | verify 16 sliding | seed  2809 | routes  164 dist 21 nh 0+0 top [47, 22, 17] | main 256.4 hot0 255.3 hotxn0 256.6
+R 0 | verify 16 sliding | seed  3809 | routes  170 dist 19 nh 0+0 top [44, 21, 18] | main 256.2 hot0 254.2 hotxn0 256.0
+R 0 | verify 16 full  | seed   810 | routes  162 dist 20 nh 0+0 top [41, 18, 15] | main 343.0 notune 343.3 hot0 342.3 hotxn0 342.2
+R 0 | verify 16 full  | seed  1810 | routes  157 dist 17 nh 0+0 top [37, 30, 23] | main 336.8 notune 336.6 hot0 336.3 hotxn0 337.4
+R 0 | verify 16 full  | seed  2810 | routes  162 dist 18 nh 0+0 top [41, 38, 16] | main 337.5 notune 337.2 hot0 337.3 hotxn0 336.5
+R 0 | verify 16 full  | seed  3810 | routes  181 dist 19 nh 0+0 top [47, 41, 25] | main 353.5 notune 353.4 hot0 351.4 hotxn0 352.9
+R 0 | verify 32 sliding | seed   811 | routes  322 dist 22 nh 1+0 top [81, 47, 41] | main 304.9 notune 306.7 hot32 306.0 hotxn0 308.5
+R 0 | verify 32 sliding | seed  1811 | routes  344 dist 23 nh 2+0 top [83, 73, 37] | main 324.3 notune 323.9 hot32 324.7 hotxn0 325.6
+R 0 | verify 32 sliding | seed  2811 | routes  368 dist 23 nh 2+0 top [104, 76, 39] | main 320.0 notune 321.6 hot32 321.8 hotxn0 323.3
+R 0 | verify 32 sliding | seed  3811 | routes  325 dist 22 nh 2+0 top [81, 73, 45] | main 324.1 notune 325.7 hot32 325.9 hotxn0 324.7
+R 0 | verify 32 full  | seed   812 | routes  338 dist 23 nh 2+0 top [91, 74, 35] | main 499.7 hot32 500.2 hotxn0 501.0
+R 0 | verify 32 full  | seed  1812 | routes  345 dist 24 nh 1+0 top [81, 39, 34] | main 509.5 hot32 511.1 hotxn0 509.6
+R 0 | verify 32 full  | seed  2812 | routes  339 dist 22 nh 1+0 top [86, 41, 40] | main 498.7 hot32 500.3 hotxn0 500.6
+R 0 | verify 32 full  | seed  3812 | routes  341 dist 23 nh 1+0 top [98, 59, 31] | main 493.0 hot32 495.2 hotxn0 492.4
+# router 6023193148244720467 prepared at 133s
+R 6023193148244720467 | decode 1 sliding | seed   801 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 63.9 notune 64.1
+R 6023193148244720467 | decode 1 sliding | seed  1801 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 70.8 notune 71.2
+R 6023193148244720467 | decode 1 sliding | seed  2801 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 70.8 notune 70.5
+R 6023193148244720467 | decode 1 sliding | seed  3801 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 64.0 notune 64.1
+R 6023193148244720467 | decode 1 full   | seed   802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 73.3
+R 6023193148244720467 | decode 1 full   | seed  1802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 73.1
+R 6023193148244720467 | decode 1 full   | seed  2802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 72.6
+R 6023193148244720467 | decode 1 full   | seed  3802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 72.7
+R 6023193148244720467 | decode 16 sliding | seed   803 | routes   27 dist  6 nh 0+0 top [7, 7, 6] | main 115.5 notune 116.3
+R 6023193148244720467 | decode 16 sliding | seed  1803 | routes   29 dist  7 nh 0+0 top [12, 4, 4] | main 124.2 notune 125.2
+R 6023193148244720467 | decode 16 sliding | seed  2803 | routes   28 dist  8 nh 0+0 top [7, 7, 6] | main 127.2 notune 127.3
+R 6023193148244720467 | decode 16 sliding | seed  3803 | routes   27 dist  7 nh 0+0 top [7, 6, 6] | main 122.2 notune 123.3
+R 6023193148244720467 | decode 16 full  | seed   804 | routes   24 dist  8 nh 0+0 top [6, 5, 4] | main 206.4 notune 207.3
+R 6023193148244720467 | decode 16 full  | seed  1804 | routes   29 dist  7 nh 0+0 top [9, 6, 5] | main 203.4 notune 204.2
+R 6023193148244720467 | decode 16 full  | seed  2804 | routes   34 dist  9 nh 0+0 top [7, 7, 4] | main 220.4 notune 221.0
+R 6023193148244720467 | decode 16 full  | seed  3804 | routes   24 dist  6 nh 0+0 top [13, 3, 3] | main 203.3 notune 204.4
+R 6023193148244720467 | decode 32 sliding | seed   805 | routes   51 dist 11 nh 0+0 top [16, 8, 6] | main 161.1
+R 6023193148244720467 | decode 32 sliding | seed  1805 | routes   48 dist  9 nh 0+0 top [22, 6, 6] | main 152.4
+R 6023193148244720467 | decode 32 sliding | seed  2805 | routes   46 dist  9 nh 0+0 top [24, 5, 4] | main 153.3
+R 6023193148244720467 | decode 32 sliding | seed  3805 | routes   53 dist 10 nh 0+0 top [13, 12, 9] | main 156.4
+R 6023193148244720467 | decode 32 full  | seed   806 | routes   50 dist  9 nh 0+0 top [12, 10, 8] | main 302.8
+R 6023193148244720467 | decode 32 full  | seed  1806 | routes   63 dist  8 nh 0+0 top [15, 14, 11] | main 298.8
+R 6023193148244720467 | decode 32 full  | seed  2806 | routes   55 dist  9 nh 0+0 top [12, 10, 10] | main 302.4
+R 6023193148244720467 | decode 32 full  | seed  3806 | routes   62 dist 10 nh 0+0 top [16, 10, 10] | main 314.1
+R 6023193148244720467 | verify 1 sliding | seed   807 | routes   12 dist  7 nh 0+0 top [3, 2, 2] | main 113.1
+R 6023193148244720467 | verify 1 sliding | seed  1807 | routes   10 dist  6 nh 0+0 top [4, 2, 1] | main 99.9
+R 6023193148244720467 | verify 1 sliding | seed  2807 | routes   17 dist 10 nh 0+0 top [3, 3, 2] | main 133.4
+R 6023193148244720467 | verify 1 sliding | seed  3807 | routes   12 dist  7 nh 0+0 top [3, 3, 2] | main 106.6
+R 6023193148244720467 | verify 1 full   | seed   808 | routes   13 dist  6 nh 0+0 top [4, 3, 3] | main 114.7
+R 6023193148244720467 | verify 1 full   | seed  1808 | routes   13 dist  9 nh 0+0 top [3, 3, 1] | main 134.1
+R 6023193148244720467 | verify 1 full   | seed  2808 | routes   13 dist  6 nh 0+0 top [5, 3, 2] | main 114.8
+R 6023193148244720467 | verify 1 full   | seed  3808 | routes   15 dist  7 nh 0+0 top [4, 4, 3] | main 121.3
+R 6023193148244720467 | verify 16 sliding | seed   809 | routes  168 dist 18 nh 0+0 top [58, 26, 14] | main 246.9 hot0 246.4 hotxn0 247.5
+R 6023193148244720467 | verify 16 sliding | seed  1809 | routes  181 dist 19 nh 0+0 top [55, 18, 17] | main 254.3 hot0 253.7 hotxn0 253.7
+R 6023193148244720467 | verify 16 sliding | seed  2809 | routes  176 dist 20 nh 0+0 top [57, 22, 18] | main 255.6 hot0 255.6 hotxn0 256.0
+R 6023193148244720467 | verify 16 sliding | seed  3809 | routes  172 dist 20 nh 0+0 top [59, 19, 16] | main 256.1 hot0 254.8 hotxn0 256.3
+R 6023193148244720467 | verify 16 full  | seed   810 | routes  187 dist 22 nh 0+0 top [59, 26, 21] | main 348.9 notune 348.7 hot0 347.7 hotxn0 349.2
+R 6023193148244720467 | verify 16 full  | seed  1810 | routes  164 dist 20 nh 0+0 top [31, 25, 25] | main 347.8 notune 350.1 hot0 348.3 hotxn0 349.3
+R 6023193148244720467 | verify 16 full  | seed  2810 | routes  162 dist 19 nh 0+0 top [30, 22, 18] | main 344.4 notune 343.8 hot0 342.7 hotxn0 344.5
+R 6023193148244720467 | verify 16 full  | seed  3810 | routes  177 dist 20 nh 0+0 top [62, 22, 15] | main 347.8 notune 348.0 hot0 345.5 hotxn0 347.6
+R 6023193148244720467 | verify 32 sliding | seed   811 | routes  345 dist 19 nh 1+0 top [82, 62, 45] | main 289.3 notune 289.9 hot32 290.1 hotxn0 291.6
+R 6023193148244720467 | verify 32 sliding | seed  1811 | routes  348 dist 22 nh 1+0 top [106, 52, 38] | main 329.8 notune 330.6 hot32 329.8 hotxn0 329.6
+R 6023193148244720467 | verify 32 sliding | seed  2811 | routes  354 dist 20 nh 1+0 top [121, 35, 34] | main 321.3 notune 322.6 hot32 321.4 hotxn0 322.7
+R 6023193148244720467 | verify 32 sliding | seed  3811 | routes  346 dist 25 nh 1+0 top [105, 45, 38] | main 336.6 notune 338.3 hot32 337.5 hotxn0 337.6
+R 6023193148244720467 | verify 32 full  | seed   812 | routes  384 dist 21 nh 1+0 top [122, 46, 40] | main 500.8 hot32 502.0 hotxn0 500.7
+R 6023193148244720467 | verify 32 full  | seed  1812 | routes  368 dist 23 nh 1+0 top [107, 47, 43] | main 510.1 hot32 510.2 hotxn0 509.6
+R 6023193148244720467 | verify 32 full  | seed  2812 | routes  350 dist 24 nh 1+0 top [103, 50, 32] | main 496.0 hot32 501.2 hotxn0 497.0
+R 6023193148244720467 | verify 32 full  | seed  3812 | routes  364 dist 23 nh 1+0 top [113, 46, 37] | main 499.7 hot32 500.9 hotxn0 499.5
+# router 7745419892846091016 prepared at 141s
+R 7745419892846091016 | decode 1 sliding | seed   801 | routes    4 dist  4 nh 0+0 top [1, 1, 1] | main 77.5 notune 77.7
+R 7745419892846091016 | decode 1 sliding | seed  1801 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 70.6 notune 71.1
+R 7745419892846091016 | decode 1 sliding | seed  2801 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 64.5 notune 63.9
+R 7745419892846091016 | decode 1 sliding | seed  3801 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 70.8 notune 70.7
+R 7745419892846091016 | decode 1 full   | seed   802 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 80.0
+R 7745419892846091016 | decode 1 full   | seed  1802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 72.8
+R 7745419892846091016 | decode 1 full   | seed  2802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 73.3
+R 7745419892846091016 | decode 1 full   | seed  3802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 80.2
+R 7745419892846091016 | decode 16 sliding | seed   803 | routes   22 dist  6 nh 0+0 top [9, 5, 4] | main 119.5 notune 120.6
+R 7745419892846091016 | decode 16 sliding | seed  1803 | routes   29 dist  8 nh 0+0 top [8, 7, 6] | main 127.0 notune 127.6
+R 7745419892846091016 | decode 16 sliding | seed  2803 | routes   23 dist  6 nh 0+0 top [10, 6, 2] | main 119.6 notune 120.8
+R 7745419892846091016 | decode 16 sliding | seed  3803 | routes   22 dist  8 nh 0+0 top [8, 4, 3] | main 126.9 notune 128.2
+R 7745419892846091016 | decode 16 full  | seed   804 | routes   27 dist  5 nh 0+0 top [8, 7, 6] | main 195.2 notune 195.1
+R 7745419892846091016 | decode 16 full  | seed  1804 | routes   28 dist  8 nh 0+0 top [9, 7, 3] | main 204.0 notune 204.1
+R 7745419892846091016 | decode 16 full  | seed  2804 | routes   26 dist  5 nh 0+0 top [9, 8, 5] | main 193.2 notune 194.0
+R 7745419892846091016 | decode 16 full  | seed  3804 | routes   28 dist  9 nh 0+0 top [9, 6, 3] | main 213.3 notune 213.8
+R 7745419892846091016 | decode 32 sliding | seed   805 | routes   40 dist  9 nh 0+0 top [10, 7, 7] | main 148.3
+R 7745419892846091016 | decode 32 sliding | seed  1805 | routes   47 dist  8 nh 0+0 top [17, 10, 8] | main 146.6
+R 7745419892846091016 | decode 32 sliding | seed  2805 | routes   45 dist  7 nh 0+0 top [18, 10, 8] | main 142.1
+R 7745419892846091016 | decode 32 sliding | seed  3805 | routes   55 dist  9 nh 0+0 top [21, 9, 8] | main 153.8
+R 7745419892846091016 | decode 32 full  | seed   806 | routes   44 dist  9 nh 0+0 top [14, 9, 7] | main 302.2
+R 7745419892846091016 | decode 32 full  | seed  1806 | routes   53 dist  9 nh 0+0 top [18, 15, 7] | main 300.0
+R 7745419892846091016 | decode 32 full  | seed  2806 | routes   45 dist  7 nh 0+0 top [14, 11, 8] | main 290.4
+R 7745419892846091016 | decode 32 full  | seed  3806 | routes   43 dist 10 nh 0+0 top [10, 7, 6] | main 309.7
+R 7745419892846091016 | verify 1 sliding | seed   807 | routes   14 dist  6 nh 0+0 top [6, 3, 2] | main 100.7
+R 7745419892846091016 | verify 1 sliding | seed  1807 | routes   13 dist  9 nh 0+0 top [4, 2, 1] | main 119.8
+R 7745419892846091016 | verify 1 sliding | seed  2807 | routes   12 dist  6 nh 0+0 top [4, 4, 1] | main 99.9
+R 7745419892846091016 | verify 1 sliding | seed  3807 | routes   13 dist  9 nh 0+0 top [3, 2, 2] | main 119.3
+R 7745419892846091016 | verify 1 full   | seed   808 | routes   12 dist  8 nh 0+0 top [3, 2, 2] | main 127.6
+R 7745419892846091016 | verify 1 full   | seed  1808 | routes   12 dist  4 nh 0+0 top [5, 4, 2] | main 101.2
+R 7745419892846091016 | verify 1 full   | seed  2808 | routes   11 dist  6 nh 0+0 top [3, 3, 2] | main 114.4
+R 7745419892846091016 | verify 1 full   | seed  3808 | routes   11 dist  7 nh 0+0 top [3, 2, 2] | main 121.5
+R 7745419892846091016 | verify 16 sliding | seed   809 | routes  156 dist 17 nh 0+0 top [39, 28, 19] | main 247.7 hot0 245.9 hotxn0 247.7
+R 7745419892846091016 | verify 16 sliding | seed  1809 | routes  159 dist 17 nh 0+0 top [32, 31, 25] | main 252.4 hot0 251.8 hotxn0 252.2
+R 7745419892846091016 | verify 16 sliding | seed  2809 | routes  165 dist 17 nh 0+0 top [32, 31, 18] | main 252.3 hot0 251.4 hotxn0 252.0
+R 7745419892846091016 | verify 16 sliding | seed  3809 | routes  167 dist 16 nh 0+0 top [50, 26, 22] | main 246.2 hot0 246.9 hotxn0 247.9
+R 7745419892846091016 | verify 16 full  | seed   810 | routes  185 dist 17 nh 0+0 top [43, 39, 24] | main 338.0 notune 338.0 hot0 336.2 hotxn0 337.9
+R 7745419892846091016 | verify 16 full  | seed  1810 | routes  160 dist 22 nh 0+0 top [19, 16, 16] | main 351.3 notune 352.6 hot0 350.5 hotxn0 351.7
+R 7745419892846091016 | verify 16 full  | seed  2810 | routes  165 dist 17 nh 0+0 top [43, 29, 22] | main 336.6 notune 336.3 hot0 335.2 hotxn0 336.3
+R 7745419892846091016 | verify 16 full  | seed  3810 | routes  176 dist 22 nh 0+0 top [42, 17, 16] | main 374.5 notune 374.1 hot0 372.0 hotxn0 374.4
+R 7745419892846091016 | verify 32 sliding | seed   811 | routes  344 dist 22 nh 0+0 top [64, 57, 55] | main 328.8 notune 327.6 hot32 328.4 hotxn0 329.8
+R 7745419892846091016 | verify 32 sliding | seed  1811 | routes  325 dist 22 nh 2+0 top [70, 68, 47] | main 305.7 notune 306.2 hot32 305.7 hotxn0 310.5
+R 7745419892846091016 | verify 32 sliding | seed  2811 | routes  338 dist 23 nh 1+0 top [87, 60, 39] | main 315.6 notune 315.7 hot32 316.6 hotxn0 316.1
+R 7745419892846091016 | verify 32 sliding | seed  3811 | routes  347 dist 22 nh 2+0 top [83, 74, 33] | main 297.8 notune 297.4 hot32 299.6 hotxn0 300.5
+R 7745419892846091016 | verify 32 full  | seed   812 | routes  318 dist 20 nh 1+0 top [82, 60, 47] | main 477.7 hot32 478.3 hotxn0 477.4
+R 7745419892846091016 | verify 32 full  | seed  1812 | routes  345 dist 18 nh 1+0 top [89, 61, 48] | main 476.4 hot32 477.3 hotxn0 475.2
+R 7745419892846091016 | verify 32 full  | seed  2812 | routes  308 dist 25 nh 0+0 top [49, 39, 36] | main 513.4 hot32 515.3 hotxn0 513.8
+R 7745419892846091016 | verify 32 full  | seed  3812 | routes  309 dist 20 nh 1+0 top [83, 39, 26] | main 478.8 hot32 479.5 hotxn0 479.2
+# router 5745108551026741284 prepared at 149s
+R 5745108551026741284 | decode 1 sliding | seed   801 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 71.1 notune 70.7
+R 5745108551026741284 | decode 1 sliding | seed  1801 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 70.9 notune 71.1
+R 5745108551026741284 | decode 1 sliding | seed  2801 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 64.2 notune 64.3
+R 5745108551026741284 | decode 1 sliding | seed  3801 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 64.6 notune 64.2
+R 5745108551026741284 | decode 1 full   | seed   802 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 72.3
+R 5745108551026741284 | decode 1 full   | seed  1802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 73.2
+R 5745108551026741284 | decode 1 full   | seed  2802 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 79.9
+R 5745108551026741284 | decode 1 full   | seed  3802 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 78.9
+R 5745108551026741284 | decode 16 sliding | seed   803 | routes   36 dist  8 nh 0+0 top [13, 9, 6] | main 140.2 notune 140.9
+R 5745108551026741284 | decode 16 sliding | seed  1803 | routes   28 dist  9 nh 0+0 top [12, 6, 2] | main 131.2 notune 131.6
+R 5745108551026741284 | decode 16 sliding | seed  2803 | routes   28 dist  6 nh 0+0 top [13, 6, 4] | main 119.6 notune 120.3
+R 5745108551026741284 | decode 16 sliding | seed  3803 | routes   33 dist  8 nh 0+0 top [14, 6, 5] | main 131.1 notune 132.8
+R 5745108551026741284 | decode 16 full  | seed   804 | routes   40 dist  9 nh 0+0 top [13, 10, 6] | main 220.1 notune 219.7
+R 5745108551026741284 | decode 16 full  | seed  1804 | routes   40 dist 10 nh 0+0 top [14, 6, 5] | main 224.5 notune 224.7
+R 5745108551026741284 | decode 16 full  | seed  2804 | routes   33 dist  6 nh 0+0 top [13, 9, 6] | main 202.9 notune 203.7
+R 5745108551026741284 | decode 16 full  | seed  3804 | routes   32 dist  8 nh 0+0 top [9, 7, 7] | main 218.3 notune 219.0
+R 5745108551026741284 | decode 32 sliding | seed   805 | routes   68 dist  9 nh 0+0 top [20, 17, 12] | main 164.0
+R 5745108551026741284 | decode 32 sliding | seed  1805 | routes   68 dist  8 nh 0+0 top [21, 12, 11] | main 153.2
+R 5745108551026741284 | decode 32 sliding | seed  2805 | routes   55 dist 10 nh 0+0 top [19, 8, 7] | main 159.7
+R 5745108551026741284 | decode 32 sliding | seed  3805 | routes   66 dist 10 nh 0+0 top [24, 14, 11] | main 168.3
+R 5745108551026741284 | decode 32 full  | seed   806 | routes   66 dist 10 nh 0+0 top [25, 16, 10] | main 318.8
+R 5745108551026741284 | decode 32 full  | seed  1806 | routes   61 dist  9 nh 0+0 top [24, 12, 8] | main 310.1
+R 5745108551026741284 | decode 32 full  | seed  2806 | routes   65 dist  8 nh 0+0 top [20, 15, 14] | main 302.3
+R 5745108551026741284 | decode 32 full  | seed  3806 | routes   65 dist  7 nh 0+0 top [24, 11, 11] | main 300.4
+R 5745108551026741284 | verify 1 sliding | seed   807 | routes   12 dist  6 nh 0+0 top [4, 3, 2] | main 100.4
+R 5745108551026741284 | verify 1 sliding | seed  1807 | routes   11 dist  6 nh 0+0 top [4, 2, 2] | main 100.6
+R 5745108551026741284 | verify 1 sliding | seed  2807 | routes   14 dist  7 nh 0+0 top [5, 3, 2] | main 106.8
+R 5745108551026741284 | verify 1 sliding | seed  3807 | routes   14 dist  9 nh 0+0 top [3, 2, 2] | main 119.9
+R 5745108551026741284 | verify 1 full   | seed   808 | routes   16 dist  7 nh 0+0 top [6, 3, 3] | main 121.7
+R 5745108551026741284 | verify 1 full   | seed  1808 | routes   13 dist  7 nh 0+0 top [4, 3, 2] | main 120.9
+R 5745108551026741284 | verify 1 full   | seed  2808 | routes   16 dist  9 nh 0+0 top [4, 4, 2] | main 127.8
+R 5745108551026741284 | verify 1 full   | seed  3808 | routes   17 dist  6 nh 0+0 top [6, 5, 3] | main 115.1
+R 5745108551026741284 | verify 16 sliding | seed   809 | routes  224 dist 16 nh 0+0 top [61, 50, 34] | main 247.5 hot0 247.5 hotxn0 247.6
+R 5745108551026741284 | verify 16 sliding | seed  1809 | routes  218 dist 18 nh 0+0 top [56, 41, 38] | main 249.9 hot0 247.6 hotxn0 249.0
+R 5745108551026741284 | verify 16 sliding | seed  2809 | routes  231 dist 18 nh 0+0 top [62, 44, 38] | main 249.6 hot0 248.5 hotxn0 250.0
+R 5745108551026741284 | verify 16 sliding | seed  3809 | routes  218 dist 18 nh 0+0 top [55, 50, 36] | main 250.8 hot0 248.8 hotxn0 249.4
+R 5745108551026741284 | verify 16 full  | seed   810 | routes  246 dist 21 nh 0+0 top [52, 51, 40] | main 372.0 notune 371.2 hot0 369.6 hotxn0 371.3
+R 5745108551026741284 | verify 16 full  | seed  1810 | routes  221 dist 20 nh 0+0 top [50, 45, 41] | main 371.8 notune 373.3 hot0 371.8 hotxn0 372.1
+R 5745108551026741284 | verify 16 full  | seed  2810 | routes  226 dist 17 nh 0+0 top [55, 52, 37] | main 338.9 notune 338.1 hot0 337.7 hotxn0 338.9
+R 5745108551026741284 | verify 16 full  | seed  3810 | routes  226 dist 20 nh 0+0 top [62, 49, 38] | main 341.0 notune 341.2 hot0 339.6 hotxn0 341.2
+R 5745108551026741284 | verify 32 sliding | seed   811 | routes  435 dist 21 nh 3+0 top [101, 89, 81] | main 332.5 notune 333.6 hot32 340.3 hotxn0 334.2
+R 5745108551026741284 | verify 32 sliding | seed  1811 | routes  456 dist 17 nh 3+0 top [118, 91, 82] | main 305.6 notune 306.3 hot32 343.6 hotxn0 305.6
+R 5745108551026741284 | verify 32 sliding | seed  2811 | routes  447 dist 20 nh 3+0 top [106, 88, 83] | main 318.0 notune 317.8 hot32 339.1 hotxn0 317.9
+R 5745108551026741284 | verify 32 sliding | seed  3811 | routes  437 dist 21 nh 3+0 top [107, 84, 80] | main 323.0 notune 322.8 hot32 334.6 hotxn0 323.5
+R 5745108551026741284 | verify 32 full  | seed   812 | routes  409 dist 20 nh 3+0 top [107, 90, 72] | main 486.2 hot32 508.9 hotxn0 486.0
+R 5745108551026741284 | verify 32 full  | seed  1812 | routes  427 dist 20 nh 3+0 top [111, 91, 89] | main 485.2 hot32 518.5 hotxn0 483.4
+R 5745108551026741284 | verify 32 full  | seed  2812 | routes  447 dist 21 nh 3+0 top [104, 91, 84] | main 499.5 hot32 518.7 hotxn0 499.4
+R 5745108551026741284 | verify 32 full  | seed  3812 | routes  440 dist 20 nh 3+0 top [102, 88, 80] | main 495.5 hot32 507.6 hotxn0 496.9
+# router 4125531254498798136 prepared at 156s
+R 4125531254498798136 | decode 1 sliding | seed   801 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 70.8 notune 70.8
+R 4125531254498798136 | decode 1 sliding | seed  1801 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 70.3 notune 70.9
+R 4125531254498798136 | decode 1 sliding | seed  2801 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 70.6 notune 71.0
+R 4125531254498798136 | decode 1 sliding | seed  3801 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 64.3 notune 64.0
+R 4125531254498798136 | decode 1 full   | seed   802 | routes    3 dist  3 nh 0+0 top [1, 1, 1] | main 79.7
+R 4125531254498798136 | decode 1 full   | seed  1802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 72.7
+R 4125531254498798136 | decode 1 full   | seed  2802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 72.8
+R 4125531254498798136 | decode 1 full   | seed  3802 | routes    2 dist  2 nh 0+0 top [1, 1, 0] | main 72.7
+R 4125531254498798136 | decode 16 sliding | seed   803 | routes   24 dist  5 nh 0+0 top [14, 4, 3] | main 113.5 notune 113.5
+R 4125531254498798136 | decode 16 sliding | seed  1803 | routes   25 dist  8 nh 0+0 top [6, 5, 4] | main 126.8 notune 128.1
+R 4125531254498798136 | decode 16 sliding | seed  2803 | routes   27 dist  7 nh 0+0 top [10, 5, 3] | main 131.3 notune 131.9
+R 4125531254498798136 | decode 16 sliding | seed  3803 | routes   31 dist 10 nh 0+0 top [9, 4, 4] | main 145.2 notune 145.7
+R 4125531254498798136 | decode 16 full  | seed   804 | routes   29 dist  9 nh 0+0 top [7, 6, 3] | main 213.5 notune 214.1
+R 4125531254498798136 | decode 16 full  | seed  1804 | routes   23 dist  6 nh 0+0 top [7, 6, 4] | main 195.8 notune 195.9
+R 4125531254498798136 | decode 16 full  | seed  2804 | routes   26 dist  7 nh 0+0 top [9, 6, 5] | main 199.7 notune 200.4
+R 4125531254498798136 | decode 16 full  | seed  3804 | routes   26 dist  7 nh 0+0 top [10, 7, 3] | main 203.2 notune 203.8
+R 4125531254498798136 | decode 32 sliding | seed   805 | routes   50 dist  9 nh 0+0 top [16, 10, 9] | main 149.9
+R 4125531254498798136 | decode 32 sliding | seed  1805 | routes   49 dist 10 nh 0+0 top [13, 12, 7] | main 154.3
+R 4125531254498798136 | decode 32 sliding | seed  2805 | routes   52 dist  8 nh 0+0 top [17, 13, 10] | main 155.2
+R 4125531254498798136 | decode 32 sliding | seed  3805 | routes   56 dist 10 nh 0+0 top [23, 8, 6] | main 159.6
+R 4125531254498798136 | decode 32 full  | seed   806 | routes   47 dist  8 nh 0+0 top [13, 11, 10] | main 298.1
+R 4125531254498798136 | decode 32 full  | seed  1806 | routes   51 dist 11 nh 0+0 top [11, 9, 8] | main 307.6
+R 4125531254498798136 | decode 32 full  | seed  2806 | routes   49 dist  9 nh 0+0 top [11, 9, 8] | main 305.4
+R 4125531254498798136 | decode 32 full  | seed  3806 | routes   50 dist  8 nh 0+0 top [16, 10, 7] | main 301.3
+R 4125531254498798136 | verify 1 sliding | seed   807 | routes   11 dist  8 nh 0+0 top [3, 2, 1] | main 106.9
+R 4125531254498798136 | verify 1 sliding | seed  1807 | routes   14 dist  9 nh 0+0 top [3, 2, 2] | main 120.7
+R 4125531254498798136 | verify 1 sliding | seed  2807 | routes   19 dist  9 nh 0+0 top [5, 4, 2] | main 121.3
+R 4125531254498798136 | verify 1 sliding | seed  3807 | routes   13 dist  6 nh 0+0 top [5, 3, 2] | main 100.5
+R 4125531254498798136 | verify 1 full   | seed   808 | routes   15 dist  8 nh 0+0 top [3, 2, 2] | main 128.6
+R 4125531254498798136 | verify 1 full   | seed  1808 | routes   14 dist  8 nh 0+0 top [3, 3, 2] | main 121.5
+R 4125531254498798136 | verify 1 full   | seed  2808 | routes   11 dist  8 nh 0+0 top [2, 2, 2] | main 134.2
+R 4125531254498798136 | verify 1 full   | seed  3808 | routes   11 dist  9 nh 0+0 top [2, 2, 1] | main 128.0
+R 4125531254498798136 | verify 16 sliding | seed   809 | routes  179 dist 17 nh 0+0 top [34, 30, 26] | main 254.7 hot0 254.0 hotxn0 254.9
+R 4125531254498798136 | verify 16 sliding | seed  1809 | routes  179 dist 18 nh 0+0 top [35, 30, 21] | main 249.0 hot0 247.7 hotxn0 249.2
+R 4125531254498798136 | verify 16 sliding | seed  2809 | routes  166 dist 16 nh 0+0 top [35, 27, 21] | main 247.2 hot0 247.4 hotxn0 247.0
+R 4125531254498798136 | verify 16 sliding | seed  3809 | routes  184 dist 18 nh 0+0 top [63, 35, 23] | main 248.8 hot0 248.6 hotxn0 249.1
+R 4125531254498798136 | verify 16 full  | seed   810 | routes  184 dist 19 nh 1+0 top [66, 31, 24] | main 341.0 notune 340.4 hot0 353.7 hotxn0 343.3
+R 4125531254498798136 | verify 16 full  | seed  1810 | routes  185 dist 18 nh 0+0 top [36, 28, 27] | main 345.2 notune 345.0 hot0 344.1 hotxn0 345.1
+R 4125531254498798136 | verify 16 full  | seed  2810 | routes  190 dist 18 nh 0+0 top [51, 32, 30] | main 339.3 notune 339.1 hot0 338.7 hotxn0 339.6
+R 4125531254498798136 | verify 16 full  | seed  3810 | routes  174 dist 18 nh 0+0 top [37, 29, 18] | main 341.2 notune 342.0 hot0 341.2 hotxn0 341.9
+R 4125531254498798136 | verify 32 sliding | seed   811 | routes  352 dist 22 nh 0+0 top [56, 53, 49] | main 322.3 notune 322.6 hot32 323.9 hotxn0 323.6
+R 4125531254498798136 | verify 32 sliding | seed  1811 | routes  343 dist 22 nh 0+1 top [134, 55, 35] | main 327.0 notune 326.4 hot32 326.1 hotxn0 325.9
+R 4125531254498798136 | verify 32 sliding | seed  2811 | routes  328 dist 20 nh 2+0 top [68, 67, 35] | main 306.0 notune 306.0 hot32 307.0 hotxn0 308.2
+R 4125531254498798136 | verify 32 sliding | seed  3811 | routes  331 dist 17 nh 0+1 top [131, 56, 43] | main 301.2 notune 301.7 hot32 302.9 hotxn0 301.3
+R 4125531254498798136 | verify 32 full  | seed   812 | routes  344 dist 20 nh 0+0 top [60, 56, 49] | main 479.8 hot32 481.4 hotxn0 479.6
+R 4125531254498798136 | verify 32 full  | seed  1812 | routes  325 dist 21 nh 0+0 top [63, 59, 43] | main 484.1 hot32 486.3 hotxn0 485.3
+R 4125531254498798136 | verify 32 full  | seed  2812 | routes  357 dist 21 nh 0+0 top [63, 62, 48] | main 482.0 hot32 483.2 hotxn0 482.8
+R 4125531254498798136 | verify 32 full  | seed  3812 | routes  355 dist 19 nh 1+0 top [65, 61, 45] | main 482.4 hot32 482.2 hotxn0 482.9
+# done 163s
+bad 0
+
+
+h200: charged 3.9 GPU-min; 26 of 60 used today

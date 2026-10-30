@@ -1,0 +1,12 @@
+decode 1 sliding  n 20 scored   69.6 other   67.7 (-2.6%) range 64-78 | notune +0.1 [-0.6,+0.9] 6/20<0
+decode 1 full     n 20 scored   75.7 other   75.1 (-0.7%) range 72-86
+decode 16 sliding n 20 scored  119.7 other  130.7 (+9.2%) range 110-156 | notune +0.6 [-0.4,+1.7] 2/20<0
+decode 16 full    n 20 scored  207.9 other  206.5 (-0.7%) range 193-224 | notune +0.4 [-0.4,+1.1] 3/20<0
+decode 32 sliding n 20 scored  153.3 other  153.2 (-0.0%) range 138-168
+decode 32 full    n 20 scored  305.1 other  304.6 (-0.2%) range 290-319
+verify 1 sliding  n 20 scored  107.0 other  111.3 (+4.0%) range 95-133
+verify 1 full     n 20 scored  121.6 other  122.6 (+0.8%) range 101-142
+verify 16 sliding n 20 scored  248.8 other  251.8 (+1.2%) range 246-256 | hot0 -0.9 [-2.7,+0.7] 16/20<0 | hotxn0 -0.1 [-2.0,+1.7] 8/20<0
+verify 16 full    n 20 scored  348.6 other  347.2 (-0.4%) range 337-374 | notune +0.1 [-0.8,+2.3] 12/20<0 | hot0 -0.4 [-2.5,+12.7] 16/20<0 | hotxn0 +0.1 [-1.0,+2.3] 9/20<0
+verify 32 sliding n 20 scored  315.6 other  317.1 (+0.5%) range 289-337 | notune +0.5 [-1.2,+1.8] 6/20<0 | hot32 +4.6 [-0.9,+38.0] 2/20<0 | hotxn0 +1.3 [-1.1,+4.8] 3/20<0
+verify 32 full    n 20 scored  488.8 other  493.6 (+1.0%) range 476-513 | hot32 +5.5 [-0.2,+33.3] 1/20<0 | hotxn0 +0.2 [-1.8,+1.9] 10/20<0

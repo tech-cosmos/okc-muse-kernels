@@ -3151,3 +3151,34 @@ forms). main = v172 (e80d4c3). 0 judge runs, 0 Modal, no code.
 
 ## night10 s3 (2026-10-30 03:05Z)
 Idle session: still no lead line after 02:45Z (all three lanes idle per COORD). main = v172. 0 judge runs, 0 Modal, no code.
+
+## night11 s1 (2026-10-30 03:51Z-~04:40Z): lead 03:50Z LANE B (held-out robustness). 0 judge runs, Modal 3.9 GPU-min. No fix needed.
+- FACT: the judge NEVER uses the listed seeds 801-812. Every check/submit json has random 63-bit case seeds, different per run
+  and per shape (profiles/*.json benchmarks[].case.seed), and a fresh router per run (weights_fields). So every judge run we
+  have (25+) already ran on held-out inputs and routers; per-shape run-to-run sd 0.7-3% (moe n7s32).
+- Judge-like routers: tools/n11/judge_routers.py inverts each case's speed_of_light_ns (hbm 4.8e12; sl and full agree) for the
+  hidden router_distinct targets: d1 2.5, d16 7.5, d32 9.0, v1 7.5, v16 18.4, v32 21.3; then weights_fields' search on distinct
+  only (router_load is not observable) -> routers 6023193148244720467 / 7745419892846091016 / 5745108551026741284 /
+  4125531254498798136 (err 2-4%; v32 routes 325-440). Plus the default router = 5 routers.
+- tools/n11/heldout.py: 5 routers x 12 shapes x 4 input seeds (scored seed + 3 others), per input interleaved A/B of main vs
+  notune (tuner pick -> base), v16 hot0 / hotxn0 (HOT_XN off), v32 hot32 (hotdyn off) / hotxn0. H200 (tools/n11/h200_summary.txt):
+  ```
+  shape        scored  other   | variant deltas vs main (mean [min,max], inputs where variant faster)
+  d1 sl         69.6   67.7    | notune +0.1
+  d16 sl/full  119.7/207.9  130.7/206.5 | notune +0.6 / +0.4
+  d32 sl/full  153.3/305.1  153.2/304.6
+  v1 sl/full   107.0/121.6  111.3/122.6
+  v16 sl       248.8  251.8    | hot0 -0.9 [-2.7,+0.7] 16/20, hotxn0 -0.1
+  v16 full     348.6  347.2    | hot0 -0.4 [-2.5,+12.7] 16/20, hotxn0 +0.1, notune +0.1
+  v32 sl       315.6  317.1    | hot32 +4.6 [-0.9,+38.0] 2/20, hotxn0 +1.3, notune +0.5
+  v32 full     488.8  493.6    | hot32 +5.5 [-0.2,+33.3] 1/20, hotxn0 +0.2
+  ```
+  scored-vs-other differences = routing chance only (d16 sl spread 110-156 us across inputs; same both ways on the H100).
+  H100 (h100_summary.txt) agrees: hotdyn +4.0/+4.8 if removed, HOT_XN +0.8, tuner picks at d16 +1.2/+1.5 if removed.
+- Only negative: HOT128 at v16 costs ~0.9 us sl / ~0.5 full when no 65..128-token expert exists (moe_hot launch that exits),
+  saves ~13 us when one exists; judge-like routers had a hot expert in 1/40 v16 inputs (break-even ~7%). Expected gain of
+  dropping it <= ~0.04% of score, below the 0.3% bar: NOT changed. (A cheaper no-hot path would take the 0.9 us.)
+- Correctness: 13 tests x 2 extra seed bases (5242, 6242) PASS on H200 and H100; 12 scored shapes x 2 held-out seeds x 2
+  judge-like routers PASS (H100, tests_seeds.py). Nearby shapes (tools/n11/nearby.py, H100): 44 cases (T=1..256, b 2/4/24/48/64,
+  q_len 4, ctx 40K/120K/200K) all PASS; only visible cliff: decode T=2/4 (149/132 us sl vs T=1 77, T=8 139: generic path) - no SGLang
+  locally to say if that's 'much slower' than SGLang there.
