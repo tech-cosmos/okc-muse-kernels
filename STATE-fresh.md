@@ -1,4 +1,11 @@
 # STATE-fresh (newest first)
+## f1s18 (2026-10-30 01:52Z-02:05Z): lead 01:55Z: merged a412f50 into main as v172 (e80d4c3; build.py reproduces
+   submission.py bit-for-bit) and SUBMITTED once: ae6c4bd3 2.1453 raw (CI 2.113-2.177), fixed-SGLang 2.1175 (same code's
+   check 8b4e6cf7 = 2.1608): slow draw on our side; board keeps 2.158. No resubmit of the same code (lead rule).
+   Fixed-score: copy profiles/submission.<job>.* into muse_decode_layer/profiles, run tools/fixed_sglang_score.py with the
+   path pointed at r-fresh and the job added (see /tmp/fx.py pattern). Budget 10-30: layer checks 1/6, submits 1, Modal 7.8/20.
+## Next (f1s19): fresh PAUSED per lead 01:55Z unless proj's table hands fresh a build. Read Human decisions IN FULL; act
+   only on a new lead line naming fresh; else stop at once.
 ## f1s17 (2026-10-30 01:36Z-01:40Z): idle stop; no lead line after 01:00Z. Bundle a412f50 fails the lead's own submit rule
    (raw 2.1539 < 2.158), so no submit; re-checking the same code for a lucky draw is not allowed. 0 judge, 0 Modal.
    Next (f1s18): act only on a new lead line naming fresh (merge/submit/new lane); else stop at once.
