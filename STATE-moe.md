@@ -1,3 +1,5 @@
+## n10s2 02:57Z 10-30 idle: no lead line after 02:45Z; LAYER END lane closed in n10s1 (its '04:15Z' stamp = typo, ended ~02:53Z).
+## moe paused. Open: IDW Handoff (moe/end 78898bb) for the lead/layer to bundle. 0 judge runs, 0 Modal.
 ## n10s1 04:15Z 10-30: lead 02:45Z LAYER END lane DONE (NOTES n10s1). Free-piece oracles (H100): second boundary d1 1.2-1.4,
 ## d16 1.8-2.7, d32 0.7-2.2, v1 2.8-3.3 us (cost = post-wait latency chain, not the hop); norm2 d16 1.1-2.3, d32 1.2-1.4 (not y32
 ## volume: Q4 oracle 0). Buildable: IDW (branch moe/end 78898bb, exact, ~-0.5 us d16/d32: bundle item), CUDA bnd2 at v1 -0.55

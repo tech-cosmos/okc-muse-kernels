@@ -3562,3 +3562,7 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   back to the top): use a volatile store. Check SASS after every pre-wait edit (README in tools/n10s1).
 - Gate (lead: >= 2 us d1 sl or >= 3 us summed over d1/d16/d32/v1): free-piece oracles sum ~10 us, but the buildable designs
   measure IDW ~0.5+0.5 + bnd2 v1 0.55 = ~1.5 us summed, d1 ~0. GATE NOT MET by any design; lane written up, moe pauses.
+
+## n10s2 (2026-10-30 02:55Z-02:58Z): idle stop
+- No lead decision after 02:45Z; the LAYER END lane closed in n10s1 (gate not met; n10s1's "04:15Z" end stamp is a typo, it ended ~02:53Z).
+  The remaining items (IDW ~-0.5 us d16/d32, CUDA bnd2 v1 -0.55) are bundle-sized; IDW is a Handoff on moe/end 78898bb. 0 judge runs, 0 Modal.
