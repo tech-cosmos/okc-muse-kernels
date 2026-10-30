@@ -3148,3 +3148,6 @@ Idle session: still no lead decision after 21:05Z (COORD re-read in full); verif
 Idle session: no lead decision after 02:45Z (COORD re-read); layer-start lane closed in n10s1 (gate not met: qkv at the
 bare-stream floor as first op at d1/d16/v1, start = launch + first DRAM byte; only d32 +3.3 us m32 consumer, dead-record
 forms). main = v172 (e80d4c3). 0 judge runs, 0 Modal, no code.
+
+## night10 s3 (2026-10-30 03:05Z)
+Idle session: still no lead line after 02:45Z (all three lanes idle per COORD). main = v172. 0 judge runs, 0 Modal, no code.
