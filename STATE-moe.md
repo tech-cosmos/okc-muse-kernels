@@ -1,3 +1,8 @@
+## n9s1 00:06Z 10-30: lead 22:30Z twm REBUILD step (1) DONE. H200 counters (Modal): twm consumer-bound (real HBM = L2-fed
+## within 3%, ring wait 5% of consumer life, SM 1.77 GHz); H100: structure ~2 us, NSTG 6 = 8, g2 spin <= 1.7 us. Gate (lead 00:00Z)
+## = fresh's H200 O2 (base - both-free) >= 25 us v16 / 35 us v32; my estimate 12-17 us v16 -> likely CLOSED -> moe pauses.
+## NEXT: read fresh's O2 (r-fresh /tmp/fresh12/h200.txt or COORD); if gate passes, design a consumer rebuild vs n7s47/48 dead list.
+## Tools: muse_moe_w4a16/tools/n9s1 (inst.py counters, run_inst.py, L2-alias recipe in README). 0 judge runs; Modal 3.5 min.
 ## n7s55 17:20Z idle: moe PAUSED per lead 16:45Z (bundle closed n7s53, no v172). No newer lead decision. 0 judge runs, 0 Modal.
 ## n7s54 17:05Z idle: moe PAUSED per lead 16:45Z (bundle done n7s53: no v172). No newer lead decision. 0 judge runs, 0 Modal.
 ## n7s53 17:05Z: lead 16:45Z bundle -> RT2 D4 DEAD in layer (ptxas C7511 in moe_twm, H100 +26..35 us; moe_hot-only tie), HOT128 no-hot
