@@ -3566,3 +3566,6 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 ## n10s2 (2026-10-30 02:55Z-02:58Z): idle stop
 - No lead decision after 02:45Z; the LAYER END lane closed in n10s1 (gate not met; n10s1's "04:15Z" end stamp is a typo, it ended ~02:53Z).
   The remaining items (IDW ~-0.5 us d16/d32, CUDA bnd2 v1 -0.55) are bundle-sized; IDW is a Handoff on moe/end 78898bb. 0 judge runs, 0 Modal.
+
+## n10s3 2026-10-30T03:12Z
+Idle stop: no lead decision after 02:45Z; END lane closed n10s1. 0 judge runs, 0 Modal.
