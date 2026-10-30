@@ -4836,6 +4836,12 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TWM_HOTC 0       // n6s3 (moe 0be4fa0): moe_twm's in-twm hot class compiled out (layer: twm_hot is in no TUNE list); set 1 to use twm_hot
 #define TK2F_REL 2       // n6s6 (moe 5eb1e15+): tk2h gemm13 publishes by a helper warp NC + 1 (H200 DIAG 8c5f1376: tk2h d32 -0.75 us; tk2f 1-group paths +0.3: 2 = tk2h only)
 #define TWM_REL 1        // n6s4 (moe 7d2a079): moe_twm gemm13+gemm2 releases by helper warp 9
+#ifndef TWM_ORC
+#define TWM_ORC 0        // fresh f1s2 ORACLE (timing only, wrong output, never submit): tw_item bit 1 dq ~free (wgmma kept),
+                         // 2 no wgmma / 4 compiled-out epilogue: BOTH also let ptxas drop the dq (ncu: 15M vs 77M instr) = stream-only;
+                         // 16/32/64 runtime-skip all / gemm13 / gemm2 epilogues, 128 epilogue without global stores
+                         // f1s12: 8 no wgmma, dq kept by an XOR sink into acc; 256 flat read of all active experts' bytes
+#endif
 #define TWM_KSC 2        // n6s4 (moe 7d2a079): moe_twm built with + without the K-split tail code (picked per call); 0 = never split, 1 = always built in
 #ifndef TK2G_PAR4
 #define TK2G_PAR4 1      // n17: tk2g_bound's 4 calls on 4 warps + 32-bit p (bitwise: same bounds)
@@ -6545,6 +6551,15 @@ __device__ __forceinline__ void tw_epi2(float (&acc)[RT][N / 2], int lane, int w
         }
       }
     __syncwarp();
+#if TWM_ORC & 128  // staging kept, global stores skipped at run time
+    if (gsc != 1234.5f) {
+#pragma unroll
+      for (int r = 0; r < RT; ++r)
+#pragma unroll
+        for (int i = 0; i + 4 < N / 2; ++i) acc[r][i] = acc[r][i + 4];
+      continue;
+    }
+#endif
     if (GATED) {
       // the warp's positions in its 64-column block: lc bit 2 fixed (RT 4: 4-element chunks) or bits 1-2 fixed (RT 2: 2)
       constexpr int CE = H == 2 ? 4 : 2;
@@ -6633,14 +6648,29 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
       for (int jj = 0; jj < KG; ++jj)
 #pragma unroll
         for (int r = 0; r < RT; ++r) {
+#if TWM_ORC & 1
+          { uint32_t* a_ = odd ? afB[jj][r] : afA[jj][r]; const uint32_t q_ = u4get(wv[r], j0 + jj);
+            a_[0] = q_; a_[1] = q_ ^ s0[r]; a_[2] = q_ ^ s1[r]; a_[3] = q_; }
+#else
           if (odd) dq(u4get(wv[r], j0 + jj), s0[r], s1[r], afB[jj][r]);
           else dq(u4get(wv[r], j0 + jj), s0[r], s1[r], afA[jj][r]);
+#endif
         }
       wg_fence();
+#if TWM_ORC & 8  // fresh f1s12: no wgmma; the dq output is kept alive by an XOR sink into acc (~2 LOP3 per 4 regs)
+#pragma unroll
+      for (int jj = 0; jj < KG; ++jj)
+#pragma unroll
+        for (int r = 0; r < RT; ++r) {
+          const uint32_t* a_ = odd ? afB[jj][r] : afA[jj][r];
+          acc[r][jj & 3] = __int_as_float(__float_as_int(acc[r][jj & 3]) ^ a_[0] ^ a_[1] ^ a_[2] ^ a_[3]);
+        }
+#elif !(TWM_ORC & 2)
 #pragma unroll
       for (int jj = 0; jj < KG; ++jj)
 #pragma unroll
         for (int r = 0; r < RT; ++r) wgmma_bf16<N>(acc[r], odd ? afB[jj][r] : afA[jj][r], d0 + (j0 + jj) * 2);
+#endif
       wg_commit();
       wg_wait<1>();
 #pragma unroll
@@ -6668,6 +6698,18 @@ __device__ __forceinline__ void tw_item(const char* smem, uint64_t* full, uint64
     for (int i = 0; i < NA; ++i) fence_f(acc[r][i]);
   }
   mbar_arrive(&empty[pst]);
+#if TWM_ORC & 4
+  return;
+#endif
+#if TWM_ORC & 16  // runtime skips (code kept: same i-cache footprint); gsc is never 1234.5
+  if (gsc != 1234.5f) return;
+#endif
+#if TWM_ORC & 32
+  if (!g2 && gsc != 1234.5f) return;
+#endif
+#if TWM_ORC & 64
+  if (g2 && gsc != 1234.5f) return;
+#endif
   const int g = lane >> 2, t = lane & 3;
   if (NW == 16 && GATED) {
     float* xb = reinterpret_cast<float*>(const_cast<char*>(smem) + NSTG * C::STG) + (warp >> 1) * 32 * 32;
@@ -7208,6 +7250,7 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 #define TWM_TL 0
 #endif
 #ifndef HOT_EMU
+#define HOT_XN 16  // fresh f1s6: moe_hot (NH 128) items at wgmma N = nv rounded up to HOT_XN (16: 80/96/112/128; 0 = N 128 always)
 #define HOT_ET 1  // n7s39: moe_hot (per > 0) triggers moe_twm (hx) before its own wait; twm polls meta[67] bit 30
 #define HOT_EMU 0  // s29: H200-proxy emulation in moe_twm/moe_hot (tests only; see moe_twm)
 #endif
@@ -7433,6 +7476,50 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     }
   }
   __syncthreads();
+#if TWM_ORC & 256  // fresh f1s12 ORACLE: flat grid-stride read of every active expert's w13+s13+w2+s2 bytes (hot ones too:
+                   // moe_hot exits at once), no items/stages/x; then the per-expert flags moe_norme waits on
+  {
+    constexpr size_t B13 = (size_t)CG::NRB * 64 * CG::WB, Q13 = (size_t)CG::NRB * 64 * CG::SB;
+    constexpr size_t B2 = (size_t)CN::NRB * 64 * CG::WB, Q2 = (size_t)CN::NRB * 64 * CG::SB;
+    constexpr size_t PER = (B13 + Q13 + B2 + Q2) / 16;
+    const int nact = meta[0];
+    const size_t tot = PER * nact, stride = (size_t)gridDim.x * 384;
+    uint32_t sink = 0;
+    for (size_t u0 = (size_t)blockIdx.x * 384 + tid; u0 < tot; u0 += 16 * stride) {
+      uint4 v[16];
+#pragma unroll
+      for (int k = 0; k < 16; ++k) {
+        const size_t u = u0 + k * stride;
+        v[k] = make_uint4(0, 0, 0, 0);
+        if (u < tot) {
+          const int a = (int)(u / PER);
+          size_t o = (u - (size_t)a * PER) * 16;
+          const int e = s_e[a];
+          const char* src;
+          if (o < B13) src = W13 + (size_t)e * B13 + o;
+          else if ((o -= B13) < Q13) src = S13 + (size_t)e * Q13 + o;
+          else if ((o -= Q13) < B2) src = W2 + (size_t)e * B2 + o;
+          else src = S2 + (size_t)e * Q2 + (o - B2);
+          asm volatile("ld.global.nc.L1::no_allocate.v4.u32 {%0,%1,%2,%3}, [%4];"
+                       : "=r"(v[k].x), "=r"(v[k].y), "=r"(v[k].z), "=r"(v[k].w) : "l"(src));
+        }
+      }
+#pragma unroll
+      for (int k = 0; k < 16; ++k) sink ^= v[k].x ^ v[k].y ^ v[k].z ^ v[k].w;
+    }
+    if (sink == 0x9E3779B9u && hx == 12345) Y[tid] = __float2bfloat16(1.0f);  // never true: keeps the loads
+    __syncthreads();
+    if (tid == 0) {
+      __threadfence();
+      if (atomicAdd(meta + 66, 1) == (int)gridDim.x - 1) {
+        for (int a = 0; a < nact; ++a) { const int e = s_e[a]; atomicAdd(done + e, 1 << 24); atomicAdd(done + 32 + e, 1 << 20); }
+        __threadfence();
+      }
+    }
+    if (hx && tid == 0) asm volatile("griddepcontrol.wait;" ::: "memory");
+    return;
+  }
+#endif
   // s11: the last ns gemm2 items (the lightest: the tail) run as 2 K halves each (items n13 + n2f + 2 j + h)
   // The split starts at an expert boundary (moe_route orders an expert's tokens nondeterministically: a token's
   // result must not depend on whether its pass is split), so ns may come out a bit below nsplit.
@@ -7691,7 +7778,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
     int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
-    __nv_bfloat16* __restrict__ Y, int per = 0) {
+    __nv_bfloat16* __restrict__ Y, int per = 0, int xn = 1) {
   using HG = TWC<2, true, 8>;
   using HN = TWC<2, false, 8>;
   constexpr int XB = NH * 128, STRIDE = XB + HG::WB + HG::SB;
@@ -7712,6 +7799,9 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   if (blockIdx.x == 0 && tid == 0) { __threadfence(); atomicOr(meta + 67, 1 << 30); }  // item counter: & 0xFFFFF
 #endif
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#if TWM_ORC & 256  // fresh f1s12: moe_twm reads every expert's bytes flat
+  return;
+#endif
   if (tid < 33) s_off[tid] = meta[33 + tid];
   if (tid == 0) {
     for (int i = 0; i < NSTG; ++i) { mbar_init(&full[i], 1); mbar_init(&empty[i], 8 * 32); }
@@ -7783,8 +7873,28 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int g2 = item >= n13, it = g2 ? item - n13 : item, nrb = g2 ? HN::NRB : HG::NRB;
     const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e], nv = s_off[e + 1] - off;
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
-    tw_item<2, 1, NH, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb,
-                                                           gsc, sroutes, g2 ? Y : Inter, g2);
+#define HOT_ITEM(NN) tw_item<2, 1, NN, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, \
+                                                                           nv, off, rb, gsc, sroutes, g2 ? Y : Inter, g2)
+    // fresh f1s6 HOT_XN: the padded tokens' MMA work (moe n5s21: N 128 for 65..128-token experts) is skipped; the x box
+    // stays 128 rows, so only the wgmma N and the accumulator count change (rows >= nv were never stored: exact)
+    if constexpr (NH == 128 && HOT_XN == 16) {
+      if (xn && nv <= 80) HOT_ITEM(80);
+      else if (nv <= 96) HOT_ITEM(96);
+      else if (nv <= 112) HOT_ITEM(112);
+      else HOT_ITEM(128);
+    } else if constexpr (NH == 128 && HOT_XN == 8) {
+      if (xn && nv <= 72) HOT_ITEM(72);
+      else if (nv <= 80) HOT_ITEM(80);
+      else if (nv <= 88) HOT_ITEM(88);
+      else if (nv <= 96) HOT_ITEM(96);
+      else if (nv <= 104) HOT_ITEM(104);
+      else if (nv <= 112) HOT_ITEM(112);
+      else if (nv <= 120) HOT_ITEM(120);
+      else HOT_ITEM(128);
+    } else {
+      HOT_ITEM(NH);
+    }
+#undef HOT_ITEM
     if (!g2) {
       asm volatile("fence.proxy.async.global;" ::: "memory");
       asm volatile("bar.sync 1, 256;" ::: "memory");
@@ -7812,6 +7922,8 @@ template <bool SA, int NH>
 static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
+  const int xn = grid < 100000000;  // fresh f1s9: grid + 1e8 = HOT_XN off for this call (tuner A/B)
+  grid %= 100000000;
   const int per = (grid / 100000) << 8 | (grid / 1000) % 100;  // n7s32 HOT_PER: grid = base * 1e5 + per * 1e3 + CTAs
   grid %= 1000;
   constexpr int NSTG = 8;
@@ -7827,7 +7939,7 @@ static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
   return launch_k(moe_hot<NSTG, SA, NH>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
-      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(), per);
+      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(), per, xn);
 }
 int64_t moe_hot_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                        torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
@@ -9529,7 +9641,7 @@ int64_t moe_norm3_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw,
 """
 def _moe__gen_wgmma():
     out = ["template <int N> __device__ __forceinline__ void wgmma_bf16(float* d, const uint32_t* a, uint64_t desc);"]
-    for n in list(range(8, 104, 8)) + [128]:
+    for n in range(8, 136, 8):
         na = n // 2
         dl = ", ".join(f"%{i}" for i in range(na))
         al = ", ".join(f"%{na + i}" for i in range(4))
