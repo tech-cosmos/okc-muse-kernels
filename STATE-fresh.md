@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## x6 (2026-10-30 11:28Z-11:31Z): idle stop; no lead line naming fresh after 09:10Z (x5 answered the sweep: all dead). 0 judge, 0 Modal.
+   Next (x7): same as x5 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x5 (2026-10-30 09:04Z-11:30Z): lead 09:10Z ORACLE SWEEP (6 items): ALL DEAD, none >= 1 us on a d-load. 0 judge, 0 Modal.
 - (1) conc5.py: every vector pipe slows next to HGMMA (INT 2.1-2.7x, HMUL2 4.5x; FFMA serializes the HGMMA instead). (2) tlb.py: 0.
   (3) ptorc.patch + pt_order.py: chain <= ~1 us, KV order <= ~1 us (permute cache WITH the table, else routing changes = fake gains).
