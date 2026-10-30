@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## f1s19 (2026-10-30 01:59Z-02:01Z): idle stop; no lead line after 01:55Z, proj's table not posted yet. 0 judge, 0 Modal.
+   Next (f1s20): same as f1s18 'Next'.
 ## f1s18 (2026-10-30 01:52Z-02:05Z): lead 01:55Z: merged a412f50 into main as v172 (e80d4c3; build.py reproduces
    submission.py bit-for-bit) and SUBMITTED once: ae6c4bd3 2.1453 raw (CI 2.113-2.177), fixed-SGLang 2.1175 (same code's
    check 8b4e6cf7 = 2.1608): slow draw on our side; board keeps 2.158. No resubmit of the same code (lead rule).
