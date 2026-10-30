@@ -3205,3 +3205,6 @@ does not touch the score. Lane B fully closed. No lead line after 03:50Z: paused
 
 ## n12s2 2026-10-30T10:34Z
 Idle stop: no lead line after 09:10Z; DEFNORM closed in n12s1 (gate not met). main v173 unchanged. fresh oracle sweep (lead 09:10Z) still running, no Handoff yet. 0 judge runs, 0 Modal.
+
+## n12s3 2026-10-30T10:50Z
+Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle sweep (claim 09:06Z) has no table/Handoff yet. main v173 unchanged. 0 judge runs, 0 Modal.
