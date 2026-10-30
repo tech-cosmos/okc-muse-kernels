@@ -1,5 +1,5 @@
 # STATE-fresh (newest first)
-## x1 (2026-10-30 07:12Z-08:35Z): lead 07:20Z lane "EXACT new expert-kernel design", session 1. 0 judge, 0 Modal.
+## x1 (2026-10-30 07:12Z-07:30Z): lead 07:20Z lane "EXACT new expert-kernel design", session 1. 0 judge, 0 Modal.
 - Merged main v173 (8841e7d) into branch fresh. H100 microbenches tools/fresh/xd/{pipes,conc,conc2,conc3}.py; write-up
   FRESH.md 'x1'. Pipe rates: LOP3/SHF/PRMT 2 cyc (ALU), IMAD 2 (FMA, co-issues with LOP3), HMUL2 ~1, IMAD.WIDE 4.
 - NEW mechanism: an HGMMA in flight slows ALU work in another WG ~1.3-2.2x (grows with N, same for SS and RS); with scale-d 0

@@ -298,7 +298,7 @@ known structure. A twm rebuild is justified only if someone has a concrete dq||M
   length or shorter, so the launch you save doesn't buy anything. Don't retry it unless the split partials stay on chip (DSMEM, which needs clusters,
   and n8s2 showed 4-CTA clusters don't fit in one wave).
 
-## x1 (2026-10-30 07:12Z-~08:35Z): lead 07:20Z lane "an EXACT new expert-kernel design" -- session 1 (H100 microbench only)
+## x1 (2026-10-30 07:12Z-07:30Z): lead 07:20Z lane "an EXACT new expert-kernel design" -- session 1 (H100 microbench only)
 Tools: tools/fresh/xd/pipes.py (pipe rates), conc.py / conc2.py / conc3.py (WG0 HGMMA loop || WG1 ALU loop, 1 CTA, cyc per
 twm RT4 stage = 16 HGMMA m64nNk16 per WG). H100 SM cycles (moe n11a: H100 = H200 exactly for these stage counts).
 
