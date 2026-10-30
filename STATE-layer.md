@@ -2,6 +2,9 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night12 s1 (10-30 09:04Z): lead 09:10Z DEFNORM (deferred pre-expert rmsnorm) GATE NOT MET: H100 hop pr1->norm->tk2f d1 sl 1.1 /
+  v1 1.7 us; d16 routing-bound (0); d32 3 us but g30k stream-K slabs (needs XN, dead). Oracle hangs (as n7s4); s12 XN already
+  measured no-norm-kernel at -0.4..-0.8. No build, 0 runs. NOTES n12s1.
 night11 s2 (10-30 04:03Z): idle/paused. T=2/4 cliff (149/132 us H100) still < SGLang d1 171 us H200 -> no fix. 0 runs.
 night11 s1 (10-30 04:40Z): LANE B held-out robustness DONE (NOTES n11s1): judge already uses random seeds + router per run
   (801-812 never used); H200 5 judge-like routers x 4 seeds: no seed effect, hotdyn/HOT_XN/tuner picks hold; HOT128 -0.9 us when
