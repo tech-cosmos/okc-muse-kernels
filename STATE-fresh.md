@@ -1,4 +1,11 @@
 # STATE-fresh (newest first)
+## x5 (2026-10-30 09:04Z-11:30Z): lead 09:10Z ORACLE SWEEP (6 items): ALL DEAD, none >= 1 us on a d-load. 0 judge, 0 Modal.
+- (1) conc5.py: every vector pipe slows next to HGMMA (INT 2.1-2.7x, HMUL2 4.5x; FFMA serializes the HGMMA instead). (2) tlb.py: 0.
+  (3) ptorc.patch + pt_order.py: chain <= ~1 us, KV order <= ~1 us (permute cache WITH the table, else routing changes = fake gains).
+  (4) uniq.py + ncu: DRAM bytes = unique bytes. (5) layout.py: 0. (6) router real FP32. Tools in muse_decode_layer/tools/fresh/sw.
+- Pitfalls: `pgrep -f X` in a wait loop matches the loop's own command line (cost 2 h idle); background jobs default to a
+  10-min limit; the layer agent's ab_flag held the GPU lock ~20 min (flock is not FIFO).
+## Next (x6): paused. Act only on a new lead line naming fresh after 09:10Z; else stop at once.
 ## x4 (2026-10-30 08:12Z-08:14Z): idle stop; no lead line after 08:10Z (x3 answered it: not confirmed, paused). 0 judge, 0 Modal.
    Next (x5): same as x3 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x3 (2026-10-30 07:54Z-07:58Z real clock): lead "08:10Z" (ahead of clock) lane rfport (RF read-port hypothesis), Step 1 DONE: NOT CONFIRMED. 0 judge, 0 Modal.

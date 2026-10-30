@@ -1,0 +1,132 @@
+--- /tmp/fx_base.py	2026-10-30 09:10:44.090943458 +0000
++++ /tmp/fx_ptorc.py	2026-10-30 09:10:57.945087568 +0000
+@@ -242,12 +242,12 @@
+     /* Keys of this thread: K rows 8j + g (j 0..3), V rows {2c, 2c+1, 8+2c, 9+2c, 16+2c, ...}. */             \
+     _Pragma("unroll") for (int j = 0; j < 4; ++j) {                                                            \
+         int t = min(max(base + w0 + 8 * j + g, 0), tmax);                                                      \
+-        kslot[j] = PAGE == 1 ? (long)max(ptr[t], 0) : (long)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;           \
++        kslot[j] = PAGE == 1 ? ((long)b * MP + t) : (long)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;           \
+     }                                                                                                          \
+     _Pragma("unroll") for (int i = 0; i < 8; ++i) {                                                            \
+         int k = 8 * (i >> 1) + 2 * c + (i & 1);                                                                \
+         int t = min(max(base + w0 + k, 0), tmax);                                                              \
+-        vslot[i] = PAGE == 1 ? (long)max(ptr[t], 0) : (long)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;           \
++        vslot[i] = PAGE == 1 ? ((long)b * MP + t) : (long)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;           \
+     }                                                                                                          \
+     _Pragma("unroll") for (int j = 0; j < 4; ++j) kr[j] = *(const uint4*)(kc + kslot[j] * (HKV * D) + h * D + 16 * c); \
+     _Pragma("unroll") for (int i = 0; i < 8; ++i) vr[i] = *(const uint2*)(vc + vslot[i] * (HKV * D) + h * D + 8 * g);
+@@ -586,12 +586,12 @@
+     /* Keys of this thread: K rows 8j + g (j 0..3), V rows {2c, 2c+1, 8+2c, 9+2c, 16+2c, ...}. */             \
+     _Pragma("unroll") for (int j = 0; j < 4; ++j) {                                                            \
+         int t = min(max(base + w0 + 8 * j + g, 0), tmax);                                                      \
+-        kslot[j] = PAGE == 1 ? (long)max(ptr[t], 0) : (long)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;           \
++        kslot[j] = PAGE == 1 ? ((long)b * MP + t) : (long)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;           \
+     }                                                                                                          \
+     _Pragma("unroll") for (int i = 0; i < 8; ++i) {                                                            \
+         int k = 8 * (i >> 1) + 2 * c + (i & 1);                                                                \
+         int t = min(max(base + w0 + k, 0), tmax);                                                              \
+-        vslot[i] = PAGE == 1 ? (long)max(ptr[t], 0) : (long)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;           \
++        vslot[i] = PAGE == 1 ? ((long)b * MP + t) : (long)max(ptr[t / PAGE], 0) * PAGE + t % PAGE;           \
+     }                                                                                                          \
+     _Pragma("unroll") for (int j = 0; j < 4; ++j) kr[j] = *(const uint4*)(kc + kslot[j] * (HKV * D) + h * D + 16 * c); \
+     _Pragma("unroll") for (int i = 0; i < 8; ++i) vr[i] = *(const uint2*)(vc + vslot[i] * (HKV * D) + h * D + 8 * g);
+@@ -979,8 +979,8 @@
+         for (int c = 0; c < 2; ++c) {
+             const Range& rg = c ? r1 : r0;
+             const int kb = rg.lo + j * BN;
+-            if (kb + tid < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][c * BN + tid]), ptr + kb + tid);
+-            if (kb + tid + 32 < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][c * BN + tid + 32]), ptr + kb + tid + 32);
++            if (kb + tid < rg.hi) if (0) cp4ca(smem_u32(&sm.ptr[j & 7][c * BN + tid]), ptr + kb + tid);
++            if (kb + tid + 32 < rg.hi) if (0) cp4ca(smem_u32(&sm.ptr[j & 7][c * BN + tid + 32]), ptr + kb + tid + 32);
+             if (tid == 0) sm.lim2[j & 7][c] = rg.hi - 1 - kb;
+         }
+     };
+@@ -1003,7 +1003,7 @@
+             if (i < nmine) {
+                 const int lim = sm.lim2[i & 7][cc];
+ #pragma unroll
+-                for (int j = 0; j < 4; ++j) cr[j] = sm.ptr[i & 7][cc * BN + min(grow + 16 * j, lim)];
++                for (int j = 0; j < 4; ++j) cr[j] = (cc ? r1.b : r0.b) * maxp + (cc ? r1.lo : r0.lo) + i * BN + min(grow + 16 * j, lim);
+             }
+             if (tid < 32 && i + NV_PFD < total) stage(i + NV_PFD);
+             mb_wait(&sm.empty[s], ((i / NS) & 1) ^ 1);
+@@ -1028,8 +1028,8 @@
+     // window start is not 16-byte aligned).
+     auto stage = [&](int j) {
+         const int kb = rg.lo + j * BN;
+-        if (kb + tid < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][tid]), ptr + kb + tid);
+-        if (kb + tid + 32 < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][tid + 32]), ptr + kb + tid + 32);
++        if (kb + tid < rg.hi) if (0) cp4ca(smem_u32(&sm.ptr[j & 7][tid]), ptr + kb + tid);
++        if (kb + tid + 32 < rg.hi) if (0) cp4ca(smem_u32(&sm.ptr[j & 7][tid + 32]), ptr + kb + tid + 32);
+         if (tid == 0) sm.lim[j & 7] = rg.hi - 1 - kb;
+     };
+     if (tid < 32)
+@@ -1046,7 +1046,7 @@
+             const int lim = sm.lim[i & 7];
+             int cr[4];
+ #pragma unroll
+-            for (int j = 0; j < 4; ++j) cr[j] = sm.ptr[i & 7][min(grow + 16 * j, lim)];
++            for (int j = 0; j < 4; ++j) cr[j] = rg.b * maxp + rg.lo + i * BN + min(grow + 16 * j, lim);
+             if (tid < 32 && i + NV_PFD < total) stage(i + NV_PFD);
+             mb_wait(&sm.empty[s], ((i / NS) & 1) ^ 1);
+             const int ch = tid & 7;
+@@ -1637,8 +1637,8 @@
+         for (int c = 0; c < 2; ++c) {
+             const Range& rg = c ? r1 : r0;
+             const int kb = rg.lo + j * BN;
+-            if (kb + tid < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][c * BN + tid]), ptr + kb + tid);
+-            if (kb + tid + 32 < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][c * BN + tid + 32]), ptr + kb + tid + 32);
++            if (kb + tid < rg.hi) if (0) cp4ca(smem_u32(&sm.ptr[j & 7][c * BN + tid]), ptr + kb + tid);
++            if (kb + tid + 32 < rg.hi) if (0) cp4ca(smem_u32(&sm.ptr[j & 7][c * BN + tid + 32]), ptr + kb + tid + 32);
+             if (tid == 0) sm.lim2[j & 7][c] = rg.hi - 1 - kb;
+         }
+     };
+@@ -1661,7 +1661,7 @@
+             if (i < nmine) {
+                 const int lim = sm.lim2[i & 7][cc];
+ #pragma unroll
+-                for (int j = 0; j < 4; ++j) cr[j] = sm.ptr[i & 7][cc * BN + min(grow + 16 * j, lim)];
++                for (int j = 0; j < 4; ++j) cr[j] = (cc ? r1.b : r0.b) * maxp + (cc ? r1.lo : r0.lo) + i * BN + min(grow + 16 * j, lim);
+             }
+             if (tid < 32 && i + NV_PFD < total) stage(i + NV_PFD);
+             mb_wait(&sm.empty[s], ((i / NS) & 1) ^ 1);
+@@ -1686,8 +1686,8 @@
+     // window start is not 16-byte aligned).
+     auto stage = [&](int j) {
+         const int kb = rg.lo + j * BN;
+-        if (kb + tid < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][tid]), ptr + kb + tid);
+-        if (kb + tid + 32 < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][tid + 32]), ptr + kb + tid + 32);
++        if (kb + tid < rg.hi) if (0) cp4ca(smem_u32(&sm.ptr[j & 7][tid]), ptr + kb + tid);
++        if (kb + tid + 32 < rg.hi) if (0) cp4ca(smem_u32(&sm.ptr[j & 7][tid + 32]), ptr + kb + tid + 32);
+         if (tid == 0) sm.lim[j & 7] = rg.hi - 1 - kb;
+     };
+     if (tid < 32)
+@@ -1704,7 +1704,7 @@
+             const int lim = sm.lim[i & 7];
+             int cr[4];
+ #pragma unroll
+-            for (int j = 0; j < 4; ++j) cr[j] = sm.ptr[i & 7][min(grow + 16 * j, lim)];
++            for (int j = 0; j < 4; ++j) cr[j] = rg.b * maxp + rg.lo + i * BN + min(grow + 16 * j, lim);
+             if (tid < 32 && i + NV_PFD < total) stage(i + NV_PFD);
+             mb_wait(&sm.empty[s], ((i / NS) & 1) ^ 1);
+             const int ch = tid & 7;
+@@ -2365,8 +2365,8 @@
+     // window start is not 16-byte aligned).
+     auto stage = [&](int j) {
+         const int kb = rg.lo + j * BN;
+-        if (kb + tid < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][tid]), ptr + kb + tid);
+-        if (kb + tid + 32 < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][tid + 32]), ptr + kb + tid + 32);
++        if (kb + tid < rg.hi) if (0) cp4ca(smem_u32(&sm.ptr[j & 7][tid]), ptr + kb + tid);
++        if (kb + tid + 32 < rg.hi) if (0) cp4ca(smem_u32(&sm.ptr[j & 7][tid + 32]), ptr + kb + tid + 32);
+         if (tid == 0) sm.lim[j & 7] = rg.hi - 1 - kb;
+     };
+     if (tid < 32)
+@@ -2383,7 +2383,7 @@
+             const int lim = sm.lim[i & 7];
+             int cr[4];
+ #pragma unroll
+-            for (int j = 0; j < 4; ++j) cr[j] = sm.ptr[i & 7][min(grow + 16 * j, lim)];
++            for (int j = 0; j < 4; ++j) cr[j] = rg.b * maxp + rg.lo + i * BN + min(grow + 16 * j, lim);
+             if (tid < 32 && i + NV_PFD < total) stage(i + NV_PFD);
+             mb_wait(&sm.empty[s], ((i / NS) & 1) ^ 1);
+             const int ch = tid & 7;

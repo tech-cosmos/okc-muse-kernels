@@ -369,10 +369,54 @@ reference router = 0.045*randn FP32: (router.view(int32) & 0xFFFF).ne(0).mean() 
 | HMUL2 / HFMA2 bf16x2 | 124-126 | 425 (348-353) | 559 (561) | 4.5x |
 | FFMA / FMUL fp32 | 125 | 143 (426) | 162 (628) | 1.30x, but HGMMA +103..115 |
 | MUFU ex2 | 923 | 1045 (313) | 1110 (526) | 1.20x (8x slower base) |
-| F2FP bf16x2 pack | see below | | | |
+| F2FP bf16x2 pack | 235 | 395 (361) | 496 (538) | 2.11x |
 - No class escapes. FP32 FFMA/FMUL look free on their own clock but push the HGMMA out by ~ their own standalone time
   (fully serialized, just billed to the other WG). The dq's HMUL2s are the WORST class next to HGMMA (4.5x), the INT ops ~2.1x.
 - "uniform datapath" roles: ptxas kept the asm on the vector datapath (8 ULOP3 in the whole binary), so not measured; and
   uniform ops can't dequantize per-thread weights anyway. Dropped.
 - Verdict (1): DEAD. Every pipe that touches vector registers is taxed while an accumulating HGMMA runs; MUFU (1.2x) is the
   only light one and is 8x too slow to carry a dq.
+### (2) cold-start TLB (fable #8): tools/fresh/sw/tlb.py (H100, bare 28 MB uint4 reader, events, median of 35)
+| reader grid | A 512 MB flush | B A + 4 GB touched per 64 KB | C A + W pre-touched per 64 KB | D per 2 MB | F per 4 KB | E no flush |
+|---|---|---|---|---|---|---|
+| 132 | 19.52 | 19.55 | 19.46 | 19.49 | 19.39 | 21.63 |
+| 264 | 16.19 | 16.13 | 16.26 | 16.16 | 16.10 | 18.34 |
+| 528 | 15.10 | 15.17 | 15.07 | 15.17 | 15.01 | 17.82 |
+- TLB thrash (B) and TLB pre-warm (C/D/F) are within 0.1 us of the plain flush (A) at every grid. A naive reader is latency-
+  limited (1.5-1.9 TB/s), which is exactly where a page-walk penalty would show, and none does. (E, no flush, slower: L2-resident
+  lines are not faster for this reader; not pursued.) Verdict (2): DEAD; the slow first op is not the TLB.
+### (4) cache admission (codex #9): ncu dram__bytes_read vs unique expert bytes (tools/fresh/sw/uniq.py, H100, seed 99, the 2 timed calls)
+- v16 sl (T=128, 163 local pairs, 17 distinct experts x 28.31 MB = 481.3 MB unique): moe_twm DRAM read 482.9 MB (L2 tex reads
+  523 MB), moe_hot idle (largest expert 46 tokens). d32 sl (T=32, 9 distinct = 254.8 MB): moe_tk2f DRAM read 255.1 MB.
+- Every weight byte comes from DRAM exactly once; the excess is ~1.5 MB of activations. evict_first can't cut DRAM bytes; it
+  could only keep other data in L2, and nothing after the experts re-reads anything big. Verdict (4): DEAD.
+### (3) sliding-attention address chain (codex #5): /tmp-built oracle file + tools/fresh/sw/pt_order.py (H100, 2 rounds, us)
+Oracle file [1] = main with every page-table read replaced by slot = b*maxp + t (csl/vtk kslot/vslot; nvs/nvscl producers skip
+the sm.ptr cp.async ring and compute rows). Inputs: orig = the judge's random pages; ident = the SAME logical input with the
+cache rows moved to slot b*maxp + t (page table + cache_loc + k/v_cache permuted together; outputs bitwise equal to orig for
+both files, 4/4 runs, checker passes).
+| sl load | [0] main orig | [0] main ident | [1] no-table ident | [1] no-table orig (WRONG keys) |
+|---|---|---|---|---|
+| d1  | 86.22  | 86.31  | 86.29  | 86.57 |
+| d16 | 189.40 | 188.93 | 187.98 | 181.61 |
+| d32 | 185.99 | 185.25 | 185.57 | 172.98 |
+| v1  | 142.24 | 142.25 | 142.10 | 122.85 |
+| v16 | 293.57 | 292.46 | 292.64 | 291.69 |
+| v32 | 369.99 | 369.50 | 368.21 | 362.82 |
+- TRAP (cost me one round): the first A/B ran the oracle on the judge's input, i.e. it read the WRONG keys -> different
+  attention output -> different routing/expert load: "-8 d16, -13 d32, -20 v1" was routing, not attention (v1 sl attention is
+  only 7.3 us on the H200). Any page-table oracle must permute the cache with the table.
+- Physical KV order (orig -> ident, main): <= 1.1 us. Page-table reads (ident, main -> no-table): -1.0 d16, +0.3 d32, -0.15 v1,
+  +0.2 v16, -1.3 v32: noise-level. PW already issues the table + KV gathers under the qkv GEMM. Verdict (3): DEAD (ceiling ~1 us).
+### (5) layout perturbation (codex #10): tools/fresh/sw/layout.py (H100; all 16 moe-state tensors > 4 MB re-copied at offset OFF)
+| sl load | 0 | 1K | 8K | 67K | 1029K | 0 again |
+|---|---|---|---|---|---|---|
+| d1 | 85.87 | 86.00 | 85.82 | 86.22 | 86.07 | 86.36 |
+| d16 | 189.06 | 189.03 | 189.02 | 189.05 | 188.72 | 188.90 |
+| d32 | 186.20 | 187.30 | 186.61 | 187.17 | 186.09 | 186.82 |
+| v1 | 141.62 | 141.50 | 141.53 | 141.58 | 141.41 | 141.51 |
+| v16 | 295.65 | 296.56 | 296.25 | 295.66 | 296.00 | 296.18 |
+| v32 | 367.29 | 367.30 | 368.06 | 367.61 | 367.61 | 366.90 |
+All within the 0-vs-0 spread (<= 1 us). Verdict (5): DEAD.
+### Sweep summary: all six items dead, none >= 1 us on a d-load: (1) no pipe escapes HGMMA contention, (2) TLB 0, (3) chain
+<= ~1 us + KV order <= ~1 us, (4) DRAM bytes = unique bytes, (5) placement 0, (6) router is real FP32. 0 judge, 0 Modal.
