@@ -231,3 +231,60 @@ balance) is closed or below ~1% on the record, and I can't name a flaw in those 
   model: full exact-N ~-3.7 us per v32 call on the H200; its N104 probe measured -2.3).
 - H100 ab_files verify 32, 5 rounds (base / x16 / x8): sl 368.5 / 367.5 / 367.9, full 621.8 / 624.4 / 625.0 = noise (the
   H100 is DRAM-bound at v32, moe n5s21: not a proxy). Needs the H200.
+
+## f1s12 (2026-10-29 22:47Z-): lead 22:20Z O2 four-way oracle, in-layer, tuner OFF in every variant (`TUNE = {}`)
+Note: f1s10/f1s11 missed the lead's 22:20Z answer (it is under Human decisions, not a `lead -> fresh` Request line).
+Variants (moe_src.py TWM_ORC, default 0 = bitwise main): base 0; (i) dq free = 1 (wgmma kept); (ii) wgmma free = 8 (NEW:
+dq kept alive by an XOR sink of the A regs into acc, ~2 LOP3 per 4 regs extra); (iii) both free = 7 (stream + skeleton:
+items, TMA ring, flags, epilogue; ptxas drops dq); (iv) flat = 256 (NEW: moe_twm grid-stride reads every active
+expert's w13+s13+w2+s2 bytes, 16 x 16 B loads in flight per thread, moe_hot exits at once, then sets the flags
+moe_norme waits on; no x reads, no Inter/Y writes). (i)-(iii) touch moe_twm only; at v32 moe_hot (hot experts, own
+consumer) runs unchanged beside it, (iv) also replaces moe_hot. Pitfall hit again: a sink under a compile-time-false
+condition (nsplit == 12345, nsplit const 0 in the KS false build) let ptxas drop the volatile loads (twm 5 us);
+the sink now tests the runtime arg hx.
+H100 (bench.py verify, seed 99; v16 nact 17 = 481 MB of expert bytes; v1 = control, flat within 0.6):
+| variant | v16 sl | v16 fu | v32 sl | v32 fu |
+|---|---|---|---|---|
+| base | 295.1 | 439.7 | 367.7 | 624.9 |
+| (i) dq free | 291.0 | 436.5 | 363.1 | 621.3 |
+| (ii) wgmma free | 291.4 | 440.0 | 363.2 | 620.9 |
+| (iii) both free | 274.8 | 431.6 | 350.0 | 608.1 |
+| (iv) flat read | 273.7 | 431.4 | 351.2 | 609.0 |
+H100 reading: (iii) = (iv) within ~1 us: twm's skeleton (items, ring, ramp, drain, w13->w2 hand-off) streams as fast as a
+flat read; structural cost ~0. The consumer (base - iii) is -20 / -8 / -18 / -17 us, and it is NOT additive: either half
+alone saves only ~4 us. So the consumer runs at ~max(dq, MMA) + ~4, each alone ~16 us over the stream: a fix must make
+BOTH cheaper (or hide the max under the stream), not one.
+H200 (Modal, one container, order base/dqfree/mmafree/bothfree/flat, rounds 1, 7.8 GPU-min; tools/fresh/o2/h200.txt;
+v16 nact 17 / 481 MB at seed 99; v1 control flat within 0.4 us):
+| variant | v16 sl | v16 fu | v32 sl | v32 fu | bench geomean (v1/v16/v32) |
+|---|---|---|---|---|---|
+| base | 244.7 | 344.9 | 319.1 | 503.7 | 2.194 |
+| (i) dq free | 230.3 (-14.4) | 334.3 (-10.6) | 296.7 (-22.4) | 479.2 (-24.6) | 2.280 |
+| (ii) wgmma free | 233.0 (-11.7) | 336.4 (-8.5) | 296.4 (-22.7) | 487.8 (-15.9) | 2.267 |
+| (iii) both free | 215.8 (-28.9) | 325.0 (-19.9) | 271.6 (-47.5) | 461.1 (-42.6) | 2.377 |
+| (iv) flat read | 219.1 (-25.6) | 336.8 (-8.1) | 285.1 (-34.0) | 475.0 (-28.7) | 2.325 |
+Reading (H200):
+- Structural cost (iii)-(iv) is NEGATIVE: +3.3 / +11.8 / +13.5 / +13.9 us for the flat read, even though at v32 it also
+  removes moe_hot's consumer. twm's TMA-bulk skeleton (items, ring, ramp, drain, hand-off) streams better than a
+  16-deep ld.global grid-stride read; the ~50 us 'non-consumer' gap from the H100 ncu (205.6 vs ~152 flat bytes) does not
+  exist in-layer on the H200 at this resolution. Nothing structural to cut in twm.
+- Consumer (base-iii) is BIG on the H200: -28.9 / -19.9 / -47.5 / -42.6 us (v16 sl 12% of the load, v32 sl 15%).
+  Full consumer free = verify geomean x1.083 = ~+4.1% on the 6-load score.
+- Unlike the H100 (each half alone ~-4), on the H200 dq and MMA are ~ADDITIVE (v32 sl -22.4 + -22.7 = -45 vs -47.5;
+  v16 sl -26 vs -29): faster HBM exposes the per-SM consumer, which runs dq then MMA nearly serially (= moe n7s47's
+  'twm = 1.4x of max(ALU, MMA)'). Perfect overlap (sum -> max) is worth ~min(i, ii) = 12 / 9 / 22 / 16 us = ~+1.9% score;
+  the remaining ~half needs fewer dq instructions or fewer MMA FLOPs.
+Ranked levers, against the record:
+1. dq || wgmma overlap inside an SM (~+1.9% ceiling). Record: moe n7s47 (H100 microbench, cycles/stage are SM-local, so
+   H100 is valid there): 2 A-sets + wait<1>, 4 A-sets, FA3 pingpong, separate dq/MMA WGs, setmaxnreg: none reaches max;
+   ncu = DISPATCH stall on dq LOP3/HMUL2 while HGMMA runs (RF/issue conflict). I can't name a flaw in that measurement.
+   Untested on record, on paper only: dq on a cluster peer writing BF16 A tiles over DSMEM to an SS-wgmma CTA. Bytes:
+   BF16 A = 4x the E2M1 bytes, ~17 TB/s aggregate at stream rate = ~65 B/clk per SM pair: above what DSMEM sustains
+   (~32 B/clk/SM class), and it halves the MMA SMs. Dead on paper.
+2. Fewer dq instructions: at its SASS floor (moe n5s35, 7 ALU ops / 8 weights via LUT; no e2m1 cvt on sm_90). Closed.
+3. Fewer MMA FLOPs: N padding bound 0-2.6 us (s27 pad_bound.py), hot exact-N -1.5/-2.7 (f1s9). FP8/INT8 MMA breaks the
+   BF16-activation rule. Closed.
+4. KQ / R1 / WAVE / XPF / TAIL / NORME_TRIG: all are schedule/drain/hand-off items; (iii)-(iv) <= 0 says the schedule is
+   not where the H200 time goes in-layer, consistent with them measuring <= ~1-6 us or worse. No re-open.
+Verdict: the v16/v32 prize is real (~+4% if free) but it is the per-SM consumer, and only lever 1 attacks it, with no
+known structure. A twm rebuild is justified only if someone has a concrete dq||MMA overlap form that beats n7s47's list.

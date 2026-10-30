@@ -1,0 +1,59 @@
+h200: reserved 23 min (11 of 60 used today before this run)
+NVIDIA H200
+
+===== base (rc 0)
+env: torch 2.14.1+cu130, triton 3.8.0
+verify 1 sliding   112.30 us   (sglang H200   266.83)
+verify 1 full      126.78 us   (sglang H200   272.30)
+verify 16 sliding   244.67 us   (sglang H200   506.48)
+verify 16 full     344.91 us   (sglang H200   692.02)
+verify 32 sliding   319.14 us   (sglang H200   723.60)
+verify 32 full     503.74 us   (sglang H200  1087.28)
+geomean SGLang-H200 / ours-H100: 2.194
+
+
+===== dqfree (rc 0)
+env: torch 2.14.1+cu130, triton 3.8.0
+verify 1 sliding   112.32 us   (sglang H200   266.83)
+verify 1 full      126.38 us   (sglang H200   272.30)
+verify 16 sliding   230.29 us   (sglang H200   506.48)
+verify 16 full     334.27 us   (sglang H200   692.02)
+verify 32 sliding   296.70 us   (sglang H200   723.60)
+verify 32 full     479.18 us   (sglang H200  1087.28)
+geomean SGLang-H200 / ours-H100: 2.28
+
+
+===== mmafree (rc 0)
+env: torch 2.14.1+cu130, triton 3.8.0
+verify 1 sliding   112.43 us   (sglang H200   266.83)
+verify 1 full      126.80 us   (sglang H200   272.30)
+verify 16 sliding   232.99 us   (sglang H200   506.48)
+verify 16 full     336.37 us   (sglang H200   692.02)
+verify 32 sliding   296.42 us   (sglang H200   723.60)
+verify 32 full     487.84 us   (sglang H200  1087.28)
+geomean SGLang-H200 / ours-H100: 2.267
+
+
+===== bothfree (rc 0)
+env: torch 2.14.1+cu130, triton 3.8.0
+verify 1 sliding   112.08 us   (sglang H200   266.83)
+verify 1 full      126.32 us   (sglang H200   272.30)
+verify 16 sliding   215.78 us   (sglang H200   506.48)
+verify 16 full     324.96 us   (sglang H200   692.02)
+verify 32 sliding   271.62 us   (sglang H200   723.60)
+verify 32 full     461.12 us   (sglang H200  1087.28)
+geomean SGLang-H200 / ours-H100: 2.377
+
+
+===== flat (rc 0)
+env: torch 2.14.1+cu130, triton 3.8.0
+verify 1 sliding   112.30 us   (sglang H200   266.83)
+verify 1 full      126.61 us   (sglang H200   272.30)
+verify 16 sliding   219.12 us   (sglang H200   506.48)
+verify 16 full     336.78 us   (sglang H200   692.02)
+verify 32 sliding   285.07 us   (sglang H200   723.60)
+verify 32 full     474.99 us   (sglang H200  1087.28)
+geomean SGLang-H200 / ours-H100: 2.325
+
+
+h200: charged 7.8 GPU-min; 11 of 60 used today
