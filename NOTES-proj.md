@@ -2771,3 +2771,53 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 ## n7s14 (2026-10-29 15:39-15:41Z): idle session
 - No Human decision after 14:45Z (answered in n7s12; ask repeated n7s13). No code, 0 judge runs, 0 Modal. Fixed n7s13's times
   (it ran 15:20-15:24Z, not to 15:45Z).
+
+## n9s1 (2026-10-30 01:05Z-, night9 session 1): lead 01:00Z lane "where is the proj board's 17%" step 1 (table + one H200 oracle)
+- Tools: dev/n9s1/projmodel.py (proj board per-load model), rank.py (layer per-GEMM critical-path table), oracles.py (n5s14's
+  generator retargeted: qkv N 2304 + o K 1024 g30 calls W-from-L2 + no decode/wgmma), tl9.py (median kernel end times over R
+  cold-L2 profiled replays, run in the layer dir; used through tools/h200.py with dir overlays).
+- PROJ BOARD (eb166fc0, judge us per load: ours | SGLang | 12-bit bytes@4.3 + 2 us per shape): d1 39.5|59.8|34.6, d16 56.3|75.8|45.2,
+  d32 57.9|77.0|45.5, v1 44.7|76.3|34.8, v16 72.1|85.1|47.4, v32 88.9|101.9|54.0. A "near-floor everywhere" team (per shape
+  2.5 us + 12-bit bytes/4.3 TB/s, m>=128 max with FLOP/750 TF) scores 1.654 = the board's #1 (1.650); 3.0 us + 4.0 TB/s + 700 TF
+  gives 1.518. So #1 is ~bytes + 2.5 us on EVERY shape. Our proj submission is stale vs the layer: m16/m32 = uncompressed
+  cuBLASLt (qkv 12.7-13.0, pool 16.3-16.6, unp 15.1-15.2), m128/256 = cuBLASLt; biggest relative load gaps v16 (1.18 vs ~1.8),
+  v32 (1.15 vs ~1.3), d16/d32 (1.33 vs ~1.6).
+- LAYER (H200 timeline r-layer dev/n7s1_tl_h200.txt, v164; per GEMM c = its end - its predecessor's end, sl/full; ideal =
+  max(bytes/4.3, FLOP/750 TF); the layer does NOT pay the stale proj m16/m32 numbers: it runs 12-bit g24/g27/g30 + PDL there):
+  ```
+  load gemm     kernel       c_sl  c_full ideal exc_sl %score     (rank.py; %score = sum over sl/full of weight x (c - ideal))
+  d1   qkv      g13          11.8  10.3   6.6   5.2   1.05   <- first op: g13 = bare cold reader + 0.9 us (H200 s17): real lever ~0.9
+  d1   unp8+n2  n2u           4.3   4.7   1.5   2.8   0.64      (includes norm2 + combine; layer's record)
+  v1   qkv      g14          11.4  11.0   6.6   4.8   0.61   <- first op, same reader floor: real ~0.5-1
+  v1   pool+rt  pr8          18.4  17.5  13.7   4.7   0.58
+  d32  qkv      g30          13.5  14.0   6.6   6.9   0.54   <- vs reader floor ~10.9: real ~2.6
+  d16  qkv      g24          11.8  11.5   6.6   5.2   0.50   <- real ~0.9
+  v1   unp8+nrm nu8           5.3   5.1   1.5   3.8   0.49
+  d1   pool+rt  pr1          16.1  14.8  13.7   2.4   0.46
+  v16  FR       nvjet        28.1  26.7  19.5   8.6   0.45   (BF16 bytes; T=128 lane: g22/g23/CUTLASS/DeepGEMM all lost to nvjet)
+  d32  pool+rt  g30k|rsplit  19.7  19.2  13.7   6.0   0.45   (n5s14 H200: pool+unp both-free = -6 us/d32 load)
+  v1   o        g30           5.9   7.6   2.9   3.0   0.44
+  v16  qkv      nvjet        15.7  16.4   8.8   6.9   0.39
+  v32  FR       nvjet        33.9  33.6  25.8   8.1   0.34
+  d32  o        g30           7.1   6.7   2.9   4.2   0.31
+  ... (rest <= 0.26 each; total of all 24 rows 9.4% = every GEMM at bytes/4.3 with zero hop cost: not reachable)
+  ```
+  Every phase pays a hop (~1.5-3 us drain + x fetch, fresh O1) and the first op pays the cold-reader ramp, so the reachable part
+  is a fraction of the column. The old proj-table example (T=16/32 cuBLASLt uncompressed qkv 13.6-13.8) is NOT in the layer.
+- ORACLE (qkv + o free: W from L2 (8 stages re-read), no decode/wgmma; g30 calls only = d32 qkv+o, v1 o, d16-full o):
+  H200 Modal run TIMED OUT (11-min reservation; two cold layer prepares + 1 GB flushes x 7 R x 3 loads x 2 variants don't fit):
+  11.2 GPU-min charged, no output. Lesson: one load, R 3, and --timeout/estimate >= 15 min, or skip Modal for timelines.
+  H100 instead (tl9.py, R 7, one round each; noise ~1 us), d32, base -> both, us from graph start:
+    sl:   qkv end 15.0 -> 10.0 | 1st boundary end 40.1 -> 33.9 (-6.2) | pooler g30k end 64.0 -> 57.9 (-6.1)
+    full: qkv end 14.9 -> 10.2 | attention end 258.5 -> 253.7 (qkv saving lands in attention) | boundary end 268.6 -> 262.0 (-6.6)
+  (pre-routing points, so the garbage routing of the oracle doesn't touch them). NB qkv with NO HBM W and NO math still takes
+  10 us as the first op (L2->smem re-reads of 28 MB + skeleton + cold start): the skeleton, not the stream, is most of qkv.
+  The B variant HANGS at v1 or d16 (o = g30 in another config; the no-math hack breaks its split/cluster path): v1 not measured.
+- READING: an INFINITELY fast qkv+o at d32 = ~-6 us/load (H100) = <= 0.46% layer; a real kernel recovers a fraction (bytes alone
+  are 9.5 us of the 22 us they take). d16 qkv/o and d1/v1 qkv are already within ~1 us of the cold-reader floor. With n5s14's
+  pool+unp both-free = -6 us/d32, the whole T=32 dense set is <= ~12 us infinitely fast, ~3-5 us realistic, spread over 4
+  kernels -> no single d-load GEMM item reaches the lead's 4 us gate with a named design. The proj board's 17% is (a) our STALE
+  proj submission at m16/m32 (uncompressed cuBLASLt; the layer already has better 12-bit PDL kernels, which standalone only
+  tie cuBLAS because their win is the pre-wait stream) and (b) T=128/256 (v16 1.18x, v32 1.15x on the board): the same nvjet
+  in the layer, ~0.5-0.9% layer if a GEMM reached bytes+2.5 us at m128 — every own/public attempt on record lost or tied.
+- 0 judge runs. Modal 11.2 GPU-min (timed out, no data).
