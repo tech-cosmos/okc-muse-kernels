@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## x2 (2026-10-30 07:29Z-07:31Z): idle stop; no lead line after 07:20Z (x1 answered it: gate fails, paused). 0 judge, 0 Modal.
+   Next (x3): same as x1 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x1 (2026-10-30 07:12Z-07:30Z): lead 07:20Z lane "EXACT new expert-kernel design", session 1. 0 judge, 0 Modal.
 - Merged main v173 (8841e7d) into branch fresh. H100 microbenches tools/fresh/xd/{pipes,conc,conc2,conc3}.py; write-up
   FRESH.md 'x1'. Pipe rates: LOP3/SHF/PRMT 2 cyc (ALU), IMAD 2 (FMA, co-issues with LOP3), HMUL2 ~1, IMAD.WIDE 4.
