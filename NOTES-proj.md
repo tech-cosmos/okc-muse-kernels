@@ -2771,3 +2771,114 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 ## n7s14 (2026-10-29 15:39-15:41Z): idle session
 - No Human decision after 14:45Z (answered in n7s12; ask repeated n7s13). No code, 0 judge runs, 0 Modal. Fixed n7s13's times
   (it ran 15:20-15:24Z, not to 15:45Z).
+
+## n9s1 (2026-10-30 01:05Z-, night9 session 1): lead 01:00Z lane "where is the proj board's 17%" step 1 (table + one H200 oracle)
+- Tools: dev/n9s1/projmodel.py (proj board per-load model), rank.py (layer per-GEMM critical-path table), oracles.py (n5s14's
+  generator retargeted: qkv N 2304 + o K 1024 g30 calls W-from-L2 + no decode/wgmma), tl9.py (median kernel end times over R
+  cold-L2 profiled replays, run in the layer dir; used through tools/h200.py with dir overlays).
+- PROJ BOARD (eb166fc0, judge us per load: ours | SGLang | 12-bit bytes@4.3 + 2 us per shape): d1 39.5|59.8|34.6, d16 56.3|75.8|45.2,
+  d32 57.9|77.0|45.5, v1 44.7|76.3|34.8, v16 72.1|85.1|47.4, v32 88.9|101.9|54.0. A "near-floor everywhere" team (per shape
+  2.5 us + 12-bit bytes/4.3 TB/s, m>=128 max with FLOP/750 TF) scores 1.654 = the board's #1 (1.650); 3.0 us + 4.0 TB/s + 700 TF
+  gives 1.518. So #1 is ~bytes + 2.5 us on EVERY shape. Our proj submission is stale vs the layer: m16/m32 = uncompressed
+  cuBLASLt (qkv 12.7-13.0, pool 16.3-16.6, unp 15.1-15.2), m128/256 = cuBLASLt; biggest relative load gaps v16 (1.18 vs ~1.8),
+  v32 (1.15 vs ~1.3), d16/d32 (1.33 vs ~1.6).
+- LAYER (H200 timeline r-layer dev/n7s1_tl_h200.txt, v164; per GEMM c = its end - its predecessor's end, sl/full; ideal =
+  max(bytes/4.3, FLOP/750 TF); the layer does NOT pay the stale proj m16/m32 numbers: it runs 12-bit g24/g27/g30 + PDL there):
+  ```
+  load gemm     kernel       c_sl  c_full ideal exc_sl %score     (rank.py; %score = sum over sl/full of weight x (c - ideal))
+  d1   qkv      g13          11.8  10.3   6.6   5.2   1.05   <- first op: g13 = bare cold reader + 0.9 us (H200 s17): real lever ~0.9
+  d1   unp8+n2  n2u           4.3   4.7   1.5   2.8   0.64      (includes norm2 + combine; layer's record)
+  v1   qkv      g14          11.4  11.0   6.6   4.8   0.61   <- first op, same reader floor: real ~0.5-1
+  v1   pool+rt  pr8          18.4  17.5  13.7   4.7   0.58
+  d32  qkv      g30          13.5  14.0   6.6   6.9   0.54   <- vs reader floor ~10.9: real ~2.6
+  d16  qkv      g24          11.8  11.5   6.6   5.2   0.50   <- real ~0.9
+  v1   unp8+nrm nu8           5.3   5.1   1.5   3.8   0.49
+  d1   pool+rt  pr1          16.1  14.8  13.7   2.4   0.46
+  v16  FR       nvjet        28.1  26.7  19.5   8.6   0.45   (BF16 bytes; T=128 lane: g22/g23/CUTLASS/DeepGEMM all lost to nvjet)
+  d32  pool+rt  g30k|rsplit  19.7  19.2  13.7   6.0   0.45   (n5s14 H200: pool+unp both-free = -6 us/d32 load)
+  v1   o        g30           5.9   7.6   2.9   3.0   0.44
+  v16  qkv      nvjet        15.7  16.4   8.8   6.9   0.39
+  v32  FR       nvjet        33.9  33.6  25.8   8.1   0.34
+  d32  o        g30           7.1   6.7   2.9   4.2   0.31
+  ... (rest <= 0.26 each; total of all 24 rows 9.4% = every GEMM at bytes/4.3 with zero hop cost: not reachable)
+  ```
+  Every phase pays a hop (~1.5-3 us drain + x fetch, fresh O1) and the first op pays the cold-reader ramp, so the reachable part
+  is a fraction of the column. The old proj-table example (T=16/32 cuBLASLt uncompressed qkv 13.6-13.8) is NOT in the layer.
+- ORACLE (qkv + o free: W from L2 (8 stages re-read), no decode/wgmma; g30 calls only = d32 qkv+o, v1 o, d16-full o):
+  H200 Modal run TIMED OUT (11-min reservation; two cold layer prepares + 1 GB flushes x 7 R x 3 loads x 2 variants don't fit):
+  11.2 GPU-min charged, no output. Lesson: one load, R 3, and --timeout/estimate >= 15 min, or skip Modal for timelines.
+  H100 instead (tl9.py, R 7, one round each; noise ~1 us), d32, base -> both, us from graph start:
+    sl:   qkv end 15.0 -> 10.0 | 1st boundary end 40.1 -> 33.9 (-6.2) | pooler g30k end 64.0 -> 57.9 (-6.1)
+    full: qkv end 14.9 -> 10.2 | attention end 258.5 -> 253.7 (qkv saving lands in attention) | boundary end 268.6 -> 262.0 (-6.6)
+  (pre-routing points, so the garbage routing of the oracle doesn't touch them). NB qkv with NO HBM W and NO math still takes
+  10 us as the first op (L2->smem re-reads of 28 MB + skeleton + cold start): the skeleton, not the stream, is most of qkv.
+  The B variant HANGS at v1 or d16 (o = g30 in another config; the no-math hack breaks its split/cluster path): v1 not measured.
+- READING: an INFINITELY fast qkv+o at d32 = ~-6 us/load (H100) = <= 0.46% layer; a real kernel recovers a fraction (bytes alone
+  are 9.5 us of the 22 us they take). d16 qkv/o and d1/v1 qkv are already within ~1 us of the cold-reader floor. With n5s14's
+  pool+unp both-free = -6 us/d32, the whole T=32 dense set is <= ~12 us infinitely fast, ~3-5 us realistic, spread over 4
+  kernels -> no single d-load GEMM item reaches the lead's 4 us gate with a named design. The proj board's 17% is (a) our STALE
+  proj submission at m16/m32 (uncompressed cuBLASLt; the layer already has better 12-bit PDL kernels, which standalone only
+  tie cuBLAS because their win is the pre-wait stream) and (b) T=128/256 (v16 1.18x, v32 1.15x on the board): the same nvjet
+  in the layer, ~0.5-0.9% layer if a GEMM reached bytes+2.5 us at m128 — every own/public attempt on record lost or tied.
+- 0 judge runs. Modal 11.2 GPU-min (timed out, no data).
+
+## n9s2 (2026-10-30 02:14-02:20Z, night9 session 2): idle, no lead decision after n9s1's table
+- COORD: newest Human decision is 01:55Z (fresh's v172 merge/submit); none answers proj n9s1 (gate not met; options (a)/(b)).
+- Re-checked option (a) (v16 12-bit swap-AB split-K GEMM) against the record before prototyping: it is g22 (s16, swap-AB wgmma,
+  W decoded to regs: per-SM smem ingest W 12 KB + x box 16 KB/stage at ~47-50 GB/s/SM = THE limit; cluster x multicast halves
+  L2 reads, not smem ingest) and g28 (s64, x as A / W decoded into smem: ~0.3 us/stage mbarrier role chain). A DSMEM split-K
+  reduce changes neither wall, so no stream-only prototype was run. Waiting for the lead. No code, 0 judge runs, 0 Modal.
+
+## n9s3 (2026-10-30 02:30Z-, night9 session 3): lead 02:30Z (a) = H100 STREAM-ONLY prototype, T=128 qkv 12-bit split-K + cluster DSMEM reduce
+- Design (dev/n9s3/sk128.cu): qkv [2304, 8192], T = 128. Cluster of S = 16 CTAs = 16 K slices (Kc = 512) of one N group;
+  G = 8 N groups of 288 rows -> 128 CTAs, 1/SM. x slice [128 tok, 512 k] BF16 = 128 KB loaded ONCE into smem and kept resident
+  (the B operand of every wgmma of that CTA); W (12-bit, repacked per CTA contiguous, 288 x 512 x 1.5 = 221 KB/CTA) streams
+  through a small TMA ring; rows in passes of 96 (acc 96 x 128 FP32 per pass); pass end = partial to smem, cluster barrier,
+  reduce-scatter over DSMEM (rank r sums rows r*6..r*6+5 of the pass from 16 peers), BF16 store. No global partials/tickets.
+- WHY NOT g22 (s16 wall = per-SM smem ingest at ~47-50 GB/s/SM: W 12 KB + x box 16 KB per stage, x/W = 1.33 at BM 128, x
+  re-streamed per stage): here x is NOT re-streamed: each SM ingests its x slice once (128 KB) + its W share (221 KB),
+  x/W = 0.58 (2.3x less than g22), whole chip 16 MB x + 28 MB W; at g22's measured ingest ceiling (~6.6 TB/s chip) that
+  is 6.7 us < the 8.7 us HBM time of 28 MB at 3.24 TB/s (H100), i.e. HBM-bound again. (x slices are shared by the 8 N groups;
+  multicast would only cut L2 reads, which g22 showed are not the wall, so not used in v1.)
+- WHY NOT g28 (s64 wall = ~0.3 us/stage mbarrier role chain: producer -> decode-to-smem -> mma consumer, two hand-offs per
+  stage): here one hand-off per stage (TMA producer -> consumer that decodes into its own registers, RS wgmma; x is static so
+  there is no x barrier per stage), stages are large (9-18 KB) and few (~12-24 per CTA), and the split-K reduce is one cluster
+  barrier pair per pass (3 per CTA) instead of global round trips.
+- Open risk not tested by a stream-only proto: the consumer (12-bit decode in the issuing warpgroup + RS wgmma; moe's twm
+  RF/dispatch wall). FLOP 4.8 G = ~6.5 us at 750 TF: if the stream-only passes, the next gate is consumer-only (x resident,
+  W from smem, decode + wgmma) <= ~9 us.
+- RESULT: GATE FAILS (H100, stream-only, us of kernel time = harness median - 5.3 us 1-kernel-graph overhead measured with
+  an empty kernel in the same harness (/tmp/empty.cu); same harness: plain grid-stride read of 28.9 MB = 10.0, torch.mm
+  qkv m128 (cuBLAS) = 18.3; gate = 11):
+  ```
+  variant (G 7 clusters x 16, NR 336 rows/CTA = conservative 28.9 MB, SB 10752 x NST 3)   kernel us
+  W stream only (no x, no reduce; ring depth 4..16 stages all the same)                       10.7-11.0
+  W + x (8 TMA boxes [64k x 128tok] SW128, resident), no reduce                               12.9
+  W + x + push reduce (st.async v2 or v4 to owner recv buffers + 4 reducer warps)             22.4-22.5
+  NO W (producer arrives without loads) + x + push reduce                                      19.1
+  NO W, NO x, push reduce only                                                                 17.1
+  v1 pull reduce (ld.shared::cluster from 16 peers, consumers do it), W + x                    ~32 (5 us per pass)
+  ```
+- WHY: (1) the 16-way DSMEM all-to-all is the wall: each CTA pushes 57 KB per pass (172 KB total = 0.67 x its W bytes),
+  and a pass of pushes drains in ~5 us (timeline: next pass' consumption starts ~5 us after the pushes are issued even with
+  no W at all) = ~11 GB/s per SM, ~180 GB/s per 16-SM cluster. v2 vs v4 st.async: same (bytes, not request count).
+  (2) cluster 16 at 1 CTA/SM: only 7 clusters fit (cudaOccupancyMaxActiveClusters) -> 112 SMs (an 8th = 2nd wave, 68 us).
+  (3) smem: x slice 128 KB + recv 57 KB leave ~32-43 KB for the W ring; not the limit (ring depth 4-16 = same W rate),
+  L2 prefetch-ahead (cp.async.bulk.prefetch.L2, PF 4-8 stages): no gain.
+  (4) general bound for T=128 split-K with every operand through the SM: per CTA x/W = 171/rows and partial/W = 341/Kc with
+  rows x Kc = N K / #CTA = 143K -> x/W + partial/W >= 1.28 at the optimum (rows ~270): same extra traffic as g22's 1.33.
+  Moving it from L2-returns (g22) to DSMEM (here) makes it slower, not faster. Smaller S needs Kc > 512 -> x slice > 128 KB.
+- Not tried (no reason to expect a win): global red.add partials (= g22's flush, 18.9 MB of FP32 reds at S 16), cluster 8 with
+  x streamed (acc for 336 rows x 128 tok does not fit the RF beside decode regs).
+- Tools: dev/n9s3/sk128.cu (v1 pull), sk128b.cu (v2 push; flags -DNOPUSH -DNOX -DNOW -DV4 -DPF=n -DSMALLSM -DGG -DNRR,
+  env TL=1 per-phase globaltimer timeline, CL=<cluster dim> for NOPUSH runs). NB zsh: pass flag lists as ${=f}.
+- Option (a) CLOSED; pausing per the lead's 02:30Z line. 0 judge runs, 0 Modal.
+
+## n9s4 (2026-10-30 02:41-02:45Z): idle stop
+- No lead decision for proj after 02:30Z (02:45Z restarts layer/moe on start/end lanes; proj only listed as a check-budget donor "proj 6 if needed").
+  n9s3 closed (a) (gate fails), lead's rule = pause. Nothing built, 0 judge runs, 0 Modal.
+- Note: n9s3's COORD/STATE stamp "03:25Z" is wrong; its commit is 02:40:52Z.
+
+## n9s5 (2026-10-30 02:57-03:00Z): idle stop
+- No lead decision for proj after 02:30Z/02:45Z; (a) closed in n9s3, so the lead's rule says pause. layer n10s2 and moe n10s2 also stopped idle.
+  Nothing built, 0 judge runs, 0 Modal. proj can lend layer check budget or take a new lane.

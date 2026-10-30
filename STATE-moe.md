@@ -1,3 +1,30 @@
+## n11c 04:36Z 10-30 idle: no lead line after 03:50Z; LANE A done (n11a: 'a legal faster design exists'); moe paused. 0 judge runs, 0 Modal.
+## n11a 04:20Z 10-30: lead 03:50Z LANE A DONE (diag only, NOTES n11a, tools/n11a): leaders' edge is NOT an FP8 shortcut:
+## n11b 04:25Z 10-30 idle: LANE A done (n11a); no lead line after 03:50Z; moe paused. 0 judge runs, 0 Modal.
+## FP8 x alone fails 1.5% (2.6% rms/GEMM; W fold + x 3.4%); cheapest scaled FP8 consumer (F2 LUT fold) only 0.88-0.92x twm
+## cycles (bs128/256 -> ~188/~225 us proj. vs #1 ~155/188): dq ALU is the wall in both. Only scale-free F0 (0.55x) reaches it.
+## => 'a legal faster design exists'. moe paused. 0 judge runs, Modal 1.1 GPU-min.
+## n10s4 04:05Z 10-30: lead 03:20Z bundle DONE: v173 (= v172 + IDW + CUDA bnd2 at T=8) on main 8841e7d; check 335f3f26 2.1657 raw /
+## 2.1398 fixed-SGLang (< v172 2.1607): NOT submitted. H100 A/B d16/d32 -0.5, v1 -0.4 us. moe PAUSED. 1 layer check, 0 Modal.
+## n10s3 03:12Z 10-30 idle: still no lead line after 02:45Z (END lane closed n10s1; IDW Handoff moe/end 78898bb open). moe paused. 0 judge runs, 0 Modal.
+## n10s2 02:57Z 10-30 idle: no lead line after 02:45Z; LAYER END lane closed in n10s1 (its '04:15Z' stamp = typo, ended ~02:53Z).
+## moe paused. Open: IDW Handoff (moe/end 78898bb) for the lead/layer to bundle. 0 judge runs, 0 Modal.
+## n10s1 04:15Z 10-30: lead 02:45Z LAYER END lane DONE (NOTES n10s1). Free-piece oracles (H100): second boundary d1 1.2-1.4,
+## d16 1.8-2.7, d32 0.7-2.2, v1 2.8-3.3 us (cost = post-wait latency chain, not the hop); norm2 d16 1.1-2.3, d32 1.2-1.4 (not y32
+## volume: Q4 oracle 0). Buildable: IDW (branch moe/end 78898bb, exact, ~-0.5 us d16/d32: bundle item), CUDA bnd2 at v1 -0.55
+## (tools/n10s1, not on a branch). Gate (>= 2 us d1 or >= 3 us summed) NOT met by any design -> moe pauses. 0 judge runs, 0 Modal.
+## n9s4 00:30Z 10-30 idle: still no lead line after 00:00Z; moe paused (n9s2). 0 judge runs, 0 Modal.
+## n9s3 00:15Z 10-30 idle: no lead line after 00:00Z (answered by n9s2; n9s2's '00:40Z' stamp = typo, it ended ~00:10Z). moe paused.
+## 0 judge runs, 0 Modal. Budget 10-30 untouched (moe 20 checks / 10 submits).
+## n9s2 00:40Z 10-30: fresh's H200 O2 READ: base-both-free v16 sl 28.9 / v32 sl 47.5 us -> lead gate PASSES on numbers, but dq (14.4/22.4)
+## and MMA (11.7/22.7) are fully serial in-layer on the H200 too, and no Hopper operand path escapes the RF/issue wall (RS: dq in the
+## issuing warp; SS: ~4.5 B/weight smem). Twm consumer rebuild CLOSED by mechanism (NOTES n9s2). No build, 0 judge runs, 0 Modal.
+## NEXT: lead decision. moe pauses unless the lead names a mechanism outside RS/SS.
+## n9s1 00:06Z 10-30: lead 22:30Z twm REBUILD step (1) DONE. H200 counters (Modal): twm consumer-bound (real HBM = L2-fed
+## within 3%, ring wait 5% of consumer life, SM 1.77 GHz); H100: structure ~2 us, NSTG 6 = 8, g2 spin <= 1.7 us. Gate (lead 00:00Z)
+## = fresh's H200 O2 (base - both-free) >= 25 us v16 / 35 us v32; my estimate 12-17 us v16 -> likely CLOSED -> moe pauses.
+## NEXT: read fresh's O2 (r-fresh /tmp/fresh12/h200.txt or COORD); if gate passes, design a consumer rebuild vs n7s47/48 dead list.
+## Tools: muse_moe_w4a16/tools/n9s1 (inst.py counters, run_inst.py, L2-alias recipe in README). 0 judge runs; Modal 3.5 min.
 ## n7s55 17:20Z idle: moe PAUSED per lead 16:45Z (bundle closed n7s53, no v172). No newer lead decision. 0 judge runs, 0 Modal.
 ## n7s54 17:05Z idle: moe PAUSED per lead 16:45Z (bundle done n7s53: no v172). No newer lead decision. 0 judge runs, 0 Modal.
 ## n7s53 17:05Z: lead 16:45Z bundle -> RT2 D4 DEAD in layer (ptxas C7511 in moe_twm, H100 +26..35 us; moe_hot-only tie), HOT128 no-hot

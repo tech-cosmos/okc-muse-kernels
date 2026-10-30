@@ -3464,3 +3464,167 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
 ## n7s54 2026-10-29T17:04Z-17:07Z: idle; moe paused per lead 16:45Z (n7s53 closed the bundle, no v172); no newer lead decision. 0 judge runs, 0 Modal
 
 ## n7s55 2026-10-29T17:20Z-17:22Z: idle; moe paused per lead 16:45Z (n7s53 closed the bundle, no v172); no newer lead decision. 0 judge runs, 0 Modal
+
+## n9s1 2026-10-29T23:12Z-: lead 22:30Z twm REBUILD step (1): in-layer attribution of moe_twm at v16/v32 (H100 + H200 Modal)
+- Base = r-fresh b8888bd muse_decode_layer (fresh's TWM_ORC: 1 dq-free, 8 wgmma-free (XOR sink), 7 both-free, 256 flat read).
+  fresh already posted the H100 LAYER totals (o2/h100.txt: v16 sl 295.1/291.0/291.4/274.8/flat 273.7). Not redone.
+- Kernel level (torch profiler, warm, v16 sl seed 99 = 17 local experts = 481 MB at 28.3 MB/expert): moe_twm base 179.8,
+  both-free 164.1, flat 161.7 us (flat = 2.98 TB/s = H100 DRAM). => on the H100 structure costs ~2.4 us: the H100 CANNOT
+  test the lead's step-(3) gate (stream-only proto beats (iii) by 25 us): (iii) already sits on the DRAM line.
+- NEW proxy, L2-ALIAS: every expert's weight address -> expert 0 (28.3 MB, L2-resident): same items/routing/structure,
+  bandwidth no longer binding (models a GPU whose HBM outruns the consumer). moe_twm kernel us (prof, v16 sl / v32 sl):
+  base 142.5 / 187.7 | dq-free 115.6 / 153.8 | wgmma-free 131.0 / 162.4 | both-free 79.3 / 121.0 | flat read 147.3 (ld.global
+  path is L2-latency bound, not a yardstick here). => dq alone ~= the whole consumer (wgmma-free 131 vs base 142.5).
+- clock64/globaltimer counters in the consumers (tools/n9s1/inst.py + run_inst.py; per consumer warp, warm replays; H100
+  SM clock under this load = 1.79-1.81 GHz, NOT 1.98): v16 sl s99
+  | variant      | life us (gtimer) | between-item wait | item | loop | ring wait | epi | rest |
+  | real base    | 156.8 | 7.8 | 128.5 | 124.4 | 26.0 | 4.1 | 6.3 |
+  | real both-fr | 149.8 | 10.8 | 116.6 | 116.3 | 95.7 | 0.2 | 8.6 |
+  | alias base   | 127.2 | 5.1 | 105.5 | 102.6 | 6.5 | 2.9 | 4.5 |
+  | alias both-fr|  73.5 | 7.8 |  52.9 |  52.7 | 31.9 | 0.2 | 5.9 |
+  (cycle columns at 1.98 GHz nominal; life = globaltimer.) Producer g2 hand-off spin 0.8-1.7 us per CTA per call
+  (v16/v32); post-item release (fence.proxy.async + REL arrive) 0.25 us per warp per call.
+- Reading: consumer compute (loop - ring wait) ~96 us of cycles in BOTH real and alias = the consumer is a fixed cost;
+  alias base life 127 us at 1.79 GHz = 3.8 TB/s-eq -> at 1.98 GHz ~4.2 TB/s-eq = the twm CONSUMER CEILING, about the
+  H200's HBM rate. So on the H200 consumer and HBM ceilings coincide at v16 (both ~112-115 us for 481 MB); structure
+  (ring wait + between + epi + rest) = ~19 us (15%) of the consumer's life when bandwidth is free.
+- Ring depth (twm_go NSTG, H100 real, v16 sl life us s99/s1/s2): 8 = 156.8/142.2/148.1 | 6 = 157.8/143.2/148.8 | 4 =
+  161.1/145.3/152.3; alias NSTG 6 = 8. => the H100 stream is on the flat part above ~5 stages; the H200 (1.4x the bytes per
+  latency) needs ~1.4x the stages: 8 stages there ~ 5.7 here = still on the flat part. More bytes in flight is NOT the lever
+  (matches tk2f's deeper-ring DIAGs, all lost).
+- H200 (Modal, 3.5 GPU-min; lead 00:00Z: no O2 repeat, counters only), v16 sl / v32 sl s99, consumer warp life (gtimer):
+  REAL base 132.1 / 156.2 us, ring wait 6.6 / 10.2 (cycle-us), between-item 6.1 / 5.2 | L2-ALIAS base 128.4 / 152.5,
+  ring wait 6.5 / 10.0. SM clock under load 1.76-1.79 GHz (not 1.98). All 3 seeds the same picture (tools/n9s1/h200_inst.txt).
+  => ON THE H200 moe_twm IS PURELY CONSUMER-BOUND: real HBM = L2-fed within 3%; consumers starve only ~5% of their life
+  (same as with L2 feed). Structure (ring wait + between-item + epi + rest) ~15% of life, compute (dq + wgmma) ~80%.
+  The consumer ceiling = 481 MB / 128 us = 3.75 TB/s-eq at v16 s99 vs HBM ~4.3: the gate quantity H200 (base - both-free)
+  is bounded by base - stream time ~= 132 - (481/4.3 + ~8) ~= 12-17 us at v16 (my estimate; fresh's H200 O2 is the
+  measurement). Clock note: an H200 at 1.77 GHz under this load means instruction count is the lever, as on record.
+
+## n9s2 (2026-10-30 00:07Z - ~00:40Z): fresh's H200 O2 read for the lead 00:00Z consumer-rebuild gate; gate PASSES, design CLOSED by mechanism; no build; 0 judge runs, 0 Modal (fresh's run, 7.8 min on the shared ledger)
+- fresh's H200 in-layer O2 (/tmp/fresh12/h200.txt, bench.py verify, us):
+    shape        base   dq-free  mma-free  both-free  flat-read
+    v1 sl       112.3   112.3    112.4     112.1      112.3
+    v1 full     126.8   126.4    126.8     126.3      126.6
+    v16 sl      244.7   230.3    233.0     215.8      219.1
+    v16 full    344.9   334.3    336.4     325.0      336.8
+    v32 sl      319.1   296.7    296.4     271.6      285.1
+    v32 full    503.7   479.2    487.8     461.1      475.0
+  base - both-free: v16 sl 28.9 / full 19.9; v32 sl 47.5 / full 42.6 => GATE (>= 25 v16 OR >= 35 v32) PASSES.
+  dq alone 14.4 / 22.4 (v16 / v32 sl), MMA alone 11.7 / 22.7: sum 26.1 / 45.1 ~= both 28.9 / 47.5, i.e. on the H200 in-layer
+  dq and wgmma are fully SERIAL (zero overlap), the same as every H100 microbench. Flat read is SLOWER than both-free (219 vs 216,
+  285 vs 272): twm's structure already streams better than a naive grid-stride read; it is all consumer, as n9s1's counters said.
+- Design vs the consumer wall (the lead's "say why a new design escapes it"). A consumer = dq (7 ALU + 4 HMUL2 per 8 weights,
+  n5s39 proven minimal over all searched families) + MMA on the dq'd A. Two ways to feed the tensor core on Hopper:
+  (1) A from registers (RS wgmma / mma.sync): the issuing warp must hold A, so it does the dq -> ncu DISPATCH stall on dq
+      LOP3/HMUL2 while its own HGMMA is in flight (n7s47). Cross-warp variants still share the SMSP's RF/dispatch: pingpong
+      1048/763 (= none), 2-4 CTAs/SM (n7s48 spills / self-fed rings +300 cyc), 4 A sets + wait<3> (-2..-9% RT2 only; in-layer
+      C7511 +26..35 us, n7s53), mma.sync (+19% at N32). Even WG0 dq-only || WG1 MMA on untouched A gives only 0.79x of serial.
+  (2) A from smem (SS wgmma): the MMA warps do no dq, but A in bf16 is 2 B/weight written + 2 B read on top of the 0.5 B FP4
+      ring: ~4.5 B/weight = ~1000 cyc per RT4 stage at 128 B/clk (s19 mb_ws, separate dq/MMA warps: full ~= T + M, 2206 vs
+      twm 1046 at RT4 N32). DSMEM/stmatrix move the same bytes through the same smem port.
+  No third operand path exists on sm_90 (no TMEM; FP8/INT8 wgmma need coarser activations, banned; FP16 A needs FP16 x, banned;
+  scale-on-accumulator costs as many FFMA as the HMUL2 it saves). Shrinking MMA work = N padding only (HOT_XN: -1.5 us, bundled).
+  => No design I can name escapes the wall; the 29/48 us is the price of Hopper's RS/SS choice at these shapes. No build.
+- If the top teams' edge is here, it is something outside this frame (different routing/item balance in-layer, or a clock
+  effect: n9s1 H200 SM 1.77 GHz under load). Not tested.
+
+## n9s3 (2026-10-30 00:11Z - 00:15Z): idle
+- No lead decision after 00:00Z (n9s2 answered it: twm consumer rebuild closed by mechanism, pause asked). Re-checked the
+  n9s2 reasoning against the record (mma.sync s18/n7s47, SS s19, 0.79x ideal-separation ceiling): nothing new. n9s2's
+  "00:40Z" stamps are typos (it ended ~00:10Z). 0 judge runs, 0 Modal.
+
+## n9s4 (2026-10-30 00:28Z - 00:31Z): idle
+- No lead decision after 00:00Z (COORD Human decisions newest = 00:00Z; n9s2's pause request still open). 0 judge runs, 0 Modal.
+
+## n10s1 (2026-10-30 02:30Z-04:15Z): lead 02:45Z LAYER END lane (tk2f end -> norm2 -> unpool -> bnd); 0 judge runs, 0 Modal
+- Not repeated (dead on record): UPF/UPF2/UPF3/UPF4, N2U_BOUNDARY, BND_SPIN, n2u8, bndc, BND_SPLIT, norm2 as PDL secondary,
+  unpool-W prefetch in the drain, s72 norm2 removal (that one broke unpool's PDL window; my oracles keep every kernel).
+- H100 tail now (main v172, tools/n10s1/tl4.py, us after tk2f END): d1 n2u end 4.7 | bnd end 6.6; d16 norm2 3.2 | g30 unpool
+  20.7 | bnd 22.9; d32 3.3 | 21.9 | 24.2; v1 nu8 5.2 | bnd 8.7. H200 (n7s1 timeline): d1 4.3|6.2, d16 3.2|17.4|19.5, d32 3.6|18.3|20.6,
+  v1 5.3|8.9. Unpool at d16/d32 = 12-bit bytes + ~2-3 us; the latency pieces are norm2 and the second boundary.
+- Oracles (H100 in-layer, ab_files, TUNE = {}, tools/n10s1/mkvar.py; us vs base, two runs):
+  NOBND (second boundary skipped): d1 -1.2/-1.4, d16 -1.8/-2.7, d32 -2.2/-0.7, v1 -3.3/-2.8 (v16 -4.4, v32 -11.8: mostly bytes).
+  HOP (boundary launched + waits, no work after the wait) = NOBND within noise -> the launch hop is free, the cost is the
+  post-wait work. NFREE (norm2 returns after its wait; n2u reads no y32): d1 0, d16 -1.1/-2.3, d32 -1.2/-1.4.
+  Q4 (norm2 loads a quarter of y32, same CTAs): d16 -0.1, d32 -0.2 -> norm2's cost is NOT y32 volume: a cluster/column-split
+  norm2 has nothing to win. DEAD by oracle.
+- Boundary post-wait work = latency chain (dependent L2 load of the branch, 2 block reductions, stores). Micro (20 chained
+  PDL launches, captured args, tools/n10s1/micro2.py): Triton _boundary d1 1.87 / d16 2.78 / d32 2.95 / v1 3.44 us per launch;
+  empty-after-wait 0.7-0.8. CUDA rewrite bnd2 (tools/n10s1/bnd2_src.cu, thread = 16 columns, pre-wait loads pinned):
+  best SPL d1 1.74 (spl 8), d16 3.0, d32 3.1, v1 2.76 (spl 8): only v1 gains. In-layer v1 bnd2 spl 8: -0.55 us, d1 +0.25
+  (6 rounds). Bundle-size at most (~0.05% score); not on any branch. Fusing the boundary into the producer = N2U_BOUNDARY (dead).
+- IDW (branch moe/end 78898bb): moe_norm2 loads ids/tw BEFORE its griddepcontrol.wait (the routing is complete before
+  moe_tk2f starts: side-stream join / harness inputs), y32 via __ldcg. Exact (bitwise), test 13/13. ab_files with alternated
+  order (position bias ~0.5 us seen on d1/v1 controls): d16 sl tie..-1.0, d16 full -1.0, d32 sl -0.4, d32 full -0.55 us.
+  ~-0.5 us per T=16/32 call: bundle item. TRAP found on the way: with ids known before the wait, ptxas hoisted the y32 .nc
+  loads ABOVE ACQBULK (a race; my first A/B was on that code). Also a dead smem store as the pin got eliminated (ACQBULK went
+  back to the top): use a volatile store. Check SASS after every pre-wait edit (README in tools/n10s1).
+- Gate (lead: >= 2 us d1 sl or >= 3 us summed over d1/d16/d32/v1): free-piece oracles sum ~10 us, but the buildable designs
+  measure IDW ~0.5+0.5 + bnd2 v1 0.55 = ~1.5 us summed, d1 ~0. GATE NOT MET by any design; lane written up, moe pauses.
+
+## n10s2 (2026-10-30 02:55Z-02:58Z): idle stop
+- No lead decision after 02:45Z; the LAYER END lane closed in n10s1 (gate not met; n10s1's "04:15Z" end stamp is a typo, it ended ~02:53Z).
+  The remaining items (IDW ~-0.5 us d16/d32, CUDA bnd2 v1 -0.55) are bundle-sized; IDW is a Handoff on moe/end 78898bb. 0 judge runs, 0 Modal.
+
+## n10s3 2026-10-30T03:12Z
+Idle stop: no lead decision after 02:45Z; END lane closed n10s1. 0 judge runs, 0 Modal.
+
+## n10s4 (2026-10-30 03:26Z-04:05Z): lead 03:20Z bundle -> v173 on main (8841e7d); 1 layer check, 0 submits, 0 Modal
+- v173 = v172 + IDW (moe/end 78898bb cherry-pick) + BND2: muse_decode_layer/bnd2_src.cu (= tools/n10s1/bnd2_src.cu, the
+  volatile-pin version; NOT /tmp/moeend/cb's, whose dead red[0] pin can be dropped) embedded via build.py's "BND2" entry, built
+  into the g10 lib (bnd2_launch), used by _tail for BND2_TOKENS = {8: 8} (TUNE 'bnd2', 0 = Triton) when pdl, no nos/rst, 2-D f
+  and cfg in BND2_CFGS. SASS checked: s/alpha/beta/gains/ids/tw LDG.CONSTANT above ACQBULK; branch/sc loads STRONG.GPU after.
+- bench test 13/13. H100 ab_files "" 6 rounds, v172/v173 then v173/v172 (deltas v173 - v172, mean of both orders):
+  d1 -0.03/-0.05, d16 -0.45/-0.53, d32 -0.48/-0.68, v1 -0.44/-0.22, v16 +0.94 (position bias: [1] slower in both)/-0.01, v32 -0.47/+0.04.
+- files_eq v172 vs v173: bitwise at d1 (tuner off; with tuner a different d1-full pick showed 0.03), d32/v16/v32; d16/d32 1-ulp
+  = A-vs-A control (v172 vs v172 copy); v1 ~1e-6 stream / up to 1 BF16 ulp hidden (bnd2 reduction order).
+- CHECK 335f3f26 (8841e7d content) 2.1657x raw [2.133, 2.198], fixed-SGLang 2.1398 (/tmp/n10s4/fx.py = /tmp/fx.py + this job;
+  v172 check 8b4e6cf7 2.1628 on the same SGLang set) -> NOT submitted (lead: submit only if fixed > 2.1607). Per shape vs v172
+  check: d16 -1.4/-1.3, d32 -0.7/-1.5 (also below the v172 submit), d1 +0.4/+2.1, v1 +3.0/+7.5, v16 +6.5/+2.5, v32 +4.8/+0.1
+  (v1/v16/v32 swing 6-11 us between the two v172 runs too). H200 profile v1: bnd2 4.8 us vs Triton second boundary ~4.6 = tie.
+- Merged to main per lead (H100 A/B never worse): origin/main 8841e7d (rebased over layer n11s1/s2; build.py reproduces).
+- moe paused.
+
+## n11a (2026-10-30 04:06Z-04:20Z): lead 03:50Z LANE A "is the leaders' edge a precision shortcut?" (DIAG ONLY: never checked/submitted/merged); 0 judge runs, Modal 1.1 GPU-min
+- Method: twm STAGE microbench (tools/n11a/ovl8.py, base n7s47 ovl2.py: same weight bytes per stage, 8 smem stages,
+  2 consumer WGs, cycles/stage per WG) with FP8 roles (wgmma m64nNk32 e4m3, RS A, x tile in smem):
+  F0 = e2m1 -> e4m3 by bit masks only (exact code * 2^-6; block scale NOT applied = oracle, not NVFP4);
+  F1 = block scale folded lossily: f16 masks + HMUL2 + cvt.rn.satfinite.e4m3x2.f16x2 (+ pack);
+  F2 = cheapest fold found: per (row, stage) 8-byte LUT of e4m3(code_k * s) built from s and e4m3(1.5 s) by byte adds
+  (exponent shifts), dq = 1 PRMT LUT + 2 LOP3 per 4 weights (weights repacked: magnitudes as prmt selectors, signs at
+  byte bit 7). F1/F2 have the same single rounding (code * s -> e4m3).
+- cycles/stage (H100 = H200 exactly; tools/n11a/h100_sweep.txt, h200_sweep_raw.txt):
+  | item     | BF16 twm (prod) | FP8 F2 (LUT fold) | FP8 F0 (no scale) | FP8 F1 | BF16 dq-only / FP8 F2 dq-only | BF16 / FP8 mma-only |
+  | RT4 N8   | 802 | 747 | 443 |      |         |         |
+  | RT4 N16  | 888 | 796 | 517 |      |         |         |
+  | RT4 N24  | 941 | 852 | 490 |      |         |         |
+  | RT4 N32  | 987 | 869 | 511 | 1041 | 700/708 | 513/261 |
+  | RT2 N40  | 580 | 483 | 305 |      | 393/359 | 383/202 |
+  | RT2 N48  | 635 | 508 | 325 |      |         |         |
+  | RT2 N64  | 739 | 527 | 358 | 609  | 393/358 | 512/256 |
+- Weighted by the board routings (bs128/bs256 seeds 7,8,9,801,802; per expert: <= 32 tokens RT4 N=ceil8, else RT2 64-token
+  passes): consumer cycles vs twm: F2 0.895-0.923 (bs128), 0.877-0.898 (bs256); F0 0.545-0.560 (both).
+  => projected (twm is consumer-bound on the H200, n9s1): F2 ~ -8..-10% of the twm kernel -> bs128 ~188-190, bs256 ~225 us
+  (+ an x -> e4m3 quant pass) vs ours 204/248 vs #1's implied ~155/188. F0 (block scales dropped) would be stream-bound
+  (~150-165) but it is not NVFP4 at all.
+- Precision (tools/n11a/precision.txt, one 4096x4096 GEMM, 256 tokens, rel L2 vs exact): W fold e4m3(code*s) alone 2.2%,
+  x per-token e4m3 alone 2.5-2.7%, both 3.3-3.5% (normal / wide scales / outlier channels alike) > the 1.5% output bound
+  (ours: 0.000-0.0015). FP8 activations alone already fail (e4m3's 3-bit mantissa = ~2.6% rms whatever the scale grain).
+- VERDICT: the leaders' edge is NOT an FP8 precision shortcut: (1) any FP8-activation path fails the judge's 1.5% check on
+  every timed call; (2) even ignoring that, the cheapest FP8 path that applies the block scale cuts only ~9-11% of consumer
+  cycles, because dq ALU stays the wall (F2 dq-only 708 ~ BF16 dq-only 700 at RT4; FP8 only halves the MMA, which twm
+  already overlaps ~80%). Only dropping the block scales (F0) reaches the implied times. => 'a legal faster design exists':
+  at bs128 #1 needs <= ~0.76x our consumer cycles per weight with an exact BF16 (or FP16) operand: i.e. a dq at ~0.5-0.6x
+  of our 9 ops / 8 weights, or a way to run dq off the issuing warps (both closed on record for us: z3 floor, RS/SS wall).
+  Untested guesses for what they do differently: none found here; this diag rules the shortcut out, nothing more.
+- Note: an FP16-operand path (HMMA f16) has the same dq and MMA cost as BF16; e4m3 x e2m1-with-scale has no Hopper MMA.
+
+## n11b (2026-10-30 04:18Z-04:25Z): idle stop
+- Lead 03:50Z LANE A was finished in n11a (verdict 'a legal faster design exists'; FP8 is not the leaders' edge). No lead line after 03:50Z.
+  Re-read the dq/overlap record (n5s39 z3 floor 8 int + 4 HMUL2 per 8 w; n7s47/48 RS/SS wall; n6s1 serial big-M floor bs128 ~125 /
+  bs256 ~160 us, under #1's implied ~155/188). So #1's edge has to be consumer efficiency (twm is at 0.83x of serial ALU+MMA per stage,
+  1.4x of max), not a cheaper dq. I can't name a mechanism that is not already dead on record, so nothing was built. moe paused. 0 judge runs, 0 Modal.
+
+## n11c 2026-10-30T04:36Z idle stop
+No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Modal.

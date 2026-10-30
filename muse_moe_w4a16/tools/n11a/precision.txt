@@ -1,0 +1,4 @@
+wide=False normal x: W e4m3-fold only 0.0218 | x e4m3 only 0.0265 | both 0.0343 | bf16 x (ours) 0.00000
+wide=False outlier x: W e4m3-fold only 0.0219 | x e4m3 only 0.0251 | both 0.0333 | bf16 x (ours) 0.00155
+wide=True normal x: W e4m3-fold only 0.0223 | x e4m3 only 0.0265 | both 0.0347 | bf16 x (ours) 0.00000
+wide=True outlier x: W e4m3-fold only 0.0222 | x e4m3 only 0.0247 | both 0.0332 | bf16 x (ours) 0.00154

@@ -3058,3 +3058,133 @@ patched moe_src would not finish and validate in time). Board 18:27Z: us #46 1.9
   Attention board #1-#4 are ~15% faster than our attention (1233 vs ~1482 us/step), i.e. ~2.4% of the layer if it carried
   over; attention lane closed by moe n7s15/n7s16 and ~/attn s114/s125, so this is only a pointer for the lead.
 - main = v168 unchanged (checked a5b4ddab 2.1540x). 10-29 left: 14 checks / 7 submits.
+
+## night8 s1 (2026-10-29 ~21:10Z-, lead 21:05Z task): in-layer verify-SLIDING attention ORACLES (H100, no build, 0 judge runs)
+Tools: tools/n8/orc_mk.py (variants/orc_*.py text patches of submission.py), tools/n8/attn_orc.py (in-layer segment timer:
+qkv-GEMM end -> o-GEMM start, 4 rounds x 5 cold-L2 profiled graph replays, files interleaved; the 'replay' column is NOT
+comparable across oracles: garbage attention output changes routing -> expert time), tools/n8/stamp_mk.py + stamp_rd.py
+(per-CTA globaltimer stamps inside nvs, v16 path; nvs_dbg reads nv::g_st). v16 = nvs S=4 (128 CTAs) + _combine_hb (O_PF 0.5);
+v32 = nvscl (S=2, 2-CTA cluster DSMEM merge, no combine).
+| variant (us, median) | v16 sl attn | v32 sl attn |
+|---|---|---|
+| base | 13.4 | 15.0 |
+| A: consumers skip QK/softmax/PV (loads only) | 11.9 | 13.8 |
+| B: no _combine_hb | 10.1 | (n/a) |
+| AB | 9.5 | 13.7 |
+| C: KV rows L2-resident (same 64 rows every tile), real math | 12.8 | 13.3 |
+| E: nvs returns after barrier init (+ combine) | 4.9 | (patch missed nvscl) |
+| EB: empty nvs, no combine = launch floor incl. o launch | 1.8 | |
+| AB + no Q prologue / no V transpose / no partial stores / L2 KV | 9.4 / 9.3 / 9.3 / 8.9 | |
+| W: seq_lens + page-table window + KV window warmed in L2 before qkv (index_select) | 12.9 | 15.3 |
+| S=2 + 2-CTA cluster at v16 (O_PF off) / O_PF off alone / S=2 no cluster | 13.7 / 13.1 / 14.4 | v32 S=2 no cluster 16.9 |
+Stamps inside nvs at v16 (us after the first CTA's entry; base / warm W): page table staged 2.3 / 1.7; tile 0 ready 4.4 / 3.8;
+tiles 1-3 +0.7 each; consumer end 8.1 / 7.7; last CTA 8.6 / 8.3. Q prologue done at 1.9 (parallel to pt staging).
+Reading: the lead's oracle bound (loads + MMAs kept, merge/epilogue stripped) = v16 -3.9 (combine -3.3 of it), v32 -1.2:
+~5 us H100 total, but it's almost all the v16 combine. Inside nvs, math is 1.2-1.5, bytes 0.6-1.7, Q/transpose/stores
+~0.2 each. The rest is a serial per-CTA latency chain seq -> page table (2.3) -> first KV gather (2.1) -> 4 tiles at ~0.7,
+and warming it all in L2 cuts only ~0.6 (the gather hop stays ~2.1 us from L2: TLB / gather issue, not DRAM). A design
+with fewer, longer CTAs (one per (request, KV head), window resident, no split) lengthens that chain (S=2 cluster at v16
+already loses +0.6). Only the v16 combine is cuttable: a 4-CTA-cluster nvs (S=4 DSMEM merge, like nvscl) + O_PF port,
+expected ~-2 us v16 sl after cluster cost = ~0.08% score. Below the 4 us gate in practice; NOT built. Lane closed unless the
+lead wants that ~0.1% item queued for a bundle.
+
+## night8 s2 (2026-10-29 21:24Z-21:45Z): v16 4-CTA cluster merge BUILT + DEAD (cluster occupancy); 0 judge runs, 0 Modal
+No lead reply to n8s1, so I built the one item n8s1 left: nvscl with cluster size 4 at verify 16 (S=4: rank r finishes warp r's
+16 rows; the 3 other warps each push 4.6 KB o/m/l by one cp.async.bulk DSMEM copy into rank w's new xo3 slot; owner merges
+the 3 in FP32 and writes the gated/normalized output; no _combine_hb) + O_PF ported into nvscl. Patch: tools/n8/cl4_patch.py
+(applies to attn_src.py @2bbed9b; plus a _verify_nvs cl=4 branch and a TUNE nvscl4 option, not kept). Correct: bench test
+13/13, scored_test verify 16 sliding 4/4 PASS, cl4 vs combine layer output rel diff ~2.5e-4 (merge order).
+H100 in-layer (tools/n8/attn_orc.py 6x5, base/cl4/base): v16 sl attn 13.5 -> 22.3 us (+8.7), v32 sl 15.0 -> 16.6 (+1.6).
+Cause v16: cudaOccupancyMaxActiveClusters at 384 thr, 1 CTA/SM = 30 clusters of 4 (120 CTAs) at ANY smem 150-227 KB
+(cl 2: 66 = 132 CTAs): GPC SM counts aren't multiples of 4, so 128 CTAs = 2 waves. H200 is the same GH100 132-SM part
+(expect the same). Cause v32 (cl=2 path, unchanged logic): +13.8 KB xo3 takes nvscl smem from ~186 KB to ~200 KB > the
+196 KB carveout step -> L1 60 -> 28 KB (cp.async.ca gathers): nvscl is L1-sensitive; shrinking it below 164 KB would need
+-22 KB (xo/xo2 aliasing gives 18 KB at most and races the peer's push): not pursued.
+Left (not built): last-CTA-merges via global partials + atomic counter at v16 (fence + atomic + 3x16 KB L2 reads on the
+critical path ~2 us vs combine 3.3) ~-1.3 us v16 sl = ~0.05%, non-deterministic merge order. Lane: verify-sliding attention
+CLOSED (bound per n8s1 was ~5 us stripped, the reachable part is <= ~1.3 us).
+
+## night8 s3 (2026-10-29 21:31Z)
+Idle session: no lead decision after 21:05Z, verify-sliding lane closed in n8s2. Only leftover in it is the v16
+last-CTA global merge (~-1.3 us v16 sl, ~0.05%); also cl=2 at v16 (66 clusters = 132 CTAs, one wave) would still leave a
+2-way merge per row: same order of gain, not built. 0 judge runs, 0 Modal, no code.
+
+## night8 s4 (2026-10-29 21:46Z)
+Idle session: still no lead decision after 21:05Z (COORD re-read in full); verify-sliding lane closed (n8s2). 0 judge runs,
+0 Modal, no code. moe/proj have STOP files; layer has none, so idle sessions keep spending usage.
+
+## night10 s1 (2026-10-30 ~02:30Z, sandbox clock): lead 02:45Z LAYER START lane, H100 oracle only. GATE NOT MET, no build.
+- Fact first: the layer has NO input norm: attn_input arrives RMS-normed BF16 (reference.py:293), so qkv IS the graph's
+  first op at every load (d1 g13, d16 g24, d32 g30, v1 g14). The lead's "input norm done" stamp / "fuse the input norm into
+  qkv's prologue" candidates don't exist.
+- Dead entries NOT repeated: G13_L2PF (L2 bulk prefetch of own W, proj +1..3 us), g13t / deeper rings / G13_CPA (proj s18:
+  deeper initial burst slower), g24 XSP, G24X, QSS at d32/verify, qkv split s54, g19 qkv at T=32, side-stream fork at graph
+  start (~9 us), L2 prefetch of the next W beside a GEMM (zero-sum).
+- tools/n10/start_oracle.py (in-layer, cold-L2 graph replays, medians of 3 rounds, minus empty graph; variants: free = qkv
+  launches nothing (output replayed from a clone, timing only); rdN = free + bare Triton int64 reader of qkv's 12-bit byte
+  count 28.3 MB on N CTAs as the first op; pre = empty kernel before qkv), sliding, us:
+  ```
+  load  base   free   rd264  rd528  pre    | qkv cost (base-free) | bare reader cost (rd528-free) | excess
+  d1    85.9   74.9   87.3   86.6   87.6   | 11.1                 | 11.7                          | -0.6
+  d16  190.0  178.8  192.0  190.5  190.9   | 11.2                 | 11.6                          | -0.4
+  d32  187.3  173.4  185.5  184.0  187.4   | 13.9                 | 10.6                          | +3.3
+  v1   142.1  131.7  144.3  143.3  142.9   | 10.4                 | 11.6                          | -1.2
+  (v16 16.7 / 16.5 reader 10.4 / 11.7: T=128 qkv is BF16 nvjet, not this lane)
+  ```
+  (the reader can't PDL-trigger, so rdN is slightly pessimistic; still, g13/g24/g14 qkv are AT the bare-stream floor in
+  first-op position). An empty prefix kernel costs +0.8..1.6 us (no warm-up effect: TLB/clock).
+- tools/n10/ramp.py + ramp2.py, standalone H100 cold-L2 graphs minus the empty graph (3.2 us): bare reader best (2112 CTAs)
+  7.1 MB 5.2 / 14.2 MB 7.5 / 28.3 MB 12.0 / 56.6 MB 20.9 / 113 MB 39.0 us -> slope 3.13 TB/s, intercept ~2.8-2.9 us =
+  one in-graph kernel 1.8 us (nop; each extra serial nop +1.0; 2112-CTA nop 3.4) + ~1.0 us first-byte (cold 8 KB read by
+  1 CTA 3.0 us). So "graph start -> W at full rate" = launch + first DRAM round trip: physical, nothing to cut. d1 qkv =
+  bytes/3.13 (9.0) + 2.1 us: below the reader's own intercept. H200 agrees (proj s17: g13 = bare TMA stream + 0.9 us;
+  H200 timeline d1 g13 11.8, d16 g24 11.8, v1 g14 11.4, d32 g30 13.5 vs reader floor ~10.9).
+- Only positive item: d32 qkv +3.3 us H100 (+2.6 H200, proj n9s1) = the m32 GEMM CONSUMER (proj n9s1: g30 with no HBM W and
+  no math is 10 us = the reader), not a start piece; ~0.2% score at an infinitely good consumer; g30/g24/g19 m32 forms are
+  on the dead list. Gate (>= 2 us d1 sl or >= 3 us summed) not met by any start lever (sum 0); 3.3 only if the d32
+  consumer is counted, all of it in one dead-record GEMM. Lane CLOSED pending lead. 0 judge runs, 0 Modal.
+
+## night10 s2 (2026-10-30 02:48Z)
+Idle session: no lead decision after 02:45Z (COORD re-read); layer-start lane closed in n10s1 (gate not met: qkv at the
+bare-stream floor as first op at d1/d16/v1, start = launch + first DRAM byte; only d32 +3.3 us m32 consumer, dead-record
+forms). main = v172 (e80d4c3). 0 judge runs, 0 Modal, no code.
+
+## night10 s3 (2026-10-30 03:05Z)
+Idle session: still no lead line after 02:45Z (all three lanes idle per COORD). main = v172. 0 judge runs, 0 Modal, no code.
+
+## night11 s1 (2026-10-30 03:51Z-~04:40Z): lead 03:50Z LANE B (held-out robustness). 0 judge runs, Modal 3.9 GPU-min. No fix needed.
+- FACT: the judge NEVER uses the listed seeds 801-812. Every check/submit json has random 63-bit case seeds, different per run
+  and per shape (profiles/*.json benchmarks[].case.seed), and a fresh router per run (weights_fields). So every judge run we
+  have (25+) already ran on held-out inputs and routers; per-shape run-to-run sd 0.7-3% (moe n7s32).
+- Judge-like routers: tools/n11/judge_routers.py inverts each case's speed_of_light_ns (hbm 4.8e12; sl and full agree) for the
+  hidden router_distinct targets: d1 2.5, d16 7.5, d32 9.0, v1 7.5, v16 18.4, v32 21.3; then weights_fields' search on distinct
+  only (router_load is not observable) -> routers 6023193148244720467 / 7745419892846091016 / 5745108551026741284 /
+  4125531254498798136 (err 2-4%; v32 routes 325-440). Plus the default router = 5 routers.
+- tools/n11/heldout.py: 5 routers x 12 shapes x 4 input seeds (scored seed + 3 others), per input interleaved A/B of main vs
+  notune (tuner pick -> base), v16 hot0 / hotxn0 (HOT_XN off), v32 hot32 (hotdyn off) / hotxn0. H200 (tools/n11/h200_summary.txt):
+  ```
+  shape        scored  other   | variant deltas vs main (mean [min,max], inputs where variant faster)
+  d1 sl         69.6   67.7    | notune +0.1
+  d16 sl/full  119.7/207.9  130.7/206.5 | notune +0.6 / +0.4
+  d32 sl/full  153.3/305.1  153.2/304.6
+  v1 sl/full   107.0/121.6  111.3/122.6
+  v16 sl       248.8  251.8    | hot0 -0.9 [-2.7,+0.7] 16/20, hotxn0 -0.1
+  v16 full     348.6  347.2    | hot0 -0.4 [-2.5,+12.7] 16/20, hotxn0 +0.1, notune +0.1
+  v32 sl       315.6  317.1    | hot32 +4.6 [-0.9,+38.0] 2/20, hotxn0 +1.3, notune +0.5
+  v32 full     488.8  493.6    | hot32 +5.5 [-0.2,+33.3] 1/20, hotxn0 +0.2
+  ```
+  scored-vs-other differences = routing chance only (d16 sl spread 110-156 us across inputs; same both ways on the H100).
+  H100 (h100_summary.txt) agrees: hotdyn +4.0/+4.8 if removed, HOT_XN +0.8, tuner picks at d16 +1.2/+1.5 if removed.
+- Only negative: HOT128 at v16 costs ~0.9 us sl / ~0.5 full when no 65..128-token expert exists (moe_hot launch that exits),
+  saves ~13 us when one exists; judge-like routers had a hot expert in 1/40 v16 inputs (break-even ~7%). Expected gain of
+  dropping it <= ~0.04% of score, below the 0.3% bar: NOT changed. (A cheaper no-hot path would take the 0.9 us.)
+- Correctness: 13 tests x 2 extra seed bases (5242, 6242) PASS on H200 and H100; 12 scored shapes x 2 held-out seeds x 2
+  judge-like routers PASS (H100, tests_seeds.py). Nearby shapes (tools/n11/nearby.py, H100): 44 cases (T=1..256, b 2/4/24/48/64,
+  q_len 4, ctx 40K/120K/200K) all PASS; only visible cliff: decode T=2/4 (149/132 us sl vs T=1 77, T=8 139: generic path) - no SGLang
+  locally to say if that's 'much slower' than SGLang there.
+
+## night11 s2 (2026-10-30 04:03Z)
+Lane B follow-up, no code: the n11s1 nearby-shape cliff (decode T=2/4 sl 149/132 us H100 vs T=1 77) is NOT below SGLang:
+SGLang's own d1 (T=1) is 171/183 us sl/full on the H200 (STATE), and its T=2/4 can only be >= that, while our H100 numbers
+are an upper bound for the H200. Also the held-out reruns use the same 12 shapes (lead 03:50Z: same ctx/spread/dist), so it
+does not touch the score. Lane B fully closed. No lead line after 03:50Z: paused. 0 judge runs, 0 Modal.
