@@ -3492,3 +3492,11 @@ Idle session: no new lead decision since 09:35Z; tasks 1+2 done; Handoff moe/lay
   161.1/145.3/152.3; alias NSTG 6 = 8. => the H100 stream is on the flat part above ~5 stages; the H200 (1.4x the bytes per
   latency) needs ~1.4x the stages: 8 stages there ~ 5.7 here = still on the flat part. More bytes in flight is NOT the lever
   (matches tk2f's deeper-ring DIAGs, all lost).
+- H200 (Modal, 3.5 GPU-min; lead 00:00Z: no O2 repeat, counters only), v16 sl / v32 sl s99, consumer warp life (gtimer):
+  REAL base 132.1 / 156.2 us, ring wait 6.6 / 10.2 (cycle-us), between-item 6.1 / 5.2 | L2-ALIAS base 128.4 / 152.5,
+  ring wait 6.5 / 10.0. SM clock under load 1.76-1.79 GHz (not 1.98). All 3 seeds the same picture (tools/n9s1/h200_inst.txt).
+  => ON THE H200 moe_twm IS PURELY CONSUMER-BOUND: real HBM = L2-fed within 3%; consumers starve only ~5% of their life
+  (same as with L2 feed). Structure (ring wait + between-item + epi + rest) ~15% of life, compute (dq + wgmma) ~80%.
+  The consumer ceiling = 481 MB / 128 us = 3.75 TB/s-eq at v16 s99 vs HBM ~4.3: the gate quantity H200 (base - both-free)
+  is bounded by base - stream time ~= 132 - (481/4.3 + ~8) ~= 12-17 us at v16 (my estimate; fresh's H200 O2 is the
+  measurement). Clock note: an H200 at 1.77 GHz under this load means instruction count is the lever, as on record.

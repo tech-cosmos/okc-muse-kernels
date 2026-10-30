@@ -1,0 +1,25 @@
+h200: reserved 11 min (0 of 60 used today before this run)
+NVIDIA H200
+
+===== base (rc 0)
+env: torch 2.14.1+cu130, triton 3.8.0
+verify 16 sliding s99: clk 1.761 GHz life 132.1 us | life 117.5 | between-item wait 6.1 | item 106.8 (loop 103.2 of which ring wait 6.6; epi+rest 3.6) | items/warp 3.27 big 0.36
+verify 16 sliding s1: clk 1.766 GHz life 122.5 us | life 109.3 | between-item wait 6.4 | item 98.0 (loop 94.7 of which ring wait 6.3; epi+rest 3.3) | items/warp 3.09 big 0.73
+verify 16 sliding s2: clk 1.772 GHz life 130.1 us | life 116.4 | between-item wait 7.4 | item 104.2 (loop 100.7 of which ring wait 6.7; epi+rest 3.5) | items/warp 3.27 big 0.73
+verify 32 sliding s99: clk 1.782 GHz life 156.2 us | life 140.6 | between-item wait 5.2 | item 129.7 (loop 144.8 of which ring wait 10.2; epi+rest -15.1) | items/warp 5.21 big 0.73
+verify 32 sliding s1: clk 1.788 GHz life 171.9 us | life 155.2 | between-item wait 5.8 | item 142.5 (loop 145.9 of which ring wait 10.3; epi+rest -3.4) | items/warp 5.21 big 1.09
+verify 32 sliding s2: clk 1.792 GHz life 171.4 us | life 155.1 | between-item wait 6.0 | item 142.1 (loop 146.5 of which ring wait 10.8; epi+rest -4.4) | items/warp 5.21 big 1.09
+
+
+===== alias (rc 0)
+env: torch 2.14.1+cu130, triton 3.8.0
+verify 16 sliding s99: clk 1.765 GHz life 128.4 us | life 114.4 | between-item wait 4.7 | item 105.5 (loop 102.5 of which ring wait 6.5; epi+rest 2.9) | items/warp 3.27 big 0.36
+verify 16 sliding s1: clk 1.772 GHz life 118.2 us | life 105.8 | between-item wait 4.8 | item 97.1 (loop 94.1 of which ring wait 6.2; epi+rest 3.0) | items/warp 3.09 big 0.73
+verify 16 sliding s2: clk 1.770 GHz life 126.3 us | life 112.9 | between-item wait 5.5 | item 103.1 (loop 100.1 of which ring wait 6.6; epi+rest 3.0) | items/warp 3.27 big 0.73
+verify 32 sliding s99: clk 1.791 GHz life 152.5 us | life 137.9 | between-item wait 4.0 | item 128.9 (loop 144.5 of which ring wait 10.0; epi+rest -15.7) | items/warp 5.21 big 0.73
+verify 32 sliding s1: clk 1.793 GHz life 168.0 us | life 152.1 | between-item wait 5.0 | item 141.2 (loop 145.0 of which ring wait 9.7; epi+rest -3.8) | items/warp 5.21 big 1.09
+verify 32 sliding s2: clk 1.793 GHz life 167.0 us | life 151.2 | between-item wait 5.0 | item 140.3 (loop 145.3 of which ring wait 9.9; epi+rest -5.0) | items/warp 5.21 big 1.09
+
+
+h200: charged 3.5 GPU-min; 27 of 60 used today
+EXIT 0
