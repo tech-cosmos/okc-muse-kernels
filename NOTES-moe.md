@@ -3619,3 +3619,9 @@ Idle stop: no lead decision after 02:45Z; END lane closed n10s1. 0 judge runs, 0
   of our 9 ops / 8 weights, or a way to run dq off the issuing warps (both closed on record for us: z3 floor, RS/SS wall).
   Untested guesses for what they do differently: none found here; this diag rules the shortcut out, nothing more.
 - Note: an FP16-operand path (HMMA f16) has the same dq and MMA cost as BF16; e4m3 x e2m1-with-scale has no Hopper MMA.
+
+## n11b (2026-10-30 04:18Z-04:25Z): idle stop
+- Lead 03:50Z LANE A was finished in n11a (verdict 'a legal faster design exists'; FP8 is not the leaders' edge). No lead line after 03:50Z.
+  Re-read the dq/overlap record (n5s39 z3 floor 8 int + 4 HMUL2 per 8 w; n7s47/48 RS/SS wall; n6s1 serial big-M floor bs128 ~125 /
+  bs256 ~160 us, under #1's implied ~155/188). So #1's edge has to be consumer efficiency (twm is at 0.83x of serial ALU+MMA per stage,
+  1.4x of max), not a cheaper dq. I can't name a mechanism that is not already dead on record, so nothing was built. moe paused. 0 judge runs, 0 Modal.
