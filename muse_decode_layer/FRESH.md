@@ -297,3 +297,43 @@ known structure. A twm rebuild is justified only if someone has a concrete dq||M
   SM after the slowest split ends; a PDL-launched combine kernel pays a grid flush + one L2 trip spread over all SMs. Same
   length or shorter, so the launch you save doesn't buy anything. Don't retry it unless the split partials stay on chip (DSMEM, which needs clusters,
   and n8s2 showed 4-CTA clusters don't fit in one wave).
+
+## x1 (2026-10-30 07:12Z-~08:35Z): lead 07:20Z lane "an EXACT new expert-kernel design" -- session 1 (H100 microbench only)
+Tools: tools/fresh/xd/pipes.py (pipe rates), conc.py / conc2.py / conc3.py (WG0 HGMMA loop || WG1 ALU loop, 1 CTA, cyc per
+twm RT4 stage = 16 HGMMA m64nNk16 per WG). H100 SM cycles (moe n11a: H100 = H200 exactly for these stage counts).
+
+### First-principles candidates (written before reading the record)
+1. Pipe balance: per 8 weights the dq puts 7 ops on the half-rate ALU pipe (14 cyc/SMSP) and 6 cyc on the FMA pipe.
+   Move rotates to the FMA pipe (IMAD.WIDE.U32 q*2^k: lo|hi = rotl, folded into the mask LOP3; bit-identical, no repack).
+2. Overlap dq with MMA (they are serial now): find WHY, then pick the structure that avoids the conflict.
+3. MMA work per dq'd weight (lead's (c)) / dq shared across a cluster (lead's (a)): arithmetic check only.
+
+### Measurements
+- Pipe rates (cyc per warp-instr per SMSP, 2-8 warps/SMSP): LOP3 / SHF / PRMT 2.0 (one ALU pipe), IMAD 2.0 on the FMA pipe
+  (LOP3+IMAD mix 1.0 = co-issue), HMUL2/HFMA2 bf16x2 ~1.06 (FMA pipe: IMAD+HMUL2 mix 1.5), FMUL 1.0, **IMAD.WIDE 4.1**.
+- twm stage SASS (ovl8 role 1, RT4 N32): per warp 91 LOP3 + 35 SHF (= 504 ALU cyc/SMSP for 2 WGs), 64 HMUL2 + 35 IMAD,
+  16 HGMMA, 320 instrs. MMA alone 513. twm 988-992 ~= ALU + MMA: zero overlap (as on record).
+- WG0 HGMMA loop || WG1 LOP3 loop (112 LOP3 per stage = 235 cyc alone), WG1 time:
+  | N  | RS (acc) | SS (acc) | RS scale-d 0 (no acc read) | RS same-D chains |
+  | 8  | 314      | 334      | 250                        | 248 (HGMMA 3x slower) |
+  | 32 | 397      | 410      | 264                        | 271 (HGMMA 3x slower) |
+  | 64 | 508      | 528      | 280                        | 297 |
+  HMUL2 loop (93 alone): 304 next to RS N32, 256 next to SS. scale-d 0 HGMMA alone is as fast as accumulate at N64 (461 vs 523).
+  => NEW: the ALU slowdown next to an HGMMA grows with N, is the same for SS as RS, and almost vanishes when the HGMMA does
+  not read its accumulator. The dq/MMA conflict is the FP32 ACCUMULATOR READ traffic through the SMSP's register file,
+  not the A operand, not issue order (r-outer vs k-outer in one commit group: identical cycles), not RS vs SS.
+### Verdicts (gate: <= 0.80x twm consumer cycles/stage at bs128 AND bs256)
+1. Pipe balance: IMAD.WIDE is quarter-rate, so 2 rotates -> FMA = 14 cyc (worse); 1 rotate -> ALU 12 / FMA 10 = 0.86x of the
+   dq's ALU time = ~0.93x of twm (dq + MMA serial). FAILS the gate alone. (IMAD-only shift layouts: bit 31 forces s = 0 and
+   bit 0 forces s = 6; no left-shift-only partition of M = 0x81C081C0 exists, checked by hand; moe n5s39/laysearch covered
+   total-op counts, not pipe balance.)
+2. Overlap: the conflict is acc reads in the RF. Every Hopper path keeps FP32 accumulators in the RF (wgmma RS/SS, mma.sync),
+   FP16 accumulators are banned (FP32 where SGLang's are), scale-d 0 needs an FADD per acc element per k16. Acc read bytes per
+   MAC are fixed by k16. So no structure on one SM escapes it; dedicated dq SMs (via L2/DSMEM) give total SM-cycles = dq + MMA,
+   the same as serial. FAILS.
+3. (c) moot: each weight is already dq'd once per call (moe_hot runs > 64-token experts at N 128); dq per weight streamed
+   can't go below 1. (a) arithmetic: each SM still dqs 1 per weight it streams, and smem then carries STS + DSMEM + SS A
+   reads (>= 6 B/weight vs 128 B/clk at ~33 weights/clk). FAILS.
+- Gate fails for all three. Not built. Open question for the lead (not a build): does #1's 0.76x imply they avoid acc reads
+  (e.g. a legal reading of "accumulators FP32" with f16 partials per k-chunk -- banned for us by the 10-24 ruling), or fewer
+  RF reads per dq op? Can't be decided by microbench.
