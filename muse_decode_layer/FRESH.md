@@ -288,3 +288,12 @@ Ranked levers, against the record:
    not where the H200 time goes in-layer, consistent with them measuring <= ~1-6 us or worse. No re-open.
 Verdict: the v16/v32 prize is real (~+4% if free) but it is the per-SM consumer, and only lever 1 attacks it, with no
 known structure. A twm rebuild is justified only if someone has a concrete dq||MMA overlap form that beats n7s47's list.
+
+## f1s15 (2026-10-30): bundle + v16 last-CTA merge (dead)
+- Bundle per lead 01:00Z = v171 + HOT_XN 16 only (all other Handoffs on record are already on main). Check 8b4e6cf7 2.1539
+  raw / 2.1607 fixed-SGLang.
+- LCM (nvs merges its own splits at v16 sliding, S=4, NV_HALF): in-layer H100 attention segment 14.5 (combine) vs 15.5 us.
+  Lesson: an in-kernel "last CTA merges" costs fence (store ack) + atomic round trip + one L2 trip for the merge, all on one
+  SM after the slowest split ends; a PDL-launched combine kernel pays a grid flush + one L2 trip spread over all SMs. Same
+  length or shorter, so the launch you save doesn't buy anything. Don't retry it unless the split partials stay on chip (DSMEM, which needs clusters,
+  and n8s2 showed 4-CTA clusters don't fit in one wave).

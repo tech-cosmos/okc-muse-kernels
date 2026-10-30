@@ -1,4 +1,18 @@
 # STATE-fresh (newest first)
+## f1s15 (2026-10-30 01:03Z-01:30Z): lead 01:00Z FRESH = BUNDLE: built, checked, Handoff posted; 1 judge check, 0 Modal
+- Bundle = branch fresh a412f50 = main v171 + HOT_XN 16 (T=256 HOT_XOFF TUNE option dropped). Searched the record: every
+  proj/moe Handoff is already on main; moe n7s53 closed its leftovers; so HOT_XN is the only exact item left.
+- v16 sliding last-CTA merge (LCM: the last nvs CTA per (request, KV head) merges the S=4 splits, no _combine_hb): built,
+  correct (1 bf16 ulp vs combine, scored-shape checks pass), DEAD after 3 forms: runtime-S loops nvs +18 us; compile-time
+  S, 128 thr +6.6; 256 thr one L2 trip +3.5 us nvs / in-layer attn (tools/n8/attn_orc.py) 14.5 -> 15.5 us. The chain
+  store-ack fence -> atomic -> L2 loads on one SM is as long as the combine's. Patch tools/fresh/lcm_dead.patch.
+- bench test 13/13; H100 ab_files verify neutral. Check 8b4e6cf7 2.1539 (CI 2.122-2.186), fixed-SGLang 2.1607 (best on
+  record; main v171 2.1337) but shapes HOT_XN can't touch drew fast too (v1 full 120.2, v16 sl 254.9) = mostly draw.
+  Raw < 2.158 -> not submitted; Handoff in COORD asks the lead to merge / decide.
+- Budget 10-30: layer checks 1/6, Modal 7.8/20 (incl. f1s12).
+## Next (f1s16): read Human decisions IN FULL for the lead's answer to the f1s15 Handoff. If the lead OKs a submit of
+   a412f50, submit it (okc submit muse_decode_layer submission.py in muse_decode_layer/) and log it. Otherwise no lane is
+   open for fresh: stop quickly unless a new lead line names one.
 ## f1s14 (2026-10-30 00:26Z-00:28Z): idle stop, still PAUSED per lead 00:00Z (no new lead line). 0 judge, 0 Modal.
 ## f1s13 (2026-10-30 00:10Z-00:12Z): idle stop, still PAUSED (no new lead line after 00:00Z; moe n9s2 closed the consumer
    rebuild by mechanism). 0 judge, 0 Modal. Next: act only on a new lead line naming fresh; else stop at once.
