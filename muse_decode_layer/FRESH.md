@@ -354,3 +354,25 @@ register source read, so a dq rewrite for fewer RF reads cannot help; instructio
 model). Step 2 not started (lead's rule). Still unexplained: why acc reads (scale-d 0 removes the slowdown, x1) tax
 instruction issue rather than operand reads: plausibly the HGMMA owns the SMSP's RF read path / dispatch in bursts so any
 vector-RF instruction waits regardless of its operand count. Not a lever either way.
+
+## x5 (2026-10-30 09:04Z-): lead 09:10Z ORACLE SWEEP (fable/codex leftovers), no builds
+### (6) router FP32 = BF16 in disguise? DEAD (1 min)
+reference router = 0.045*randn FP32: (router.view(int32) & 0xFFFF).ne(0).mean() = 0.99998 on the reference weights. Not shrinkable.
+### (1) pipe-selective contention (fable #7): tools/fresh/xd/conc5.py (H100, 1 CTA, WG0 HGMMA RS m64nNk16 scale-d 1 16/stage || WG1
+112 instrs/stage of ONE class, 16 independent chains; cyc/stage; SASS checked: 112 of the class per loop body)
+| class | alone | WG1 next to N32 (WG0) | WG1 next to N64 (WG0) | slowdown N64 |
+|---|---|---|---|---|
+| (HGMMA alone) | | (311) | (524) | |
+| LOP3 / SHF / PRMT | 235 | 401 (341) | 490 (545) | 2.08x |
+| IMAD | 233 | 428 (350) | 559 (561) | 2.40x |
+| IADD3 | 188 | 391 (357) | 502 (568) | 2.67x |
+| HMUL2 / HFMA2 bf16x2 | 124-126 | 425 (348-353) | 559 (561) | 4.5x |
+| FFMA / FMUL fp32 | 125 | 143 (426) | 162 (628) | 1.30x, but HGMMA +103..115 |
+| MUFU ex2 | 923 | 1045 (313) | 1110 (526) | 1.20x (8x slower base) |
+| F2FP bf16x2 pack | see below | | | |
+- No class escapes. FP32 FFMA/FMUL look free on their own clock but push the HGMMA out by ~ their own standalone time
+  (fully serialized, just billed to the other WG). The dq's HMUL2s are the WORST class next to HGMMA (4.5x), the INT ops ~2.1x.
+- "uniform datapath" roles: ptxas kept the asm on the vector datapath (8 ULOP3 in the whole binary), so not measured; and
+  uniform ops can't dequantize per-thread weights anyway. Dropped.
+- Verdict (1): DEAD. Every pipe that touches vector registers is taxed while an accumulating HGMMA runs; MUFU (1.2x) is the
+  only light one and is 8x too slow to carry a dq.
