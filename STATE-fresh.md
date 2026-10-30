@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## f1s13 (2026-10-30 00:10Z-00:12Z): idle stop, still PAUSED (no new lead line after 00:00Z; moe n9s2 closed the consumer
+   rebuild by mechanism). 0 judge, 0 Modal. Next: act only on a new lead line naming fresh; else stop at once.
 ## f1s12 (2026-10-29 22:47Z-2026-10-30 00:15Z): lead 22:20Z/00:00Z O2 DONE on the H200; fresh PAUSED per lead 00:00Z
 - f1s10/f1s11 missed the lead's 22:20Z answer (Human decisions, not a `lead -> fresh` line): read Human decisions IN FULL.
 - Added TWM_ORC 8 (no wgmma, dq kept by an XOR sink) and 256 (flat grid-stride read of all active experts' bytes; moe_hot
