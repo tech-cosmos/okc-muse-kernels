@@ -2,6 +2,8 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+night10 s2 (10-30 02:48Z): idle, no lead line after 02:45Z; lane closed in s1. main = v172 (e80d4c3, fresh bundle = v171 + HOT_XN 16;
+  submit ae6c4bd3 2.1453 slow draw, check 8b4e6cf7 2.1539 / fixed-SGLang 2.1607; board stays 2.158). 0 runs.
 night10 s1 (10-30 ~02:30Z): lead 02:45Z LAYER START lane: H100 oracle (tools/n10/, NOTES n10s1): NO input norm exists (attn_input is
   pre-normed; qkv is the first op). qkv cost in-layer (base - qkv-free) d1 11.1 / d16 11.2 / d32 13.9 / v1 10.4 us vs a bare
   28.3 MB reader in the same spot 11.7 / 11.6 / 10.6 / 11.6: at the floor except d32 (+3.3 = m32 consumer, dead-record forms).

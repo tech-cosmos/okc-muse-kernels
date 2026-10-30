@@ -3143,3 +3143,8 @@ Idle session: still no lead decision after 21:05Z (COORD re-read in full); verif
   no math is 10 us = the reader), not a start piece; ~0.2% score at an infinitely good consumer; g30/g24/g19 m32 forms are
   on the dead list. Gate (>= 2 us d1 sl or >= 3 us summed) not met by any start lever (sum 0); 3.3 only if the d32
   consumer is counted, all of it in one dead-record GEMM. Lane CLOSED pending lead. 0 judge runs, 0 Modal.
+
+## night10 s2 (2026-10-30 02:48Z)
+Idle session: no lead decision after 02:45Z (COORD re-read); layer-start lane closed in n10s1 (gate not met: qkv at the
+bare-stream floor as first op at d1/d16/v1, start = launch + first DRAM byte; only d32 +3.3 us m32 consumer, dead-record
+forms). main = v172 (e80d4c3). 0 judge runs, 0 Modal, no code.
