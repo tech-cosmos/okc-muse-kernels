@@ -3112,3 +3112,34 @@ last-CTA global merge (~-1.3 us v16 sl, ~0.05%); also cl=2 at v16 (66 clusters =
 ## night8 s4 (2026-10-29 21:46Z)
 Idle session: still no lead decision after 21:05Z (COORD re-read in full); verify-sliding lane closed (n8s2). 0 judge runs,
 0 Modal, no code. moe/proj have STOP files; layer has none, so idle sessions keep spending usage.
+
+## night10 s1 (2026-10-30 ~02:30Z, sandbox clock): lead 02:45Z LAYER START lane, H100 oracle only. GATE NOT MET, no build.
+- Fact first: the layer has NO input norm: attn_input arrives RMS-normed BF16 (reference.py:293), so qkv IS the graph's
+  first op at every load (d1 g13, d16 g24, d32 g30, v1 g14). The lead's "input norm done" stamp / "fuse the input norm into
+  qkv's prologue" candidates don't exist.
+- Dead entries NOT repeated: G13_L2PF (L2 bulk prefetch of own W, proj +1..3 us), g13t / deeper rings / G13_CPA (proj s18:
+  deeper initial burst slower), g24 XSP, G24X, QSS at d32/verify, qkv split s54, g19 qkv at T=32, side-stream fork at graph
+  start (~9 us), L2 prefetch of the next W beside a GEMM (zero-sum).
+- tools/n10/start_oracle.py (in-layer, cold-L2 graph replays, medians of 3 rounds, minus empty graph; variants: free = qkv
+  launches nothing (output replayed from a clone, timing only); rdN = free + bare Triton int64 reader of qkv's 12-bit byte
+  count 28.3 MB on N CTAs as the first op; pre = empty kernel before qkv), sliding, us:
+  ```
+  load  base   free   rd264  rd528  pre    | qkv cost (base-free) | bare reader cost (rd528-free) | excess
+  d1    85.9   74.9   87.3   86.6   87.6   | 11.1                 | 11.7                          | -0.6
+  d16  190.0  178.8  192.0  190.5  190.9   | 11.2                 | 11.6                          | -0.4
+  d32  187.3  173.4  185.5  184.0  187.4   | 13.9                 | 10.6                          | +3.3
+  v1   142.1  131.7  144.3  143.3  142.9   | 10.4                 | 11.6                          | -1.2
+  (v16 16.7 / 16.5 reader 10.4 / 11.7: T=128 qkv is BF16 nvjet, not this lane)
+  ```
+  (the reader can't PDL-trigger, so rdN is slightly pessimistic; still, g13/g24/g14 qkv are AT the bare-stream floor in
+  first-op position). An empty prefix kernel costs +0.8..1.6 us (no warm-up effect: TLB/clock).
+- tools/n10/ramp.py + ramp2.py, standalone H100 cold-L2 graphs minus the empty graph (3.2 us): bare reader best (2112 CTAs)
+  7.1 MB 5.2 / 14.2 MB 7.5 / 28.3 MB 12.0 / 56.6 MB 20.9 / 113 MB 39.0 us -> slope 3.13 TB/s, intercept ~2.8-2.9 us =
+  one in-graph kernel 1.8 us (nop; each extra serial nop +1.0; 2112-CTA nop 3.4) + ~1.0 us first-byte (cold 8 KB read by
+  1 CTA 3.0 us). So "graph start -> W at full rate" = launch + first DRAM round trip: physical, nothing to cut. d1 qkv =
+  bytes/3.13 (9.0) + 2.1 us: below the reader's own intercept. H200 agrees (proj s17: g13 = bare TMA stream + 0.9 us;
+  H200 timeline d1 g13 11.8, d16 g24 11.8, v1 g14 11.4, d32 g30 13.5 vs reader floor ~10.9).
+- Only positive item: d32 qkv +3.3 us H100 (+2.6 H200, proj n9s1) = the m32 GEMM CONSUMER (proj n9s1: g30 with no HBM W and
+  no math is 10 us = the reader), not a start piece; ~0.2% score at an infinitely good consumer; g30/g24/g19 m32 forms are
+  on the dead list. Gate (>= 2 us d1 sl or >= 3 us summed) not met by any start lever (sum 0); 3.3 only if the d32
+  consumer is counted, all of it in one dead-record GEMM. Lane CLOSED pending lead. 0 judge runs, 0 Modal.

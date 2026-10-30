@@ -2,7 +2,11 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
-night8 s3-s4 (10-29 21:31Z, 21:46Z): idle, no lead decision after 21:05Z; 0 runs. Lane closed (see s2); waiting for a lead assignment.
+night10 s1 (10-30 ~02:30Z): lead 02:45Z LAYER START lane: H100 oracle (tools/n10/, NOTES n10s1): NO input norm exists (attn_input is
+  pre-normed; qkv is the first op). qkv cost in-layer (base - qkv-free) d1 11.1 / d16 11.2 / d32 13.9 / v1 10.4 us vs a bare
+  28.3 MB reader in the same spot 11.7 / 11.6 / 10.6 / 11.6: at the floor except d32 (+3.3 = m32 consumer, dead-record forms).
+  Start = 1.8 us in-graph launch + ~1 us first DRAM byte (standalone ramp fit 3.13 TB/s + 2.8 us): physical. Prefix kernel
+  +0.8..1.6. Gate not met, no build, 0 runs. Lane CLOSED pending lead.
 night8 s2 (10-29): v16 4-CTA cluster nvs merge BUILT + DEAD: max 30 clusters of 4 resident (120 CTAs < 128) -> 2 waves,
   H100 v16 sl attn 13.5 -> 22.3 us; extra 13.8 KB smem also cost v32 +1.6 (nvscl crosses the 196 KB carveout; L1-sensitive).
   Reverted (tools/n8/cl4_patch.py kept). Verify-sliding lane CLOSED: last-CTA global merge ~-1.3 us v16 (0.05%) not built.
@@ -10,13 +14,8 @@ night8 s1 (10-29): lead 21:05Z verify-sliding attention lane: ORACLES only (H100
   (stripped nvs): v16 sl -3.9 us (combine 3.3 of it), v32 sl -1.2. nvs body = serial seq->pt (2.3)->KV gather (2.1)->tiles
   latency chain; L2-warm all of it -0.4/-0.6 only; math/stores/transposes small. Only item: v16 4-CTA cluster merge + O_PF
   (~-2 us, ~0.08%). Lane CLOSED pending lead. main = v168/v171 unchanged.
-night7 s11 (10-29): no build, 0 runs. g30kgx 'drop' on the judge = records don't fit (weight-dependent), not a build
-  flake (~0.01%, skip). Layer lane idle: asked lead to pause the loop until a moe/proj Handoff (COORD Requests n7s11).
 night7 s10 (10-29): main v168 checked a5b4ddab 2.1540x (fixed-SGLang 2.1343) < board 2.158: not submitted. No build (no lever
   >= 0.3% found). Judge sometimes drops g30kgx (build flake, 3/12 logs; graceful fallback). 10-29 left: 14 checks / 7 submits.
-night7 s9 (10-29): no build, 0 runs. v1 T=8 o post-attention latency (H200 5.9 sl / 7.6 full us) re-sized = closed
-  (pr8 end is set by its own pre-wait W stream, s88 / n5s5). Layer lane: nothing >= 0.3% left; d1/v1 full attention native
-  kernel (~0.5%, multi-session, s73 lost) needs a lead assignment. main = v168 unchanged.
 night7 s8 (10-29): IDF lane CLOSED: pooler-progress throttle (tk2f waits for 0/50/85/97 of 100 pr1 pooler blocks) = no change
   (all +4 us); the loss is n2u's post-wait routing reads (+4.3 us); with base n2u reads IDF ties base (H100 d1, NOTES n7s8).
   Early tk2f at T=1 is dead by mechanism (x not ready before pr1+rmsnorm). 0 runs. main = v168 (= v167 timing; check 59013cf5
@@ -53,24 +52,7 @@ night7 s1 (10-29): **main = v164** (e5d3272) = moe merge 9d2b3a8 (v163 + twm EPI
   build.py reproduces submission.py (moe had edited submission.py only). H200 Modal timeline of all 12 shapes + top-5 non-expert
   table: NOTES n7s1, dev/n7s1_tl_h200.txt. T=128 g30:o + bnd1 PDL: dead (tie). 10-29 left: 18 checks / 8 submits, Modal layer 2.5/15.
   NEXT: (a) T=128/256 _routing + rg one launch (grid barrier) ~-2 us; (b) T=256 boundaries ~-2..3 us each. Bundle with v164, then check.
-night5 s20: **main = v163** (d02f7a6) = v162 + rg in T=128 base: H200 Modal (tools/h200.py) real-routing ab_flag 14/14 inputs
-  (v16 sl -0.9..-3.5, full -2.3..-3.6 us); T=256/32/16/8/1 pins re-confirmed on the H200 (every escape loses; T=8 bal option is
-  unbuilt now). check c9f263d6 2.1476x (d32 full 283.2 best; v16 sl node-slow), prepare_s 88.6; not submitted. 10-28: 6 checks / 7 submits left after v163.
-  Use h200.py (3-4 GPU-min per 3-shape x 3-seed sweep, shared 60/day) to re-decide H100 'ties' before spending checks.
-night5 s30: tk3/PR CLOSED on its zero-overhead ceiling (s29 H100 A/Bs minus the 3.2-3.8 us fixed part: d32 sl ~-1.6..-3 us,
-  d16 none since tk2h/BAL already merge 2-group experts) = <= ~0.16% score; tk2f bs1 fallback is on record dead (moe n5s37).
-  No build, 0 runs. Lane request in COORD. 10-28 left: 4 checks / 7 submits.
-night5 s29: tk3 lane: BUILT "PR" (pair-role tk2f: k CTAs run 16-token pairs with a compact rolled TWO body, rest tk2f's
-  1-group rows) on BRANCH layer/tk3 a2ed836 (option tk2pr, TK2PR build flag; main untouched). Correct 37/37. H100 d16 ~= non-BAL,
-  +4 vs BAL; d32 tie..+5. DIAG check df997d8f 2.158x (= v163 redraw, PR not picked, not submitted), prepare_s 91.9: H200 tuner
-  T=16 +3 (fixed overhead, no pairs), T=32 tie. NEXT: cut PR's ~3 us fixed overhead (L1 carveout from 200 KB dyn smem ~1 us,
-  gemm2 long_sb) -> T=32 ~-3 us; then Modal real-routing A/B. Rule found: hot loops at kernel code offset >= 64 KB stall
-  (no_inst ~50%), not only straddling ones. Micro: wgmma N16 not cheaper than mma.sync pair (NOTES n5s29). 10-28 left: 4 checks / 7 submits.
-night5 s28: no build, 0 runs: pr1/qkv at d1 sit on the H200 bulk-stream fit (3.8 us + B/4.26 TB/s); co-resident pr1
-  bounded <= 1 us; T=256 b1/b2 byte cut 0.04%. Lane-change request posted (lead 09:20Z). 10-28 left: 5 checks / 7 submits.
-night5 s27: no build, 0 runs: H100 v32 sl timeline (experts 235 of 385 us); remaining gaps are expert-kernel
-  (proj TWS drain, moe closed); lane request n5s26 still open. 10-28 left: 5 checks / 7 submits.
-Older session summaries (night5 s1-s19, s85-s107): NOTES-layer.md.
+Older session summaries (night5 s1-s30, night7 s9/s11, night8 s3-s4, s85-s107): NOTES-layer.md.
 
 ## Per-load H200 us vs the s12 floor (board run 19ebde23 = v108; lead 05:07Z request; s74)
 Score %/us = gain in total score per us saved on that layer type (geomean of 6 loads x (46 sl + 16 full)).
