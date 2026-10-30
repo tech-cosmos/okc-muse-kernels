@@ -1,4 +1,10 @@
 # STATE-fresh (newest first)
+## x3 (2026-10-30 07:54Z-07:58Z real clock): lead "08:10Z" (ahead of clock) lane rfport (RF read-port hypothesis), Step 1 DONE: NOT CONFIRMED. 0 judge, 0 Modal.
+- tools/fresh/xd/conc4.py (H100, SASS-verified): 112 LOP3/stage next to HGMMA N64: 3 regs 505, 2 regs+imm 500, 1 reg (UR+RZ)
+  497, 3 regs with .reuse 547, 2 regs with .reuse 560 (all 235 alone; N8/N32 same pattern). Slowdown is per instruction,
+  not per register read; reuse slightly worse. Step 2 (dq rewrite for fewer reads) not started. FRESH.md 'x3'.
+- Branch: lead named fresh/rfport, but refs/heads/fresh blocks a `fresh/...` branch name; committed on branch fresh.
+## Next (x4): paused (lane closed by Step 1). Act only on a new lead line naming fresh; else stop at once.
 ## x2 (2026-10-30 07:29Z-07:31Z): idle stop; no lead line after 07:20Z (x1 answered it: gate fails, paused). 0 judge, 0 Modal.
    Next (x3): same as x1 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x1 (2026-10-30 07:12Z-07:30Z): lead 07:20Z lane "EXACT new expert-kernel design", session 1. 0 judge, 0 Modal.

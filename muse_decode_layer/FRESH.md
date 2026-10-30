@@ -338,7 +338,7 @@ twm RT4 stage = 16 HGMMA m64nNk16 per WG). H100 SM cycles (moe n11a: H100 = H200
   (e.g. a legal reading of "accumulators FP32" with f16 partials per k-chunk -- banned for us by the 10-24 ruling), or fewer
   RF reads per dq op? Can't be decided by microbench.
 
-## x3 (2026-10-30 07:54Z-08:15Z): lead 08:10Z lane "register read-port contention" (rfport), Step 1 (H100 microbench)
+## x3 (2026-10-30 07:54Z-07:58Z real clock): lead "08:10Z" lane "register read-port contention" (rfport), Step 1 (H100 microbench)
 Tool tools/fresh/xd/conc4.py (= conc.py + roles 7-11). 1 CTA, WG0 HGMMA RS m64nNk16 loop (scale-d 1, 16 HGMMA/stage) ||
 WG1 loop of 112 LOP3/stage (16 independent chains x 7). SASS checked per role (cuobjdump; loop body = 112 LOP3 each):
 (a) `LOP3 R, R, Rb, Rc` 3 regs, no reuse; (b) `LOP3 R, R, imm, Rc` 2 regs; (c) `LOP3 R, R, UR, RZ` 1 vector reg;
