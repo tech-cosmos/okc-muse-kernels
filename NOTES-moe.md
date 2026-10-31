@@ -4169,3 +4169,8 @@ H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-
   N/2 FFMA per thread per k16 vs 4 HMUL2 for dq scaling, worse for N >= 8, and needs a separate accumulator. smem LUT dq
   (byte -> bf16x2) = 4 addr ops + 4 LDS per 8 weights + the same 4 HMUL2: more issue slots than the 7 int ops now.
 - main moe dir == 8242d5e: bench.py test PASS (all shapes + cloned state). Still queued: SUBMIT 8242d5e ONCE after 00:00Z 11-01.
+
+## o23 (session 21, 2026-10-31 18:00-18:05Z)
+- Read CLAUDE/AGENT/COORD (Human decisions to 16:30Z; nothing new for moe since). Moe board budget: checks 6/20 left, scored 8 left
+  (lead cap 2 submits/agent/day, both used 10-31). No candidate code: main moe dir still 8242d5e (test PASS o22), no new lever.
+- Did not spend checks (re-checking unchanged code only returns 'duplicate'). Plan unchanged: submit 8242d5e ONCE after 00:00Z 11-01.
