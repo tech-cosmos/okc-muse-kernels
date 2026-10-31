@@ -3480,3 +3480,22 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   * _gw_verify excess over the decode-full gather floor (~13/22 us H200 v16/v32 full, ~0.4%): ~/attn s1-s126, closed without a
     structural idea.
 - Layer lane's own list stays empty. Open: fresh's d32 tk2h MRG 2 (Modal A/B after 00:00Z 11-01), then merge + check (bar 2.1913).
+
+## n22s1 (2026-10-31 15:30-16:20Z): v177 = v176 + fresh x13 MRG 2 + fresh x14 attn PDL-secondary; 1 check, 0 submits, 0 Modal.
+- Merge: `git checkout origin/fresh -- attn_src.py layer.py` (main's muse_decode_layer/ unchanged since b051588; fresh e4432a2
+  = v176 + x13 tk2h MRG 2 (layer.py 1 line, T=32 SQ cfg 14x004) + x14 NDS_PW/NVS_PW/GD_PW/CB_HB_TRIG (attn_src.py)); build.py
+  output == fresh's submission.py (998080 B: 1 MB cap is tight). main = v177 51eaeff.
+- validate ALL OK: test 13/13, scored 0/24, opt 0/40, tk2f 0/1200, replay 0/480, route 0/240 (worst gap 0.0256, drop-lead
+  0.0179), fuzz 0/188, cold prepare 63 s.
+- graph_eq v176 vs v177 (10 inputs): diffs ~1e-3 on d1 full / d16 sl / d16 full / d32 full = SAME as v176 vs v176 control
+  (inherent near-tie routing flips from atomics order); everything else bitwise.
+- H100 ab_files all shapes 4 rounds (v176, v177, v177, v176): d32 sl 184.6 -> 180.0, d32 full 410.0 -> 406.9, d16 full
+  288.6 -> 286.3, d16 sl 189.5 -> 188.3, d1 full 103.6 -> 103.0, v1 full 155.9 -> 157.0 (+1.1), rest tie.
+- CHECK a4582885 v177: 2.1776 raw, fixed-SGLang 2.1673 (< bar 2.1913; adding this run moved v176 check to 2.1917). Per shape
+  (sl/full us) vs v176 check 0ac4a2f0: d1 65.1/75.0 (64.7/73.5), d16 131.1/208.0 (128.7/206.0), d32 151.0/304.9 (154.6/306.3),
+  v1 110.3/127.3 (110.5/118.5), v16 253.3/343.9 (250.0/337.4), v32 315.0/484.8 (303.7/484.7). Only d32 sl moves the right way.
+  H200 node noise dominates: the tuner's synthetic T=8 times were 6 us FASTER in this run (no code change at T=8) and T=256 sl
+  14 us slower; v1 full profile 111.6 us vs 129.6 in v176's (timed 127.3 vs 118.5): single draws. Tuner picks differ (T=16 full
+  g30n:qkv_gate on). Unresolved on the H200 -> NOT submittable (bar). v177 stays on main (H100 + tests clean).
+- NEXT: after 00:00Z 11-01, H200 Modal A/B v176 vs v177 per shape (fresh planned MRG 2 A/B; ask to include x14 and v1 full).
+  If v1 full / d16 full lose on the H200, drop GD_PW (batched only; v1 = batch 1, so v1 full can't be GD_PW: check CB_HB_TRIG/NVS_PW).
