@@ -3011,3 +3011,22 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   (ingest wall ~50 GB/s/SM, split-K red); flashinfer in the judge image lists tinygemm_bf16 / trtllm_low_latency_gemm / mm_bf16
   (diagext line): untested at m128 -> a one-check diag (print only) of those vs the lt pick is cheap. (2) router m16/m32 zero kernel
   (0.7-1.1 us) needs an intra-CTA K split + small cluster (clusters of 16 dead). (3) layer lane per lead.
+
+## n17 (2026-10-31 14:45Z-, unattended session 5): lead 13:58Z/14:30Z PROJ BOARD lane, router m16/m32 + m128 library check
+- Per-shape (check 5b420410, H200 us ours/SoL): d1 sum 39.4 (1.537x), d16 55.6 (1.375), d32 58.4 (1.333), v1 44.9 (1.69),
+  v16 71.7 (1.199), v32 85.5 (1.19). Biggest gaps vs SoL: m128/m256 GEMMs (+5..8.5 each), router m16/m32 +4.0/+4.8, qkv m16/32 +4.5/5.1.
+- DEAD: R3_IZ (dev/n17/r3v.cu): router3 zeroes out itself (each CTA a slice, fence, epoch-counter arrive pre-loop, acquire-poll
+  before the atomics) instead of the PDL zero kernel: H100 m16 8.42 vs 6.94, m32 8.90 vs 7.81, m8 8.13 vs 7.52 (+0.6..1.5 us):
+  the per-CTA loop at KC 256 is ~1 us, so fence + 112-224 same-address atomics + poll sit on the critical path. Third dead
+  in-kernel replacement of the zero kernel (R3_FA, R3_CL): the 0.7 us zero kernel stays.
+- DEAD: cuDNN frontend matmul (= flashinfer mm_bf16 backend 'cudnn', the only sm90 path; cutlass/tgv are sm100-only)
+  (dev/n17/cdn.py, nvidia-cudnn-frontend 1.18 in ~/okc): every engine ties F.linear (eng0 = cuBLAS): qkv m128 20.61 vs 20.54,
+  pooler m128 27.23 vs 27.26, qkv m256 21.25 vs 21.73, unp m128 26.82 vs 26.66. No judge diag needed.
+- DEAD: bmm+rsum router at m16/m32 (dev/n16/bmm.py): S8 8.64/9.50 vs router3 6.94/7.81.
+- router3 tile configs m16/m32 (H100 r3b, GPU shared, +-0.5 noise): m32 (32,32,2,2,256,4) 7.17-7.74 vs (16,64,1,4,256,4)
+  7.17-7.97; m16 (16,32,1,2,256,4) ~tie. Put in ROUTER_R3_TUNE[16/32] (51388e8): local tuner m16 9.98 -> 9.66, m32 10.05 -> 9.70.
+- Judge: check a670beb1 (51388e8) 1.3839 [1.363, 1.405] vs best dba12fb4 1.3847: NOT submitted (does not beat). Router H200:
+  m32 6.71 -> 5.84 (picked (32,32,2,2,256,4)), m16 5.82 -> 5.47 (picked (16,32,1,2,128,4)); rest = noise (qkv m16/32 12.11/12.57,
+  pool 15.67/16.03). Kept on main (router gain is real; next submit-worthy change carries it). Budget 10-31: checks 4/20, scored 1/10.
+- NEXT: proj board has no open >= 1 us item with a design not on record (v16/v32 GEMMs, qkv m16/32, router zero kernel all
+  closed). Options: 00:00Z H200 queue (dev/n15/mk_h200.sh); stack small wins + submit when a check beats 1.3847.
