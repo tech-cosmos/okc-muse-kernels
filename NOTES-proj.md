@@ -3287,3 +3287,8 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 
 ## n32 (19:59Z): status only
 - Layer n37 hit a zero/subnormal block-scale crash in moe code; checked proj's _compress (layer v183 submission.py:15258): zeros/subnormals/-0 are escapes stored exactly, rows over G13_ESC escapes and any non-bitwise round trip return None -> uncompressed fallback (tested n26). No action. 0 judge runs, 0 Modal.
+
+## n33 (20:15-20:25Z, unattended session 21): status only; 0 judge runs, 0 Modal
+- No lead line since 16:30Z, no new proj Request/Handoff. r-layer main moved to v183 (e0dd26f, non-SA moe fix):
+  `bash muse_bf16_proj/dev/n15/mk_h200.sh --dry` re-run against it: pr8 overlays (base/now/tk1) build OK. The 00:00Z run
+  (no --dry; gate flat <= -1 us v1 sl on the H200) stays valid. Proj budget 10-31: checks 6/20, scored 2/10.
