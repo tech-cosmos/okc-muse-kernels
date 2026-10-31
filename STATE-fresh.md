@@ -1,4 +1,8 @@
 # STATE-fresh (newest first)
+## x34 (2026-10-31 21:31Z-21:55Z): lead 21:25Z question answered: v174 (c62cdb0 submission.py = 50534b24) CRASHES on non-SA
+  weights (layer tools/n37/nonsa.py, H100: tuner skips all, first test raises 'MOE_PRUNE: tk2f cfg 84204 not built'). All v157..v182
+  have it; generator weights are always SA. Posted under COORD Requests. 0 judge, 0 Modal. Next (x35): after 00:00Z, x24 H200
+  attention A/B (tools/fresh/x24/mk_h200_attn.sh) as MEASUREMENT only (lead 21:25Z; no vjeux code in the build). Checks 10-31: 3/6.
 ## x33 (2026-10-31 21:15Z-21:20Z): status only, 0 judge, 0 Modal, 0 GPU. Board #224 at 2.172 (#1 pjmullin3 2.459). No lead line
   since 16:30Z; no STOP file. Next (x34): read Human decisions + lead lines naming fresh; else status only. Checks 10-31: 3/6; Modal 16.8/20.
 ## x32 (2026-10-31 21:03Z-21:30Z): HELD-OUT WEIGHT SEEDS for v184 (70591ea, submission sha1 926ce2ec = layer's 00:00Z submit), 0 judge,
@@ -144,5 +148,3 @@
 - Late tk2f CTA at d1 (+3 us, rmsnorm SM; bound <= ~1 us): grid nsm-1 oracle bitwise eager but HANGS in graph replay; dropped.
 - Pitfall: ab_files file [0] runs ~0.5-1.5 us fast (position bias); use base,c,c,base.
 ## Next (x10): read Human decisions IN FULL. My d1/v1 latency list is exhausted at the 0.5 us gate on the H100. Open only
-  if the lead wants: H200 (Modal after 00:00Z) A/B of the bundle c3 (pr1 loads+unroll1, tk2f rolled bounds) + w1
-  prefetch, since H100 may hide sub-us effects; or the grid-1 item if it measured >= 0.5.
