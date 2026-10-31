@@ -3030,3 +3030,20 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   pool 15.67/16.03). Kept on main (router gain is real; next submit-worthy change carries it). Budget 10-31: checks 4/20, scored 1/10.
 - NEXT: proj board has no open >= 1 us item with a design not on record (v16/v32 GEMMs, qkv m16/32, router zero kernel all
   closed). Options: 00:00Z H200 queue (dev/n15/mk_h200.sh); stack small wins + submit when a check beats 1.3847.
+
+## n18 (2026-10-31 15:08-15:45Z, unattended session 6): lead 15:00Z PROJ BOARD v16 m128; router m128/m256 oracles (H100), 0 judge runs
+- Judge profile a670beb1 (H200 GPU us): v16 qkv nvjet 15.1, o 5.5, pool 21.3, unp 19.7, router nvjet bmm 5.4 + pj_rsum 1.4;
+  v32 qkv 25.3(!), o 7.8, pool 26.4, unp 24.4, router 6.5 + rsum 1.6. Router m128/m256 = 6 us above SoL each: took it first
+  (the qkv/pool/unp m128 designs are all on record dead: g22/g23/g28/sk128/CUTLASS/DeepGEMM/cuDNN, n9s1-n9s3, n17).
+- ORACLE router3 (dev/n18/r3v.cu = n17 + R3_NOMMA + R3_BULK; r3b.py takes VARS ';'-separated, DEFS ','-joined), H100 us minus
+  empty graph: m128 (128,64,4,4,256,4) base 9.8 | NOMMA 9.2 | NORED 9.1 | NOMMA+NORED 9.0 | NOZERO 9.3; m256 (256,32,4,2,512,4)
+  13.1-13.5 | 13.2 | 12.5 | 11.3-12.0 | 12.4. Bare grid-stride reader (dev/n18/rd.py) of the same bytes: 10.5 MB 6.1-6.4, 12.6 MB 6.7-7.0.
+  => load-only structure costs ~2.7 (m128) / ~4.5 (m256) us over a bare reader; MMA + atomics only ~0.8 / ~1.5.
+- Retiling to cut x re-reads (ingest 41 -> 16 MB at m256): load-only 10.45-11.0 at best, full kernels WORSE (atomics volume
+  grows: (256,64,4,4,256,4) 14.1, (256,128,4,4,128,3) 17.7; m128 (128,128,..) 12.6, (128,256,..,64,2) 17.1). Ingest is not the wall.
+- R3_BULK (1D cp.async.bulk per row per part, padded 528-B rows, NS mbarriers, all issued up front; correct, err 2.5e-6):
+  load-only 9.5 (m128) / 12.1-12.9 (m256), full 10.8-10.9 / 15.8-16.6: copy mechanism is not the wall either. DEAD.
+- PDL-launched pj_rsum after the cuBLAS bmm (dev/n18/rsp.py, griddepcontrol.wait first): m128 S4 9.44 vs 9.52, m256 S4 11.07 vs
+  11.26, S8 -0.2..-0.3: noise-level (nvjet doesn't trigger dependents early). DEAD (not worth a check).
+- Verdict: router m128/m256 stays bmm4 + rsum. The ~6 us vs SoL is launch (2 kernels) + a latency-bound small-read structure
+  (~2.5-4.5 us above a bare reader regardless of copy mechanism/tiling). No proj-board item >= 1 us with a new design left.
