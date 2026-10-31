@@ -66,6 +66,10 @@ ROUTER_F32 = [(1, (1, 2, 512)), (8, (8, 2, 512))]
 ROUTER_R3 = [(32, (16, 64, 1, 4, 256, 4)), (128, (128, 64, 4, 4, 256, 4))]
 # router3 configs that prepare() times against the cuBLAS path per m (H100 m256: 12.9 vs 12.5-13.4, a tie).
 ROUTER_R3_TUNE = {256: [(256, 32, 4, 2, 512, 4), (256, 64, 4, 2, 256, 4)]}
+# n16: router m >= 128 as one strided-batched cuBLAS GEMM over S K-slices (N = 512 = [hi; lo], FP32 out) + pj_rsum
+# (sums slices and halves). H100 (dev/n16/bmm.py): m256 S4 11.1-11.4 vs 13.5-13.6 (torch.mm + add) / router3 13.6;
+# m128 S4/S8 10.2-10.3 vs router3 10.4. Candidates ("bmm", S) in _tune_router, picked on the judge's GPU.
+ROUTER_BMM_TUNE = {128: [4, 8], 256: [4, 8]}
 # Router hi/lo tensor-core configs (n, mt, nwr, nwk, stages, na, cluster, token groups), chosen on the H100 (dev/g5.py).
 ROUTER_HL = [(16, (256, 2, 2, 4, 8, 2, 8, 1)), (32, (256, 4, 2, 2, 8, 2, 8, 1))]
 # BF16 grid-stride GEMV configs per layer: (m, k, u, nv, minb, pf, blocks), chosen on the H100 (dev/g10.py).
@@ -242,7 +246,7 @@ _SRC = (_ROUTER_SRC.replace("PR2_CONFIGS", " ".join("PR2_CASE(%d,%d,%d)" % c for
 try:
     from torch.utils.cpp_extension import load_inline
     _mod = load_inline(
-        name="muse_proj_v14",
+        name="muse_proj_v15",
         cpp_sources="void pj_router2(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
                     "void g7_gemv(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, "
                     "int64_t, int64_t, int64_t);\n"
@@ -261,9 +265,10 @@ try:
                     "void g21_gemv(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, int64_t, "
                     "int64_t, int64_t, int64_t, torch::Tensor, int64_t, torch::Tensor);\n"
                     "void pj_router3(torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, "
-                    "int64_t, int64_t);",
+                    "int64_t, int64_t);\n"
+                    "void pj_rsum(torch::Tensor, torch::Tensor);",
         cuda_sources=_SRC, functions=["pj_router2", "g7_gemv", "g10_gemv", "g12_gemm", "g13_gemv", "g14_gemm", "g15_gemm",
-                                      "g16_gemm", "g17_gemv", "g21_gemv", "pj_router3"],
+                                      "g16_gemm", "g17_gemv", "g21_gemv", "pj_router3", "pj_rsum"],
         extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"], verbose=False)
 except Exception as _e:  # noqa: BLE001
     print("muse_proj native build failed, using torch:", _e)
@@ -1461,23 +1466,39 @@ def _tune_router(st):
         return picks
     g = torch.Generator(device="cuda")
     g.manual_seed(1)
-    for m, cfgs in ROUTER_R3_TUNE.items():
+    for m in sorted(set(ROUTER_R3_TUNE) | set(ROUTER_BMM_TUNE)):
         x = torch.randn(m, st["router"].shape[1], generator=g, device="cuda").to(torch.bfloat16)
         ref = _router_cublas(x, st)
         out = torch.empty((m, 256), dtype=torch.float32, device="cuda")
-        cands = [None]
-        for c in cfgs:
-            _mod.pj_router3(st["router_hl2"], x, out, *c)
-            torch.cuda.synchronize()
-            if ((out - ref).norm() / ref.norm()).item() < 1e-5:
-                cands.append(c)
-        med = _graph_medians([(lambda c=c: _router_cublas(x, st) if c is None else
-                               _mod.pj_router3(st["router_hl2"], x, out, *c)) for c in cands])
+        r3 = [c for mmax, c in ROUTER_R3 if m <= mmax][:1]  # the fixed config this m runs without a pick
+        cands = [None] + r3 + ROUTER_R3_TUNE.get(m, []) + [("bmm", S) for S in ROUTER_BMM_TUNE.get(m, [])]
+        ok = []
+        for c in cands:
+            if c is not None:
+                o = _router_run(x, st, c)
+                torch.cuda.synchronize()
+                if not ((o - ref).norm() / ref.norm()).item() < 1e-5:
+                    continue
+            ok.append(c)
+        cands = ok
+        med = _graph_medians([(lambda c=c: _router_cublas(x, st) if c is None else _router_run(x, st, c)) for c in cands])
         best = min(range(len(cands)), key=med.__getitem__)
         picks[m] = cands[best]
         print(f"tune router m{m}: best {cands[best]} {med[best] * 1e3:.2f} us; "
               + " ".join(f"{'cublas' if c is None else c}:{t * 1e3:.2f}" for c, t in zip(cands, med)))
     return picks
+
+
+def _router_run(x, st, c):
+    m = x.shape[0]
+    out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
+    if c[0] == "bmm":
+        S = c[1]
+        ws = torch.bmm(x.contiguous().view(m, S, -1).transpose(0, 1), st["router_hl_t"].view(S, -1, 512), out_dtype=torch.float32)
+        _mod.pj_rsum(ws, out)
+    else:
+        _mod.pj_router3(st["router_hl2"], x.contiguous(), out, *c)
+    return out
 
 
 def _router_cublas(x, st):
@@ -1487,6 +1508,9 @@ def _router_cublas(x, st):
 
 def _router(x, st, m):
     if _mod is not None:
+        if m in st["rpick"]:
+            cfg = st["rpick"][m]
+            return _router_cublas(x, st) if cfg is None else _router_run(x, st, cfg)
         for mmax, cfg in ROUTER_F32:
             if m <= mmax:
                 out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
@@ -1497,11 +1521,6 @@ def _router(x, st, m):
                 out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
                 _mod.pj_router3(st["router_hl2"], x.contiguous(), out, *cfg)
                 return out
-        cfg = st["rpick"].get(m)
-        if cfg is not None:
-            out = torch.empty((m, 256), dtype=torch.float32, device=x.device)
-            _mod.pj_router3(st["router_hl2"], x.contiguous(), out, *cfg)
-            return out
         for mmax, cfg in ROUTER_HL:
             if m <= mmax:
                 out = torch.empty((m, 256), dtype=torch.float32, device=x.device)

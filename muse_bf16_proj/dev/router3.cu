@@ -158,3 +158,25 @@ void pj_router3(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mt,
     PR3_CONFIGS
     TORCH_CHECK(false, "pj_router3: no config");
 }
+
+// n16: router m >= 128 as ONE strided-batched cuBLAS GEMM over S K-slices into ws [S, m, 512] (cols 0..255 = hi,
+// 256..511 = lo, FP32), then this kernel: out[r][c] = sum_s ws[s][r][c] + ws[s][r][256 + c] (FP32, fixed order).
+namespace pr3 {
+__global__ void rsum(const float4* __restrict__ ws, float4* __restrict__ out, int m, int S) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;  // float4 index into out [m][64]
+    if (i >= m * 64) return;
+    const int r = i >> 6, c = i & 63;
+    float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+    for (int s = 0; s < S; ++s) {
+        const float4 h = ws[((size_t)s * m + r) * 128 + c], l = ws[((size_t)s * m + r) * 128 + 64 + c];
+        a.x += h.x + l.x; a.y += h.y + l.y; a.z += h.z + l.z; a.w += h.w + l.w;
+    }
+    out[i] = a;
+}
+}  // namespace pr3
+
+void pj_rsum(torch::Tensor ws, torch::Tensor out) {
+    const int S = ws.size(0), m = ws.size(1);
+    pr3::rsum<<<(m * 64 + 255) / 256, 256, 0, c10::cuda::getCurrentCUDAStream()>>>(
+        reinterpret_cast<const float4*>(ws.data_ptr<float>()), reinterpret_cast<float4*>(out.data_ptr<float>()), m, S);
+}
