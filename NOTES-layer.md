@@ -3852,3 +3852,16 @@ Status only. Lead 22:55Z: hold v185 (board fcb67ee9 2.2048x, #180); integrate ha
 - Lead 22:55Z: layer = hold v185, integrate handoffs. No Handoff since x35 (in v185); fresh has not started the d16/d32 per-CTA stamps (x38 last), so a kernel-level pass first.
 - us (start/end): qkv g30 0/14.8 | csl 12.8/25.4 | o g27 15.3/30.8 | bnd 27.0/34.0 | pooler g24 29.8/55.6 || router_split 34.5/55.6, _routing 37.5/58.2 | rmsnorm_gain 55.9/58.3 | tk2f 58.8/168.0 (109 us = 57%) | norm2 160.8/170.8 | unpool g30 163.3/188.3 | bnd 170.9/190.4. Replay 2 within 1 us.
 - Hops: _routing end 2.6 us after the pooler (on record n14s3: overlaps rmsnorm, ceiling ~-2.2 us with XN, not built); rmsnorm->tk2f 0.5; unpool->bnd tail 2.1 (end-of-layer boundary, forms dead on record). Every kernel boundary is already PDL-overlapped; nothing new >= 1 us at kernel level. Per-CTA stamps (fresh) are what's left to find intra-kernel hops.
+
+## n53 2026-10-31 23:43-23:58Z (session 47): v186 = v185 + moe o42 nu8 mmq; 1 check (10-31 budget), not submitted.
+- moe o42 Handoff (optional rider): nu8 D-path MMA on a compile-time slot-tile count (switch nt 1..8 -> lambda with NTC constant;
+  removes the runtime n < nt guards, same accumulation order). stp_patch.py asserts on the built file's comment-free text, so it
+  was ported by hand into layer.py's _N2U_SRC (built submission.py = moe's patched v185 except one comment). sha1 d41255da.
+- H100 ab_files "verify 1 " 6 rounds, v185/v186/v185/v186: sl 141.71/139.51/141.10/140.96, full 156.67/155.56/155.76/155.41
+  -> mean sl -0.67, full -0.73 us (noisy, validate ran in parallel). validate --quick ALL OK (13/13, scored 0/12, opt 0/40,
+  tk2f 0/300, replay 0/240, route 0/240 gap .0256/.0172, fuzz 0/58, prep 64.9 s).
+- CHECK 1d07cbf1 (4c405e9) 2.1875 raw (CI 2.155-2.220) < board 2.2048 -> NOT submitted. Per shape (ours/SGLang/speedup):
+  d1 65.0/170.7 2.625, 74.3/181.4 2.440 | d16 129.2/267.0 2.066, 202.4/435.9 2.154 | d32 148.7/264.3 1.778, 287.8/618.9 2.151 |
+  v1 111.7/265.3 2.375, 119.2/272.5 2.286 | v16 252.1/524.7 2.081, 345.2/711.8 2.062 | v32 325.9/709.7 2.177, 505.9/1076.9 2.129.
+  vs v185 submit: target v1 sl 2.375 (2.410), full 2.286 (2.276) = within noise; untouched d1 sl 2.625 (2.708), v32 sl slower = node draw.
+- Main = v186 (kept: H100 small win, validated). NEXT: bundle v186 with the next new-code item; bar = beat 2.2048 board.
