@@ -3458,3 +3458,25 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Layer 10-31: 4 checks, 3 submits (lead's raised cap 3 used). v176 must NOT be resubmitted unchanged. Next layer candidate
   needs new code with fixed-SGLang > 2.1913. Open handoff: fresh x13 d32 tk2h MRG 2 (Modal A/B after 00:00Z 11-01).
 - tools/fixed_sglang_score.py: e0f2159f added.
+
+## n21s1 (2026-10-31 15:10-15:35Z): v176 v16/v32 H100 timelines, non-expert audit; no build; 0 judge runs, 0 Modal.
+- No new layer item from the lead after 15:00Z (v176 submit done in n20s1). Own item: tools/n13/tlmed.py on main b051588, 25 cold
+  replays, seed 99 (start / end / dur us):
+  v16 sl 296.3: qkv nvjet 0-18.8 | nvs 19.1-29.2 | combine_hb -31.5 | o -38.9 | bnd -44.4 | FR torch.mm 44.4-78.2 (33.8) |
+    routing -81.6 | rg -84.3 | hot -85.8 | twm 83.8-266.6 | norm -268.7 | g30 unpool 238.8-291.3 (PDL W pre-wait) | bnd2 -296.3.
+  v32 sl 371.0: qkv 0-22.7 | nvs -37.0 | o -47.2 | bnd -54.2 | FR 54.2-90.8 (36.6) | routing -94.5 | rg -98.5 | hot 96.5-254.3 |
+    twm 97.9-325.3 | norm -327.1 | unpool cuBLAS 327.2-359.9 (32.7, serial) | bnd2 359.7-371.0 (11.3).
+  v16 full 446.8: qkv 18.0 | _gw_verify 18.4-147.4 | new_tokens/combine_bal tail -151.3 | o -160.8 | bnd -166.8 | FR -200.9 |
+    route+rg -207.4 | twm 207.3-417.8 | norm -419.5 | g30 unpool -442.0 | bnd2 -446.8.
+  v32 full 624.8: qkv 19.3 | _gw_verify 19.7-268.0 | tail -271.8 | o -282.0 | bnd -290.4 | FR -327.7 | rg -335.3 | twm -578.1 |
+    norm -579.7 | unpool -613.5 | bnd2 -624.8.
+- No hop >= 2 us outside the closed record. Every non-expert piece maps to an entry already on record:
+  * T=256 unpool 32.7 us = 17.2 GFLOP at ~525 TFLOPS / 2 TB/s: neither bound saturated (128x128 tiles, one 128-CTA wave, A re-read
+    x64 from L2 = SM-ingest). g30 at T=256 dead (s100); proj m256 GEMMs lost (s16/s25/s28). W prefetch cannot help (not HBM-bound).
+  * bnd2 at T=256 11.3 us ~ its 28 MB (s FP32 8 + x1 4 + f 4 in, s 8 + h 4 out) at ~2.5-3 TB/s (NOS already on). L2-prefetching
+    s/x1 (12 MB) during the compute-bound unpool: bound ~-3 us H200 v32 sl+full = ~0.13%, and the 67 MB W stream would evict it. Not built.
+  * qkv T=128 (18.8, 2x its byte floor): g30 S3 + DSMEM cluster reduce (instead of s101's fence+ticket+global reduce) estimated
+    ~-1..2 us H100 standalone, worse on the H200 (ingest-bound): < 0.1%. Not built.
+  * _gw_verify excess over the decode-full gather floor (~13/22 us H200 v16/v32 full, ~0.4%): ~/attn s1-s126, closed without a
+    structural idea.
+- Layer lane's own list stays empty. Open: fresh's d32 tk2h MRG 2 (Modal A/B after 00:00Z 11-01), then merge + check (bar 2.1913).
