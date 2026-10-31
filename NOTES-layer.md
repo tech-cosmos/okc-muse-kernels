@@ -3208,3 +3208,27 @@ Idle stop: no lead line after 09:10Z; DEFNORM closed in n12s1 (gate not met). ma
 
 ## n12s3 2026-10-30T10:50Z
 Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle sweep (claim 09:06Z) has no table/Handoff yet. main v173 unchanged. 0 judge runs, 0 Modal.
+
+## n13s1 2026-10-31 09:50Z-: lead 10-31 09:55Z LAYER = d32 qkv oracle. GATE NOT MET (no piece >= 1.5 us), no build, 0 judge runs, 0 Modal.
+- tools/n13/qkv_stamp.py <submission.py> [MTOK,S,NW,NS]: the layer's d32 qkv (g30n qkv_gate m32, S3 cluster K-split, NW/NS 16,
+  108 CTAs = 36 row tiles x 3) rebuilt standalone with per-CTA %globaltimer stamps (256 ns ticks), H100 cold-L2 graph replays
+  minus empty. VAR tokens (timing only): nomath (no decode/wgmma), nored (no DSMEM reduce), noesc (-DG30_ESC=0), early (cluster
+  barrier arrive at start / wait before the push), rot (tile g = blockIdx.x + 17: W moves to other SMs).
+  ```
+  graph us: base 16.5 | nored 15.7 | noesc 16.5 | nored+noesc 15.5 | nomath 15.4 | nomath+nored+noesc 14.75 | early 16.9
+  base stamps (us from first CTA start, median CTA): W/x producer 1st issue 0.8-1.0 | consumer prologue (esc sort) 2.6 |
+  first stage consumed 2.8 | loop end 11.0 (min 10.0, max 12.3-13.0) | CTA reduce 11.3 | rank-0 cluster reduce 12.5 (max 13.8) | end max 14.1
+  per-CTA rate in the loop 25-35 GB/s (median 31) = 2.8-3.0 TB/s aggregate on 108 SMs
+  ```
+- Split of the standalone excess (16.5 vs ~12.1 for a bare 28.3 MB reader on many CTAs): math 1.1 | DSMEM cluster reduce chain
+  0.85 | escapes 0 | start ~1 us to the producers' first issue (NOT the cluster barrier: 'early' is no better, +0.4) | per-SM
+  imbalance: loop time max - mean ~0.8-0.9 us, repeatable per CTA (replay corr 0.92) and it follows the SM, not the tile (same slow
+  smids 12/52/60/95/103 after 'rot'); not TPC-sibling occupancy (102 vs 6 CTAs: 9.63 vs 9.90). Whole clusters (one GPC) are slow:
+  mean of per-cluster max 9.74 vs mean 9.54 -> in-cluster K stealing buys ~0.2 us; the rest needs a global dynamic split =
+  slabs/ticket (s101 / g24sk qkv / g30k: dead on record). (The ld.global reader at 108 CTAs is 19.5 us: no fair 108-SM floor.)
+- Buildable: reduce-scatter epilogue (each rank sums + stores 1/3 of the tile) ~-0.4 of the 0.85; in-cluster stealing ~-0.2;
+  math = the m32 consumer (dead-record forms). Sum ~0.6 us H100 standalone, less in-layer/H200 (in-layer excess 3.3 H100 / 2.6 H200).
+  < 1.5 us gate: CLOSED.
+- Next item (lead's list) v1 boundary/o hops, H200 n7s1 timeline v1 sl: o end -> bnd end 2.4, pr8 end -> rmsnorm end 2.3, nu8 -> bnd 3.6.
+  All on record: o+bnd fusion OB8 dead (s86), o speed doesn't move v1 (pr8 sets the front: s88, n5s5, n7s9), pr8 -> norm =
+  DEFNORM 1.7 us H100 (n12s1), tail = moe n10s1 post-wait latency (closed 10-30 03:20Z). pr8 itself is proj's item. CLOSED on paper.
