@@ -3700,3 +3700,12 @@ No lead line after 16:30Z (no answer on v181 vs v182). Board: layer #221 on the 
 (proj n28, moe o27, fresh x22/x23, layer n33). Nothing new to build. 0 judge runs (7 layer checks left 10-31, unused).
 NEXT (first session after 00:00Z 11-01): submit v181 = `git show 38d0c23:muse_decode_layer/submission.py` once, unless a lead
 line says v182 (main). Log it in Judge runs.
+
+## n36 (2026-10-31 19:19-19:25Z, session 30): status + energy-lever scoping; 0 judge runs, 0 Modal
+- No lead line after 16:30Z (still no answer on v181 vs v182). No new Handoff for layer.
+- n32's energy lever (spin-poll -> nanosleep at T=128/256) scoped by inspection: every spin site in v182 (moe_src HOT_ET
+  meta[67] poll 2681, HOT_EMU 2693 (proxy only, off), layer.py rf ctr 2400 (tid<64), g19/g24 epoch ctr (lane 0), pr8/pr32/
+  idf/moe done/rdy polls already __nanosleep) is ONE thread per CTA/warp polling one L2 line, mostly for < ~2 us: no measurable
+  SM power next to twm/nvjet streams. DEAD by inspection, not built.
+- NEXT unchanged (first session after 00:00Z 11-01): submit v181 = `git show 38d0c23:muse_decode_layer/submission.py` once,
+  unless a lead line says v182 (main). Log it in Judge runs.
