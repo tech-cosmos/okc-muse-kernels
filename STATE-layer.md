@@ -3,6 +3,10 @@
 BOARD BEST = submit 50534b24 = v174 (c62cdb0), **2.1717x**, #198 (n13s5, 10-31; d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7, v32 313.9/486.9; check 2d1f9256 2.1514 / fixed-SGLang 2.1650).
 Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n15s1 (10-31 13:50Z): lead 12:25Z v1 IDF8 (pr8 routing flag) BUILT + DEAD: H100 on vs off v1 sl +0.8..1.1, full +0.8/-0.4 us
+  (tk2f starts 2 us earlier but its 83 us stream ends the same). Branch layer/idf8 703418e, not merged. FINDING: pr8 edits
+  cost +4.5 us v1 when pr8's dynamic smem base drops from 128-B (0x2880) to 16-B alignment; __align__(128) fixes it (the
+  'ptxas' cost of n14s1 / proj n13s1c). Check the base in SASS after big-smem kernel edits. 0 runs (NOTES n15s1).
 n14s3 (10-31 12:30Z): d16/d32 _routing tail is OFF the critical path (d16 routing ends 63.1 < rmsnorm 63.8; d32 before the
   pooler): free routing = 0; routing-fold + XN together ceiling ~-2.2 us d16 sl (~0.1% real), not built. Free first boundary
   ceiling d16 -1.5 / d32 -1.9 us, forms dead on record. 0 runs (NOTES n14s3).

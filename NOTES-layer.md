@@ -3367,3 +3367,22 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - First boundary at T=16/32 (tools/n13/orc_nobnd.py, ORC_NOBND=(16,32); stale h, so only o end -> rmsnorm end is valid):
   rmsnorm end d16 64.1 -> 62.6 (-1.5 us), d32 74.0 -> 72.1 (-1.9 us) = CEILING of a free boundary. Forms that remove it are
   dead on record (o-side grid barrier OB8; pooler-side prologue = every pooler CTA re-reads 16-32 rows of o + residual). No build.
+
+## n15s1 (2026-10-31 12:35-13:50Z): lead 12:25Z v1 IDF with a pr8 flag: BUILT, DEAD; pr8 smem-alignment finding
+- Branch layer/idf8 703418e (on v174, NOT merged): pr8 finisher st.release's state["idf"] after route_token (threadfence +
+  bar + release); rmsnorm TRIG at start at T=8 (TRIG2 off); moe_set_idf before the T=8 tk2f (existing IDF spin patch);
+  nu8<.., I> reads the routing after griddepcontrol.wait and block 0 resets the flag there. IDF8_DEFAULT False (TUNE "idf8").
+  bench test 13/13, replay_test verify 1 sl/full 0/120 (routers 11,5,23).
+- First A/B said +5.1/+3.8 us v1 sl/full. NOT the mechanism: the same build with IDF8 off was +4.3/+4.0. Split: nu8 change
+  alone tie, pr8 change alone (rel = null, branch never taken) +4.8/+2.9, also with TUNE pinned ({} : not tuner picks).
+  pr8 SASS = same instruction stream + the finisher block, same regs (64) / stack; the difference is the DYNAMIC SMEM
+  BASE: 0x2880 (128-B aligned) -> 0x2810 (16-B aligned) because the static smem layout moved. Fix: `extern __shared__
+  __align__(128)` in pr8 (base back to 0x2880): cost gone (off 141.3/155.5 vs v174 141.6/156.3). __align__(1024) = tie.
+  => n14s1's 'anything compiled into pr8 costs +1.5..5 us (ptxas)' and proj n13s1c's '+~4 us compiled into pr8' are very
+  likely this. RULE: after any pr8 (or any big-dynamic-smem kernel) edit, check the dynamic smem base in SASS (VIADD ..,
+  0x2880) or keep __align__(128). Main's g12/g14/nu8/ob8 declare __align__(16) but their static sizes are 128-B multiples now.
+- IDF8 itself (aligned, TUNE pinned, 8 rounds, H100): on vs off sl +0.8 / +1.1, full +0.8 / -0.4 us = DEAD (gate -0.7).
+  Timeline (tools/timeline.py v1 sl): tk2f starts 49.6 vs 51.6 us but ends 135.4 vs 135.0: pr8's 129 one-per-SM blocks
+  leave 3 SMs, and the T=8 tk2f is an 83 us weight stream: its routing prologue is not on the path. proj n14 built the same
+  independently (r-proj dev/n14/idf8_layer.patch): tie. Finisher local_start hoist above the wait: tie (proj: overlaps spin).
+- Next item (proj T=8/16/32 hoist handoff): proj n14 says bound ~0, not built: nothing to integrate. 0 judge runs, 0 Modal.
