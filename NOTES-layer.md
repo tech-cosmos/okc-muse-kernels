@@ -3309,3 +3309,29 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Next for layer: no open layer item >= gate (n13s1-s4). Bundle candidates on record, all < gate: proj n13s1 BAL (H200 -0.4/-0.6
   d1 sl but H100 +1.6), moe tk2f last-wave K-split (~0.8/1.1 us d16/d32, not built). The routing-slack ruling (fresh x8, moe/slack
   branch) is the biggest open item; moe/slack should rebase onto v174 (c62cdb0) before any check.
+
+## n14s1 2026-10-31 ~11:00-12:15Z: moe/slack T<=8 sites (lead 10:55Z). 0 judge runs, 0 Modal. NOT for submission (ruling pending).
+- Result: local branch `layer/slack1` 1fc464c in ~/r-layer's repo (fast-forward of moe's moe/slack a9242fb, r-moe; not
+  pushed, not on main). T=1: moe's slack rule fused into pr1's routing warp (pr1_src.cu `#if PR1_SLK`, defines from
+  layer.py `_pr1_slk_defs`, SLACK_T1). T=8: OFF (no selection at all). submission.py 985,830 B (slack8 not embedded).
+- Why fused: moe's one-CTA slack_kernel as a separate plain launch costs +10.7 us d1 and +9 us v1 on the H100 even when it
+  changes nothing (ab_files, variant with KT margin 1.0 = all kept).
+- Why new floor margins at T<=8: moe's DM 2 / RM 8 save exactly 0 experts at T=1/8 (tools/n14/slk_margins.py, moe's kernel
+  on the reference's own logits, 3 router seeds x 40 inputs): moe -0.00/-0.00; near-tie window TIE 0.02 + DM/RM 0: d1 -0.32,
+  v1 -0.54; kt margin .015 instead of .022: -0.49/-0.78; no margins (fresh x8): -0.97/-2.13. Pick/keep margins kept as moe's
+  (MR .023, MK .022 = ~5 std of the FP8-query key noise).
+- T=1 build: ids bitwise = moe's slack_kernel with the same margins on 480 inputs (tools/n14/eq_files.py, d1 sl/full,
+  rs 11-13). bench test 13/13. slack_judge (graph replay) d1 rs 11-15 x 60: 0/600 fails, worst pick gap 0.026 (limit 0.05),
+  worst dropped-keep lead 0.015 (limit 0.03), -0.31 experts/call.
+  H100 ab_seeds vs v174, seeds 99..113 (8): d1 sl -4.62 / full -2.92 us mean; seeds with a dropped expert -8.8 (two: -17.4),
+  others -0.6..+1.2. Expected over random routings ~0.31 x 8.8 = ~-2.7 us d1 sl+full (~0.6% score). v1 +0.16/+0.65 (T=8 untouched).
+- T=8 DEAD (slack8_src.cu kept on the branch): moe's rule as a device fn in pr8's finish block (no extra launch). Gross gain
+  per dropped expert at v1 is only ~4.5 us (x 0.39 = ~1.75 us). Cost: anything compiled into pr8 re-schedules its main path
+  (ptxas; same REG 64 / smem / stack): forceinline +5.5 us v1 sl even with nothing to drop; compiled in but never executed
+  (runtime-false branch) +4; dyn-smem scratch (no static smem) +6.8; no local arrays (STACK 8 = base) +5.5; __noinline__ +1.5..4.7
+  (build-to-build variance). Net v1 +2.2 us over 8 seeds. proj n13s1c saw the same thing (an oracle compiled into pr8 inflated
+  pr8's own base ~4 us). A separate PDL kernel would pay ~2-3 us too. Lesson: pr8 must stay byte-identical; host
+  extras in other kernels.
+- proj's pr8 lever closed (n13s1d: pr8 already at a flat reader on a quiet H100): nothing to land there.
+- Tools (on the branch): tools/n14/slk_margins.py (savings vs margins), eq_files.py (two files' outputs on the same inputs),
+  kprof.py (eager per-kernel times; PDL makes them unreliable).
