@@ -7814,7 +7814,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   extern __shared__ __align__(1024) uint4 smem_tw[];
   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
   __shared__ uint32_t slut[256];
-  __shared__ int s_e[64], s_so[64], s_ns[64], s_off[33], s_item[NSTG], s_nh;  // proj n20: slice table (expert, token offset, slices)
+  __shared__ int s_e[64], s_so[64], s_ns[64], s_sz[64], s_off[33], s_item[NSTG], s_nh;  // proj n20: slice table (expert, token offset, slices)
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   int* done = meta + 68;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
@@ -7842,11 +7842,19 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0;
     const bool h = nt > NH / 2 && (NH == 128 || nt <= NH);
     const int ns = h ? (nt + NH - 1) / NH : 0;  // proj n20 HOT_SL: >128-token experts as ceil(nt / 128) slices (NH 128 only)
-    int pos = ns;
+    const unsigned b = __ballot_sync(0xffffffffu, h), bm = __ballot_sync(0xffffffffu, ns > 1);
+    if (!bm) {  // proj n21 fast path (no expert > 128 tokens): the old ballot compaction
+      const int p = __popc(b & ((1u << tid) - 1));
+      if (h) { s_e[p] = e; s_so[p] = 0; s_ns[p] = 1; s_sz[p] = NH; }
+      if (tid == 0) s_nh = __popc(b);
+    } else {
+      int pos = ns;
 #pragma unroll
-    for (int o = 1; o < 32; o <<= 1) { const int y = __shfl_up_sync(0xffffffffu, pos, o); if (tid >= o) pos += y; }
-    for (int q = 0; q < ns; ++q) { s_e[pos - ns + q] = e; s_so[pos - ns + q] = q * NH; s_ns[pos - ns + q] = ns; }
-    if (tid == 31) s_nh = pos;
+      for (int o = 1; o < 32; o <<= 1) { const int y = __shfl_up_sync(0xffffffffu, pos, o); if (tid >= o) pos += y; }
+      const int sz = ns > 1 ? (((nt + ns - 1) / ns + 15) & ~15) : NH;  // proj n21: balanced slices (167 -> 2 x 96 rows, not 128 + 39)
+      for (int q = 0; q < ns; ++q) { s_e[pos - ns + q] = e; s_so[pos - ns + q] = q * sz; s_ns[pos - ns + q] = ns; s_sz[pos - ns + q] = sz; }
+      if (tid == 31) s_nh = pos;
+    }
   }
   __syncthreads();
   const int nh = s_nh, n13 = nh * HG::NRB, nitems = n13 + nh * HN::NRB;
@@ -7902,7 +7910,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int item = s_item[st];
     if (item < 0) break;
     const int g2 = item >= n13, it = g2 ? item - n13 : item, nrb = g2 ? HN::NRB : HG::NRB;
-    const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e] + s_so[a], nv = min(NH, s_off[e + 1] - off);
+    const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e] + s_so[a], nv = min(s_sz[a], s_off[e + 1] - off);
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
 #define HOT_ITEM(NN) tw_item<2, 1, NN, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, \
                                                                            nv, off, rb, gsc, sroutes, g2 ? Y : Inter, g2)
