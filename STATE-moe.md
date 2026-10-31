@@ -1,3 +1,8 @@
+## o16 15:55Z 10-31: main 34dd790 = cbd4bcf + layer IDW in moe_norm2/norm3 (ids/tw before griddepcontrol.wait, Y .cg;
+## SASS checked), bitwise, test 15/15; H100 bs1 -0.32, bs8 -0.44, bs16 -0.34, bs32 -0.07 us. Check ce1a1aa4 2.3335x (bs1 25.8,
+## bs16 90.1, bs32 123.3, bs8 67.4, bs128 190.8, bs256 230.9: bs8/16/32 slow draws, untouched paths). moe board 10-31: 10 checks,
+## 2 submits. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE (supersedes cbd4bcf; check > board 2.3198). Remaining
+## moe-board items all < 0.1% (HOT_ET race-safe ~1 us bs128 no-hot draws); lead lines decide.
 ## o15 16:15Z 10-31: bs1 is 0.64 %/us of the moe board (bs32 0.14, bs256 0.07). Cluster-split norm3 (moe_norm3c, bitwise,
 ## tools/o15/n3c.diff) H100 bs1 +0.4/+0.7, bs8 +0.5 us = DEAD. 0 judge runs. main still cbd4bcf: SUBMIT IT ONCE AFTER 00:00Z 11-01.
 ## o14 15:31Z 10-31: main cbd4bcf = acf63a9 + tk2h MRG 2 at bs32 (fresh x13 per-segment counters); bitwise, test 15/15.

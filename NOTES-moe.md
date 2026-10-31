@@ -3896,3 +3896,15 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
 - H100 ab.py (8 seeds x 4 rounds): CS 8 at bs1 +0.43 us (7/8 seeds slower); CS 2 bs1 +0.69, bs8 +0.47. DEAD: a cluster
   PDL secondary costs more than the single-SM read (it is not the norm's bottleneck). Not checked.
 - main unchanged (cbd4bcf). NEXT SESSION AFTER 00:00Z 11-01: SUBMIT cbd4bcf ONCE (best check c015407f 2.3737x).
+
+## o16 (2026-10-31 15:40Z - 15:55Z): moe board: layer IDW ported into moe_norm2/norm3; 1 check, 0 submits (cap 2/2 used today)
+- The moe-board moe_norm2<SLOT> still loaded ids/tw AFTER griddepcontrol.wait (one dependent trip after tk2f's trigger).
+  Layer v173 has IDW (moe n10s1): ids/tw before the wait (harness inputs, complete before moe_tk2f; topk_weights is FP32 so
+  .float() is a no-op), volatile pin store on the loaded words, Y and inv via __ldcg. Copied 1:1 (main 34dd790).
+- SASS (cuobjdump of the build): ids/tw/w1 LDG.CONSTANT before ACQBULK, Y loads LDG.E.128.STRONG.GPU after. Good.
+- Bitwise vs cbd4bcf: tools/o11/eq1.py bs 1/8/16/32, 100 eager + 200 replay each: 0 differ. bench test 15/15.
+- H100 tools/o11/ab.py 8 seeds x 4 rounds: bs1 -0.32, bs8 -0.44, bs16 -0.34, bs32 -0.07 us (big-M paths use moe_norm/norme: untouched).
+- Check ce1a1aa4 (34dd790) 2.3335x (CI 2.298-2.368): bs1 25.8, bs16 90.1, bs32 123.3, bs8 67.4, bs128 190.8, bs256 230.9 us.
+  bs8/16/32 drew slow vs c015407f (61.5/85.2/120.0): judge run-to-run swing (bs8 has ranged 61.5-68.6 on unchanged code).
+- NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE (= cbd4bcf + IDW, strictly fewer trips; check > board 2.3198).
+
