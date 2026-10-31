@@ -2,6 +2,10 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n13s1 (10-31 09:50Z): lead 10-31 09:55Z d32 qkv oracle GATE NOT MET (tools/n13/qkv_stamp.py, per-CTA globaltimer stamps, H100):
+  g30n S3 qkv standalone 16.5 vs ~12.1 reader = math 1.1 | DSMEM reduce 0.85 | start ~1 | per-SM imbalance ~0.85 (GPC-level,
+  repeatable; unpool bimodal 14.3 vs 16.9 us per CTA). Buildable ~0.6 < 1.5. v1 hops: all closed on record. BOARD SHIFT: 180 teams
+  passed us 10-30/31; we are #212, top-50 cut 2.2465, #1 2.418 (NOTES n13s1). okc check of unchanged code = "duplicate" (dedupe, no run).
 night12 s1 (10-30 09:04Z): lead 09:10Z DEFNORM (deferred pre-expert rmsnorm) GATE NOT MET: H100 hop pr1->norm->tk2f d1 sl 1.1 /
   v1 1.7 us; d16 routing-bound (0); d32 3 us but g30k stream-K slabs (needs XN, dead). Oracle hangs (as n7s4); s12 XN already
   measured no-norm-kernel at -0.4..-0.8. No build, 0 runs. NOTES n12s1.

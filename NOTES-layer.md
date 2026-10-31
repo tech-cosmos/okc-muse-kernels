@@ -3239,3 +3239,8 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   kernel (qkv/o/unpool g30n, g30k, g24, tk2f's static T=1 split): ~7-8% of the stream phase per kernel. Dynamic fixes need
   per-unit FP32 partials (slab traffic ~1 MB per extra slab at m32 = more than the ~1 us gain) -> not built. Posted for fresh's
   d1 expert-span lane (tk2f T=1 static split: GPU-vs-bytes gap).
+- BOARD SHIFT (okc leaderboard muse_decode_layer --json, ~10:00Z sandbox clock): we are #212 at 2.158 (was #50 on 10-29). 211 teams
+  ahead, 180 of them submitted 10-30/10-31; #1 mpeng19 2.418, #10 2.354, #20 2.316, #50 2.2465, #100 2.221, #150 2.204, #200 2.168.
+  New row fields: 'screening' (screened/pending/under_review) and 'screened_speedup' (e.g. #10 2.354 -> screened 2.326).
+  `okc check` of unchanged main v173 returned status 'duplicate' of 335f3f26 (content-hash dedupe; no run, no budget): judge drift
+  can't be tested without a code change. Cause of the shift unknown (public solution? baseline?): for the human/lead.
