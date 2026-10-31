@@ -3127,3 +3127,7 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   +bal, routers 5,12,17,20,7 x 4 inputs, tuner off: v32 sl -1.67 us (15/20), v32 full -3.07 (19/20); bitwise + check 40/40.
   The real routers' top experts sit at 130-190 tokens (the sweet spot). Handoffs to layer + moe in COORD. 0 judge runs.
 - Lesson: torch_extensions cache is shared by all agents; identify my .so by mtime, not "newest".
+- validate --quick --skip=prep on layer v178 (161c986 submission.py) + mk_bal_layer.py (/tmp/n21keep/v178bal.py): ALL OK
+  (13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240, route 0/240 worst gap 0.0256, fuzz 0/58).
+- NEXT: layer merges balanced slices into v178/v179 before its post-00:00Z check; moe takes hotsl_moe_board.diff for the moe
+  board (its own check). Proj standing: 00:00Z H200 queue dev/n15/mk_h200.sh.
