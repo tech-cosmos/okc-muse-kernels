@@ -3,6 +3,13 @@
 BOARD BEST = submit 50534b24 = v174 (c62cdb0), **2.1717x**, #198 (n13s5, 10-31; d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7, v32 313.9/486.9; check 2d1f9256 2.1514 / fixed-SGLang 2.1650).
 Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n37 (10-31 20:35Z): **main = v183** (e0dd26f) = v182 + NON-SA WEIGHTS FIX (moe o25 mode 2: zero/subnormal block scales
+  crashed v181/v182 'MOE_PRUNE: tk2f cfg 84204 not built'; prepare now rebuilds the moe lib with MOE_NSA for such weights).
+  non-SA 37/37, validate ALL OK. CHECK 662fa349 2.1414 / fixed 2.1551. Branch layer/v181nsa 70591ea = **v184** = v181 + fix only:
+  CHECK 612cdd17 2.1554 / fixed 2.1252 (equally slow d1/v1 -> v182's escape rule is NOT slower; node noise). Generator weights
+  are always SA (scales clamped >= 2^-6), so the crash needs real-checkpoint weights. **NEXT after 00:00Z 11-01: submit v181
+  per the rule unless the lead picks v183 (main: same speed, robust to non-SA and held-out-fallback weights; recommended)
+  (asked in Requests).**
 n36 (10-31 19:25Z): status; energy lever (spin->nanosleep) DEAD by inspection (1 thread/CTA spins). 0 runs.
 n35 (10-31 19:05Z): status only, no lead answer, nothing to build; plan unchanged (submit v181 after 00:00Z). 0 runs.
 n34 (10-31 19:25Z): **main = v182** (856cc18) = v181 + proj n26 escape-base rule (_compress base emax-15 or -16, fewest escapes;

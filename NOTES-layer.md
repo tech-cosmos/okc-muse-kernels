@@ -3709,3 +3709,22 @@ line says v182 (main). Log it in Judge runs.
   SM power next to twm/nvjet streams. DEAD by inspection, not built.
 - NEXT unchanged (first session after 00:00Z 11-01): submit v181 = `git show 38d0c23:muse_decode_layer/submission.py` once,
   unless a lead line says v182 (main). Log it in Judge runs.
+
+## n37 (2026-10-31 19:35-20:35Z, session 31): non-SA weights crash FIXED (v183 main, v184 branch); 2 checks, 0 submits
+- moe o25's Request (held-out weights mode 2: zero / subnormal e4m3 block scales -> moe st["sa"] False) applied to the layer
+  (tools/n37/nonsa.py <file> <seeds>: default weights + w13_sf[:,0,0]=0, w13_sf[:,7,3]=1, w2_sf[:,5,7]=3 raw bytes; 13 tests +
+  12 scored x seeds): v182 CRASHED in the tuner and at the first test: "layer MOE_PRUNE: tk2f cfg 84204 not built" (the pruned
+  moe_tk2f_launch kept only SA instantiations; non-SA turns SQ/BAL/tk2h/CW off by itself, leaving plain 84204 non-SA).
+- Fix (layer.py): prepare() runs moe's sa test (_moe_weights_sa) before _moe_prepare; for non-SA weights it rebuilds the moe lib
+  with `#define MOE_NSA 1`, which adds the one non-SA instantiation tk2f_go<8,4,2,false,false,false,8,0,4> for cfg 84204.
+  SA weights: preprocessed code unchanged (only the lib hash moves). Non-SA prepare pays one extra serial moe build (~65 s H100,
+  est. total ~135 s < 300; not measured). twm/hot/nu8 paths needed nothing (moe_set_sa runtime).
+- Risk context: nvfp4.random_weights clamps scales to [8, 448] (wide: [2^-6, 448]) = always SA, so generator draws never hit it;
+  only real-checkpoint weights (e.g. zero scale on an all-zero block) would. v181/v182 would crash there; v183/v184 don't.
+- v183 = main e0dd26f = v182 + fix: non-SA 37/37 PASS (2 seeds), default validate ALL OK (prep 68.3 s). CHECK 662fa349 2.1414 raw /
+  fixed 2.1551.
+- v184 = branch layer/v181nsa 70591ea = v181 + fix only (submission sha1 926ce2ec): validate ALL OK (67.8 s), non-SA 25/25.
+  CHECK 612cdd17 2.1554 raw / fixed 2.1252. Purpose: test whether v182's escape-base rule caused v182/v183's slower d1 sl
+  (67.8/67.5 vs 64.1-66.0 in v176-v181) and v1 sl (114.7/118.9 vs 104-110): v184 (no rule) is as slow (66.3 / 117.9) ->
+  NODE NOISE, the escape rule is cleared. Tonight's 3 checks (v182/v183/v184) all drew slow nodes; v181's 2.2076 was a fast draw.
+- Modal: 50.9/60 GPU-min used on 10-31, a 2-variant A/B reserves 11: not run.
