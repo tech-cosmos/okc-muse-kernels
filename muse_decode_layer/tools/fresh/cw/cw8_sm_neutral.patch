@@ -1,0 +1,197 @@
+diff --git a/muse_decode_layer/layer.py b/muse_decode_layer/layer.py
+index 5b0e748..3f07544 100644
+--- a/muse_decode_layer/layer.py
++++ b/muse_decode_layer/layer.py
+@@ -1935,14 +1935,14 @@ _MOE_TK2F_PRUNED = """
+   TORCH_CHECK(!s6, "layer MOE_PRUNE: tk2f S6 not built");
+   if (sq) {
+     if (cfg >= 140000 && cfg < 150000 && cfg % 1000 == 4)
+-      return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4 | 512>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
++      return tk2f_go<8, 4, 2, false, false, true, 16, 2, 4 | 512>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);  // fresh x13: MRG 2 = per-segment gemm13 -> gemm2 counters cnt[64 + j] (H100 d32 sl -2.8 / full -1.9 us; = the no-wait oracle)
+     TORCH_CHECK(cfg == 184204, "moe_tk2f SQ: cfg ", cfg);
+     if (bal) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 36 | 512>(0, TK2F_ARGS0);
+     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512>(0, TK2F_ARGS0);
+   }
+   if (!bal && cfg == 100001) return tk2f_go<8, 4, 2, false, false, true>(0, TK2F_ARGS0);  // tk2f_stress.py (moe TK2F = 1)
+-  if (!bal && cfg == 184294) {  // fresh x12 CW (T = 1 only: cnt[64 + seg * 4 + chunk], seg < 8)
+-    TORCH_CHECK(nr == 8, "tk2f CW: T = 1 only");
++  if (!bal && cfg == 184294) {  // fresh x12/x13 CW (T = 1 / 8: cnt[64 + seg * 4 + chunk], seg < 32; <= 63 gemm13 rows per CTA = <= 8 helper runs)
++    TORCH_CHECK(nr <= 64 && cnt_.numel() >= 192, "tk2f CW: T <= 8, cnt >= 192");
+     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 8192>(0, TK2F_ARGS0);
+   }
+   TORCH_CHECK(!bal && cfg == 184204, "layer MOE_PRUNE: tk2f cfg ", cfg, " not built");
+@@ -2283,7 +2283,7 @@ __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const in
+     __syncthreads();
+     const int nl = __popcll(m64);
+     asm volatile("griddepcontrol.wait;" ::: "memory");
+-    if (blockIdx.x == 0 && tid < 128) zc[tid] = 0;  // moe_tk2f's segment counters (moe_norm3's other job)
++    if (blockIdx.x == 0 && tid < 192) zc[tid] = 0;  // moe_tk2f's segment counters (moe_norm3's other job; fresh x13 CW: [64, 192))
+     constexpr int CPS = KB / 4;  // 16-byte chunks per slot chunk
+     for (int c = tid; c < nl * CPS; c += 512) {
+         const int i = c / CPS, q = c % CPS;
+@@ -3731,6 +3731,7 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
+ 
+ 
+ TK2F_SQ_T1 = False
++TK2F_CW8 = False  # fresh x13: the same at T = 8 (nu8 path, segment-major CwIt): bitwise, H100 v1 neutral (no-wait oracle <= 0.5 us)
+ TK2F_CW = True  # fresh x12: T = 1 tk2f chunk-wait (PF & 8192): gemm2 waits per (segment, K chunk), not all of gemm13
+ 
+ 
+@@ -3837,10 +3838,12 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
+     tw = topk_weights.float().contiguous()
+     d = y32.shape[0] == 81  # NU8D (kernel_fn allocated the per-slot rows)
+     lib.moe_set_ss(0 if d else st["w1"].data_ptr())
++    c = (_moe__tk2f_cfg(8, st) + (0 if d or _nu8_x(state, 8) else 1000)
++         + max(0, _opt(state, 8, "tk2x", 0) - 6) * 100000000)  # n5s25 DIAG oracle probes
++    if TK2F_CW8 and c == 184204:
++        c = 184294  # fresh x13 CW at T = 8 (as T = 1, see _experts_n2u)
+     lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"],
+-                        x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"],
+-                        _moe__tk2f_cfg(8, st) + (0 if d or _nu8_x(state, 8) else 1000)
+-                        + max(0, _opt(state, 8, "tk2x", 0) - 6) * 100000000)  # n5s25 DIAG oracle probes
++                        x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"], c)
+     lib.moe_set_ss(0)
+     f = y32[65:81].view(8 * TOP_K, UNPOOL_SLICE) if d else torch.empty((D_EXPERT // NU8_KB, 8, UNPOOL_SLICE), dtype=torch.float32, device=dev)
+     _G10["lib"].nu8_launch(y32, ids, tw, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, state["unpool_slice"], f, st["cnt"],
+diff --git a/muse_decode_layer/moe_src.py b/muse_decode_layer/moe_src.py
+index 24af454..2753d23 100644
+--- a/muse_decode_layer/moe_src.py
++++ b/muse_decode_layer/moe_src.py
+@@ -3600,15 +3600,39 @@ int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
+ // takes its logical range [r0, r1) chunk by chunk (c = 0..3, then l ascending), so its first rows complete chunk 0 of
+ // their segments, its last ones chunk 3. Each CTA publishes per (segment, chunk) run into cnt[64 + seg * 4 + c] (64 rows
+ // = done); gemm2 waits chunks 0..2 at a segment start and chunk 3 only before its stage 3 (polled at stages 1..2).
+-// Iteration state (c, l); init with l = cw_first(r0, 0) - 4 and one cw_next.
++// fresh x13 (T = 8, sm = nroutes > 8): SEGMENT-major, chunk-major inside each segment, the CTA's smaller part first. At
++// T = 8 the segments' x rows differ, and the T = 1 order (chunk-major across segments) switched segments 8 times per
++// CTA (x fragments reloaded each time): slowest gemm13 CTA +3 us (stamps). <= 63 rows per CTA -> <= 2 parts.
++__shared__ int g_cwsm;  // = nroutes > 8, set by moe_tk2f's thread 0 before its routing __syncthreads
+ __device__ __forceinline__ int cw_first(int r0, int c) { return r0 + ((c - r0) & 3); }
+-__device__ __forceinline__ void cw_next(int r0, int r1, int& c, int& l) {
+-  l += 4;
+-  while (c < 4 && l >= r1) {
+-    if (++c < 4) l = cw_first(r0, c);
+-  }
+-}
+ __device__ __forceinline__ int cw_row(int l) { return (l & ~255) | ((l & 3) << 6) | ((l & 255) >> 2); }
++struct CwIt {  // logical rows of [r0, r1) in the consumers' order: done() after the last; row() = physical row
++  int lo, hi, lo2, hi2, c, l;
++  __device__ __forceinline__ void init(int r0, int r1, bool sm) {
++    const int m = sm ? min(r1, (r0 & ~255) + 256) : r1;
++    if (sm && r1 - m < m - r0 && r1 > m) {
++      lo = m; hi = r1; lo2 = r0; hi2 = m;
++    } else {
++      lo = r0; hi = m; lo2 = m; hi2 = r1;
++    }
++    c = 0;
++    l = cw_first(lo, 0) - 4;
++    next();
++  }
++  __device__ __forceinline__ void next() {
++    l += 4;
++    while (c < 4 && l >= hi) {
++      if (++c < 4) {
++        l = cw_first(lo, c);
++      } else if (lo2 < hi2) {
++        lo = lo2; hi = hi2; lo2 = hi2; c = 0;
++        l = cw_first(lo, 0);
++      }
++    }
++  }
++  __device__ __forceinline__ bool done() const { return c >= 4; }
++  __device__ __forceinline__ int row() const { return cw_row(l); }
++};
+ 
+ template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false, bool ORN = false, bool CW = false>
+ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
+@@ -3624,11 +3648,19 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
+   asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol_last));
+   asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol_first));
+ #endif
+-  int cc = 0, cl = cw_first(r0, 0) - 4;  // CW: the consumers' row order
+-  if (CW && r0 < r1) cw_next(r0, r1, cc, cl);
++  CwIt it;  // CW: the consumers' row order; a0s = r0's segment (rows never below it)
++  int a0s = 0;
++  if (CW && r0 < r1) {
++    it.init(r0, r1, g_cwsm);
++    while (s_rs[a0s + 1] <= r0) ++a0s;
++  }
+   for (int R_ = r0; R_ < r1; ++R_) {
+     int R = R_;
+-    if constexpr (CW) { R = cw_row(cl); cw_next(r0, r1, cc, cl); a = 0; }
++    if constexpr (CW) {
++      R = it.row();
++      it.next();
++      if (R < s_rs[a]) a = a0s;  // T = 8: <= 32 segments, no rescan from 0 per row
++    }
+     while (s_rs[a + 1] <= R) ++a;
+     const int e = s_e[a];
+     const int lr = (R - s_rs[a]) & (RPE - 1);
+@@ -3686,13 +3718,14 @@ __device__ __forceinline__ void tk2f_rel_arrive(int seg_start, int r0) { mbar_ar
+ // cnt[64 + (R >> 6)] once the consumers' k-th arrive (<= 8 runs per CTA at T = 1: one ring pass, no parity reuse).
+ __device__ __forceinline__ void tk2f_cw_helper(int* cnt, int r0, int r1) {
+   if (r0 >= r1) return;
+-  int cc = 0, cl = cw_first(r0, 0) - 4, k = 0, np = 0;
+-  cw_next(r0, r1, cc, cl);
++  int k = 0, np = 0;
++  CwIt it;
++  it.init(r0, r1, g_cwsm);
+   for (int R_ = r0; R_ < r1; ++R_) {
+-    const int R = cw_row(cl);
+-    cw_next(r0, r1, cc, cl);
++    const int R = it.row();
++    it.next();
+     ++np;
+-    if (cc >= 4 || (cw_row(cl) >> 6) != (R >> 6)) {
++    if (it.done() || (it.row() >> 6) != (R >> 6)) {
+       mbar_wait(&g_tkrel[k & 7], (k >> 3) & 1);
+       __threadfence();
+       atomicAdd(cnt + 64 + (R >> 6), np);
+@@ -3731,19 +3764,24 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float*
+   const uint4* wsm = smem + warp * 32 + lane;
+   constexpr bool CW = (PF & 8192) != 0;  // fresh x12 chunk-wait (see cw_row)
+   static_assert(!CW || (NQ == 8 && KPS == 2 && !BAL && !(PF & 3)), "CW: NC 8, KPS 2, no BAL / PF 1 / 2");
+-  int cc = 0, cl = cw_first(r0, 0) - 4, kpub = 0, xrow = -2;
++  CwIt it;
++  int kpub = 0, xrow = -2;
+   int pend = 4;  // CW gemm2: the next chunk whose x fragments (qq 2 pend, 2 pend + 1) are still to load
+   const int* cp3 = cnt;
+-  if (CW && GATED && r0 < r1) cw_next(r0, r1, cc, cl);
++  int a0s = 0;  // CW: r0's segment (the CTA's rows never lie below it)
++  if (CW && GATED && r0 < r1) {
++    it.init(r0, r1, g_cwsm);
++    while (s_rs[a0s + 1] <= r0) ++a0s;
++  }
+   for (int R_ = r0; R_ < r1; ++R_) {
+     int R = R_, nR = -1;
+     if constexpr (CW && GATED) {
+-      R = cw_row(cl);
+-      cw_next(r0, r1, cc, cl);
+-      if (cc < 4) nR = cw_row(cl);
++      R = it.row();
++      it.next();
++      if (!it.done()) nR = it.row();
+     }
+     if (CW && GATED ? (R < seg_start || R >= seg_end) : R >= seg_end) {
+-      if (CW && GATED) a = 0;
++      if (CW && GATED && R < seg_start) a = a0s;
+       while (s_rs[a + 1] <= R) ++a;
+       const int gi = (R - s_rs[a]) / RPE;
+       seg_start = s_rs[a] + gi * RPE;
+@@ -4589,6 +4627,7 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
+     for (int i = 0; i < 4; ++i) mbar_init(&ridb[i], 1);
+     if constexpr (tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>())
+       for (int i = 0; i < 8; ++i) mbar_init(&g_tkrel[i], NC * 32);
++    if constexpr ((PF & 8192) != 0) g_cwsm = nroutes > 8;  // fresh x13 CW order (CwIt)
+     asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+   }
+   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+@@ -5252,7 +5291,7 @@ def prepare(weights):
+     sfb = [weights[k][:LOCAL].contiguous().view(torch.uint8) for k in ("w13_sf", "w2_sf")]
+     st["sa"] = all(bool((((b & 0x80) == 0) & ((b & 0x78) != 0) & (b != 0x7F)).all()) for b in sfb)
+     del sfb
+-    st["cnt"] = torch.zeros(128, dtype=torch.int32, device=dev)  # moe_tk2f counters (zero between calls)
++    st["cnt"] = torch.zeros(256, dtype=torch.int32, device=dev)  # moe_tk2f counters (zero between calls; fresh x13 CW T=8: [64, 192))
+     st["tk"] = torch.zeros(1024, dtype=torch.int32, device=dev)  # moe_twf split-item tickets (self-resetting)
+     st["w1"] = (1.0 + weights["post_norm_w"].float()).contiguous()
+     torch.cuda.synchronize()

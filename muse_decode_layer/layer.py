@@ -1935,7 +1935,7 @@ _MOE_TK2F_PRUNED = """
   TORCH_CHECK(!s6, "layer MOE_PRUNE: tk2f S6 not built");
   if (sq) {
     if (cfg >= 140000 && cfg < 150000 && cfg % 1000 == 4)
-      return tk2f_go<8, 4, 2, false, false, true, 16, 1, 4 | 512>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+      return tk2f_go<8, 4, 2, false, false, true, 16, 2, 4 | 512>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);  // fresh x13: MRG 2 = per-segment gemm13 -> gemm2 counters cnt[64 + j] (H100 d32 sl -2.8 / full -1.9 us; = the no-wait oracle)
     TORCH_CHECK(cfg == 184204, "moe_tk2f SQ: cfg ", cfg);
     if (bal) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 36 | 512>(0, TK2F_ARGS0);
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512>(0, TK2F_ARGS0);
