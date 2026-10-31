@@ -1,3 +1,20 @@
+## o5 11:30Z 10-31: lead 10:25Z ROUTING-SLACK BUILD PREPARED: branch moe/slack 894de97 (slack_src.cu + _slack at all routing sites,
+## OFF by default). Greedy = fresh's exact min on 12/12 loads with reference scores, BUT the layer's keys carry FP8-query noise
+## (keep-lead std 0.0048, max 0.019 = E4M3-ref vs FP32) -> safe margins leave ~1 expert v16/v32, ~0 d1/d16/v1. H100: 0 fails/192
+## inputs; A/B vs main v16 +6.4/+1.6, v32 +4.8/+8.9 us = NET LOSS (kernel 4.4/8.7 us + lost PDL). x1.096 needs reference-exact
+## scores; usable slack for us ~0.1-0.3 % even fused. Next if wanted: fuse phase A into _routing + B/C in its last program. 0 judge runs.
+## o4 10:30Z 10-31: no moe item >= gate left (o1-o3 closed lead 09:55Z items + own list). New angle checked on paper: x1's acc-read
+## wall is per weight-token (BF16 wgmma k16 fixed: one FP32 acc read per token per 16 K for any M/N/RS/SS shape; k32 = FP8 x = illegal),
+## so no tile shape escapes it. Sub-gate leftovers unchanged (tk2f last-wave K-split ~0.8/1.1 us d16/d32; twm instr trims <1; HOT128 0.9 v16).
+## Largest open lever = routing-slack ruling (fresh x8, x1.096) -> human/organizers. 0 judge runs, 0 Modal.
+## o3 10:50Z 10-31: own item SCALE-D-0 PROMOTION in twm (wgmma scale-d 0 per k16 + FP32 FFMA block scale, from fresh x1): DEAD
+## by H100 oracle (tools/o3): bound w/o promotion 0.81-0.86x, promotion ALU (N/2 FFMA/tile/k16) 1.25-1.8x even ideal; ptxas C7514
+## trap documented (NOTES o3). Nothing in the moe lane >= gate. 0 judge runs, 0 Modal.
+## o2 10:35Z 10-31: own-list oracles DEAD: power/clock lever (n9s1: dq+wgmma-free twm clocks 1.80 GHz = base -> clock not compute-set),
+## GPC static imbalance in tk2f (inside n7s41 tail bound <= 2.2 us d32), twm structure (= drain, dead on record). NOTES o2. 0 judge runs, 0 Modal.
+## o1 10:30Z 10-31: lead 09:55Z PIPE-BALANCED DQ: GATE FAILS by oracle (tools/o1: twm w/o HMUL2 0.87-0.93x = bound; HMUL2->1 IADD
+## 0.99-1.03x; exact int product >= 3-4 ops/pair -> slower). Next item tk2f d16/d32 rows: H200 record n7s41 says <= ~1 us/item -> not built.
+## 0 judge runs, 0 Modal. NOTES o1.
 ## n11c 04:36Z 10-30 idle: no lead line after 03:50Z; LANE A done (n11a: 'a legal faster design exists'); moe paused. 0 judge runs, 0 Modal.
 ## n11a 04:20Z 10-30: lead 03:50Z LANE A DONE (diag only, NOTES n11a, tools/n11a): leaders' edge is NOT an FP8 shortcut:
 ## n11b 04:25Z 10-30 idle: LANE A done (n11a); no lead line after 03:50Z; moe paused. 0 judge runs, 0 Modal.

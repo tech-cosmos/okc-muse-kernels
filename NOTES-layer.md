@@ -3188,3 +3188,124 @@ Lane B follow-up, no code: the n11s1 nearby-shape cliff (decode T=2/4 sl 149/132
 SGLang's own d1 (T=1) is 171/183 us sl/full on the H200 (STATE), and its T=2/4 can only be >= that, while our H100 numbers
 are an upper bound for the H200. Also the held-out reruns use the same 12 shapes (lead 03:50Z: same ctx/spread/dist), so it
 does not touch the score. Lane B fully closed. No lead line after 03:50Z: paused. 0 judge runs, 0 Modal.
+
+## night12 s1 (2026-10-30 09:04Z-~10:35Z): lead 09:10Z DEFNORM lane (fable #11, deferred pre-expert rmsnorm). GATE NOT MET, no build. 0 judge runs, 0 Modal.
+- H100 timeline (tools/timeline.py, main v173 submission.py, seed 99, cold L2), the pooler -> rmsnorm -> tk2f hop:
+  d1 sl: pr1 22.3-44.7, rmsnorm (pr1's PDL secondary) ends 45.8, tk2f (rmsnorm's PDL secondary, TK2FX) starts 45.2 -> hop 1.1 us.
+  v1 sl: pr8 ends 50.7, rmsnorm ends 52.4, tk2f starts 51.1 -> hop 1.7 us.
+  d16 sl: pooler g24 ends 56.4, router_split 56.6 -> _routing ends 59.6 = rmsnorm end 59.6: ROUTING-bound, defnorm saves ~0.
+  d32 sl: pooler g30k ends 66.5, routing 66.0, rmsnorm ends 69.5 -> ~3 us, BUT g30k is stream-K with FP32 slab output: no CTA
+  owns final values, so the per-token sum of squares can't come from the pooler epilogue (needs the summed row: = XN, dead s12).
+- Oracle ORC_NONORM (tools/n12/orc_nonorm.patch: T=1/8 pr1/pr8 path skips _rmsnorm_gain, tk2f becomes pr1/pr8's PDL secondary)
+  HANGS on the H100 (decode 1 sliding, timeout 300 s; baseline 86.1 us), same as n7s4's early-tk2f-on-live-pr1 hang. Not debugged.
+- Bound instead from the record: s12 XN (norm inside tk2f's prologue, i.e. no norm kernel) measured -0.4..-0.8 us vs the same
+  binary at d1/v1 ('the rmsnorm launch is already hidden'). So defnorm's upper bound <= ~1.1 us d1 sl / ~1.7 v1 sl (H100), minus
+  pr1/pr8 epilogue sumsq atomics + a separate tk2f instantiation (XN: changing the shared one cost d16/d32 1-2 us).
+  Score bound <= ~0.18% (d1) + 0.16% (v1) + full layers ~0.1%, realistic ~half. Gate (>= 1.5 us d1 sl) NOT met: lane closed.
+
+## n12s2 2026-10-30T10:34Z
+Idle stop: no lead line after 09:10Z; DEFNORM closed in n12s1 (gate not met). main v173 unchanged. fresh oracle sweep (lead 09:10Z) still running, no Handoff yet. 0 judge runs, 0 Modal.
+
+## n12s3 2026-10-30T10:50Z
+Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle sweep (claim 09:06Z) has no table/Handoff yet. main v173 unchanged. 0 judge runs, 0 Modal.
+
+## n13s1 2026-10-31 09:50Z-: lead 10-31 09:55Z LAYER = d32 qkv oracle. GATE NOT MET (no piece >= 1.5 us), no build, 0 judge runs, 0 Modal.
+- tools/n13/qkv_stamp.py <submission.py> [MTOK,S,NW,NS]: the layer's d32 qkv (g30n qkv_gate m32, S3 cluster K-split, NW/NS 16,
+  108 CTAs = 36 row tiles x 3) rebuilt standalone with per-CTA %globaltimer stamps (256 ns ticks), H100 cold-L2 graph replays
+  minus empty. VAR tokens (timing only): nomath (no decode/wgmma), nored (no DSMEM reduce), noesc (-DG30_ESC=0), early (cluster
+  barrier arrive at start / wait before the push), rot (tile g = blockIdx.x + 17: W moves to other SMs).
+  ```
+  graph us: base 16.5 | nored 15.7 | noesc 16.5 | nored+noesc 15.5 | nomath 15.4 | nomath+nored+noesc 14.75 | early 16.9
+  base stamps (us from first CTA start, median CTA): W/x producer 1st issue 0.8-1.0 | consumer prologue (esc sort) 2.6 |
+  first stage consumed 2.8 | loop end 11.0 (min 10.0, max 12.3-13.0) | CTA reduce 11.3 | rank-0 cluster reduce 12.5 (max 13.8) | end max 14.1
+  per-CTA rate in the loop 25-35 GB/s (median 31) = 2.8-3.0 TB/s aggregate on 108 SMs
+  ```
+- Split of the standalone excess (16.5 vs ~12.1 for a bare 28.3 MB reader on many CTAs): math 1.1 | DSMEM cluster reduce chain
+  0.85 | escapes 0 | start ~1 us to the producers' first issue (NOT the cluster barrier: 'early' is no better, +0.4) | per-SM
+  imbalance: loop time max - mean ~0.8-0.9 us, repeatable per CTA (replay corr 0.92) and it follows the SM, not the tile (same slow
+  smids 12/52/60/95/103 after 'rot'); not TPC-sibling occupancy (102 vs 6 CTAs: 9.63 vs 9.90). Whole clusters (one GPC) are slow:
+  mean of per-cluster max 9.74 vs mean 9.54 -> in-cluster K stealing buys ~0.2 us; the rest needs a global dynamic split =
+  slabs/ticket (s101 / g24sk qkv / g30k: dead on record). (The ld.global reader at 108 CTAs is 19.5 us: no fair 108-SM floor.)
+- Buildable: reduce-scatter epilogue (each rank sums + stores 1/3 of the tile) ~-0.4 of the 0.85; in-cluster stealing ~-0.2;
+  math = the m32 consumer (dead-record forms). Sum ~0.6 us H100 standalone, less in-layer/H200 (in-layer excess 3.3 H100 / 2.6 H200).
+  < 1.5 us gate: CLOSED.
+- Next item (lead's list) v1 boundary/o hops, H200 n7s1 timeline v1 sl: o end -> bnd end 2.4, pr8 end -> rmsnorm end 2.3, nu8 -> bnd 3.6.
+  All on record: o+bnd fusion OB8 dead (s86), o speed doesn't move v1 (pr8 sets the front: s88, n5s5, n7s9), pr8 -> norm =
+  DEFNORM 1.7 us H100 (n12s1), tail = moe n10s1 post-wait latency (closed 10-30 03:20Z). pr8 itself is proj's item. CLOSED on paper.
+- Same tool on the d32 UNPOOL (KEY=unpool, cfg 32,1,16,16: g30n S1, 128 CTAs x 393 KB, no cluster): graph 22.3 us (nomath 20.8).
+  Per-CTA loop time is BIMODAL and repeatable (corr 0.93): ~30 CTAs (smid groups 78-84, 124-125, 37-38, ...; every ~8th tile pair)
+  at 14.0-15.3 us, the rest 16.6-17.3 (max 18.5); mean 17.0 / max 18.5 (nomath 16.2 / 17.3). = GPC-level bandwidth sharing: SMs in
+  less crowded GPCs stream ~15% faster; a static equal split ends at the crowded GPCs. Applies to every static-split stream
+  kernel (qkv/o/unpool g30n, g30k, g24, tk2f's static T=1 split): ~7-8% of the stream phase per kernel. Dynamic fixes need
+  per-unit FP32 partials (slab traffic ~1 MB per extra slab at m32 = more than the ~1 us gain) -> not built. Posted for fresh's
+  d1 expert-span lane (tk2f T=1 static split: GPU-vs-bytes gap).
+- BOARD SHIFT (okc leaderboard muse_decode_layer --json, ~10:00Z sandbox clock): we are #212 at 2.158 (was #50 on 10-29). 211 teams
+  ahead, 180 of them submitted 10-30/10-31; #1 mpeng19 2.418, #10 2.354, #20 2.316, #50 2.2465, #100 2.221, #150 2.204, #200 2.168.
+  New row fields: 'screening' (screened/pending/under_review) and 'screened_speedup' (e.g. #10 2.354 -> screened 2.326).
+  `okc check` of unchanged main v173 returned status 'duplicate' of 335f3f26 (content-hash dedupe; no run, no budget): judge drift
+  can't be tested without a code change. Cause of the shift unknown (public solution? baseline?): for the human/lead.
+
+## n13s2 2026-10-31 10:00Z-10:55Z: own-list item (lead 09:55Z: both layer items closed in n13s1). SM-WEIGHTED static split DEAD; 0 judge runs, 0 Modal.
+- Re-read the record for an unclosed lever (d1 hops, PR1_BND, OB8, megakernel, batch-1 full attention (~/attn s73/s74/s92/s99,
+  proj n7s9 fa1), 11-bit/entropy formats (proj n5s13: dead; floor 10.54 bits), v1 tk2f (moe n5s13/n7s22)): all closed on record.
+- New item from n13s1's GPC finding: per-SM stream rate is repeatable under a static split, so give each SM a byte share
+  proportional to its measured rate (table indexed by %smid, calibrated from hardware in prepare(); no partials, no atomics).
+  Oracle tools/n13/smw_oracle.py: bare ld.global.v4 reader, 1 CTA/SM (132), range from table[%smid], cold L2, H100:
+  ```
+  28.2 MB  equal: event 18.30-18.38 us, span 12.98-12.99, loop mean 11.85 max 12.50 | weighted (2-3 iters, w 0.93-1.15):
+           event 18.34-18.51, span 12.86-13.10, max 12.38-12.61
+  99.9 MB  equal: event 43.47-43.63, span 38.22-38.24, loop mean 36.6 max 37.4  | weighted: event 44.1-44.3, span 38.4-38.6
+  per-SM loop time corr: equal vs equal 0.94 / 0.97; equal vs weighted 0.13 / 0.19
+  ```
+  The slow set reshuffles when bytes move: the per-SM rate is a share of a common bound, not an SM property. Static
+  reweighting gains 0 (slightly worse); max - mean under an equal split is not idle bandwidth. This also weakens n13s1's
+  "dynamic split ~1 us" estimate for unpool/qkv. CLOSED. (Caveat: bare reader at ~2.2 TB/s, not the g30n TMA kernel; same
+  mechanism expected, and n13s1's 'rot' showed slowness follows the SM only under a fixed pattern.)
+- Outside check: teams with 2-3 attempts sit at 2.23-2.26x on the layer board (rank 42: 3 attempts, rank 69: 2), 180 of the
+  teams ahead submitted 10-30/31: looks like shared know-how. Web search found no public solution; vLLM's MuseSpark MegaMoE
+  uses DeepGEMM fp4_fp4_mega_moe (FP4 activations: illegal here). muse_prefill_layer exists (no row; not counted on the overall board).
+
+## n13s3 2026-10-31 10:05Z-10:40Z: lead 09:55Z 2nd item (v1 boundary/o hops) MEASURED; free-boundary ceiling; no build, 0 judge runs, 0 Modal.
+- Budget 10-31: all boards 20 checks / 10 submits unused. Board unchanged: #212 at 2.158; value = us, so SGLang total = 10482 x
+  2.158 = 22620 = #1's 9356 x 2.418: the baseline did NOT move; the 180 teams that passed us are just faster (11% at #1).
+- Oracle (tools/n13/orc_nobnd.py: skip the first _boundary at T in ORC_NOBND; pr1/pr8 read a stale h, so only the o end ->
+  pr1/pr8 end interval is valid; tools/n13/tlmed.py = median per-kernel timeline of 25 cold replays), H100, main v173, seed 99:
+  ```
+  d1 sl  base: o end 21.2, bnd end 24.4, pr1 end 43.5 (o->pr1 end 22.3) | no bnd: o end 21.8, pr1 end 43.1 (21.3)  => -1.0 us
+  v1 sl  base: o(g30) end 29.6, bnd end 32.8, pr8 end 55.2 (25.6)    | no bnd: o end 25.8, pr8 end 47.9 (22.1) => -3.5 us
+  ```
+  (GPU shared with 3 agents: absolute times high; intervals are what count.) d1: the boundary is already hidden behind pr1's
+  pre-wait W ramp (ceiling 1.0 < 1.5 gate). v1: 3.5 us ceiling (= proj's T=8 -4.2 oracle), but every form that removes it is
+  on record dead: OB8 o-side grid barrier (s86: pr8 = 1024 thr x 64 regs + ~140 KB smem can't co-reside with o blocks, so its
+  ramp gets exposed), pr8-side prologue (needs s + b + 4 FP32 vectors per block = ~5x the x bytes; PR1_BND form). Checked a new
+  form: DEFERRED boundary in pr8 (pooler(h) = r_s [W((1+w)alpha s) + r_b W((1+w)beta b)], scalars applied in the epilogue / the
+  scale-invariant pre-expert rmsnorm): needs two 8-col activation sets staged per block (256 KB smem, or 32 more regs/thread
+  for s) -> does not fit pr8's ~140 KB + 64-reg budget; and the router would then run on non-SGLang-rounded h (route-check
+  risk, lead 10-26). Not built. v1 hop lane CLOSED with a number.
+- Both lead 09:55Z layer items are closed (n13s1 d32 qkv ~0.6 buildable; n13s3 v1 bnd ceiling 3.5 but no fitting form).
+
+## n13s4 2026-10-31 10:24Z-10:45Z (real clock): no item >= gate; board analysis only; nothing built, 0 judge runs, 0 Modal.
+- Re-checked the record for anything open (o+bnd+pr1 megakernel: every form lost +1.4..2.8 and n13s3's free-boundary d1
+  ceiling is 1.0 us; g30kgx "drop" = records overflow, not a flake, ~0.01%; attention leaders ~15% faster but lane closed
+  by moe n7s15/16 + ~/attn s114/s125). Nothing new >= 1 us.
+- okc leaderboard muse_decode_layer --json has no per-shape data. #16 2.3314 in 1 attempt; 17/1094 rows screened/pending,
+  screened_speedup 1-4% below raw where given (#22 2.310 -> 2.238, #41 2.264 -> 2.162).
+- fresh x8 slack_out.txt: d1 local experts 2.6 -> 1.75 (6.3 us/expert of tk2f bytes): slack ~-5 us d1 sl (~0.9%); x1.096
+  overall = 2.365 = #6-#9. moe board (routes given) #1 is still 1.18x ahead of us: part of the gap is a legal faster expert kernel.
+- Offered moe (COORD Requests) the layer-owned selection sites for moe/slack: T=1 pr1 + _router_fma, T=8 r3/pr8, T>8 _routing/rg.
+
+## n13s5 2026-10-31 10:43Z-: merged fresh x8 Handoff ceb86cf as main v174 (c62cdb0); 1 check + 1 submit -> NEW BOARD BEST 2.1717x.
+- v174 = v173 + fresh's 3 edits (pr1 router bias/local_start into smem before griddepcontrol.wait, bitwise; IDF_DEFAULT True;
+  n2u IDF routing loads plain after the wait). Reviewed: smem bias read is behind the ticket __syncthreads; block T=1024 > E.
+  submission.py from build.py == r-fresh's byte for byte.
+- H100: bench test 13/13; replay_test d1/v1 seeds 11,23,57 x 40 = 0 fails; ab_files 6 rounds "decode 1": sl 86.16 -> 84.58,
+  full 106.28 -> 104.15 us.
+- check 2d1f9256: 2.1514 own-run, fixed-SGLang 2.1650 (tools/fixed_sglang_score.py, now incl. 8b4e6cf7 v172 check = 2.1597 and
+  ae6c4bd3; profiles copied from r-fresh). d1 66.7/74.3 (v172 67.8/75.1).
+- submit 50534b24: **2.1717x** [2.139, 2.204] (d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7,
+  v32 313.9/486.9). Board best (was 3e3b9fd3 2.1580). Submits today: 1 of the lead's 2/agent.
+- v1 sanity (judge v1 sl 111.6-112.1 vs v172 108.4): pr8 is separate code (pr1_src.cu's router<> serves T=1 only); H100
+  ab_files 4 rounds "verify 1": sl 142.2 -> 141.1, full 155.6 -> 156.0 = tie -> judge noise.
+- Next for layer: no open layer item >= gate (n13s1-s4). Bundle candidates on record, all < gate: proj n13s1 BAL (H200 -0.4/-0.6
+  d1 sl but H100 +1.6), moe tk2f last-wave K-split (~0.8/1.1 us d16/d32, not built). The routing-slack ruling (fresh x8, moe/slack
+  branch) is the biggest open item; moe/slack should rebase onto v174 (c62cdb0) before any check.

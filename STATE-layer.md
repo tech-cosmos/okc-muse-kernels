@@ -1,7 +1,25 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
+BOARD BEST = submit 50534b24 = v174 (c62cdb0), **2.1717x**, #198 (n13s5, 10-31; d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7, v32 313.9/486.9; check 2d1f9256 2.1514 / fixed-SGLang 2.1650).
+Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n13s5 (10-31 10:43Z): main = v174 = v173 + fresh x8 ceb86cf (pr1 bias/ls hoist + IDF on at T=1); H100 d1 -1.6/-2.1 us; 13/13,
+  replay 0/480; check 2d1f9256 2.1514 (fixed-SGLang 2.1650 > v172 2.1597) -> submit 50534b24 2.1717 = board best.
+n13s4 (10-31 10:45Z): no gate item; board analysis (COORD Results): slack x1.096 ~ #6-#9, moe-board gap 1.18x = faster legal experts exist.
+  Offered moe the layer-owned selection sites for moe/slack (T=1 pr1/_router_fma, T=8 r3/pr8, T>8 _routing/rg). 0 runs.
+n13s3 (10-31 10:40Z): lead 09:55Z item 2 MEASURED (tools/n13/orc_nobnd.py + tlmed.py, H100): free first boundary saves d1 sl
+  1.0 / v1 sl 3.5 us (o end -> pr1/pr8 end); v1 forms all dead (OB8 barrier, pr8 prologue, deferred-norm pr8 = no smem/regs).
+  Baseline unchanged (value math): the board shift is real speed. 0 runs. NOTES n13s3.
+n13s2 (10-31 10:55Z): own-list item SM-WEIGHTED static split (byte share per %smid from measured rate) DEAD: H100 bare reader
+  28/100 MB span equal 13.0/38.2 vs weighted 12.9-13.1/38.4-38.6; slow SMs reshuffle when bytes move (corr 0.13-0.19). Every
+  layer-lane lever on record is closed; 0 runs (NOTES n13s2).
+n13s1 (10-31 09:50Z): lead 10-31 09:55Z d32 qkv oracle GATE NOT MET (tools/n13/qkv_stamp.py, per-CTA globaltimer stamps, H100):
+  g30n S3 qkv standalone 16.5 vs ~12.1 reader = math 1.1 | DSMEM reduce 0.85 | start ~1 | per-SM imbalance ~0.85 (GPC-level,
+  repeatable; unpool bimodal 14.3 vs 16.9 us per CTA). Buildable ~0.6 < 1.5. v1 hops: all closed on record. BOARD SHIFT: 180 teams
+  passed us 10-30/31; we are #212, top-50 cut 2.2465, #1 2.418 (NOTES n13s1). okc check of unchanged code = "duplicate" (dedupe, no run).
+night12 s1 (10-30 09:04Z): lead 09:10Z DEFNORM (deferred pre-expert rmsnorm) GATE NOT MET: H100 hop pr1->norm->tk2f d1 sl 1.1 /
+  v1 1.7 us; d16 routing-bound (0); d32 3 us but g30k stream-K slabs (needs XN, dead). Oracle hangs (as n7s4); s12 XN already
+  measured no-norm-kernel at -0.4..-0.8. No build, 0 runs. NOTES n12s1.
 night11 s2 (10-30 04:03Z): idle/paused. T=2/4 cliff (149/132 us H100) still < SGLang d1 171 us H200 -> no fix. 0 runs.
 night11 s1 (10-30 04:40Z): LANE B held-out robustness DONE (NOTES n11s1): judge already uses random seeds + router per run
   (801-812 never used); H200 5 judge-like routers x 4 seeds: no seed effect, hotdyn/HOT_XN/tuner picks hold; HOT128 -0.9 us when

@@ -3628,3 +3628,90 @@ Idle stop: no lead decision after 02:45Z; END lane closed n10s1. 0 judge runs, 0
 
 ## n11c 2026-10-30T04:36Z idle stop
 No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Modal.
+
+## o1 (2026-10-31 09:47Z - ~10:30Z): lead 09:55Z PIPE-BALANCED DQ in twm: GATE FAILS (oracle); next item (tk2f d16/d32 rows) gated out on the H200 record; 0 judge runs, 0 Modal
+- Oracle tools/o1/ovl9.py (= n11a ovl8 + roles NOH: dq without the 4 HMUL2, masked codes go straight into the RS wgmma = the speed
+  bound of ANY scale-step replacement; IAD: each HMUL2 -> one IADD = a 1-int-op-per-pair replacement; both wrong values, timing only).
+  H100, 2 consumer WGs, cyc/stage (RESULTS.txt): NOH 0.865-0.887x at RT4 N8-32, 0.903-0.931x at RT2 N40-64; IAD 0.99-1.03x.
+- Reading: next to an accumulating HGMMA an integer op costs what an HMUL2 costs (fresh x5's '4.5x' is a slowdown ratio on HMUL2's
+  2x faster standalone base, not a higher absolute cost: per instruction next to N64 HMUL2 ~5.0 cyc, IMAD 5.0, LOP3/PRMT 4.4,
+  IADD3 4.5). An exact integer product needs >= 3-4 ops per pair: codes 1.5/3/6 times a scale with 3-bit mantissa b renormalize
+  for b >= 3 ((1 + 1/2)(1 + b/8) >= 2), code 0 needs its own zero, the sign needs placing; additive exponent/mantissa forms need a
+  per-half select (PRMT selector nibbles can't be fed from one stored bit without an op). So any exact form is SLOWER than the
+  4 HMUL2. byte_perm LUT forms (per-scale 8-entry byte tables): ~21 ops per 8 weights (counted) vs 12 today.
+- Real twm SASS (moe_w4a16 lib, moe_twm<8,0,64,0>, 16-HGMMA loop): 284 instr/stage/warp = dq core 192 (LOP3 80, SHF 32, IMAD 16,
+  HMUL2 64) + ~92 other (uniform ~35, LDS 13, scale decode ~20, WARPGROUP 8, sync/branch ~10). Even the 64 HMUL2 free was only
+  v16 -3.1 / v32 -3.4 us in-layer (n5s34 'ors', H100); trimming 10-20 overhead instrs is < 1 us. Not pursued.
+- Next item (lead: tk2f d16/d32 per-row cost): already measured on the H200 (n7s41 fit of DIAG 81391142): ph2 extra 8-token
+  rows ~-1 us per extra group (d16 ~1/call), row-quantization tail bound d16 1.53 / d32 2.21 us/call (rows = 16 output cols x
+  full K; only a K-split of last-wave rows can balance it, ~half recoverable = ~0.8 / ~1.1 us; d32 runs tk2h in-layer). Each
+  < the 1.5 us d-load gate. Not built.
+
+## o2 (2026-10-31 09:57Z - ~10:35Z): no lead item left (o1 closed both); own-list oracles, all DEAD on record or new data; 0 judge runs, 0 Modal
+- POWER/CLOCK lever (new): twm runs at ~1.79-1.80 GHz effective on the H100 and 1.76-1.79 on the H200 (n9s1 clock64/globaltimer),
+  not 1.98. Is it a power cap that a lower-power dq/MMA would lift? NO: n9s1's H100 counters already have the answer: orc7 (dq AND
+  wgmma both free, consumers waiting on the ring) 1.791-1.805 GHz = base orc0 1.784-1.801 = alias 1.791. The clock does not depend
+  on consumer compute. nvidia-smi during a back-to-back bs256/bs128 loop (tools/o2/pw.py, GPU shared, timing not valid): 600-700 W
+  of the 700 W cap, clocks.sm 1860-1980 with intermittent SW-power-cap (0x4) events. Lever DEAD.
+- GPC-level static imbalance (layer n13s1, H100 unpool: bimodal per-SM stream rate, ~7-8% of stream): for tk2f it is already
+  inside the H200 timeline record (s12 88d201b4 d32: ph1 end min/med/max 49.9/50.7/53.0, end 77.8/80.1/80.9 us) and the n7s41
+  row-quantization tail bound (d16 1.53 / d32 2.21 us/call, ~half reachable). smid-indexed splits are unsafe (a CTA can land on
+  an SM after another finished there) and the GPC map changes per chip (floorsweeping). Not built.
+- twm 'structure' (n9s1: ring wait + between-item + epi ~15% of life at v16/v32): between-item wait is mostly the first item
+  (n7s1/n7s13 gaps 0.4-1.0 us per CTA per call); the rest is the drain (14-24 us v16), whose levers are all on record dead
+  (K halves tie, AUTO halves, quarters/eighths, row-split tails, orders, R1 gate). Nothing new to build.
+- Nothing in the moe lane reaches the lead's gates (>= 1.5 us on a d-load, >= 0.2% score). Ranked leftovers (all below gate):
+  tk2f last-wave K-split of rows d16/d32 (~0.8/1.1 us), twm overhead-instruction trims (<1 us), HOT128 no-hot cost (0.9 us v16, 1/40).
+
+## o3 (2026-10-31 10:04Z - ~10:50Z): own item: SCALE-D-0 PROMOTION in twm (from fresh x1's acc-read finding): DEAD by oracle; 0 judge runs, 0 Modal
+- Mechanism (not on record): dq without the 4 HMUL2 + wgmma scale-d 0 into a per-k16 partial P + FP32 FFMA acc += s_row * P
+  (exact products, FP32 sums: legal). Hoped: no acc read by the HGMMA -> dq overlaps better; FFMA is x5's cheap 1.3x class.
+- H100 stage microbench tools/o3/ovl10.py (RESULTS.txt table): bound SD0N (no promotion) 0.81-0.86x prod (only 6-10% under
+  o1's NOH: the acc-read relief is small in the real stage); promotion ideal-overlap SD0X 1.25-1.8x, wait0-ordered SD0W 1.28-1.8x,
+  double-buffered SD0F serialized by ptxas C7514 (1.6-2.0x). N/2 FFMA per tile per k16 + scale decode > the 4 HMUL2 removed at
+  every N; next to HGMMA every ALU op costs ~4-5 cyc (o1). DEAD. No layer value, nothing built.
+- TRAP (cost me 20 min, reusable): C7514 fires when LLVM hoists acc-reading register math above an inline-asm wait_group (asm
+  volatile "memory" does not order register-only math): one post-loop `acc += P` above the final wait serialized every HGMMA in
+  the function. Fix = empty asm "+f" fence on each acc register right after the wait. Diagnose: exec the script's SRC into k.cu
+  with an explicit instantiation, `nvcc -arch=sm_90a -ptx`, `ptxas` to reproduce, then list non-wgmma PTX lines reading the
+  wgmma output registers (python regex over the {..} lists). Also: scale-d as immediate 0 lets ptxas delete dead wgmmas.
+
+## o4 (2026-10-31 10:17Z - ~10:30Z): no item >= gate; paper check of the acc-read wall; 0 judge runs, 0 Modal, no code
+- Lead 09:55Z moe items closed in o1 (pipe-balanced dq 0.87-0.93x bound, exact int forms slower; tk2f rows <= ~1 us/item),
+  own list closed in o2/o3. Checked one more angle from fresh x1 (dq||HGMMA wall = FP32 accumulator reads, scale-d 0 relieves):
+  the acc read is per weight-token: a BF16 wgmma consumes k16 per instruction whatever M/N/RS/SS, so every token routed to an
+  expert costs one FP32 acc read per 16 K per weight row; N8 vs N64 only changes the per-instruction batch (x1: per-token
+  slowdown N8 ~9.9 cyc vs N64 ~4.3 cyc per stage, twm already picks N to the token count). Halving it needs k32 = FP8 operands
+  (activations FP8 = illegal, n11a) or promotion (o3: dead). No tile shape or pipe mix escapes it -> nothing to oracle.
+- Remaining sub-gate leftovers (not built per lead gate): tk2f last-wave K-split d16/d32 ~0.8/1.1 us, twm overhead instr <1 us,
+  HOT128 no-hot 0.9 us v16. The only lever on record of gate size is fresh x8's routing slack (x1.096), pending the organizers.
+
+## o5 (2026-10-31 10:34Z - ~11:30Z): lead 10:25Z ROUTING-SLACK BUILD prepared on branch moe/slack; 0 judge runs, 0 Modal
+- Build (branch moe/slack, worktree /tmp/slack/wt off origin/main 588a578): muse_decode_layer/slack_src.cu (own small
+  load_inline lib, prebuilt), layer.py `_slack()` after the routing at all 4 sites (_route, FR, pr1/pr8), gated by
+  SLACK / SLACK_TOKENS (128, 256). build.py embeds it; PR32 source dropped from the embed (dead, PR32_TOKENS = ()) to stay
+  under 1 MB (975 KB). Kernel: grid T/8 x 8 warps, warp = token (keys, v8/v9, masks L/K/R/N/need to global); last CTA
+  (self-resetting ticket in state["slack_scratch"]) = greedy S (most deficit tokens, then top-8 routes) + redundancy pass,
+  re-picks only tokens whose top-8 local experts left S (keep the rest; replacement = best local candidate in S, else best
+  non-local), floors checked (fallback = routing unchanged). Deterministic, plain launch (no PDL trigger) so every later
+  kernel sees the final routing.
+- Algorithm quality (tools/slack/tst_standalone.py, reference logits, margins 0): greedy == fresh x8's exact minimum on all
+  12 loads (8 seeds): saved d1 .62/.75, d16 2.38/2.25, d32 2.50/1.88, v1 2.12/1.50, v16 3.12/2.38, v32 4.00/4.00 (sl/fu).
+- THE CATCH (tools/slack/keyerr.py, leaderr.py): the layer's router logits differ from the FP32 reference's by 2.5-3 %
+  (max |dkey| 0.02-0.04); on the droppable experts (local, in our top 8, lead <= 0.03) the keep-rule lead error has std
+  ~0.0048, max 0.019 (n ~1.7k) - the same as the reference with E4M3 queries vs FP32 (0.0045). It is FP8-query noise that
+  any legal FP8-query layer has, not a routing bug. Ours vs the E4M3-query reference: std 0.0025 (the non-query part).
+  With 0.005 margins the first judge-like run failed 3/60 inputs (keep 0.0327 > 0.03; distinct 9 vs 13 from a flip).
+- Safe margins (~4.5-5 std): picks within 0.027 of the 8th (not 0.05), drop only local top-8 experts with our lead <= 0.008
+  (not 0.03), floors with +2 distinct / +8 routes. Real layer (tools/slack/slack_judge.py, graph replay, routers 11/23,
+  24 inputs per shape): 0 fails / 192 slack-on inputs; worst pick gap 0.032 (limit .05), worst dropped lead 0.018 (limit .03).
+  Saved distinct: v16 0.6-1.5, v32 0.7-1.0, d32 0.25-0.7, v1 0.1-0.4, d1/d16 ~0 (rs 11 all-T run). = ~1/4 of fresh's oracle.
+- Cost: kernel alone 4.4 us (T=128) / 8.7 us (T=256) in a graph (first one-CTA version 25-69 us: one SM's issue rate; small
+  T still 7-16 us, unexplained, slack off there). H100 A/B vs main (tools/slack/ab_seeds.py, seeds 801-803, 3 rounds):
+  v16 sl +6.4 us, v16 fu +1.6 (seed spread -6.6..+15.8); v32 sl +4.8, fu +8.9. => NET LOSS as built.
+  Branch moe/slack 894de97 has SLACK_TOKENS = () (off; = main behaviour); set (128, 256) to test.
+- What would make it pay: (1) fuse phase A into _routing (keys are already there) and B/C into its last program: saves the
+  launch + keeps the PDL chain (~4-6 us) -> v16 ~+3-5 us, v32 ~0..+2 (~0.1-0.2 %); (2) less noise: halving the std
+  (BF16 queries would remove at most the E4M3 part) -> clean-score estimate at 0.012 margins v16 1.3-1.9, v32 1.9-2.8,
+  still ~0 at d1/d16/v1 (small T: the distinct floor + flip margin binds). The x1.096 of fresh x8 assumes the reference's
+  exact scores; for an FP8-query layer the safely usable slack is ~0.1-0.3 % of score, not ~9 %.
