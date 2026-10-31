@@ -6,7 +6,8 @@
   +0.2-0.4 us. Test 13/13, replay verify 0/360. QLO in _gw_verify (v16/v32 full) costs +9% kernel on the H200 (+8.9/+17.3 us,
   ~0.3% score): dropped, patch kept (tools/fresh/x16/qlo_patch.py ... GW). Check 2d0914bf raw 2.1745, fixed 2.1405 (slow node).
 - Checks 10-31: 3 of 6 used.
-## Next (x17): after 00:00Z Modal H200 A/B v176 vs v177 (layer's request) + nvs QLO cost confirm; d32 sl nds QLO only if
+## Next (x17): after 00:00Z run muse_decode_layer/tools/fresh/x16/mk_h200.sh (Modal H200 A/B v176 vs v177, pinned tuner, 4
+  load groups, ~14 GPU-min; layer's request; read the bench output per shape, no routing confound: numerics equal); d32 sl nds QLO only if
   the human wants the rest of the risk (FRESH.md x16).
 ## x15 (2026-10-31 15:32Z-16:20Z): lead 15:25Z 'continue'. 0 judge, 0 Modal. FRESH.md x15.
 - CORRECTION: the x14 judge FAIL was on v32 sl REPETITION 1 with the run's own router seed; repro_v32.py never reproduced that
