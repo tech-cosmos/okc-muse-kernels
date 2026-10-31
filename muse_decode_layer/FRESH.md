@@ -870,3 +870,9 @@ Per-shape judge medians, top-3 runs each (cmp_profiles.py), Madhavan 10-29 (2.11
   v1 2.36-2.38, v16 1.99-2.06, v32 2.17-2.25. The weakest loads (d32, v16) are the ones the record already mapped in full
   (d32: dense GEMMs free +1.0% ceiling (proj n5s14), experts at stream rate; v16: twm consumer, nvjet T=128).
 => Nothing to build. Own list still empty.
+
+## x26 (2026-10-31 19:26Z-19:40Z): own pick, TUNER-PICK NOISE audit (paper, 39 judge logs in ~/r-layer/.../profiles/*.log; 0 judge, 0 Modal, 0 GPU)
+Question: does the prepare()-time tuner's choice add variance to judge runs / final reruns? Per (T, layout), the tuner's best
+candidate vs default (its own synthetic timing): median 0.0 (T=1/8), 0.7-1.2 (T=16), 0.3 (T=32), 0.4-0.5 (T=128), 0.6-0.7 (T=256) us;
+max 1.4-3.0 (T<=16), 6.6-10.6 (T=32/128/256, single logs, mostly with a 'confirm' line that re-times default within ~1 us).
+So the candidates are near-ties and a wrong pick costs ~<= 1 us typical: not a variance source worth pinning (<= 0.1%). CLOSED.

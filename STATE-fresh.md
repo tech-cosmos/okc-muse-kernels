@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## x26 (2026-10-31 19:26Z-19:40Z): tuner-pick noise audit (39 judge logs): candidates are near-ties (median gain vs default 0-1.2 us),
+  so wrong picks cost <= ~1 us typical: CLOSED. 0 judge, 0 Modal, 0 GPU. Next as x25's Next (unchanged).
 ## x25 (2026-10-31 19:07Z-19:15Z): own pick, paper only (0 judge, 0 Modal, 0 GPU). FRESH.md x25. Nothing to build.
   PDL per-kernel rows can't be compared across teams (x24's "their d32 MoE 85 vs our 95+14" is wrong: moe_fused d32 sl is 86-100
   vs our tk2f 64.8). Attention-board #1's lead is probably sliding batch-1 latency; in the layer, the free-oracle cap is
