@@ -65,7 +65,10 @@ ROUTER_F32 = [(1, (1, 2, 512)), (8, (8, 2, 512))]
 # (dev/r3.py): m9-16 6.9 (g7 8.5-8.9), m32 7.2-7.7 (g7 10.3), m128 9.6-10.9 (cuBLAS 3 kernels 12.2-12.6); m256 ties cuBLAS.
 ROUTER_R3 = [(32, (16, 64, 1, 4, 256, 4)), (128, (128, 64, 4, 4, 256, 4))]
 # router3 configs that prepare() times against the cuBLAS path per m (H100 m256: 12.9 vs 12.5-13.4, a tie).
-ROUTER_R3_TUNE = {256: [(256, 32, 4, 2, 512, 4), (256, 64, 4, 2, 256, 4)]}
+ROUTER_R3_TUNE = {256: [(256, 32, 4, 2, 512, 4), (256, 64, 4, 2, 256, 4)],
+                  # n17: H100 dev/n16/r3b.py m32 (32,32,2,2,256,4) 7.17-7.74 vs default 7.17-7.97 (GPU-shared noise +-0.5): let the
+                  # judge's GPU pick (MT 32 reads W once at m32; NT 32 = 2x the CTAs at m16)
+                  16: [(16, 32, 1, 2, 256, 4), (16, 32, 1, 2, 128, 4)], 32: [(32, 32, 2, 2, 256, 4), (32, 64, 1, 4, 256, 4)]}
 # n16: router m >= 128 as one strided-batched cuBLAS GEMM over S K-slices (N = 512 = [hi; lo], FP32 out) + pj_rsum
 # (sums slices and halves). H100 (dev/n16/bmm.py): m256 S4 11.1-11.4 vs 13.5-13.6 (torch.mm + add) / router3 13.6;
 # m128 S4/S8 10.2-10.3 vs router3 10.4. Candidates ("bmm", S) in _tune_router, picked on the judge's GPU.
