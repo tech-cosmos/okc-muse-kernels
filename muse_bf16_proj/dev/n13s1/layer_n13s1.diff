@@ -1,0 +1,19 @@
+1044a1045,1046
+> PR1_L1 = int(__import__("os").environ.get("PR1_L1", "0"))
+> PR1_MIX = 0  # n13s1 MIX (TUNE option "pr1_mix" = mpf + 0 off): every block 1 router group of 2 rows + pooler rows over all 528 vgroups  # n13s1 BAL: pooler rounds over all vgroups incl. the router blocks' (0 = off); TUNE option "pr1_l1"
+1278c1280
+<                 src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
+---
+>                 src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)} | {(*v[:2], v[2], 2) for v in PR1_CFG.values()})))
+4078a4081
+>             mix = int(_opt(state, tokens, "pr1_mix", PR1_MIX))  # n13s1 MIX: value = L2-prefetched first pooler chunks per vgroup
+4082,4083c4085,4086
+<                                    PR1_CFG[tokens][3], _opt(state, tokens, "pr1_rb", PR1_CFG[tokens][4]),
+<                                    PR1_CFG[tokens][5], _opt(state, tokens, "pr1_npf", PR1_CFG[tokens][6]), 1,
+---
+>                                    *((2, 0) if mix else (PR1_CFG[tokens][3], _opt(state, tokens, "pr1_rb", PR1_CFG[tokens][4]))),
+>                                    PR1_CFG[tokens][5], mix << 8 if mix else _opt(state, tokens, "pr1_npf", PR1_CFG[tokens][6]) | _opt(state, tokens, "pr1_l1", PR1_L1) << 16, 1,
+4085c4088
+<                                    + ([state["idf"]] if idf else []), POST_NORM_EPS, RMS_EPS)
+---
+>                                    + ([state["idf"]] if idf else []) + ([state["pr1_dbg"]] if "pr1_dbg" in state else []), POST_NORM_EPS, RMS_EPS)

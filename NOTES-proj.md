@@ -2882,3 +2882,37 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 ## n9s5 (2026-10-30 02:57-03:00Z): idle stop
 - No lead decision for proj after 02:30Z/02:45Z; (a) closed in n9s3, so the lead's rule says pause. layer n10s2 and moe n10s2 also stopped idle.
   Nothing built, 0 judge runs, 0 Modal. proj can lend layer check budget or take a new lane.
+
+## n13s1 (2026-10-31 09:47-10:50Z, session 1 of the 10-31 restart): lead 09:55Z PROJ = d1 POOLER+ROUTER (pr1) oracle + builds
+- Tools (muse_bf16_proj/dev/n13s1): orc.py (pr1 oracle variants of a layer submission: nomath/flat/nopool/norout + sub_rt =
+  flat by env PR1_FLAT at capture), tl13.py / tl13b.py (ONE prepare, many pr1 variants = state['tune'] overrides per captured
+  graph, alternating cold-L2 profiled replays; pr1 end + graph end; VARJ env = json variant list), stamps.py (per-block
+  %globaltimer stamps, needs the dbg build), pr1_src.cu (dev copy: BAL / MIX / RPRE + oracle bits), layer_n13s1.diff
+  (layer.py wiring in a /tmp copy: pr1_l1 / pr1_mix options, pr1_dbg stamps). NOTHING handed off; layer dir untouched.
+- ORACLES (us, pr1 end vs base, d1 sl / full; same process; H200 = Modal, 4 runs):
+  H100: flat (132 blocks grid-stride read of the same 58.9 MB, no math) -1.6..-2.0 / -1.7..-3.0; nomath -1.25 / -0.7;
+        router only 10.2 post-bnd, pooler only 17.4 (H100 pooler is HBM-bound: it can't rank pooler changes)
+  H200: base pr1 15.2-16.4 us post-boundary; flat 12.6-13.1 (= 4.5 TB/s); flat -2.6..-3.5 / -2.0..-4.0;
+        nomath (same loads, xor instead of decode+FMA) -1.15 / -2.24. => GATE (>= 1 us d1 sl) HOLDS as an oracle;
+        ~1/3-1/2 is decode compute, the rest structure (100 pooler SMs vs 132, 10 vs 11 rows per vgroup, routing tail).
+- H200 stamps (base): router loop done ~6 us, routing (last router block, 1 warp) done ~12.8, pooler vgroups end 14.8-16.9
+  (~1.3 us per 12 KB row per vgroup; 96 of 400 vgroups do 11 rows, the rest 10). H100: routing done ~16-21 (top-8 ~3 us of
+  it; stamps inside the routing warp are not trustworthy, e.g. 12 us between two adjacent stamps).
+- BUILT + MEASURED, all exact (sliding bitwise = main on 4 seeds; full differs only by the known FP32-atomics nondeterminism,
+  main vs main differs too), bench test 13/13 for BAL:
+  * BAL (pr1_l1 = L1): the first L1 x 528 rows round-robin over EVERY vgroup (router blocks after their router role), the rest
+    over the pooler vgroups, vgroup order vg*blocks+block. H100 +1.6 us per L1 round (the last router block's pooler waits for
+    its routing warp at the xs __syncthreads). H200 L1 1/2: -0.38/-0.60 sl pr1 end, graph end -0.16/-0.37 (full not measured:
+    script IndexError). Below the bar; NOT a handoff (<= ~0.05% score).
+  * MIX (every block 1 two-row router group + pooler rows over all 528 vgroups): H100 +19 us (router and pooler parts serialize
+    per block; routing in a pooler block). DEAD.
+  * RPRE (bias + local_start into smem before the wait): H100 tie, H200 tie (routing is not critical on the H200). DEAD.
+  * existing TUNE knobs on the H200 (pr1_pf 2, pr1_rb 22/26/29/36, pr1_npf 1/2, pf2+rb): all within -0.6..+1.6 (noise ~0.5);
+    none qualifies; the layer tuner has no T=1 pr1 options, correctly.
+- Reading: the reachable part needs BOTH the decode issue cost (nomath bound 1.15 sl) and the structural part; the structural
+  part is blocked by the routing tail (it delays any work given to router blocks) and the per-vgroup row chain (pf2 does not
+  help on the H200, so it is not plain latency). A full rewrite (all 132 SMs streaming, routing on a dedicated finisher)
+  would be the next try; record says dedicated finisher blocks/chains cost ~3-4 us per dependent round trip under load.
+- Side finding: the layer's eager outputs at d1 FULL are not bitwise run-to-run (main vs main; same seeds repeat), = the known
+  FP32-atomics nondeterminism (NOTES-layer), not pr1.
+- 0 judge runs. Modal 11.8 GPU-min (5 runs, 2.2-2.5 each; ledger 27/60 shared).
