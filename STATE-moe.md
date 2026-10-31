@@ -1,3 +1,6 @@
+## o12 15:40Z 10-31: main 7139706 = c75be69 + moe_hot HOT_XN 16 (layer v172), bitwise, test 15/15. check 2ba95722 2.3265x
+## (bs256 x2.728 vs 2.683 twice before = real; others slow draws). NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 7139706 once
+## (moe board cap resets; beats 2.3198). Then: HOT_ET port (race-safe form) is the last unported layer moe piece.
 ## o11 10-31: moe board = layer moe_hot hotdyn+HOT128 (HOT_M {128: 16048, 256: 3216064}) + bs32 tk2h W3 (TK2H_M {32: 3}) on main c75be69,
 ## bitwise, test 15/15. Checks e59302f4 2.3275 (hotdyn only) / b4e94b61 2.3323; submit 41ad7717 drew 2.3124 -> board stays 2.3198 (e37e578e).
 ## moe board 10-31: 4 checks (1 DIAG), 2 submits = lead's 2/agent/day cap reached. Do NOT resubmit c75be69 unchanged.

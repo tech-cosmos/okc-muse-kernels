@@ -3845,3 +3845,14 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   bs256 230.3. Board keeps 2.3198 (e37e578e); no resubmit. Moe board 10-31: 4 checks, 2 submits (cap reached for today).
 - Takeaway: hotdyn+HOT128 at bs128 is the real gain (+1.2..2.4% on that shape in both checks); the ~0.5% overall win is inside
   the run-to-run noise of the other shapes (bs16 swings 87-94 us between runs of untouched code).
+
+## o12 (2026-10-31 14:52Z - 15:40Z): moe board: layer HOT_XN 16 ported into moe_hot; 1 check, 0 submits (cap 2/2 used today)
+- Unported layer piece #2 (after o11's hotdyn): HOT_XN 16 (fresh f1s6, layer v172): moe_hot NH 128 items run wgmma N = nv rounded
+  up to 16 (80/96/112/128); x box stays 128 rows, rows >= nv never stored -> exact. Runtime A/B switch: hot grid + 1e8 = XN off
+  (passed to the kernel as per bit 30). main 7139706.
+- Bitwise vs N128 (tools/o11/hot.py, 16 seeds bs256 + 16 seeds bs128, assert torch.equal), test 15/15.
+  H100: bs256 xn 271.70 / off 272.14 (hot seeds -0.9), bs128 240.91 / 240.48 = tie (H100 DRAM-bound, as n5s21).
+- check 2ba95722 (7139706) 2.3265x (CI 2.292-2.361): bs1 25.8, bs16 89.6, bs32 118.3, bs8 68.6, bs128 197.3 (x2.406),
+  bs256 234.8 (x2.728 vs x2.683 in both e59302f4 and b4e94b61 = +1.7% on the shape, matches H200 exact-N n5s21 -2.3 us).
+  Untouched shapes drew slow (bs8 x2.204 vs 2.225). SUBMIT CANDIDATE for 11-01 after 00:00Z (beats board 2.3198 already).
+- HOT_ET (layer v171, ~1 us no-hot cost at bs128) still NOT ported: o11's theoretical meta[67] race note.
