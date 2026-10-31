@@ -3201,3 +3201,26 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - NEXT: 00:00Z H200 queue: dev/n24/mk_h200.sh (power/clock), then dev/n15/mk_h200.sh. If the H200 shows SW power cap at T=256
   full: tell the lead (ranking uses medians of reruns: a power-throttled T=256 is a lever for energy cuts, e.g. nanosleep in
   mbarrier spin loops).
+
+## n25 (2026-10-31 18:20Z-, unattended session 13): H200 power-cap test (n24 queue item, run early on today's spare Modal), 0 judge runs
+- No new lead line for proj; proj-board items all closed on record (n16-n19). Today's shared Modal had ~11 min unused (49/60),
+  so ran dev/n24/mk_h200.sh now (charged 2.1 GPU-min; 51/60). Layer = r-layer main (v180+), tuner off, 256 MB flush.zero_
+  before each replay (like _tune), nvidia-smi 20 ms.
+- H200 CONFIRMS the power cap: v32 full A (tuner first pass, 3-way x 43) medians 510.2/508.7/508.4 -> B (confirm, 2-way x 40)
+  531.0/530.8 (+4.3%), C (2400 replays, 1.5 s) 527-532 per block (one 636 block). smi: power ramps 129 -> ~700 W (cap 700),
+  throttle reasons 0x4 (SW power cap) from ~0.1 s in, SM clock 1980 -> 1680-1845 (dips 1425-1515). The last A block already
+  reads 528: the switch happens ~0.1 s into continuous load. v32 sliding: A 302.6-304.0, B 304.4/306.4, C 303-307, late
+  blocks 312/327 (cap reached later, smaller effect: sliding is more memory-bound / lower power).
+  => explains the n24 'confirm +10..20 us at T=256 full' in 25/25 judge tuner logs (the tuner's own replays heat the GPU).
+- Does it reach the SCORE? Judge record (layer check 36474b5e, okc status --json): each scored shape = 20 single replays (60 at
+  d1), each preceded by a ~298 us gate kernel and interleaved with SGLang's baseline replay (paired ratios); judge v32 full
+  median 498.5 us is AT/BELOW the unthrottled first pass, and n24 found no first-vs-last-third drift in 12 scored series. So the
+  scored regime is short bursts with idle/gate gaps: ~unthrottled, and any throttle hits ours and SGLang's run of the same pair.
+  The tuner picks are also safe (both candidates of a confirm are timed in the same thermal phase).
+- Verdict: power is real on the H200 for SUSTAINED T=256 full (relevant to the Serving track later: energy per step costs
+  ~4% there; spin-waiting warps/redundant DQ = watts), NOT a kernel-board lever. Item CLOSED. Raw: dev/n25/h200_power.log.
+- dev/n15/mk_h200.sh (pr8 v1 flat/NOW/TK1) did not fit today (3 variants reserve 15 min; 9 left) and its overlay builder
+  broke on current layer main (dev/n13s1/orc8.py anchor '// s36 timing probe' is gone): orc8 now falls back to
+  '__global__ void pred(' (inside namespace pr8). Dry run OK; H100 smoke of the base overlay (R=1, v1): flat vs base
+  K end +1.4 sl / +0.9 full (base2 -0.4/-0.5): flat ~= pr8 on the H100 as in n13s1d. Ready for the 00:00Z run (~15 Modal min).
+- NEXT: 00:00Z: dev/n15/mk_h200.sh (build a pr8 change only if flat <= -1 us v1 sl on the H200). No other open proj item.
