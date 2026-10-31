@@ -3646,3 +3646,19 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   rows ~-1 us per extra group (d16 ~1/call), row-quantization tail bound d16 1.53 / d32 2.21 us/call (rows = 16 output cols x
   full K; only a K-split of last-wave rows can balance it, ~half recoverable = ~0.8 / ~1.1 us; d32 runs tk2h in-layer). Each
   < the 1.5 us d-load gate. Not built.
+
+## o2 (2026-10-31 09:57Z - ~10:35Z): no lead item left (o1 closed both); own-list oracles, all DEAD on record or new data; 0 judge runs, 0 Modal
+- POWER/CLOCK lever (new): twm runs at ~1.79-1.80 GHz effective on the H100 and 1.76-1.79 on the H200 (n9s1 clock64/globaltimer),
+  not 1.98. Is it a power cap that a lower-power dq/MMA would lift? NO: n9s1's H100 counters already have the answer: orc7 (dq AND
+  wgmma both free, consumers waiting on the ring) 1.791-1.805 GHz = base orc0 1.784-1.801 = alias 1.791. The clock does not depend
+  on consumer compute. nvidia-smi during a back-to-back bs256/bs128 loop (tools/o2/pw.py, GPU shared, timing not valid): 600-700 W
+  of the 700 W cap, clocks.sm 1860-1980 with intermittent SW-power-cap (0x4) events. Lever DEAD.
+- GPC-level static imbalance (layer n13s1, H100 unpool: bimodal per-SM stream rate, ~7-8% of stream): for tk2f it is already
+  inside the H200 timeline record (s12 88d201b4 d32: ph1 end min/med/max 49.9/50.7/53.0, end 77.8/80.1/80.9 us) and the n7s41
+  row-quantization tail bound (d16 1.53 / d32 2.21 us/call, ~half reachable). smid-indexed splits are unsafe (a CTA can land on
+  an SM after another finished there) and the GPC map changes per chip (floorsweeping). Not built.
+- twm 'structure' (n9s1: ring wait + between-item + epi ~15% of life at v16/v32): between-item wait is mostly the first item
+  (n7s1/n7s13 gaps 0.4-1.0 us per CTA per call); the rest is the drain (14-24 us v16), whose levers are all on record dead
+  (K halves tie, AUTO halves, quarters/eighths, row-split tails, orders, R1 gate). Nothing new to build.
+- Nothing in the moe lane reaches the lead's gates (>= 1.5 us on a d-load, >= 0.2% score). Ranked leftovers (all below gate):
+  tk2f last-wave K-split of rows d16/d32 (~0.8/1.1 us), twm overhead-instruction trims (<1 us), HOT128 no-hot cost (0.9 us v16, 1/40).

@@ -1,3 +1,5 @@
+## o2 10:35Z 10-31: own-list oracles DEAD: power/clock lever (n9s1: dq+wgmma-free twm clocks 1.80 GHz = base -> clock not compute-set),
+## GPC static imbalance in tk2f (inside n7s41 tail bound <= 2.2 us d32), twm structure (= drain, dead on record). NOTES o2. 0 judge runs, 0 Modal.
 ## o1 10:30Z 10-31: lead 09:55Z PIPE-BALANCED DQ: GATE FAILS by oracle (tools/o1: twm w/o HMUL2 0.87-0.93x = bound; HMUL2->1 IADD
 ## 0.99-1.03x; exact int product >= 3-4 ops/pair -> slower). Next item tk2f d16/d32 rows: H200 record n7s41 says <= ~1 us/item -> not built.
 ## 0 judge runs, 0 Modal. NOTES o1.
