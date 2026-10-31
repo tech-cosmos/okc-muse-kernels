@@ -3638,3 +3638,31 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Verdict: Triton (n30), TileLang and CUTLASS's own sm90 kernels all lose to nvjet at T=128/256 qkv. Only a hand-written
   lockstep-x / 12-bit-W / cluster-reduce kernel (fresh x20) could take the ~2x byte headroom; still the lead's call. 0 runs.
 - Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
+
+## n32 (session 26, 2026-10-31 18:19-18:50Z real UTC): H200 SM-clock DIAG check: the judge's H200 THROTTLES at T=256; 1 check, 0 submits.
+- No lead line after 16:30Z, no new Handoff for layer. Took proj n24's open question (tuner confirm loop at T=256 full is
+  +10..20 us over its own first pass in 25/25 judge logs; H100 repro flat) with one of today's expiring layer checks instead
+  of Modal: DIAG CHECK 2657b536 = v181 (main 38d0c23) + tools/n32/mk_diag.py (tuner only, prepare(); NEVER submit): after the
+  tuner's pick for T=16 sl / T=256 sl / T=256 full, 1500 back-to-back graph replays (flush.zero_ + replay, as the tuner) with
+  an SM-clock probe every 5th (torch.cuda._sleep(400000) cycles / event us), then 0.5 s host rest and 60 more replays.
+  H200 (judge):              idle MHz | us per sixth of the 1500                   | MHz per sixth                 | min
+    T=16 sl  (control)       1926     | 172.0 171.9 172.0 172.1 172.0 172.0          | 1928 1929 1929 1926 1928 1928 | 1912
+    T=256 sl                 1925     | 342.6 346.2 347.4 345.6 345.5 345.2          | 1926 1889 1869 1884 1886 1890 | 1758
+    T=256 full               1914     | 521.0 528.9 529.2 529.6 529.0 577.7          | 1908 1839 1842 1840 1846 1617 | 1397
+    after 0.5 s rest: idle back to 1927-1928 MHz, T=256 sl 341.0 / full 516.2 us (= fresh first-sixth level).
+  H100 (local, same tool): flat at every shape (T=256 full 624 +-1 us, probe 1750 MHz with launch bias): proj's repro holds.
+  So the H200 clocks down within ~0.2 s of sustained T=256 work (power/thermal cap): -2..-4% clock at T=256 sl, -4% then
+  -15% at T=256 full, +1.5% / +11% time. That is proj n24's confirm-loop shift (the confirm runs right after the first pass).
+- Does it touch the score? Judge timing = paired ratios, our replay and SGLang's taking turns on fresh inputs with a cold-L2
+  read between (TASK.md 92-96), so both sides sit in the same cap state and most of it cancels. What is left: (a) our T=256
+  phases are more clock-bound (twm consumer-bound, nvjet near compute) than SGLang's -> a throttle hurts our side more;
+  (b) our own energy per replay feeds the cap both sides see. Ceiling if the scored v32 series runs ~2-4% clock-throttled and
+  half of it hits only us: ~5-10 us v32 sl x 0.033 + ~10 us full x 0.011 = ~0.2-0.4%; realistic energy cuts get a fraction.
+  This check's v32 sl 323.0 / full 494.5 (scored) vs the tuner's fresh 341/516 on synthetic inputs: no direct read of the
+  scored series' clock (would need a probe inside kernel_fn = not allowed). Raw 2.1790 (DIAG code adds nothing to timed calls).
+- Energy levers if the lead wants them (none built): spin-polling secondaries at T=128/256 (HOT_ET twm polling meta[67],
+  PDL secondaries spinning on flags) -> nanosleep backoff; mbarrier try_wait is already a suspend. Measure energy/replay on
+  the H100 (NVML total energy) is polluted by the other agents' GPU use: needs an exclusive window.
+- Side note (proj n24 (2)): T=16 sl {g30n:unpool} wins the first pass here too (171.0 vs 171.7, confirm 171.0 vs 172.1) and
+  locally (217.6 vs 218.8): pin candidate in TUNE_BASE[(16, True)] for a later bundle (~-0.2 us), not put on main now.
+- Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
