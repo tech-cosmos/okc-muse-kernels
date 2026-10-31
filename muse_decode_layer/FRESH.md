@@ -420,3 +420,31 @@ both files, 4/4 runs, checker passes).
 All within the 0-vs-0 spread (<= 1 us). Verdict (5): DEAD.
 ### Sweep summary: all six items dead, none >= 1 us on a d-load: (1) no pipe escapes HGMMA contention, (2) TLB 0, (3) chain
 <= ~1 us + KV order <= ~1 us, (4) DRAM bytes = unique bytes, (5) placement 0, (6) router is real FP32. 0 judge, 0 Modal.
+
+## x8 (2026-10-31): (a) ROUTING-SLACK SIZE ORACLE (lead 09:55Z). Measurement only, NOT in submission.py.
+tools/fresh/slack/slack.py (out: slack_out.txt): reference.py routings, 5 routers (default + the 4 judge-like routers of
+tools/n11/judge_routers.py), 12 scored shapes, 8 input seeds each, local_start from case_fields. Exact search: smallest
+set S of local experts such that every token can pick 8 distinct experts within ROUTE_TOL (0.05) of its 8th best, keeps
+every local ref-top-8 expert whose margin over the 9th > KEEP_TOL (0.03 at <= 256 tokens), local routes >= 0.92 r - 4,
+distinct >= 0.85 d - 2. (Search capped at 2M sets per size: if hit, the minimum is overestimated, i.e. conservative.)
+```
+load    ref distinct  min distinct  saved   us @6.5/expert   (mean over 5 routers x 8 inputs)
+d1 sl      2.42          1.45        0.97      6.3
+d1 fu      2.55          1.50        1.05      6.8
+d16 sl     7.92          6.05        1.88     12.2
+d16 fu     7.58          5.62        1.95     12.7
+d32 sl     8.75          6.67        2.08     13.5
+d32 fu     8.80          7.08        1.73     11.2
+v1 sl      7.50          5.33        2.17     14.1
+v1 fu      7.47          5.53        1.95     12.7
+v16 sl    19.00         15.20        3.80     24.7
+v16 fu    18.65         15.30        3.35     21.8
+v32 sl    21.55         17.50        4.05     26.3
+v32 fu    21.40         17.62        3.77     24.5
+```
+- Binding constraint = KEEP_TOL (the must-keep set): min distinct is on average 0.36 above |must-keep|, 1.3 above the
+  distinct floor. So the slack is "drop the local experts that beat the 9th by <= 0.03 and swap in a near-tie".
+- Implied at 6.5 us/expert on our H200 per-shape times (n11 table): load x1.099 d1, 1.095 d16, 1.072 d32, 1.142 v1,
+  1.096 v16, 1.077 v32; geomean x1.096 (2.14 -> ~2.35). Upper-ish bound: at v16/v32 the dropped experts' routes move
+  to hot experts (more MMA), and 6.5 us/expert is the d1 bytes cost. Still: it is the size of the gap to #1 (2.42/2.14 =
+  1.13), so top teams exploiting it would explain much of their lead. Item closed per lead (table, then stop).
