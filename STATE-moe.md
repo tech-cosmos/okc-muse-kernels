@@ -1,3 +1,8 @@
+## o5 11:30Z 10-31: lead 10:25Z ROUTING-SLACK BUILD PREPARED: branch moe/slack 894de97 (slack_src.cu + _slack at all routing sites,
+## OFF by default). Greedy = fresh's exact min on 12/12 loads with reference scores, BUT the layer's keys carry FP8-query noise
+## (keep-lead std 0.0048, max 0.019 = E4M3-ref vs FP32) -> safe margins leave ~1 expert v16/v32, ~0 d1/d16/v1. H100: 0 fails/192
+## inputs; A/B vs main v16 +6.4/+1.6, v32 +4.8/+8.9 us = NET LOSS (kernel 4.4/8.7 us + lost PDL). x1.096 needs reference-exact
+## scores; usable slack for us ~0.1-0.3 % even fused. Next if wanted: fuse phase A into _routing + B/C in its last program. 0 judge runs.
 ## o4 10:30Z 10-31: no moe item >= gate left (o1-o3 closed lead 09:55Z items + own list). New angle checked on paper: x1's acc-read
 ## wall is per weight-token (BF16 wgmma k16 fixed: one FP32 acc read per token per 16 K for any M/N/RS/SS shape; k32 = FP8 x = illegal),
 ## so no tile shape escapes it. Sub-gate leftovers unchanged (tk2f last-wave K-split ~0.8/1.1 us d16/d32; twm instr trims <1; HOT128 0.9 v16).

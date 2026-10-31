@@ -3293,3 +3293,19 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - fresh x8 slack_out.txt: d1 local experts 2.6 -> 1.75 (6.3 us/expert of tk2f bytes): slack ~-5 us d1 sl (~0.9%); x1.096
   overall = 2.365 = #6-#9. moe board (routes given) #1 is still 1.18x ahead of us: part of the gap is a legal faster expert kernel.
 - Offered moe (COORD Requests) the layer-owned selection sites for moe/slack: T=1 pr1 + _router_fma, T=8 r3/pr8, T>8 _routing/rg.
+
+## n13s5 2026-10-31 10:43Z-: merged fresh x8 Handoff ceb86cf as main v174 (c62cdb0); 1 check + 1 submit -> NEW BOARD BEST 2.1717x.
+- v174 = v173 + fresh's 3 edits (pr1 router bias/local_start into smem before griddepcontrol.wait, bitwise; IDF_DEFAULT True;
+  n2u IDF routing loads plain after the wait). Reviewed: smem bias read is behind the ticket __syncthreads; block T=1024 > E.
+  submission.py from build.py == r-fresh's byte for byte.
+- H100: bench test 13/13; replay_test d1/v1 seeds 11,23,57 x 40 = 0 fails; ab_files 6 rounds "decode 1": sl 86.16 -> 84.58,
+  full 106.28 -> 104.15 us.
+- check 2d1f9256: 2.1514 own-run, fixed-SGLang 2.1650 (tools/fixed_sglang_score.py, now incl. 8b4e6cf7 v172 check = 2.1597 and
+  ae6c4bd3; profiles copied from r-fresh). d1 66.7/74.3 (v172 67.8/75.1).
+- submit 50534b24: **2.1717x** [2.139, 2.204] (d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7,
+  v32 313.9/486.9). Board best (was 3e3b9fd3 2.1580). Submits today: 1 of the lead's 2/agent.
+- v1 sanity (judge v1 sl 111.6-112.1 vs v172 108.4): pr8 is separate code (pr1_src.cu's router<> serves T=1 only); H100
+  ab_files 4 rounds "verify 1": sl 142.2 -> 141.1, full 155.6 -> 156.0 = tie -> judge noise.
+- Next for layer: no open layer item >= gate (n13s1-s4). Bundle candidates on record, all < gate: proj n13s1 BAL (H200 -0.4/-0.6
+  d1 sl but H100 +1.6), moe tk2f last-wave K-split (~0.8/1.1 us d16/d32, not built). The routing-slack ruling (fresh x8, moe/slack
+  branch) is the biggest open item; moe/slack should rebase onto v174 (c62cdb0) before any check.

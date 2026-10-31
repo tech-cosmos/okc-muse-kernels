@@ -1,7 +1,10 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
-BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
+BOARD BEST = submit 50534b24 = v174 (c62cdb0), **2.1717x**, #198 (n13s5, 10-31; d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7, v32 313.9/486.9; check 2d1f9256 2.1514 / fixed-SGLang 2.1650).
+Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n13s5 (10-31 10:43Z): main = v174 = v173 + fresh x8 ceb86cf (pr1 bias/ls hoist + IDF on at T=1); H100 d1 -1.6/-2.1 us; 13/13,
+  replay 0/480; check 2d1f9256 2.1514 (fixed-SGLang 2.1650 > v172 2.1597) -> submit 50534b24 2.1717 = board best.
 n13s4 (10-31 10:45Z): no gate item; board analysis (COORD Results): slack x1.096 ~ #6-#9, moe-board gap 1.18x = faster legal experts exist.
   Offered moe the layer-owned selection sites for moe/slack (T=1 pr1/_router_fma, T=8 r3/pr8, T>8 _routing/rg). 0 runs.
 n13s3 (10-31 10:40Z): lead 09:55Z item 2 MEASURED (tools/n13/orc_nobnd.py + tlmed.py, H100): free first boundary saves d1 sl
