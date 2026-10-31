@@ -3628,3 +3628,21 @@ Idle stop: no lead decision after 02:45Z; END lane closed n10s1. 0 judge runs, 0
 
 ## n11c 2026-10-30T04:36Z idle stop
 No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Modal.
+
+## o1 (2026-10-31 09:47Z - ~10:30Z): lead 09:55Z PIPE-BALANCED DQ in twm: GATE FAILS (oracle); next item (tk2f d16/d32 rows) gated out on the H200 record; 0 judge runs, 0 Modal
+- Oracle tools/o1/ovl9.py (= n11a ovl8 + roles NOH: dq without the 4 HMUL2, masked codes go straight into the RS wgmma = the speed
+  bound of ANY scale-step replacement; IAD: each HMUL2 -> one IADD = a 1-int-op-per-pair replacement; both wrong values, timing only).
+  H100, 2 consumer WGs, cyc/stage (RESULTS.txt): NOH 0.865-0.887x at RT4 N8-32, 0.903-0.931x at RT2 N40-64; IAD 0.99-1.03x.
+- Reading: next to an accumulating HGMMA an integer op costs what an HMUL2 costs (fresh x5's '4.5x' is a slowdown ratio on HMUL2's
+  2x faster standalone base, not a higher absolute cost: per instruction next to N64 HMUL2 ~5.0 cyc, IMAD 5.0, LOP3/PRMT 4.4,
+  IADD3 4.5). An exact integer product needs >= 3-4 ops per pair: codes 1.5/3/6 times a scale with 3-bit mantissa b renormalize
+  for b >= 3 ((1 + 1/2)(1 + b/8) >= 2), code 0 needs its own zero, the sign needs placing; additive exponent/mantissa forms need a
+  per-half select (PRMT selector nibbles can't be fed from one stored bit without an op). So any exact form is SLOWER than the
+  4 HMUL2. byte_perm LUT forms (per-scale 8-entry byte tables): ~21 ops per 8 weights (counted) vs 12 today.
+- Real twm SASS (moe_w4a16 lib, moe_twm<8,0,64,0>, 16-HGMMA loop): 284 instr/stage/warp = dq core 192 (LOP3 80, SHF 32, IMAD 16,
+  HMUL2 64) + ~92 other (uniform ~35, LDS 13, scale decode ~20, WARPGROUP 8, sync/branch ~10). Even the 64 HMUL2 free was only
+  v16 -3.1 / v32 -3.4 us in-layer (n5s34 'ors', H100); trimming 10-20 overhead instrs is < 1 us. Not pursued.
+- Next item (lead: tk2f d16/d32 per-row cost): already measured on the H200 (n7s41 fit of DIAG 81391142): ph2 extra 8-token
+  rows ~-1 us per extra group (d16 ~1/call), row-quantization tail bound d16 1.53 / d32 2.21 us/call (rows = 16 output cols x
+  full K; only a K-split of last-wave rows can balance it, ~half recoverable = ~0.8 / ~1.1 us; d32 runs tk2h in-layer). Each
+  < the 1.5 us d-load gate. Not built.

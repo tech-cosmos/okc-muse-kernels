@@ -1,3 +1,6 @@
+## o1 10:30Z 10-31: lead 09:55Z PIPE-BALANCED DQ: GATE FAILS by oracle (tools/o1: twm w/o HMUL2 0.87-0.93x = bound; HMUL2->1 IADD
+## 0.99-1.03x; exact int product >= 3-4 ops/pair -> slower). Next item tk2f d16/d32 rows: H200 record n7s41 says <= ~1 us/item -> not built.
+## 0 judge runs, 0 Modal. NOTES o1.
 ## n11c 04:36Z 10-30 idle: no lead line after 03:50Z; LANE A done (n11a: 'a legal faster design exists'); moe paused. 0 judge runs, 0 Modal.
 ## n11a 04:20Z 10-30: lead 03:50Z LANE A DONE (diag only, NOTES n11a, tools/n11a): leaders' edge is NOT an FP8 shortcut:
 ## n11b 04:25Z 10-30 idle: LANE A done (n11a); no lead line after 03:50Z; moe paused. 0 judge runs, 0 Modal.
