@@ -453,7 +453,7 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     _routing[(tokens,)](part, state["router_bias"], local_start, ids, lids, wts, tokens, E=N_EXPERTS, KS=ks,
                         TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, PDL=rpdl,
                         num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4, launch_pdl=rpdl)
-    _slack(part, ks, tokens * N_EXPERTS, N_EXPERTS, state, local_start, ids, lids, wts, tokens)
+    _slack(part, ks, tokens * N_EXPERTS, N_EXPERTS, state, local_start, ids, lids, wts, tokens, trig)
     return ids, lids, wts
 
 
@@ -967,7 +967,7 @@ def _slack_build():
         _GSLACK["lib"] = load_inline(
             name="layer_slack_" + hashlib.sha256(_GSLACK_SRC.encode()).hexdigest()[:12],
             cpp_sources="void slack_launch(torch::Tensor, int64_t, int64_t, int64_t, torch::Tensor, torch::Tensor, "
-                        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, double, double, double, double, double, double);",
+                        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, double, double, double, double, double, double, int64_t);",
             cuda_sources=_GSLACK_SRC, functions=["slack_launch"],
             extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
     except Exception as e:  # noqa: BLE001
@@ -975,9 +975,10 @@ def _slack_build():
         _GSLACK["lib"] = None
 
 
-def _slack(part, ks, sks, st, state, local_start, ids, lids, wts, tokens):
+def _slack(part, ks, sks, st, state, local_start, ids, lids, wts, tokens, trig=False):
     """Overwrite ids/lids/wts [T, 8] in place with the slack routing (one CTA; reads logits = sum of ks partials
-    part[k * sks + t * st + e]). A plain launch (no PDL, no trigger): every later kernel sees the final routing."""
+    part[k * sks + t * st + e]). A PDL secondary of the routing (griddepcontrol.wait first); triggers its dependents at
+    once iff trig (= the routing's TRIG at this site, so later kernels keep main's PDL edges and read after their wait)."""
     if _SLACK_DBG is not None:  # tools/slack/keyerr.py (eager only): the logits the selection sees
         _SLACK_DBG.append(sum(part.as_strided((tokens, N_EXPERTS), (st, 1), part.storage_offset() + k * sks).float()
                               for k in range(ks)).clone())
@@ -987,7 +988,7 @@ def _slack(part, ks, sks, st, state, local_start, ids, lids, wts, tokens):
     keep = KEEP_TOL[0] if tokens <= KEEP_TOKENS else KEEP_TOL[1]
     lib.slack_launch(part, ks, sks, st, state["router_bias"], local_start, ids, lids, wts, state["slack_scratch"], tokens,
                      ROUTER_MULTIPLIER,
-                     ROUTE_EPS, ROUTE_TOL - SLACK_MR, keep - SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM)
+                     ROUTE_EPS, ROUTE_TOL - SLACK_MR, keep - SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM, int(bool(trig)))
 # proj's gemv19 (g19_src.cu = r-proj dev/gemv19.cu @6996d0c): m = 16/32 GEMM over the 12-bit weights, FP32 out zeroed
 # in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
 # kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
@@ -4110,7 +4111,7 @@ def _kernel_fn(data, state):
         _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
                             E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
                             SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, TRIG=rpdl, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4)
-        _slack(pr[:, D_EXPERT:], 2, N_EXPERTS, D_EXPERT + 2 * N_EXPERTS, state, data["local_start"], ids, lids, wts, tokens)
+        _slack(pr[:, D_EXPERT:], 2, N_EXPERTS, D_EXPERT + 2 * N_EXPERTS, state, data["local_start"], ids, lids, wts, tokens, rpdl)
         bucket = _moe_bucket(state, lids, rpdl) if bkt else None
         if gnorm:
             p = pr[:, :D_EXPERT]
