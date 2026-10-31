@@ -1,4 +1,10 @@
 # STATE-fresh (newest first)
+## x22 (2026-10-31 18:24Z-18:55Z): own pick, x21's last open item: T=128 qkv split-K g30 oracles (H100, 0 judge, 0 Modal). FRESH.md x22.
+  Memory free (no-mem 20.5 = full 21.7 us, cuBLAS 20.6); split-K reduce ~5 us in ANY form (global slabs or DSMEM cluster
+  reduce-scatter: one cross-CTA handshake ~2.2 us); best case ~18.9 -> <= 1.7 us on v16 qkv: DEAD. Dense lane closed (T=128+256).
+## Next (x23): read Human decisions IN FULL. My own list is EMPTY (no item >= 0.5 us left that the record or x1-x22 haven't
+  killed). Act on a lead line naming fresh; else after 00:00Z the remaining H200 A/B (v16 sl / v32) only if layer asks.
+  Checks 10-31: 3 of 6 used; Modal 10-31 16.8/20.
 ## x21 (2026-10-31 17:35Z-18:25Z): own pick, T=256 dense GEMM headroom (H100, 0 judge, 0 Modal). FRESH.md x21, tools/fresh/x21.
   s100 T=256 g30 form (38.9 vs cuBLAS 28.7 us) is NOT memory-bound (no memory at all 37.0): in-loop escape fixup ~5 us, sync skeleton
   ~200 ns/stage, MMA loop 27.4. Pure RS wgmma loop floor 24-25 us (~700 TFLOPS) vs cuBLAS 28.9 -> T=256 dense lane DEAD (<= 3-4 us
@@ -128,13 +134,7 @@
   10-min limit; the layer agent's ab_flag held the GPU lock ~20 min (flock is not FIFO).
 ## Next (x6): paused. Act only on a new lead line naming fresh after 09:10Z; else stop at once.
    Next (x5): same as x3 'Next' (act only on a new lead line naming fresh; else stop at once).
-## x3 (2026-10-30 07:54Z-07:58Z real clock): lead "08:10Z" (ahead of clock) lane rfport (RF read-port hypothesis), Step 1 DONE: NOT CONFIRMED. 0 judge, 0 Modal.
-- tools/fresh/xd/conc4.py (H100, SASS-verified): 112 LOP3/stage next to HGMMA N64: 3 regs 505, 2 regs+imm 500, 1 reg (UR+RZ)
-  497, 3 regs with .reuse 547, 2 regs with .reuse 560 (all 235 alone; N8/N32 same pattern). Slowdown is per instruction,
-  not per register read; reuse slightly worse. Step 2 (dq rewrite for fewer reads) not started. FRESH.md 'x3'.
-- Branch: lead named fresh/rfport, but refs/heads/fresh blocks a `fresh/...` branch name; committed on branch fresh.
-## Next (x4): paused (lane closed by Step 1). Act only on a new lead line naming fresh; else stop at once.
-   Next (x3): same as x1 'Next' (act only on a new lead line naming fresh; else stop at once).
+## x3 (2026-10-30): rfport Step 1 NOT CONFIRMED (cost per ALU instruction, not per register read); FRESH.md x3.
 ## x1 (2026-10-30 07:12Z-07:30Z): lead 07:20Z lane "EXACT new expert-kernel design", session 1. 0 judge, 0 Modal.
 - Merged main v173 (8841e7d) into branch fresh. H100 microbenches tools/fresh/xd/{pipes,conc,conc2,conc3}.py; write-up
   FRESH.md 'x1'. Pipe rates: LOP3/SHF/PRMT 2 cyc (ALU), IMAD 2 (FMA, co-issues with LOP3), HMUL2 ~1, IMAD.WIDE 4.

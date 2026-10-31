@@ -798,3 +798,20 @@ and nvjet's tensor rate equals our best loop. (The H200 has the same tensor rate
 Left open (not measured): T=128 qkv (v16): nvjet ~17-18 us vs ~9 us 12-bit-bytes/~6.6 tensor floors. s101's split-K g30 qkv
 (= cuBLAS 20.8 H100) carried the in-loop escape fixup (~5 us/64 stages here) and the ~200 ns/stage skeleton; a GX-escape (out of
 loop) split-K form is the only untried variant I can name. Gate before building: tt2o-style oracles on s101 (no-fix, no-memory).
+
+## x22 (2026-10-31 18:24Z-18:55Z): own pick (x21's last open item): T=128 qkv split-K g30 oracles, H100, 0 judge, 0 Modal
+tools/fresh/x22/s101o.cu = dev/s101_g30split.cu + oracle defines (O_NOX/O_NOWL no x/W loads, O_NODEC, O_NOFIX, O_NOMMA, O_NOLOOP,
+O_NOEPI = CTAs exit after the WG reduce, O_DSM = split-K reduce-scatter in a (1,S,1) cluster over DSMEM instead of global
+slabs + tickets, O_E 1/2 cut points; O_E 3 and an O_NOWAIT variant HANG: don't use). Run: SRC=tools/fresh/x22/s101o.cu
+PRE="#define O_DSM 1;..." SPLIT=2,3 python dev/s101_g30real.py (qkv_gate 2304x8192, M=128, real weights, 1301 escapes).
+H100 cold-L2 graph us minus empty, cuBLAS 20.3-21.2:
+    split 3: full 21.6-21.8 | no fix 20.3 | no x 21.0 | no W 20.4 | no memory 20.5 | no MMA 20.1 | skeleton (no mem/MMA/dec) 12.7
+             no epilogue 15.95 | + no fix 14.9 | no mem, no epi 15.1 | MMA only, no epi 11.2 (with epi 17.1)
+             skeleton no epi 6.2 | no loop 8.6 | no loop no epi (launch + empty CTAs) 2.75
+    split 2: full 25.6, no epi 20.5; split 1 no epi 35.9 (36 CTAs); split 4 = 144 CTAs (2 waves) 32.3.
+    O_DSM: full split 3 20.9-21.6 (vs 21.8), split 2 24.8-25.1; skeleton no loop 8.0 (slabs 8.6); E1 (tile -> own smem, exit) 4.0,
+           E2 (+ rdy/dne cluster mbarrier handshake, no reads) 6.2 => one cross-CTA handshake ~2.2 us; the DSMEM reads ~1.8.
+=> memory is free (no-mem = full), decode+fix ~4.7 us over the MMA loop, per-stage sync ~3.5, and the split-K reduce costs
+   ~5 us in ANY form (global slabs or DSMEM: it is handshake latency + the slowest split, not bytes). Best case = no-epi 15.95
+   + the cheapest reduce measured (~2.9) ~ 18.9 vs cuBLAS 20.6: <= ~1.7 us on v16 qkv (~0.07% score). DEAD below gate.
+Closes the dense lane on my side for T=128 and T=256 (x21). Agrees with layer n10 (cluster reduce = latency) and n30/n31.
