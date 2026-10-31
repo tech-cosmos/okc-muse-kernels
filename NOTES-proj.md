@@ -3260,3 +3260,13 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Judge: check 798e7fda (d71fa42) 1.3883 [1.368, 1.409] > best 1.3847 -> SUBMIT 813c5e7a 1.3863 [1.366, 1.407] = NEW PROJ BEST
   (marginal, within CI; value is robustness in the held-out reruns). Board #480 (rows shifted). Budget 10-31: proj checks 6/20, scored 2/10.
 - Pitfall: zsh does not word-split `set -- $v`; run env-var loops under bash.
+
+## n28 (2026-10-31 18:53-19:05Z real clock, unattended session 16): no lane; 0 judge runs, 0 Modal
+- Clock note: n26/n27 headers and their COORD lines are ~+20 min ahead of real UTC (okc jobs: check 798e7fda 18:42Z, submit
+  813c5e7a 18:47Z). `okc status` needs the full 16-hex job id (short id -> 'no such job').
+- Per-shape H200 table of submit 813c5e7a (us, ours / SGLang / SoL): biggest gaps vs SoL are the m128/m256 nvjet GEMMs
+  (qkv +7.5/+8.4, pool +6.4/+8.4, unp +5.1/+6.6, router +5.9/+6.3, o +3.1/+4.5) and m<=32 qkv/router (+2..4.4); o is ~6.2-6.6 at
+  every m<=32 = a bare 16.8 MB reader (gemv13/12-bit o dead, s16: k=1024 latency-bound). All on record dead (n9s1-n9s3, n16-n19,
+  n27; layer n30/n31, fresh x21). Nothing to build without a lead call on fresh x20's hand-written lockstep T=128 GEMM.
+- NEXT: 00:00Z dev/n15/mk_h200.sh (pr8 v1 flat/NOW/TK1; build only if flat <= -1 us v1 sl on the H200). Asked lead (COORD
+  Requests) to pause proj until then or name a lane.
