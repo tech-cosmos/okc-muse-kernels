@@ -3675,3 +3675,13 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   the function. Fix = empty asm "+f" fence on each acc register right after the wait. Diagnose: exec the script's SRC into k.cu
   with an explicit instantiation, `nvcc -arch=sm_90a -ptx`, `ptxas` to reproduce, then list non-wgmma PTX lines reading the
   wgmma output registers (python regex over the {..} lists). Also: scale-d as immediate 0 lets ptxas delete dead wgmmas.
+
+## o4 (2026-10-31 10:17Z - ~10:30Z): no item >= gate; paper check of the acc-read wall; 0 judge runs, 0 Modal, no code
+- Lead 09:55Z moe items closed in o1 (pipe-balanced dq 0.87-0.93x bound, exact int forms slower; tk2f rows <= ~1 us/item),
+  own list closed in o2/o3. Checked one more angle from fresh x1 (dq||HGMMA wall = FP32 accumulator reads, scale-d 0 relieves):
+  the acc read is per weight-token: a BF16 wgmma consumes k16 per instruction whatever M/N/RS/SS, so every token routed to an
+  expert costs one FP32 acc read per 16 K per weight row; N8 vs N64 only changes the per-instruction batch (x1: per-token
+  slowdown N8 ~9.9 cyc vs N64 ~4.3 cyc per stage, twm already picks N to the token count). Halving it needs k32 = FP8 operands
+  (activations FP8 = illegal, n11a) or promotion (o3: dead). No tile shape or pipe mix escapes it -> nothing to oracle.
+- Remaining sub-gate leftovers (not built per lead gate): tk2f last-wave K-split d16/d32 ~0.8/1.1 us, twm overhead instr <1 us,
+  HOT128 no-hot 0.9 us v16. The only lever on record of gate size is fresh x8's routing slack (x1.096), pending the organizers.

@@ -1,3 +1,7 @@
+## o4 10:30Z 10-31: no moe item >= gate left (o1-o3 closed lead 09:55Z items + own list). New angle checked on paper: x1's acc-read
+## wall is per weight-token (BF16 wgmma k16 fixed: one FP32 acc read per token per 16 K for any M/N/RS/SS shape; k32 = FP8 x = illegal),
+## so no tile shape escapes it. Sub-gate leftovers unchanged (tk2f last-wave K-split ~0.8/1.1 us d16/d32; twm instr trims <1; HOT128 0.9 v16).
+## Largest open lever = routing-slack ruling (fresh x8, x1.096) -> human/organizers. 0 judge runs, 0 Modal.
 ## o3 10:50Z 10-31: own item SCALE-D-0 PROMOTION in twm (wgmma scale-d 0 per k16 + FP32 FFMA block scale, from fresh x1): DEAD
 ## by H100 oracle (tools/o3): bound w/o promotion 0.81-0.86x, promotion ALU (N/2 FFMA/tile/k16) 1.25-1.8x even ideal; ptxas C7514
 ## trap documented (NOTES o3). Nothing in the moe lane >= gate. 0 judge runs, 0 Modal.
