@@ -3584,3 +3584,6 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Accident: `rm -rf profiles` in the repo root deleted the gitignored ~/r-layer/profiles (old layer judge JSONs from sessions run
   from the root). Restored 16 layer jobs via `okc status <job> --json` (it writes ./profiles/<id>.{json,txt} as a side effect;
   non-layer ones removed). okc check run from muse_decode_layer/ writes muse_decode_layer/profiles/ (42 jobs, untouched).
+- Own H100 A/B (proj dev/n22/ab_multi.py, tuner off, routers 17,12 = dominant-expert x 4 inputs, verify 32; log
+  tools/n27/ab_il2.log): vs v180s base, v181 sl -1.99 / full -3.22 us (8/8 faster each), A/A copy of the base -0.60 / -1.98
+  (6/8) -> HOT_IL net ~-1.4 sl / -1.2 full us on dominant-expert inputs, in line with proj n22. Session ends; 9 layer checks left 10-31.
