@@ -3509,3 +3509,18 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   Pinned-tuner rule (fresh x14 lesson) applies to every future whole-file A/B.
 - Side note for proj's variance audit: v1 full spreads 128.7 (s7) vs 155.6 us (s13) by routing seed alone on the H100.
 - Nothing to build; next is still fresh's post-00:00Z Modal H200 A/B v176 vs v177 (d32 sl/full, v16 sl, d16 full).
+
+## n24s1 (2026-10-31 16:00-16:05Z, sandbox clock): v1 (T=8) per-seed spread = distinct local experts, no slow mode; 0 judge runs, 0 Modal.
+- Own item from n23s1 (v1 full 128.7 vs 155.6 us by seed). tools/n24/seedspread.py (one process, one prepare = pinned tuner,
+  3 rounds x 40 cold replays) on main v177, seeds 1-24, H100. Time is a step function of distinct local experts:
+  v1 sl (ref-distinct tiers) 4:104 | 5:115 | 6:122 | 7:132.5 | 8:141.3 | 9:150.3 | 10:162 us; v1 full 5:119-129 | 6:137 | 7:147 |
+  8:157 | 9:166.5 | 10:176 us. ~9.5-10 us per expert on the H100 = 28.3 MB at ~2.9-3.0 TB/s (stream rate).
+- Seeds one step off their ref tier (sl s19/s8/s2/s10, full s15/s20/s21/s13/s24/s7) are explained by the LAYER's own topk_ids
+  (tools/n24/layer_distinct.py): the layer's distinct count differs from the reference's by +-1 (legal router-logit near-ties;
+  usually LOWER, because local_start is the reference's busiest 32-range, so perturbations regress to the mean). On the
+  layer's own count every seed sits on its tier.
+- tools/n13/tlmed.py (now takes SEED=) v1 full s15/s10/s5: only moe_tk2f moves (75.1 / 93.9 / 105.4 us); all other kernels
+  within ~2 us (g14 qkv 14, attn 14-15, g30 o 11-13, bnd 12, pr8 32, rmsnorm 23, nu8 10-13, bnd2 9.5). tk2f fixed part ~5 us.
+- Verdict: v1's routing-seed variance is inherent byte cost (SGLang streams the same experts); unlike proj n20's T=256
+  >128-token mode there is nothing to fix at T=8. Bonus for proj's audit: v16 seeds 1-16 also track distinct (sl 15:279 ..
+  21:311, full 14:378 .. 21:449), ~5-6 us/expert at T=128, no outlier beyond +-1 tier.
