@@ -15253,19 +15253,22 @@ PR1_BND = False
 G13_ESC = 8
 def _compress(w):
     """Lossless 12-bit BF16 (gemv13/gemv14): sign|mantissa byte and 4-bit exponent code c = e - base per weight
-    (base = max exponent - 15; decoded exponent 112 | c, so sums are rescaled by scale = 2^(base - 112)); weights below
-    the window (zeros, tiny values) are escapes: code 0, byte 0 (decodes to 2^(base - 127)) plus a per-row header of
+    (base = max exponent - 15 or - 16, fewest escapes; decoded exponent 112 | c, so sums are rescaled by scale = 2^(base - 112)); weights outside
+    the window (zeros, tiny values, a top outlier at base - 16) are escapes: code 0, byte 0 (decodes to 2^(base - 127)) plus a per-row header of
     G13_ESC (col, true / scale) entries (exact; kernels subtract 2^-15 = 2^(base - 127) / scale). None if a row has more than G13_ESC escapes."""
     n, k = w.shape
     b = w.contiguous().view(torch.int16).int() & 0xFFFF
     e = (b >> 7) & 0xFF
-    base = int(e.max()) - 15
-    if base < 1:
+    best = None
+    for base in (int(e.max()) - 15, int(e.max()) - 16):
+        code = e - base
+        esc = (code < 0) | (code > 15)
+        nr = esc.sum(1)
+        if base >= 1 and int(nr.max()) <= G13_ESC and (best is None or int(nr.sum()) < best[0]):
+            best = (int(nr.sum()), base, code, esc)
+    if best is None:
         return None
-    code = e - base
-    esc = code < 0
-    if int(esc.sum(1).max()) > G13_ESC:
-        return None
+    _, base, code, esc = best
     code = torch.where(esc, 0, code)
     sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F))
     scale = 2.0 ** (base - 112)
