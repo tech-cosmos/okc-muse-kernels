@@ -2252,6 +2252,7 @@ void n2u_launch(torch::Tensor y32, torch::Tensor inv, torch::Tensor ids, torch::
 #ifndef NU8_PF
 #define NU8_PF 1
 #endif
+template <int N> struct O42IC { static constexpr int v = N; };
 namespace nu8 {
 // s26 NU8 (T = 8): moe_norm3 (y32 rows = route slots, pre-scaled; per-slot sums of squares at y32 row 64 from moe_tk2f
 // PF 20) + the unpool slice (1024 x 4096 BF16) split over k. Block (rg, kc): rows rg * 64.. x k kc * 512..: the W tile
@@ -2349,24 +2350,38 @@ __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const in
         for (int n = 0; n < 8; ++n) c[n][0] = c[n][1] = c[n][2] = c[n][3] = 0.f;
         const __nv_bfloat16* wa = sw + (mt * 16 + g) * LD + kq * (KB / 4) + 2 * tq;
         const float* yb = ys + g * YS + kq * (KB / 4) + 2 * tq;
+        auto mmq = [&](auto ntc) {  // moe o42 mmq: nt as a template constant (no runtime n < nt guards; same order)
+            constexpr int NTC = decltype(ntc)::v;
 #pragma unroll
-        for (int ks = 0; ks < KB / 64; ++ks) {
-            const int o = ks * 16;
-            const unsigned a0 = *reinterpret_cast<const unsigned*>(wa + o), a1 = *reinterpret_cast<const unsigned*>(wa + 8 * LD + o);
-            const unsigned a2 = *reinterpret_cast<const unsigned*>(wa + o + 8), a3 = *reinterpret_cast<const unsigned*>(wa + 8 * LD + o + 8);
+            for (int ks = 0; ks < KB / 64; ++ks) {
+                const int o = ks * 16;
+                const unsigned a0 = *reinterpret_cast<const unsigned*>(wa + o), a1 = *reinterpret_cast<const unsigned*>(wa + 8 * LD + o);
+                const unsigned a2 = *reinterpret_cast<const unsigned*>(wa + o + 8), a3 = *reinterpret_cast<const unsigned*>(wa + 8 * LD + o + 8);
 #pragma unroll
-            for (int n = 0; n < 8; ++n) {
-                if (n < nt) {
-                    const bool ok = n * 8 + g < nl;
-                    const float2 p0 = *reinterpret_cast<const float2*>(yb + n * 8 * YS + o);
-                    const float2 p1 = *reinterpret_cast<const float2*>(yb + n * 8 * YS + o + 8);
-                    __nv_bfloat162 q0 = __floats2bfloat162_rn(p0.x, p0.y), q1 = __floats2bfloat162_rn(p1.x, p1.y);
-                    const unsigned b0 = ok ? *reinterpret_cast<unsigned*>(&q0) : 0u, b1 = ok ? *reinterpret_cast<unsigned*>(&q1) : 0u;
-                    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
-                                 : "+f"(c[n][0]), "+f"(c[n][1]), "+f"(c[n][2]), "+f"(c[n][3])
-                                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+                for (int n = 0; n < 8; ++n) {
+                    if (n < NTC) {
+                        const bool ok = n * 8 + g < nl;
+                        const float2 p0 = *reinterpret_cast<const float2*>(yb + n * 8 * YS + o);
+                        const float2 p1 = *reinterpret_cast<const float2*>(yb + n * 8 * YS + o + 8);
+                        __nv_bfloat162 q0 = __floats2bfloat162_rn(p0.x, p0.y), q1 = __floats2bfloat162_rn(p1.x, p1.y);
+                        const unsigned b0 = ok ? *reinterpret_cast<unsigned*>(&q0) : 0u, b1 = ok ? *reinterpret_cast<unsigned*>(&q1) : 0u;
+                        asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                                     : "+f"(c[n][0]), "+f"(c[n][1]), "+f"(c[n][2]), "+f"(c[n][3])
+                                     : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+                    }
                 }
             }
+        };
+        switch (nt) {
+            case 1: mmq(O42IC<1>{}); break;
+            case 2: mmq(O42IC<2>{}); break;
+            case 3: mmq(O42IC<3>{}); break;
+            case 4: mmq(O42IC<4>{}); break;
+            case 5: mmq(O42IC<5>{}); break;
+            case 6: mmq(O42IC<6>{}); break;
+            case 7: mmq(O42IC<7>{}); break;
+            case 8: mmq(O42IC<8>{}); break;
+            default: break;
         }
         __syncthreads();  // ys consumed: reuse as red [4 quarters][64 slots][64 rows]
         float* red = ys;
