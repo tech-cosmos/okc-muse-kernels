@@ -3815,7 +3815,7 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   the LATE trigger wins (n5s19's +3.4 us loss was the entry trigger). Layer may want the same late-trigger idea where a
   PDL secondary follows tk2f.
 
-## o11 (2026-10-31 14:17Z - ): moe board: layer's moe_hot hotdyn + HOT128 ported; check e59302f4 2.3275x; CW (lead 14:30Z) port
+## o11 (2026-10-31 14:17Z - 14:52Z): moe board: layer's moe_hot hotdyn + HOT128 ported; check e59302f4 2.3275x; CW (lead 14:30Z) port
 - Found: the moe-board submission never got the layer's moe_hot work (v169 hotdyn `per`, v170 HOT128, v171 HOT_ET). Moe-board
   routings (reference.generate_input, 200 seeds): bs128 has a 65..128-token expert in 37% (2 in 2%); bs256 nh>=3 ~5%.
 - Port (main 2f20f9f): moe_hot `per` arg (grid = base*1e5 + per*1e3 + CTAs; CTAs >= max(base, per*nh) exit at once) +
