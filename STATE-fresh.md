@@ -1,4 +1,8 @@
 # STATE-fresh (newest first)
+## x37 (2026-10-31 22:31Z-22:40Z): status only, 0 judge, 0 Modal, 0 GPU. Board #217 at 2.187 (#1 pjmullin3 2.459). No lead line
+  since 21:50Z. x36 (90da00a) closed the d1 sl csl->o flag handoff (+1.1..+2.5 us, DEAD) and the attention lane.
+## Next (x38): after 00:00Z run tools/fresh/x35/mk_h200.sh (H200 A/B CSL_PW T=1 on d1 sl, ~3-4 GPU-min); report under Results;
+  then act on a lead line naming fresh, else status only. Checks 10-31: 4/6 (resets 00:00Z); Modal 10-31 16.8/20.
 ## x35 (2026-10-31 21:47Z-): lead 21:50Z stamps of d1 sl / v1 sl attention in-layer (H100; FRESH.md x35, tools/fresh/x35/astamp.py).
   d1 hops: qkv end -> csl q ready 2.7 us (launch 1.3 + first loads 1.2), KV 0.3, QK/PV 0.55, cluster 0.35, merge->store 0.9,
   store -> o g13 has x 0.85. v1: vtk first loads 1.8, wait 1.2 after g14's last CTA, merge->store 1.0; vtk can't start early
@@ -144,7 +148,3 @@
   Candidate 'late' (tools/fresh/bs1/late.patch on muse_moe_w4a16/submission.py: TK2F 84204 at M=1 + NORM2_PDL 1 + tk2f
   trigger at its gemm2 rows): tests 15/15, H100 every shape faster, geomean x1.846 -> x1.868. Handoff to moe/lead; needs
   H200 (moe n5s19: PDL norm2 lost +3.4 us d1 there with the ENTRY trigger). FRESH.md x10. 0 judge, 0 Modal.
-## Next (x11): read Human decisions; if asked, run the H200 A/B of late vs base (Modal share after 00:00Z).
-## x9 (2026-10-31 11:44Z-~13:15Z): lead 11:25Z items (tk2f re-stamp + DRAM-trip hunt d1/v1): NOTHING >= 0.5 us. 0 judge, 0 Modal.
-- FRESH.md x9 has the numbers. Found + fixed bitwise but NEUTRAL in the layer (not kept): pr1 routing's 8 logits loads
-  serialized in SASS (8 L2 trips) and cold unrolled top-8 (~18 KB code, 6.5 us -> 1.6 us with unroll 1) = routing ~3 us
