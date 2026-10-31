@@ -1,4 +1,12 @@
 # STATE-fresh (newest first)
+## x12 (2026-10-31 13:58Z-14:20Z): lead 13:58Z BUILD CW: built, bitwise (300 eager + 300 replay), H100 NEUTRAL -> DEAD. 0 judge, 0 Modal.
+- d1 us vs base sl/full: cw 0.0/-0.2, cw+helper +0.4/-0.35; oracles: no waits -0.5/-0.9, no waits+no publishes -0.9/-1.1.
+- Stamps: per-CTA stream rates differ ~25% (5.8 rows/CTA at d1 sl), so each segment's chunk 0 completes with its slowest
+  CTA (32-34 us vs chunk 3 at 37-39); each publish fence ~1.9 us. Patch tools/fresh/cw/cw_helper_dead.patch; FRESH.md x12.
+- Source reverted: branch fresh submission.py = v174 bit-for-bit.
+## Next (x13): read Human decisions IN FULL; take the lead's next item. Own list is thin: the d1 tk2f stream runs ~2.6 TB/s
+  on the H100 with ~25% per-CTA unfairness (row ends 30-38 us); the H200 may differ (moe: ~4.33 TB/s marginal). If
+  Modal is available (after 00:00Z), a stamp run of v174 d1 on the H200 would tell whether the unfairness exists there.
 ## x11 (2026-10-31 13:34Z-13:56Z): lead 12:25Z MOE BS1 GAP, cont. H100 stamps + oracles, 0 judge, 0 Modal. FRESH.md x11.
 - bs1 fixed ~9.5 us = pre-data 4.3 (routing 1.5, TMA issue 0.5, first data 2.3) + w13->w2 transition 1.4 (O2) + norm
   2.4 (O1) + launch/PDL ~1. In-layer: transition bound ~1.1 us d1 / ~0.5-0.8 d16/d32 (O2); n2u work 3.5/4.4 d1 (O3,

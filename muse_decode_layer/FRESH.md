@@ -597,3 +597,25 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   per-segment xf reload or strided rows reload it every row); producer must walk the same permuted order; inter-CTA
   flags need the t16c-style many-routing stress test (moe s7 lesson). Estimate: ~0.6 us d1, ~0.3-0.5 d16/d32, ~1 us
   standalone bs1 (bound 1.4). Lead's 11:25Z bar is 0.5 us at d1 sl: marginal; asked the lead before building.
+
+## x12 (2026-10-31 13:58Z-, lead 13:58Z: BUILD CW): built, bitwise, H100 NEUTRAL -> DEAD at the 0.5 us gate. 0 judge, 0 Modal.
+- Built (tools/fresh/cw/cw_helper_dead.patch on v174 = branch fresh b15f672; layer TK2F_CW, cfg 184294 = PF 4 | 8192, T=1
+  only): gemm13 rows permuted in each 256-row segment (cw_row), CTA order (chunk, u, v & 3), producer walks the same
+  order, T=1 x fragments kept across segments, per-(segment, chunk) counters cnt[64 + seg * 4 + c], gemm2 waits chunks
+  0..2 at a segment start and polls chunk 3 at stages 1-2 (blocking before stage 3). Publishes first by consumer
+  bar.sync 2 + tid-0 fence (cw), then by a helper warp (cwh, tk2f_rel_on extended). tools/fresh/cw/stress.py: 300 eager +
+  300 graph-replay routings (0..8 local experts) bitwise vs base; bench test 13/13. PF 8196 confirmed in the profile.
+- H100 tools/ab_files.py "decode 1 " (us vs base, sl / full): cw +0.0 / -0.2; cwh +0.4 / -0.35; cwh with red.release
+  instead of fence + atomic: same; ORACLES: cw without any chunk wait -0.45 / -0.4; cwh without waits -0.5 / -0.9;
+  cw without waits and without publishes -0.9 / -1.1 (the whole transition bound, cf. x11 O2 ~1.1).
+- WHY (stamps, tools/fresh/cw/stamp.py + strun.py: per-CTA %globaltimer into an enlarged cnt buffer; d1 sl seed 99):
+  nact = 3 -> 768 gemm13 rows / 132 CTAs = 5.8 rows per CTA at ~3.3 us/row (~2.6 TB/s H100 stream). Every CTA starts
+  gemm13 at the same time (14.4 us; TK2FX wait), but per-CTA stream rates differ ~25%: first (chunk-0) publish med 24.7,
+  max 30.4; gemm13 end 30.2..38.1. A segment's chunk spans ~22 CTAs, so chunk 0 completes with its SLOWEST CTA:
+  chunk complete times per segment 33.8 / 37.9 / 37.2 / 38.4 (chunks 0..3), 32.1 / 37.2 / 37.1 / 37.2, 32.7 / 37.5 /
+  37.2 / 39.1. Chunks 0-2 are not early, and each publish costs a ~1.9 us fence (helper stamp pre/post
+  __threadfence: 32.7 -> 34.6 us; red.release the same), i.e. one DRAM-loaded memory round trip.
+- Lessons: (1) at d1 a 'chunk' of a segment is ~1.5 rows of each of ~22 CTAs: row ORDER inside a CTA cannot make a chunk
+  early when CTA streams are unfair; (2) inter-CTA publish = ~1.9 us fence under the stream, each one; more publishes
+  only pay off if they are off the consumers' path AND the data they release is early; (3) the remaining d1
+  transition bound is ~1 us total on the H100 (O2 / ob); nothing order-based gets it.
