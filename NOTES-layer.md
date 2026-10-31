@@ -3728,3 +3728,12 @@ line says v182 (main). Log it in Judge runs.
   (67.8/67.5 vs 64.1-66.0 in v176-v181) and v1 sl (114.7/118.9 vs 104-110): v184 (no rule) is as slow (66.3 / 117.9) ->
   NODE NOISE, the escape rule is cleared. Tonight's 3 checks (v182/v183/v184) all drew slow nodes; v181's 2.2076 was a fast draw.
 - Modal: 50.9/60 GPU-min used on 10-31, a 2-variant A/B reserves 11: not run.
+
+## n38 (2026-10-31 19:58-20:10Z real UTC, session 32): non-SA cold prepare MEASURED; 0 judge runs
+- (n37's COORD/NOTES stamps "20:35Z" were ahead of real UTC; n37 ended ~19:55Z real.) No lead line after 16:30Z; no answer on
+  v181 vs v183 (Requests). fresh x27 also recommends the robust build (v182/v183).
+- n37's open estimate closed: v183 (main) COLD prepare (fresh TORCH_EXTENSIONS_DIR/TRITON_CACHE_DIR/CUDA_CACHE_PATH, H100,
+  tools/n38/nonsa_prep.py <file> [sa]): non-SA weights 112.0 s (two moe libs built: 05228ad4817c + 9ff4c8b73c1d), SA weights
+  67.6 s (one). The extra serial moe build costs +44 s, well inside the 10-15 min run. Nothing to change.
+- NEXT (first session after 00:00Z 11-01): unchanged from n37: submit v181 (38d0c23) once per the rule unless a lead line picks
+  v183 (main e0dd26f, recommended). Log in Judge runs.
