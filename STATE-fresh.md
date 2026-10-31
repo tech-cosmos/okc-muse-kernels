@@ -10,10 +10,11 @@
   pre-wait, unconditional Y loads, nowait (x hop not binding), PFX (early CTAs prefetch others' first rows).
 - SASS fact: the n2u base-path routing loads are BEFORE ACQBULK in this build (layer comment says otherwise): racy if
   anything launches n2u before pr1's routing is written (IDF does: IDF uses the post-wait path).
-## Next (x9): no open lead item for fresh. Read Human decisions IN FULL; if none names fresh, take from own list:
-  (1) T=16/32 router path: stamp whether routing (router kernels on the side stream) sits behind the pooler stream the
-  same way (d16 is 'routing-bound' per layer n12s1) -> same hoist / fewer dependent L2 trips. (2) tk2f per-CTA routing at
-  entry (~1.5 us) at d1/v1: a precomputed schedule from pr1/pr8 only saves the compute (~0.5), probably below gate.
+## Next (x9): read Human decisions IN FULL first (lead may want the Handoff ceb86cf bundled/checked, or slack follow-ups).
+  Own list: (1) v1 IDF build (pr8 st.release routing flag + tk2f flag acquire at T=8 + nu8 routing after its wait; the
+  flagless oracle HANGS); bound ~1 us v1 (~0.1%): build only if nothing better. d16/d32 routing: closed (not critical).
+  (2) tk2f per-CTA routing at entry (~1.5 us d1/v1): precomputed schedule saves only the compute (~0.5): skip.
+  Pitfalls: background Bash jobs default to a 10-min limit (use run_in_background + timeout); `pkill -f` matches itself.
 ## x7 (2026-10-30 11:44Z-11:47Z): idle stop again; still no lead line naming fresh after 09:10Z (layer n12s1 DEFNORM gate also not met). 0 judge, 0 Modal.
 ## x6 (2026-10-30 11:28Z-11:31Z): idle stop; no lead line naming fresh after 09:10Z (x5 answered the sweep: all dead). 0 judge, 0 Modal.
    Next (x7): same as x5 'Next' (act only on a new lead line naming fresh; else stop at once).
