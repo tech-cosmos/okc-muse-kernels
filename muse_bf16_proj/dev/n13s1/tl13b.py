@@ -14,16 +14,16 @@ if os.environ.get("VARS"): VAR = [v for v in VAR if v[0] in os.environ["VARS"].s
 w, st = bench.weights_state(sub)
 flush = torch.empty(1 << 30, dtype=torch.uint8, device="cuda"); sink = torch.zeros((), dtype=torch.int64, device="cuda")
 for load, c in bench.SCORED:
-    if load != "decode 1": continue
-    key = (1, c["layer"] == "sliding")
+    if load != os.environ.get("LOAD", "decode 1"): continue
+    key = (int(os.environ.get("TOK", "1")), c["layer"] == "sliding")
     data = bench.make_input(c, w, 99)
     orig = dict(st.get("tune", {}).get(key, {}))
     gs = {}
     for v, o in VAR:
         st.setdefault("tune", {})[key] = dict(orig, **(o or {}))
-        if o is None: os.environ["PR1_FLAT"] = "1"
+        if o is None: os.environ["PR1_FLAT"] = "1"; os.environ["PR8_FLAT"] = "1"
         gs[v] = bench.capture(lambda: sub.kernel_fn(data, st))
-        os.environ.pop("PR1_FLAT", None)
+        os.environ.pop("PR1_FLAT", None); os.environ.pop("PR8_FLAT", None)
     st["tune"][key] = orig
     res = {v: [] for v in gs}
     lock = open("/tmp/okc-gpu.lock", "w"); fcntl.flock(lock, fcntl.LOCK_EX)
@@ -34,10 +34,10 @@ for load, c in bench.SCORED:
                 g.replay(); torch.cuda.synchronize()
             p.export_chrome_trace("/tmp/tl13b.json")
             ev = sorted((e for e in json.load(open("/tmp/tl13b.json"))["traceEvents"] if e.get("cat") == "kernel"), key=lambda e: e["ts"])
-            t0 = ev[0]["ts"]; k = next(i for i, e in enumerate(ev) if e["name"].startswith("void pr1::"))
+            t0 = ev[0]["ts"]; k = next(i for i, e in enumerate(ev) if os.environ.get("KN", "pr1::") in e["name"])
             b = ev[k - 1]
             if r: res[v].append((b["ts"] + b["dur"] - t0, ev[k]["ts"] + ev[k]["dur"] - t0, max(e["ts"] + e["dur"] for e in ev) - t0))
     fcntl.flock(lock, fcntl.LOCK_UN); lock.close()
     md = {v: [statistics.median(x[i] for x in res[v]) for i in range(3)] for v in res}
     for v, (be, pe, ge) in md.items():
-        print(f"RES {load} {c['layer']:7s} {v:8s} pr1 post-bnd {pe - be:6.2f}  pr1 end {pe - md['base'][1]:+6.2f}  graph end {ge:7.1f} ({ge - md['base'][2]:+6.2f})  R {R}")
+        print(f"RES {load} {c['layer']:7s} {v:8s} K post-bnd {pe - be:6.2f}  K end {pe - md['base'][1]:+6.2f}  graph end {ge:7.1f} ({ge - md['base'][2]:+6.2f})  R {R}")

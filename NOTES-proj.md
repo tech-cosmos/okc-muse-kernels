@@ -2916,3 +2916,14 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Side finding: the layer's eager outputs at d1 FULL are not bitwise run-to-run (main vs main; same seeds repeat), = the known
   FP32-atomics nondeterminism (NOTES-layer), not pr1.
 - 0 judge runs. Modal 11.8 GPU-min (5 runs, 2.2-2.5 each; ledger 27/60 shared).
+- n13s1b/c (10:55-11:50Z): lead's next item, v1 pr8 (T=8 pooler + router + routing, 128 blocks + finisher):
+  * FIRST ORACLE WAS WRONG: orc8.py v1 compiled the flat read INTO pr8::fused; that inflated pr8's own base by ~4 us (H100
+    tl9 same run: main 23.7 vs oracle-build base 27.7 us after the boundary), so its H200 result (flat -10.2 sl / -9.0 full,
+    base 22.1 vs 18.4 on record) is OVERSTATED. Lesson: put oracle code in a SEPARATE kernel and compare the oracle build's
+    base against main before trusting a bound. (pr1's in-kernel flat did not inflate pr1: tl13 base 18.98 = main 19.1.)
+  * orc8.py now: separate pr8::flat8 kernel swapped in by pr8_launch when env PR8_FLAT is set at capture (pr8 code = main).
+    H100: flat -1.25 sl / -0.64 full, norouter (npf -1) -1.0 / -1.6, but under other agents' unlocked load (100% util).
+  * H100 pr8 TR stamps (PR8_TRACE with a state-held part buffer, /tmp/pj13/L8; dev/n13s1/stamps8.py), us from pr8 start:
+    x32 staged 10.2 (~boundary end), router partials stored 14.3 (max 20), released 17.7 (max 20.5), pooler loop end 28.2
+    (23.8-30.2), epilogue 30.5, finisher 30.5: the pooler loop starts ~7.5 us after x is ready (s36 record: the bulk L2
+    prefetch npf 220 streams during that window).
