@@ -3908,3 +3908,30 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   bs8/16/32 drew slow vs c015407f (61.5/85.2/120.0): judge run-to-run swing (bs8 has ranged 61.5-68.6 on unchanged code).
 - NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE (= cbd4bcf + IDW, strictly fewer trips; check > board 2.3198).
 
+
+## o17 (2026-10-31 15:50Z - ): HOT_ET RACE (layer main v171+ carries it) DEMONSTRATED + FIX; moe-board HOT_ET port
+- HOT_ET (layer v171, moe n7s39): moe_hot (per > 0) triggers moe_twm BEFORE its own griddepcontrol.wait; twm (hx) polls
+  meta[67] bit 30, set by moe_hot CTA 0 after that wait. meta is a per-call torch.empty: at entry meta[67] holds the
+  previous replay's word (bit 30 SET) or pool garbage, and moe_routegather(n) zeroes it only AFTER its own PDL trigger
+  (CTA 0, after the count pass). If twm polls before that zero, it passes on the stale bit and runs on stale meta.
+- Demonstration (moe-board copy = HOT_ET exactly as the layer, tools/o17/mk.py fix=0 delay=40000: routegather CTA 0 spins
+  40000 cycles after its trigger, TEST ONLY): device printf at the poll, eager: first value seen = 0xbf409ccc /
+  0xbb93d998 (leftover negative floats: bit 30 clear by luck; a positive float >= 2.0 has bit 30 set). Graph replay
+  (tools/o11/race.py): routegather sees meta[67] = 0x40000040 (previous replay) at its delay point, 98/132 twm CTAs pass
+  the poll on it (first 0x40000040, stale meta[66] 279/564) and the replay HANGS (100% GPU, killed).
+- Fix (fix=1): routegather CTA 0 `meta[67] = 0; __threadfence();` BEFORE launch_dependents. Same 40000-cycle delay:
+  0/200 graph replays differ at bs128, no hang. Ordering: moe_hot launches only after every routegather CTA triggered,
+  twm only after moe_hot's trigger, so the zero is performed before any twm read; call N's twm is complete before
+  routegather(N+1) passes its wait (the same assumption meta[66]/[68+] zeroing already relies on).
+- Layer: TUNE_BASE (128/256, *) = "rg": True + "hot": moe_routegathern + moe_hot (HOT_ET) + twm = exposed on v16/v32 in
+  every layer run since v171 (incl. the board runs). The moe_route + moe_gathern path is safe (route completes first).
+  Branch moe/hotet-race (layer.py moe_routegathern: zero + fence before the trigger, both RG_XPRE branches; build.py
+  regenerates submission.py with only that 4-line diff).
+- Layer evidence (worktree of branch moe/hotet-race, layer's own tools): same 40000-cycle spin after moe_routegathern's
+  trigger: main -> CUDA illegal instruction in the T=128/256 tuner (tools/replay_test.py verify 32 sliding); fixed ->
+  tuner completes, 0/20 fails on every verify shape. Fix without delay: replay_test 0/40 x router seeds 11,12 on verify
+  1/16/32 sl+full; bench test PASS (cases 9-12 shown, no FAIL); H100 ab_files 4 rounds vs main: v16 sl -0.5 / full -0.3,
+  v32 sl -0.3 / full +0.2 us = tie. Branch moe/hotet-race e24be08 (on main 0d36b3a), pushed; layer merges.
+- Moe board HOT_ET (fixed form, /tmp/o17/etfix; race.py 0/400 bs128, 0/200 bs256, 0/100 bs256 with the delay): H100
+  tools/o11/ab.py 8 seeds x 4 rounds: bs128 -0.12, bs256 -0.07 us = TIE (seed spread +-3) -> NOT ported. Moe main stays
+  34dd790. Tools: tools/o17/mk.py (variant writer: fix, delay), printf_poll.py (eager poll printf driver). 0 judge runs.
