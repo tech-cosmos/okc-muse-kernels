@@ -3869,3 +3869,18 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   -1..-1.6), maxdiff 0. Its own timed run: 2.3429x. REUSABLE: the diff is a moe-board-routing H200 A/B harness.
 - Clean check bfd582aa (acf63a9) 2.3694x (CI 2.334-2.405) = best moe check: bs1 26.4, bs16 84.8, bs32 117.2, bs8 62.1,
   bs128 193.4, bs256 228.4 us. SUBMIT acf63a9 after 00:00Z 11-01 (supersedes o12's 7139706; beats board 2.3198).
+
+## o14 (2026-10-31 15:16Z - 15:45Z): moe board: fresh x13 tk2h MRG 2 ported to bs32; 2 checks (1 DIAG), 0 submits (cap)
+- Layer d32 tk2h MRG 1 -> 2 (fresh x13 b0017ad: per-segment gemm13 -> gemm2 counters cnt[64 + j], existing code) maps 1:1
+  onto the moe board's bs32 (SQ tk2h GS16 PF4 dispatch, line ~5508: tk2f_go<..., 16, 2, 516>). norm3 already zeroes cnt[0..127].
+- Bitwise vs main (tools/o11/eq1.py 200 eager + 400 replay bs32: 0 differ), bench test 15/15.
+- H100 ab.py 8 seeds x 4 rounds: bs32 -2.29 us (every seed -1.4..-4.2). H100 DIAG (tools/o14, 16 seeds x 2 interleaved
+  pairs): 162.5 -> 160.3 us, maxdiff 0.
+- H200 DIAG cc253b3b (tools/o14/diag_mrg.diff = o13 harness with a runtime MRG switch via moe_set_l2h2 + 1e6; moe-board
+  routings seeds 500..515): m1 118.52/118.38 -> m2 117.75/117.78 us (-0.7, 15/16 seeds). Smaller than the H100's -2.2
+  (as s12's PSC record: H200 gemm13 tail shorter). Its own timed run 2.3273x.
+- main cbd4bcf. Clean check c015407f 2.3737x (CI 2.338-2.409) = BEST moe check: bs1 25.9, bs16 85.2, bs32 120.0 (x1.778
+  vs 1.744-1.756 before; SGLang drew 213 us), bs8 61.5, bs128 189.9, bs256 229.4 us.
+- Dead (H100 ab.py): tk2h MRG 2 at bs16 instead of BAL (TK2H_M {16: 3}) +2.45 us every seed; BAL at bs32 instead of tk2h
+  MRG 2 = tie (+0.05). Neither checked.
+- NEXT SESSION AFTER 00:00Z 11-01: SUBMIT cbd4bcf (supersedes acf63a9 / 7139706) ONCE; beats board 2.3198.

@@ -1,3 +1,7 @@
+## o14 15:45Z 10-31: main cbd4bcf = acf63a9 + tk2h MRG 2 at bs32 (fresh x13 per-segment counters); bitwise, test 15/15.
+## H100 bs32 -2.2 us; H200 DIAG cc253b3b bs32 -0.7 us (16 seeds, 2 pairs). Clean check c015407f 2.3737x = BEST check:
+## bs1 25.9, bs16 85.2, bs32 120.0, bs8 61.5, bs128 189.9, bs256 229.4. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT cbd4bcf ONCE
+## (supersedes acf63a9/7139706). moe board 10-31: 9 checks, 2 submits. Dead: tk2h at bs16 (+2.5 H100), BAL at bs32 (tie).
 ## o13 15:30Z 10-31: main acf63a9 = 7139706 + tk2f BAL on SQ (PF 548, layer T=16 'bal') at bs 8/16; bitwise, test 15/15.
 ## H200 DIAG 51ba444e (moe-board routings, interleaved): bs16 -1.1, bs8 -0.3 us. Clean check bfd582aa 2.3694x (best check):
 ## bs1 26.4, bs16 84.8, bs32 117.2, bs8 62.1, bs128 193.4, bs256 228.4. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT acf63a9 ONCE
