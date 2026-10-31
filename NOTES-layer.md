@@ -3790,3 +3790,21 @@ tools/route_judge.py same = 0/720 routing fails; worst drop-lead 0.0289 (verify 
 
 ## n45 (10-31 21:37-21:42Z, session 39)
 Status only. Board: layer #211 at 2.1874 (bc16338a v183), #1 pjmullin3 2.459. No lead line after 21:25Z; no new-code candidate (all levers closed on record; QLO full-layer half and vjeux attention copy await the human). Hold. 0 judge runs.
+
+## n46 (2026-10-31 21:55Z-22:15Z, session 40): attn-board history audit for sliding d1/v1 (lead 21:50Z); 0 judge runs, no build
+- Diffed the layer's csl/vtk CUDA against ~/attn main (82866c6, the attention board's final code): the layer's csl::decode and
+  vtk::verify ARE attn main's kernels (s91 cluster-per-KV-head csl, CSL_SPEC, s96 vtk) plus layer-only additions (QT=float for
+  QSS, PW/griddepcontrol path, launch_dependents, csl's pfb L2-prefetch warp). Nothing on attn main is missing from the layer.
+- Sliding T=1/T=8 designs in the attn record (NOTES.md, NOTES-agent2.md, COORD-final.md), standalone H100 unless noted:
+  * WON + already in layer: csl cluster/KV head (s91, -0.58 d1; H200 4.91 -> 4.17), CSL_SPEC (s?? -0.29..-0.34), vtk (s96,
+    H200 v1 sl 6.8 -> 5.6), Triton tiny tsep+stages 2 (-0.35..-0.42; superseded by csl).
+  * TIES (never ported, nothing to gain): vtk coalesced page table + shfl (s98), csl ptsh coalesced page table (s93), csl
+    owner-merge sig/tree (s91/s119), reciprocal divides (s96), vtk placement (s120).
+  * LOST: vtk2a 2 tokens/cluster (8.1 vs 6.5), vtkp 8-CTA x 8-warp (7.1 vs 6.5), vsl native v1 cluster (s84), vsw wgmma v1
+    (s89: DSMEM merge ~1.3 us kills single-kernel v1), nvs at v1 (s93), Codex warp-MMA / cluster-tile B1 (+0.3..+2.9),
+    Triton fused merge / seq-independent loops (s4-s7).
+  * Layer-side, never built: KV_PF at v1 (g14 qkv L2-prefetching vtk's window rows): v33 warm-KV probe vtk 5.7 -> 5.4 us
+    H100 = <= 0.3 us, under the 1 us gate. Also already dead: CSL_PW in g13 drain (+1.3..1.7), flag-spin (n5s14), G10_PFL2 (+1.8).
+- => no standalone-winning sliding design is left unported. The only lever is a new hop cut found by fresh's per-CTA stamps
+  (21:50Z). Candidate hops to look for in them: launch->first load (~1 us), page-table trip (spec skips the seq wait only),
+  cluster barrier + DSMEM push, owner merge -> out store -> o GEMV's griddepcontrol.wait.
