@@ -1,0 +1,26 @@
+seed 100 maxnt 144 n>64 1 bitwise True chk True: base  267.20 sl  265.26 d  -1.94
+seed 101 maxnt 161 n>64 2 bitwise True chk True: base  268.30 sl  263.92 d  -4.38
+seed 102 maxnt  53 n>64 0 bitwise True chk True: base  254.61 sl  254.66 d  +0.05
+seed 103 maxnt  77 n>64 2 bitwise True chk True: base  241.41 sl  242.56 d  +1.15
+seed 104 maxnt  89 n>64 1 bitwise True chk True: base  300.56 sl  300.11 d  -0.45
+seed 105 maxnt 117 n>64 1 bitwise True chk True: base  214.75 sl  214.19 d  -0.56
+seed 106 maxnt 149 n>64 1 bitwise True chk True: base  229.55 sl  225.81 d  -3.74
+seed 107 maxnt  44 n>64 0 bitwise True chk True: base  269.33 sl  268.56 d  -0.77
+seed 108 maxnt 159 n>64 1 bitwise True chk True: base  307.26 sl  303.49 d  -3.78
+seed 109 maxnt 137 n>64 2 bitwise True chk True: base  286.83 sl  281.28 d  -5.55
+seed 110 maxnt 133 n>64 1 bitwise True chk True: base  270.86 sl  269.54 d  -1.33
+seed 111 maxnt  68 n>64 1 bitwise True chk True: base  277.52 sl  277.73 d  +0.21
+seed 112 maxnt 256 n>64 2 bitwise True chk True: base  251.57 sl  250.24 d  -1.33
+seed 113 maxnt  70 n>64 1 bitwise True chk True: base  297.39 sl  297.34 d  -0.05
+seed 114 maxnt 108 n>64 1 bitwise True chk True: base  256.83 sl  256.66 d  -0.18
+seed 115 maxnt 256 n>64 2 bitwise True chk True: base  307.17 sl  299.52 d  -7.65
+seed 116 maxnt 201 n>64 1 bitwise True chk True: base  251.09 sl  247.78 d  -3.31
+seed 117 maxnt 256 n>64 1 bitwise True chk True: base  241.79 sl  239.60 d  -2.19
+seed 118 maxnt  91 n>64 1 bitwise True chk True: base  276.19 sl  275.95 d  -0.24
+seed 119 maxnt  77 n>64 1 bitwise True chk True: base  268.13 sl  268.42 d  +0.29
+seed 120 maxnt 113 n>64 1 bitwise True chk True: base  262.59 sl  263.14 d  +0.54
+seed 121 maxnt 229 n>64 1 bitwise True chk True: base  251.22 sl  247.07 d  -4.14
+seed 122 maxnt  69 n>64 1 bitwise True chk True: base  262.46 sl  263.04 d  +0.58
+seed 123 maxnt  59 n>64 0 bitwise True chk True: base  270.19 sl  270.88 d  +0.69
+bs 256 maxnt>128 n=11 base  266.62 sl  263.05 d  -3.58 us
+bs 256 maxnt<=128 n=13 base  265.54 sl  265.63 d  +0.10 us

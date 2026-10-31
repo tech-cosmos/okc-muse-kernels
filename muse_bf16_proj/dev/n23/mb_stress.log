@@ -1,0 +1,3 @@
+eager 180/180 bitwise (65 with a >128-token expert)
+replay bs 256: 60/60 bitwise
+replay bs 257: 60/60 bitwise

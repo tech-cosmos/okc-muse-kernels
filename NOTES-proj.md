@@ -3152,3 +3152,160 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - validate --quick --skip=prep on /tmp/n22/il2.py: ALL OK (13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240, route
   0/240 worst gap 0.0256, fuzz 0/58). Handoff to layer (sub-gate bundle) + moe (moe board bs256 has the same HOT_SL moe_hot).
   0 judge runs. NEXT: layer takes HOT_IL into the next bundle; 00:00Z H200 queue dev/n15/mk_h200.sh stands.
+
+## n23 (2026-10-31 16:53Z-, unattended session 11): HOT_IL re-measured on layer main v180 (+ SLW test)
+- v180 (30d3612) already carries HOT_SL + n21 balanced slices + fast path; only n22 HOT_IL is missing. `IL=2 python
+  dev/n22/mk_il.py <v180 submission.py> out.py` applies cleanly (999304 B, cap 1e6: 696 B left).
+- H100 dev/n22/ab_multi.py v32 sl/full, routers 17,12,5 (a >128-token expert) + 3 (none) x 4 inputs, tuner off, base v180,
+  A/A copy (dev/n23/ab_v180il.log): IL full -2.69 (A/A -0.59) -> ~-2.1 us; sl -0.78 (A/A +0.22) -> ~-1.0 us; router 3
+  (no >128) tie. bitwise 32/32.
+- SLW (moe o18: hot working CTAs = 132*16s/(16s+5*others) when slices exist) on v180+IL (dev/n23/ab_slw.log, same
+  routers/inputs, base v180+IL, A/A copy): full +0.20 (A/A -0.46), sl -0.49 (A/A -0.17): TIE in the layer -> dead here
+  (consistent with n22's HOT256 sweep: 32/16/64 already fits the layer's expert mix; moe's win was vs its board's own per).
+- validate --quick --skip=prep on /tmp/n23/v180il.py (v180 + IL=2): ALL OK: test 13/13, scored 0/12, opt 0/40, tk2f 0/300,
+  replay 0/240, route 0/240 (worst gap 0.0256 drop-lead 0.0172), fuzz 0/58.
+- Handoff files: dev/n23/il2_on_v180_moe_src.diff (git apply --check OK on main 64f3bf7 muse_decode_layer/moe_src.py),
+  dev/n23/il2_on_v180_submission.diff (diff of the built file). mk_il.py IL=2 also applies cleanly to the moe board's
+  submission (moe o18 2ab9ba1, with SLW).
+- MOE BOARD IL (dev/n23/il2_moe_board.diff on r-moe 2ab9ba1 = o18 HOT_SL+SLW): dev/n21/stress.py bitwise eager 180/180 (65
+  with a >128 expert) + replay bs256 60/60, bs257 60/60. ab_moe.py bs256 seeds 100-123 x 4 rounds (mb_ab.log): >128 inputs
+  -3.43 us (n=11, 10 faster, seed 115 -7.7), <=128 +0.36 (n=13); A/A (mb_aa.log, seeds 100-111): +0.06 / +0.00, per seed
+  +-0.4 -> ~-1.1 us mean per bs256 input (37% have a >128 expert). Handoff to moe. 0 judge runs this session.
+- NEXT: layer takes IL into v181 (after v180's post-00:00Z submit); moe takes il2_moe_board.diff into its next moe-board
+  check. Proj standing: 00:00Z H200 queue dev/n15/mk_h200.sh.
+
+## n24 (2026-10-31 18:07-18:25Z, unattended session 12): T=128 qkv re-check vs fresh x20 (closed) + tuner variance audit; 0 judge runs
+- No lead line for proj after 16:30Z; took fresh x20 (same-line L2 broadcast 16.5 TB/s vs distinct-line 7.5) as the question:
+  does it reopen an own T=128/256 GEMM? NO, by measured records, not paper: layer s99 already built g30 x-multicast (G30_CL:
+  CL=2 tie 23.1 vs 21.9, CL=4 39.8) and ablated g30 unp S1 (no x 21.1 / no MMA 20.6 / no W 18.1 vs 21.9: latency-bound
+  pipeline, no single wall), and G30_ROT (desynchronised x reads) was WORSE (lockstep already used). qkv g30 S3 slab (108
+  CTAs) 16.4 vs cuBLAS 20.0 H100, but the reduce was +5 (s101). A cluster-3 DSMEM reduce-scatter (~2-2.5 us at 32 KB/peer, n19
+  rates) would at best be about -1 us on the H100, and the H200 rejects g30 at T=128 standalone (unp lt 22.66 vs g30 24.58,
+  NOTES-proj ~line 2058), so it is DEAD on paper from measured parts. Layer n30/n31 (Triton, TileLang, CUTLASS) agree.
+- TUNER VARIANCE AUDIT (judge logs r-layer profiles, 10 newest runs): pick flips at T=1/16/128/256 are near-ties. Every
+  candidate is within ~0.3-1.3 us of the default on 60-530 us loads (<0.4%), so a 'wrong' pick costs <= ~1 us. The one steady
+  winner is T=16 sliding {g30n:unpool}: first-pass median lower in 10/10 runs (-0.4..-1.3 us), but the confirm step dropped it
+  2/10 times (margin 0.1%). Pinning it in TUNE_BASE[(16, True)] = ~-0.15 us on average, less variance. Low priority (layer's call).
+- ODD: the tuner's CONFIRM loop at T=256 FULL is +10..+20 us (~3%) slower than its own first pass on the SAME graphs and data
+  in 25/25 judge logs (sliding: 0..+5 normally, +14/+28 twice); T=1/16/128 show no such shift. H100 repro (dev/n24/conf.py:
+  3 captures, tuner's A 3-way x 43 then B 2-way x 40, then a long series C; flush.zero_ per replay, nvidia-smi 20 ms):
+  v32 full A 623.4/622.0/621.1, B 621.3/621.2, C flat 620-624 (2400 replays, 1.75 s); v32 sl A 350.0, B 349.8. No effect on the
+  H100: SM clock 1980 MHz throughout, reasons 0; power (lagging sensor) climbs to ~530 W of 700 W over 1.75 s at v32 full.
+  Hypothesis: the H200 (same 700 W cap, HBM3e) hits the power cap under sustained T=256 full and clocks down; the judge's
+  scored v32 full (491-524 us) sits between the tuner's first-pass (477-518) and confirm (496-537) medians. If so, energy per
+  step matters at T=256 (spin-waiting warps, redundant DQ). Test queued: dev/n24/mk_h200.sh (after 00:00Z, ~3-5 Modal min:
+  conf.py on r-layer main, 'verify 32', 2400-replay series, clocks/power/throttle reasons per phase).
+- Counter-evidence: the judge's SCORED series show no in-run drift (12 logs, median of first vs last third of the 20 runs, ours
+  v32 full 488/492, 513/533, 505/481, ...; SGLang the same mixed signs): whatever slows the tuner confirm does not visibly reach
+  the scored medians -> low priority; the H200 test only says whether energy is a lever at all.
+- NEXT: 00:00Z H200 queue: dev/n24/mk_h200.sh (power/clock), then dev/n15/mk_h200.sh. If the H200 shows SW power cap at T=256
+  full: tell the lead (ranking uses medians of reruns: a power-throttled T=256 is a lever for energy cuts, e.g. nanosleep in
+  mbarrier spin loops).
+
+## n25 (2026-10-31 18:20Z-, unattended session 13): H200 power-cap test (n24 queue item, run early on today's spare Modal), 0 judge runs
+- No new lead line for proj; proj-board items all closed on record (n16-n19). Today's shared Modal had ~11 min unused (49/60),
+  so ran dev/n24/mk_h200.sh now (charged 2.1 GPU-min; 51/60). Layer = r-layer main (v180+), tuner off, 256 MB flush.zero_
+  before each replay (like _tune), nvidia-smi 20 ms.
+- H200 CONFIRMS the power cap: v32 full A (tuner first pass, 3-way x 43) medians 510.2/508.7/508.4 -> B (confirm, 2-way x 40)
+  531.0/530.8 (+4.3%), C (2400 replays, 1.5 s) 527-532 per block (one 636 block). smi: power ramps 129 -> ~700 W (cap 700),
+  throttle reasons 0x4 (SW power cap) from ~0.1 s in, SM clock 1980 -> 1680-1845 (dips 1425-1515). The last A block already
+  reads 528: the switch happens ~0.1 s into continuous load. v32 sliding: A 302.6-304.0, B 304.4/306.4, C 303-307, late
+  blocks 312/327 (cap reached later, smaller effect: sliding is more memory-bound / lower power).
+  => explains the n24 'confirm +10..20 us at T=256 full' in 25/25 judge tuner logs (the tuner's own replays heat the GPU).
+- Does it reach the SCORE? Judge record (layer check 36474b5e, okc status --json): each scored shape = 20 single replays (60 at
+  d1), each preceded by a ~298 us gate kernel and interleaved with SGLang's baseline replay (paired ratios); judge v32 full
+  median 498.5 us is AT/BELOW the unthrottled first pass, and n24 found no first-vs-last-third drift in 12 scored series. So the
+  scored regime is short bursts with idle/gate gaps: ~unthrottled, and any throttle hits ours and SGLang's run of the same pair.
+  The tuner picks are also safe (both candidates of a confirm are timed in the same thermal phase).
+- Verdict: power is real on the H200 for SUSTAINED T=256 full (relevant to the Serving track later: energy per step costs
+  ~4% there; spin-waiting warps/redundant DQ = watts), NOT a kernel-board lever. Item CLOSED. Raw: dev/n25/h200_power.log.
+- dev/n15/mk_h200.sh (pr8 v1 flat/NOW/TK1) did not fit today (3 variants reserve 15 min; 9 left) and its overlay builder
+  broke on current layer main (dev/n13s1/orc8.py anchor '// s36 timing probe' is gone): orc8 now falls back to
+  '__global__ void pred(' (inside namespace pr8). Dry run OK; H100 smoke of the base overlay (R=1, v1): flat vs base
+  K end +1.4 sl / +0.9 full (base2 -0.4/-0.5): flat ~= pr8 on the H100 as in n13s1d. Ready for the 00:00Z run (~15 Modal min).
+- NEXT: 00:00Z: dev/n15/mk_h200.sh (build a pr8 change only if flat <= -1 us v1 sl on the H200). No other open proj item.
+
+## n26 (2026-10-31 18:27Z-19:20Z, unattended session 14): HELD-OUT WEIGHTS audit of layer v181 + 12-bit escape-base rule, 0 judge runs
+- Why: TASK.md says the judge runs 'steps of its own (the weights, routing fields, fresh inputs)'; nobody had run the layer on a
+  WEIGHTS_SEED other than 5353. /tmp copies of r-layer main (v181) with reference.WEIGHTS_SEED patched.
+- validate --quick (skip fuzz/prep) on WEIGHTS_SEED 1 and 777: ALL OK both (test 13/13, scored 0/12, opt 0/40, tk2f 0/300,
+  replay 0/240, route 0/240, worst gap 0.0240 / 0.0225). Log dev/n26/validate_seeds.log.
+- 12-bit fallback risk: _compress returns None (weight runs uncompressed BF16) if any row has > 8 escapes. Escape rate per
+  weight seed is set by the max exponent: pooler/qkv_gate emax is 122 or 123 (~50/50; 123 = a single > 5.66 sigma weight),
+  and emax 123 doubles every row's escapes (seed 5353: pooler mean 1.14/row, max 7 of 8!; qkv 1.11, max 5). MC of
+  randn/sqrt(k) weights (dev/n26/esc_mc.py, 1000 draws): fallback pooler 5/1000, qkv 1/1000, unpool/o 0.
+- Forced fallback (FORCE_NOCOMP shape env in a /tmp copy): bench test 13/13 PASS for pooler, qkv, and all four -> the fallback
+  paths are correct; cost (H100 tuner lines): pooler d1 sl 83.7 -> 95.3 us, qkv 83.7 -> 87.1, all four +16 (d1) / +20 (d32 sl).
+- FIX (n26 rule, dev/n26/esc_base_layer_submission.diff, one function): _compress tries base = emax-15 and emax-16 (the
+  lone top outlier(s) then become escapes too: code 0, header value w / scale, exact; no kernel change) and keeps the one with
+  fewest escapes whose rows fit 8. Seed 5353: pooler escapes 4676 -> 2375 (max row 7 -> 5), qkv 2561 -> 1268 (5 -> 4);
+  unpool/o keep emax-15. MC fallback: pooler 5/1000 -> 0/1000, qkv 1/1000 -> 0/1000.
+  validate --quick ALL OK (13/13, 0/12, 0/40, 0/300, 0/240, 0/240 worst gap 0.0256). Pinned-tuner A/B all 12 scored shapes
+  (tools/ab_files.py 6 rounds, GPU shared at 100% util by another agent): every shape within +-0.7 us = TIE (escapes are cheap
+  in these W-bound kernels). Value = robustness only (~0.6% of weight draws would lose 3-12 us at d1 without it).
+- Handoff to layer (sub-gate, robustness): apply to layer.py _compress; not bitwise vs main (summation order of the halved
+  escapes changes), within test bounds. Also fine for the proj board (not applied; board does not count).
+
+## n27 (2026-10-31 18:38-19:25Z, unattended session 15): x21 T=128 qkv GX gate (paper) + n26 escape-base rule on the proj board
+- x21's 'only untried form' (T=128 qkv split-K g30 with escapes out of the loop, GX) closed from measured parts: layer s101
+  ablations (real weights, H100) put the whole escape cost of split-K g30 qkv m128 at 0.5 us (fence+ticket 1.4, reduce 3.5), and
+  the H200 run (layer NOTES n5s21: s101 split real S3 21.0-21.2 vs cuBLAS 17.3-17.5 us same run) leaves +3.2 us even with free
+  escapes. GX cannot close it. Gate FAILS, no build.
+- Proj board held-out weights: same generator/shapes as the layer, so n26's MC (fallback 6/1000 -> 0/1000) applies. dev/n27/seeds.py
+  lists per weight seed the base each layer picks: the board seed 5151 itself picks emax-16 for qkv_gate and pooler (rows max 6 -> 4
+  escapes); ~1/3 of seeds pick emax-16 for qkv or pooler; unpooler/o always emax-15.
+- Ported the n26 rule into dev/sub_template.py _compress (d71fa42). bench.py: WSEED=<n> env overrides reference.WEIGHTS_SEED.
+  Tests: test 39/39, esc 16/16, FORCE=gx test 39/39, ESCV=bf16 FORCE=gx esc 24/24, WSEED 1/5/22/24(+gx) test 39/39, WSEED=13 esc 16/16.
+  H100 bench ABAB (old HEAD vs new, 2 rounds): tie; qkv/pooler m16/m32/m128 -0.2..-0.4 us (fewer escapes in g30), rest noise.
+- Judge: check 798e7fda (d71fa42) 1.3883 [1.368, 1.409] > best 1.3847 -> SUBMIT 813c5e7a 1.3863 [1.366, 1.407] = NEW PROJ BEST
+  (marginal, within CI; value is robustness in the held-out reruns). Board #480 (rows shifted). Budget 10-31: proj checks 6/20, scored 2/10.
+- Pitfall: zsh does not word-split `set -- $v`; run env-var loops under bash.
+
+## n28 (2026-10-31 18:53-19:05Z real clock, unattended session 16): no lane; 0 judge runs, 0 Modal
+- Clock note: n26/n27 headers and their COORD lines are ~+20 min ahead of real UTC (okc jobs: check 798e7fda 18:42Z, submit
+  813c5e7a 18:47Z). `okc status` needs the full 16-hex job id (short id -> 'no such job').
+- Per-shape H200 table of submit 813c5e7a (us, ours / SGLang / SoL): biggest gaps vs SoL are the m128/m256 nvjet GEMMs
+  (qkv +7.5/+8.4, pool +6.4/+8.4, unp +5.1/+6.6, router +5.9/+6.3, o +3.1/+4.5) and m<=32 qkv/router (+2..4.4); o is ~6.2-6.6 at
+  every m<=32 = a bare 16.8 MB reader (gemv13/12-bit o dead, s16: k=1024 latency-bound). All on record dead (n9s1-n9s3, n16-n19,
+  n27; layer n30/n31, fresh x21). Nothing to build without a lead call on fresh x20's hand-written lockstep T=128 GEMM.
+- NEXT: 00:00Z dev/n15/mk_h200.sh (pr8 v1 flat/NOW/TK1; build only if flat <= -1 us v1 sl on the H200). Asked lead (COORD
+  Requests) to pause proj until then or name a lane.
+
+## n29 (2026-10-31 19:10-19:20Z, unattended session 17): status only; 0 judge runs, 0 Modal
+- No lead reply to n28's pause request; no new proj item in COORD. Board: proj #480, 1.386x (813c5e7a).
+- Pre-flight for 00:00Z: `bash muse_bf16_proj/dev/n15/mk_h200.sh --dry` against r-layer main v182 (856cc18): pr8_n15.diff applies,
+  build OK, base/now/tk1 overlays generated. Run it without --dry after 00:00Z (gate: flat <= -1 us v1 sl on the H200).
+
+## n30 (2026-10-31 19:27-19:35Z, unattended session 18): status only; 0 judge runs, 0 Modal
+- Still no lead reply to n28's pause request (last Human decision 16:30Z); no new proj item in COORD Requests/Handoffs.
+- r-layer muse_decode_layer/submission.py unchanged since n29's dry run (856cc18 = v182), so the 00:00Z
+  `bash muse_bf16_proj/dev/n15/mk_h200.sh` run stays valid as prepared (gate: flat <= -1 us v1 sl on the H200).
+## n31 (2026-10-31 19:42-19:50Z, unattended session 19): status only; 0 judge runs, 0 Modal
+- No lead line since 16:30Z; no new proj Request/Handoff. r-layer main submission.py still 856cc18 (v182): the 00:00Z
+  `bash muse_bf16_proj/dev/n15/mk_h200.sh` run stays valid. Not run early: shared Modal ledger 10-31 = 50.9/60 min,
+  the run needs ~7 min (would leave the other lanes ~2 min today).
+
+## n32 (19:59Z): status only
+- Layer n37 hit a zero/subnormal block-scale crash in moe code; checked proj's _compress (layer v183 submission.py:15258): zeros/subnormals/-0 are escapes stored exactly, rows over G13_ESC escapes and any non-bitwise round trip return None -> uncompressed fallback (tested n26). No action. 0 judge runs, 0 Modal.
+
+## n33 (20:15-20:25Z, unattended session 21): status only; 0 judge runs, 0 Modal
+- No lead line since 16:30Z, no new proj Request/Handoff. r-layer main moved to v183 (e0dd26f, non-SA moe fix):
+  `bash muse_bf16_proj/dev/n15/mk_h200.sh --dry` re-run against it: pr8 overlays (base/now/tk1) build OK. The 00:00Z run
+  (no --dry; gate flat <= -1 us v1 sl on the H200) stays valid. Proj budget 10-31: checks 6/20, scored 2/10.
+
+## n34 (20:31-20:36Z, unattended session 22): status only; 0 judge runs, 0 Modal, 0 GPU
+- No lead line since 16:30Z, no new proj Request/Handoff. r-layer main submission.py still e0dd26f (v183): n33's
+  `mk_h200.sh --dry` stays valid; run it without --dry after 00:00Z (gate flat <= -1 us v1 sl on the H200).
+- proj n35 (20:47-20:52Z): status only, 0 judge/Modal/GPU; no lead line since 16:30Z; r-layer origin/main submission.py still v183 (e0dd26f): 00:00Z pr8 mk_h200.sh run stays ready (re-dry if layer moves main to v184).
+
+## n36 (2026-10-31 21:03-21:50Z, unattended session 24): d32 (T=32) routing-draw variance audit (n20 NEXT item); 0 judge runs, 0 Modal
+- Layer main v183 (submission.py e0dd26f), H100, tuner off: `route_var.py /tmp/pj36/muse_decode_layer <sub> 1,3,5,7,8,9,12,17,20,2,4,6 6
+  "decode 32"` (12 routers x 6 inputs x d32 sl/full, cold L2, median of 9 replays); log dev/n36/sweep.log, fit dev/n36/an32.py
+  (adds n16 = local experts with > 16 tokens). The GPU was ~95% busy with another agent's work during the run (noise up).
+- d32 sl: 178.0 us mean [147, 240]; us = 88.5 + 7.96 D + 0.41 R, R2 0.91, resid sd 5.5; n16 coef only +2.0 (an early
+  19-row fit said +5.7: small sample). Router-level residual means sd 2.1 us (-4.2..+2.8; ~1%).
+  d32 full: 404.6 [378, 446]; us = 325 + 8.0 D + 0.26 R, R2 0.90; n16 +1.3; router means sd 1.75 (-3.3..+2.5; ~0.4%).
+- Verdict: NO structural slow mode at T=32 (unlike T=256's >128-token expert, n20). Time follows distinct experts (~8 us
+  each, as SGLang's does), so the per-rep ratio stays tight. A 17-32-token expert costs ~1-2 us extra (per-row consumer
+  cost; 16-token segments are dead on record, STATE-moe s10/s12). Nothing to fix; with n20 (T=128/256) and layer n24s1
+  (T=8/16) the routing-variance audit now covers every T. 00:00Z dev/n15/mk_h200.sh (pr8) stays queued.

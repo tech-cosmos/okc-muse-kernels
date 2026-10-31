@@ -3564,3 +3564,229 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Not submitted (10-31 layer submit cap used). SUBMIT RECOMMENDATION after 00:00Z: v180 instead of v178 (v178 carries the
   HOT_ET race; v180 = v178 + bitwise/near-free changes; v180's own check raw 2.1977 beats the board, the CLAUDE.md rule).
   Re-checking unchanged v180 gives 'duplicate' (content dedupe), so no further check of the same file is possible.
+
+## n27 (session 21, 2026-10-31 16:52-17:10Z real UTC): 1 MB headroom + v181 (HOT_IL); 1 check (84eb0719), 0 submits.
+- build.py `strip_cuda_comments`: drops whole-line and trailing `//` comments inside triple-quoted string tokens holding CUDA
+  (__global__/__device__/#include); comments named by other string literals (runtime text-patch anchors like
+  "// n4s1 (NORM_EARLY)") are kept (first try without that rule tripped an anchor assert at import). submission.py 999018 ->
+  909538 B: ~90 KB headroom. tools/n27/srccmp.py rec/cmp hooks torch load_inline over prepare + 13 tests + 12 scored shapes:
+  17/17 sources IDENTICAL modulo comments vs v180. Commit f0ab506 (= v180's code, not checked: nothing to check).
+- v181 (38d0c23) = that + proj n22 HOT_IL (`IL=2 python r-proj/.../dev/n22/mk_il.py moe_src.py`, @64f3bf7: moe_hot claims a
+  >128-token expert's slices rb-major, 2nd W read = L2 hit; gated ns>1; bitwise; proj H100 v32 ~-2.5 us on dominant-expert
+  inputs, tie otherwise). Own H100 A/B NOT run (proj's on v178bal+IL2). validate ALL OK: 13/13, scored 0/24, opt 0/40,
+  tk2f 0/1200, replay 0/480, route 0/240 (gap 0.0256, drop-lead 0.0172), fuzz 0/188, cold prep 64.6 s. 909824 B.
+- CHECK 84eb0719 **2.1896 raw** [2.157, 2.222] (board 2.1717). us sl/full: d1 65.2/73.2, d16 121.0/200.3, d32 144.3/296.4,
+  v1 108.2/123.2, v16 251.7/339.7, v32 326.8/498.8. Fixed-SGLang (bench.SGLANG_H200, 46/16 weights, geomean of loads; this
+  formula gives v180 2.1643 / v178 2.1917 vs the 2.1629 / 2.1874 on record, i.e. ~+0.002-0.004 high) = **2.2105** > bar 2.1913:
+  best fixed on record. d16 sl 121.0 (v180 130.1) / d32 sl 144.3 (157.8) = node draw, HOT_IL only touches T=256.
+- SUBMIT PLAN (first session after 00:00Z 11-01): submit **v181** = main 38d0c23 (`okc submit muse_decode_layer/submission.py`)
+  once, INSTEAD of v180: it has v180's race fix + QLO, its own check beats the board raw and the lead's fixed bar.
+- Accident: `rm -rf profiles` in the repo root deleted the gitignored ~/r-layer/profiles (old layer judge JSONs from sessions run
+  from the root). Restored 16 layer jobs via `okc status <job> --json` (it writes ./profiles/<id>.{json,txt} as a side effect;
+  non-layer ones removed). okc check run from muse_decode_layer/ writes muse_decode_layer/profiles/ (42 jobs, untouched).
+- Own H100 A/B (proj dev/n22/ab_multi.py, tuner off, routers 17,12 = dominant-expert x 4 inputs, verify 32; log
+  tools/n27/ab_il2.log): vs v180s base, v181 sl -1.99 / full -3.22 us (8/8 faster each), A/A copy of the base -0.60 / -1.98
+  (6/8) -> HOT_IL net ~-1.4 sl / -1.2 full us on dominant-expert inputs, in line with proj n22. Session ends; 9 layer checks left 10-31.
+
+## n28 (session 22, 2026-10-31 17:10-17:45Z real UTC): v181 HOT_IL correctness stress; 0 judge runs
+- Nothing new under Handoffs/Requests since v181; lead's newest line (16:30Z) is already in main (v178 HOT_SL + nvs QLO via v180).
+- tools/n28/il_stress.py (new): per router seed x verify 16/32 sl/full, capture once, replay n fresh inputs (cold L2), compare each
+  replay BITWISE to an eager kernel_fn on the same input + reference.check_implementation. v181 main (38d0c23), dominant-expert
+  routers 5/12/17 (proj n20/n21/n22: >128-token experts on most inputs, the HOT_SL/HOT_IL path), 30 inputs each:
+  replay!=eager 0/360, check fails 0/360 (log tools/n28/il_stress.log). No race/hang in the new slice-interleave claims.
+- Board 17:20Z: we are #214 at 2.172 (board best v174); #1 2.418, #10 2.375.
+- Plan unchanged: first session after 00:00Z 11-01 submits v181 (main) once.
+
+## n29 (session 23, 2026-10-31 17:27-17:50Z real UTC): T=256/128 bnd2 L2-warm oracle DEAD; 0 judge runs, 0 Modal.
+- No lead line after 16:30Z and no new Handoff/Request for layer (fresh x19 H200 A/B: keep all of x14 + MRG 2, already in main).
+- Own-list item from n21s1 (L2-prefetch the second boundary's pre-expert inputs s FP32 8 MB + x1 BF16 4 MB during the
+  compute-bound T=256 unpool, est. ~-3 us H200): oracle tools/n29/bnd_warm.py, standalone _boundary NOS=2, CUPTI kernel
+  times, median of 60, flush 200 MB then touch f only (cold) vs f+s+x1 (warm): T=256 12.86/12.85 cold vs 11.86/11.87 warm
+  (-1.0 us), T=128 6.40 vs 5.76 (-0.6 us). The kernel is not bound by those reads (warm still 11.9 us vs ~4 us of writes):
+  ceiling ~1 us x (0.033+0.011) %/us = 0.04%. Not built. BND_SPLIT at T=256 was already noise (s74).
+- H200 profile of check 84eb0719 (v181): v32 sl hot 123 + twm 197 (concurrent), T=256 GEMMs nvjet 26-35 us each (~17 GFLOP:
+  near compute); d32 sl tk2f 83 of 144 us. Layer-lane list stays empty; v181 submit after 00:00Z 11-01 stands.
+
+## n30 (session 24, 2026-10-31 17:46-17:52Z real UTC): T=128/256 qkv Triton split-K oracle DEAD; 0 judge runs, 0 Modal.
+- No lead line after 16:30Z; fresh x20 asks the lead whether an own dense T=128/256 GEMM (qkv N=2304 K=8192 first) is worth it.
+  Cheap first test of that question on the H100 (cold L2 200 MB flush, CUPTI via torch.profiler, median of 40, GPU lock;
+  shared GPU): Triton split-K FP32 slabs [S,M,N] + torch slab sum vs F.linear (cuBLAS/nvjet incl. its own ~3 us reduce at m128).
+  * tools/n30/qkv_splitk.py (plain pointer loads): m128 cuBLAS 24.9 | best S7 128x128x64 126 CTAs 23.3 + 3.9 sum = 27.1;
+    m256 cuBLAS 29.5 | best S3 128x128x64 108 CTAs 32.5 + 4.1 = 36.6 (S6 128x256 31.6 + 5.2).
+  * tools/n30/qkv_tma.py (TMA tensor descriptors, warp_specialize on/off): worse: m128 best 26.1 + 3.9 = 30.0, m256 36.9 + 6.9;
+    BK 128 / 128x256 tiles exceed smem at 3-4 stages.
+  Even the GEMM part alone never beats cuBLAS's total, and the slab sum adds 4-7 us (would need an in-kernel/cluster reduce).
+  Reading: cuBLAS m128 22 us is ~2x the H100 byte time (37.7 MB ~ 11-13 us), so headroom exists, but Triton-level kernels
+  (~26 GB/s/SM effective) are nowhere near; only a hand-written CUTLASS/CuTe-class kernel (fresh x20's lockstep-x, 12-bit W,
+  >= 16 KB stages, cluster reduce) could get it: a multi-day build, lead's call (fresh x20 Request). Not built by layer.
+- Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
+
+## n31 (session 25, 2026-10-31 17:52-18:25Z real UTC): T=128/256 qkv TileLang + CUTLASS sm90 oracles DEAD; 0 judge runs, 0 Modal.
+- Follow-up of n30 (Triton lost) on fresh x20's dense-GEMM question, with the two remaining library-class generators. Both run
+  from the SYSTEM python3.14 (/usr/local/bin/python3.14 has tilelang 0.1.9 + nvidia-cutlass-dsl 4.4.2 + torch 2.11; ~/okc has
+  neither); CUTLASS 4.1 C++ headers come with that tilelang wheel (.../tilelang/3rdparty/cutlass). Speed oracles only.
+  * tools/n31/tl_splitk.py (TileLang T.Pipelined wgmma/TMA split-K, FP32 slabs, NO reduce, CUPTI, cold L2): m128 cuBLAS 24.8-25.2
+    | best S4 128x128x128 st3 72 CTAs 23.0, S8 128x256x64 72 CTAs 24.8; >= 128 CTAs worse (28-32). m256 cuBLAS 29.9 | best
+    S4 128x256x64 34.7, S8 128x128x128 35.4. Effective ingest ~45 GB/s/SM (72 CTAs x 1 MB / 23 us) = the record's wall.
+  * tools/n31/cl_gemm.cu + build.sh (CUTLASS sm90 TMA warp-specialized cooperative, stream-K scheduler with Deterministic
+    reduction, split-K/stream-K/DP modes, clusters 1x2 / 2x1 multicast, swapped A=W, tiles 128x128x64/128x64x64/128x128x128)
+    vs tools/n31/cb_cal.cu (cuBLAS GemmEx in the same cudaEvent harness, which reads ~+5 us over CUPTI): m128 cuBLAS 29.8 |
+    CUTLASS best 36.1 (swap 128x64 clu 2x1 stream-K) / 36.5 (split 4), DP 64.4; m256 cuBLAS 34.7 | CUTLASS 42.9-43.0.
+  * GOTCHA: CUTLASS stream-K/split-K Deterministic needs its workspace re-initialized (g.initialize) before EVERY run; a bare
+    g.run() repeat hangs the GPU. My first hung binary held /tmp/okc-gpu.lock ~10 min (killed; sorry). cl_gemm.cu now calls
+    initialize per run and alarm(20)s after taking the lock.
+- Verdict: Triton (n30), TileLang and CUTLASS's own sm90 kernels all lose to nvjet at T=128/256 qkv. Only a hand-written
+  lockstep-x / 12-bit-W / cluster-reduce kernel (fresh x20) could take the ~2x byte headroom; still the lead's call. 0 runs.
+- Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
+
+## n32 (session 26, 2026-10-31 18:19-18:50Z real UTC): H200 SM-clock DIAG check: the judge's H200 THROTTLES at T=256; 1 check, 0 submits.
+- No lead line after 16:30Z, no new Handoff for layer. Took proj n24's open question (tuner confirm loop at T=256 full is
+  +10..20 us over its own first pass in 25/25 judge logs; H100 repro flat) with one of today's expiring layer checks instead
+  of Modal: DIAG CHECK 2657b536 = v181 (main 38d0c23) + tools/n32/mk_diag.py (tuner only, prepare(); NEVER submit): after the
+  tuner's pick for T=16 sl / T=256 sl / T=256 full, 1500 back-to-back graph replays (flush.zero_ + replay, as the tuner) with
+  an SM-clock probe every 5th (torch.cuda._sleep(400000) cycles / event us), then 0.5 s host rest and 60 more replays.
+  H200 (judge):              idle MHz | us per sixth of the 1500                   | MHz per sixth                 | min
+    T=16 sl  (control)       1926     | 172.0 171.9 172.0 172.1 172.0 172.0          | 1928 1929 1929 1926 1928 1928 | 1912
+    T=256 sl                 1925     | 342.6 346.2 347.4 345.6 345.5 345.2          | 1926 1889 1869 1884 1886 1890 | 1758
+    T=256 full               1914     | 521.0 528.9 529.2 529.6 529.0 577.7          | 1908 1839 1842 1840 1846 1617 | 1397
+    after 0.5 s rest: idle back to 1927-1928 MHz, T=256 sl 341.0 / full 516.2 us (= fresh first-sixth level).
+  H100 (local, same tool): flat at every shape (T=256 full 624 +-1 us, probe 1750 MHz with launch bias): proj's repro holds.
+  So the H200 clocks down within ~0.2 s of sustained T=256 work (power/thermal cap): -2..-4% clock at T=256 sl, -4% then
+  -15% at T=256 full, +1.5% / +11% time. That is proj n24's confirm-loop shift (the confirm runs right after the first pass).
+- Does it touch the score? Judge timing = paired ratios, our replay and SGLang's taking turns on fresh inputs with a cold-L2
+  read between (TASK.md 92-96), so both sides sit in the same cap state and most of it cancels. What is left: (a) our T=256
+  phases are more clock-bound (twm consumer-bound, nvjet near compute) than SGLang's -> a throttle hurts our side more;
+  (b) our own energy per replay feeds the cap both sides see. Ceiling if the scored v32 series runs ~2-4% clock-throttled and
+  half of it hits only us: ~5-10 us v32 sl x 0.033 + ~10 us full x 0.011 = ~0.2-0.4%; realistic energy cuts get a fraction.
+  This check's v32 sl 323.0 / full 494.5 (scored) vs the tuner's fresh 341/516 on synthetic inputs: no direct read of the
+  scored series' clock (would need a probe inside kernel_fn = not allowed). Raw 2.1790 (DIAG code adds nothing to timed calls).
+- Energy levers if the lead wants them (none built): spin-polling secondaries at T=128/256 (HOT_ET twm polling meta[67],
+  PDL secondaries spinning on flags) -> nanosleep backoff; mbarrier try_wait is already a suspend. Measure energy/replay on
+  the H100 (NVML total energy) is polluted by the other agents' GPU use: needs an exclusive window.
+- Side note (proj n24 (2)): T=16 sl {g30n:unpool} wins the first pass here too (171.0 vs 171.7, confirm 171.0 vs 172.1) and
+  locally (217.6 vs 218.8): pin candidate in TUNE_BASE[(16, True)] for a later bundle (~-0.2 us), not put on main now.
+- Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
+
+## n33 (session 27, 2026-10-31 18:32-18:45Z real UTC): T=16 {g30n:unpool} pin = H100 tie; 0 judge runs, 0 Modal.
+- No lead line after 16:30Z, no new Handoff for layer, layer list empty (n29-n32 closed the rest).
+- Re-timed d1 sl on main v181 (H100 timeline): qkv g13 0-15.6 | csl 20.6 | o g13 24.9 | bnd 28.1 | pr1 48.2 | norm 49.2 |
+  tk2f 84.3 | n2u 89.5 | bnd 91.3 us: same hops as the n10s1/n13s3/n19s1 record, nothing new to cut.
+- proj n24 / layer n32 side note tested: pin {g30n:unpool} in TUNE_BASE[(16, True)] (and {g30n:unpool, g30n:qkv_gate} at
+  (16, False)), tools/ab_flag.py TUNE {} vs pinned, seeds 99/7/13 x 4 rounds, H100: d16 sl 187.67/152.58/153.40 vs
+  187.75/152.58/153.34, full 286.97/267.63/266.86 vs 286.94/267.66/267.11 us = tie on real routings. Not pinned (the H200
+  tuner can keep it as an option; flips there are <= ~1 us near-ties per proj n24).
+- Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
+
+## n34 (session 28, 2026-10-31 18:51-19:25Z real UTC): v182 = v181 + proj n26 escape-base rule; 1 check (f8de6feb), 0 submits.
+- Handoff proj n26 (Handoffs 19:20Z): layer.py _compress tries base = emax-15 and emax-16 (top outliers become escapes: code 0,
+  header value w / scale, exact; no kernel change) and keeps the fewest-escape base whose rows fit G13_ESC. Same code as
+  r-proj dev/n26/esc_base_layer_submission.diff. Board weights (seed 5353): qkv_gate emax 123 -> base -16 (max row 4), pooler
+  emax 123 -> -16 (max row 5, was 7 of 8), o/unpooler keep -15. All downstream packers (g22 EV, g30 BF16 check, gx tables)
+  read escapes generically from hdr; top escapes are w/scale <= 4 (exact BF16), no 2^-15 sentinel collision.
+- validate --quick --skip=fuzz ALL OK (tools/n34/validate.log): 13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240,
+  route 0/240 (gap 0.0256), cold prep 62.5 s. submission.py 910092 B.
+- CHECK f8de6feb 2.1570 raw [2.125, 2.189] / fixed-SGLang 2.1508 (v181 84eb0719: 2.1896 / 2.2082). us sl/full: d1 67.8/75.0,
+  d16 126.9/205.8, d32 154.2/291.2, v1 114.7/127.2, v16 261.4/345.3, v32 313.2/495.5. Tuner's own synthetic d1 lines on that
+  node: 68.8/72.5 vs 67.5/72.0 on v181's node.
+- H100 tools/ab_files.py "" 6 v181 vs v182 (tools/n34/ab.log, GPU shared): d1 84.54/103.72 -> 84.79/102.74, d16 189.34/288.86 ->
+  188.86/288.76, d32 178.53/408.00 -> 179.23/407.02, v1 142.46/157.18 -> 141.39/156.34, v16 298.26/443.30 -> 296.81/442.74,
+  v32 361.04/625.02 -> 361.86/625.74 = TIE. The check gap is node noise.
+- Submit decision: by the 15:58Z rule v182's check misses the bar (2.1913), v181's passed. v182 is the same speed and does not
+  lose 3-16 us at d1 on the ~0.6% of held-out weight draws that would push v181's pooler/qkv to BF16 fallback. Asked the lead
+  (Requests). Default after 00:00Z: submit v181 (38d0c23) once.
+
+## n35 (2026-10-31 19:03-19:10Z, session 29): status only
+No lead line after 16:30Z (no answer on v181 vs v182). Board: layer #221 on the overall board (#1 2.418). Every agent's list is empty
+(proj n28, moe o27, fresh x22/x23, layer n33). Nothing new to build. 0 judge runs (7 layer checks left 10-31, unused).
+NEXT (first session after 00:00Z 11-01): submit v181 = `git show 38d0c23:muse_decode_layer/submission.py` once, unless a lead
+line says v182 (main). Log it in Judge runs.
+
+## n36 (2026-10-31 19:19-19:25Z, session 30): status + energy-lever scoping; 0 judge runs, 0 Modal
+- No lead line after 16:30Z (still no answer on v181 vs v182). No new Handoff for layer.
+- n32's energy lever (spin-poll -> nanosleep at T=128/256) scoped by inspection: every spin site in v182 (moe_src HOT_ET
+  meta[67] poll 2681, HOT_EMU 2693 (proxy only, off), layer.py rf ctr 2400 (tid<64), g19/g24 epoch ctr (lane 0), pr8/pr32/
+  idf/moe done/rdy polls already __nanosleep) is ONE thread per CTA/warp polling one L2 line, mostly for < ~2 us: no measurable
+  SM power next to twm/nvjet streams. DEAD by inspection, not built.
+- NEXT unchanged (first session after 00:00Z 11-01): submit v181 = `git show 38d0c23:muse_decode_layer/submission.py` once,
+  unless a lead line says v182 (main). Log it in Judge runs.
+
+## n37 (2026-10-31 19:35-20:35Z, session 31): non-SA weights crash FIXED (v183 main, v184 branch); 2 checks, 0 submits
+- moe o25's Request (held-out weights mode 2: zero / subnormal e4m3 block scales -> moe st["sa"] False) applied to the layer
+  (tools/n37/nonsa.py <file> <seeds>: default weights + w13_sf[:,0,0]=0, w13_sf[:,7,3]=1, w2_sf[:,5,7]=3 raw bytes; 13 tests +
+  12 scored x seeds): v182 CRASHED in the tuner and at the first test: "layer MOE_PRUNE: tk2f cfg 84204 not built" (the pruned
+  moe_tk2f_launch kept only SA instantiations; non-SA turns SQ/BAL/tk2h/CW off by itself, leaving plain 84204 non-SA).
+- Fix (layer.py): prepare() runs moe's sa test (_moe_weights_sa) before _moe_prepare; for non-SA weights it rebuilds the moe lib
+  with `#define MOE_NSA 1`, which adds the one non-SA instantiation tk2f_go<8,4,2,false,false,false,8,0,4> for cfg 84204.
+  SA weights: preprocessed code unchanged (only the lib hash moves). Non-SA prepare pays one extra serial moe build (~65 s H100,
+  est. total ~135 s < 300; not measured). twm/hot/nu8 paths needed nothing (moe_set_sa runtime).
+- Risk context: nvfp4.random_weights clamps scales to [8, 448] (wide: [2^-6, 448]) = always SA, so generator draws never hit it;
+  only real-checkpoint weights (e.g. zero scale on an all-zero block) would. v181/v182 would crash there; v183/v184 don't.
+- v183 = main e0dd26f = v182 + fix: non-SA 37/37 PASS (2 seeds), default validate ALL OK (prep 68.3 s). CHECK 662fa349 2.1414 raw /
+  fixed 2.1551.
+- v184 = branch layer/v181nsa 70591ea = v181 + fix only (submission sha1 926ce2ec): validate ALL OK (67.8 s), non-SA 25/25.
+  CHECK 612cdd17 2.1554 raw / fixed 2.1252. Purpose: test whether v182's escape-base rule caused v182/v183's slower d1 sl
+  (67.8/67.5 vs 64.1-66.0 in v176-v181) and v1 sl (114.7/118.9 vs 104-110): v184 (no rule) is as slow (66.3 / 117.9) ->
+  NODE NOISE, the escape rule is cleared. Tonight's 3 checks (v182/v183/v184) all drew slow nodes; v181's 2.2076 was a fast draw.
+- Modal: 50.9/60 GPU-min used on 10-31, a 2-variant A/B reserves 11: not run.
+
+## n38 (2026-10-31 19:58-20:10Z real UTC, session 32): non-SA cold prepare MEASURED; 0 judge runs
+- (n37's COORD/NOTES stamps "20:35Z" were ahead of real UTC; n37 ended ~19:55Z real.) No lead line after 16:30Z; no answer on
+  v181 vs v183 (Requests). fresh x27 also recommends the robust build (v182/v183).
+- n37's open estimate closed: v183 (main) COLD prepare (fresh TORCH_EXTENSIONS_DIR/TRITON_CACHE_DIR/CUDA_CACHE_PATH, H100,
+  tools/n38/nonsa_prep.py <file> [sa]): non-SA weights 112.0 s (two moe libs built: 05228ad4817c + 9ff4c8b73c1d), SA weights
+  67.6 s (one). The extra serial moe build costs +44 s, well inside the 10-15 min run. Nothing to change.
+- NEXT (first session after 00:00Z 11-01): unchanged from n37: submit v181 (38d0c23) once per the rule unless a lead line picks
+  v183 (main e0dd26f, recommended). Log in Judge runs.
+
+## n39 (2026-10-31 20:20-20:45Z): v181 recheck = judge DUPLICATE, 0 checks spent
+- Lead silent on v181 vs v183 since n34/n37. v183's SA path = v181's byte-for-byte except an untimed prepare-time
+  `_moe_weights_sa` test (diff 856cc18..e0dd26f, layer.py): v182/v183/v184's slow d1/v1 can only be node draw (or escape rule,
+  already excluded by v184).
+- Tried to confirm by re-checking v181 itself (`git show 38d0c23:.../submission.py`, sha1 fa4865e6): okc check returned
+  `status: duplicate, duplicate_of 84eb0719b68c4693`, result None, checks used stayed 15/20. **The judge dedups identical
+  code by content hash; no rerun.** Not worked around (padding the file to force a rerun = against the dedup's intent).
+- Unknown: whether a SUBMIT of code identical to an earlier check is also deduped (and what it returns). v181 was checked
+  (84eb0719) but never submitted; v183 checked (662fa349). Whoever submits after 00:00Z: read the submit's `status` field.
+
+## n40 (2026-10-31 ~20:35-20:55Z, session 34): v181 vs v184 H100 A/B = tie; 00:00Z submit -> v184; 0 judge runs, 0 Modal
+- Question: v181 (38d0c23) is the only build whose check clears the lead's fixed-SGLang bar (84eb0719 ~2.21), but it crashes
+  on non-SA weights (n37). v184 (layer/v181nsa 70591ea) = v181 + the n37 fix only; its check 612cdd17 drew 2.1554 raw / 2.1252
+  fixed (d1/v1 sl slow). Is v184 slower, or was that the node?
+- Construction: for SA weights (every generator draw) `_MOE_NSA` stays False, no rebuild, and the only source change in the moe
+  lib is an `#ifdef MOE_NSA` block that the preprocessor drops: same kernels as v181; prepare() adds one scale scan (untimed).
+- H100 tools/ab_files.py "" 4 rounds, files v181, v184, v184, v181 (tools/n40/ab.log), medians us:
+  d1 sl 82.6/83.3/83.2/83.5, d1 full 102.9/102.5/102.7/102.5, d16 sl 189.3/188.9/189.1/189.4, d16 full 289.5/287.9/288.6/289.7,
+  d32 sl 178.3/179.8/179.2/178.0, d32 full 408.1/408.3/408.3/408.2, v1 sl 142.0/141.7/141.5/141.7, v1 full 157.7/157.0/156.5/157.8,
+  v16 sl 300.2/298.8/299.3/300.1, v16 full 442.6/444.3/445.4/442.1, v32 sl 358.8/358.2/358.3/358.4, v32 full 624.9/625.4/625.7/625.0.
+  = TIE (all within +-1.5 us; same spread as copy vs copy). v184's slow judge draw was the node.
+- Decision for the first session after 00:00Z 11-01: submit v184 once (v181's speed + crash fix; v184's own check is within 1%
+  of the board, 09:28Z rule; v181's check is the speed evidence for identical kernels). v181 only if a lead/human line says so.
+
+## n41 (2026-10-31 20:50Z, session 35)
+Status only. No lead/human line since n40. Verified v184 = `git show 70591ea:muse_decode_layer/submission.py` sha1 926ce2ec
+(v181 38d0c23 = fa4865e6). okc problems: layer 15/20 checks, 3/10 scored used on 10-31; no new candidate to check, every lever
+in STATE is closed. Plan: first session after 00:00Z 11-01 submits v184 once. 0 judge runs, 0 Modal min.
+
+## n42 (2026-10-31 ~21:05-21:15Z, session 36): pre-submit stress of v184; 0 judge runs, 0 Modal
+No new lead/human line. Stressed the exact 00:00Z file (`git show 70591ea:muse_decode_layer/submission.py`, sha1 926ce2ec)
+with NEW router seeds 31,37 (H100): tools/replay_test.py 30 inputs x 12 shapes x 2 seeds = 0/720 output fails;
+tools/route_judge.py same = 0/720 routing fails; worst drop-lead 0.0289 (verify 32 full, rs 31) = fp8ref's own 0.0289
+(inherent to the input, not ours); our worst pick gap 0.0256 < 0.05. Logs tools/n42/. Plan unchanged: submit v184 once after 00:00Z 11-01.
+
+## n43 (2026-10-31 ~21:15-21:20Z, session 37): status only; 0 judge runs, 0 Modal
+- No lead line after 16:30Z, no new Handoff or Request for layer. Layer board: #224 at 2.172x, #1 pjmullin3 2.459x (#2 2.418).
+- v184 file `git show origin/layer/v181nsa:muse_decode_layer/submission.py` = sha1 926ce2ec (unchanged). okc limits 10-31: 5 checks
+  / 7 scored left, but the lead's 2 submits/day are used and there is no new candidate (identical code is deduplicated).
+- NEXT unchanged: the first session after 00:00Z 11-01 submits v184 once and logs it in Judge runs.
+## n44 (2026-10-31 21:31-21:40Z, session 38): SUBMIT v183 per lead 21:25Z; 1 scored run
+- Lead 21:25Z: submit v183 (e0dd26f = main, sha1 ac9e1467) now (non-SA guard + escape-base fixes survive held-out weights).
+- SUBMIT bc16338a = **2.1874x** (CI 2.155-2.220), new layer board best (was 50534b24 v174 2.1717), #211. All 13 tests pass.
+  Per-shape median us (ours / SGLang): d1 sl 65.7/171.2, full 73.5/181.3; d16 sl 124.4/259.4, full 204.8/442.8;
+  d32 sl 151.6/269.3, full 297.0/617.7; v1 sl 106.4/258.2, full 125.5/282.1; v16 sl 252.0/519.5, full 343.1/694.2;
+  v32 sl 323.7/712.4, full 497.6/1071.0. d32 sl (1.8x) remains the weakest shape.
+- v174 (old best row) crashes on non-SA weights (fresh x34); now superseded on the board by v183.
+- v184 submit planned for 00:00Z is moot (= v181 + same fix, H100 tie with v183): HOLD. Next submit needs new code beating 2.1874.
+  Layer 10-31 left: 5 checks / 6 scored.
+
+## n45 (10-31 21:37-21:42Z, session 39)
+Status only. Board: layer #211 at 2.1874 (bc16338a v183), #1 pjmullin3 2.459. No lead line after 21:25Z; no new-code candidate (all levers closed on record; QLO full-layer half and vjeux attention copy await the human). Hold. 0 judge runs.

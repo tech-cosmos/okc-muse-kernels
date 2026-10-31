@@ -1,0 +1,11 @@
+# proj n25 2026-10-31 ~18:22Z: bash dev/n24/mk_h200.sh (Modal H200, r-layer main, tuner off, flush.zero_ 256 MB per replay); charged 2.1 GPU-min
+verify 32 sliding: A (3-way) medians 302.6 304.0 302.7 | B (2-way) 304.4 306.4 | A+B 0.09 s, C 0.98 s
+  A per-round-block of 10 (graph 0): 303.0 302.6 302.2 302.6 302.8
+  B per-block of 10 (graph 0):       302.1 304.8 305.1 304.8
+  C per-block of R/12:               304.8 304.7 303.6 304.0 303.6 305.2 303.3 307.5 306.6 307.3 327.0 312.4
+  smi C (20 ms, lagging): 1980MHz/165W/0000 -> 1830-1845MHz/227-592W/0004 -> 1515/652W, 1425/695W, 1680-1845/690-706W (reason 0x4 = SW power cap)
+verify 32 full: A (3-way) medians 510.2 508.7 508.4 | B (2-way) 531.0 530.8 | A+B 0.13 s, C 1.54 s
+  A per-round-block of 10 (graph 0): 509.4 509.8 510.1 510.6 528.4
+  B per-block of 10 (graph 0):       530.8 530.8 531.3 530.7
+  C per-block of R/12:               530.3 527.1 530.8 528.8 529.2 532.7 635.7 554.3 532.0 530.1 530.4 531.8
+  smi: 1980/129W/0000 -> 1950/184-243W/0004 ... 1890/537W, 1680/647W, 1815/697W (cap 700 W)

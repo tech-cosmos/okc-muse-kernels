@@ -1,0 +1,23 @@
+env: torch 2.14.1+cu130, triton 3.8.0
+env: torch 2.14.1+cu130, triton 3.8.0
+env: torch 2.14.1+cu130, triton 3.8.0
+rs 17 verify 32 sliding in 0 base  370.3  -1.1  +1.9 bitwise True max 183 2nd 43 n>64 1 D 21
+rs 17 verify 32 sliding in 1 base  379.9  -2.3  +1.7 bitwise True max 181 2nd 41 n>64 1 D 22
+rs 17 verify 32 sliding in 2 base  374.0  -1.5  -1.0 bitwise True max 179 2nd 46 n>64 1 D 21
+rs 17 verify 32 sliding in 3 base  362.3  -2.1  -0.8 bitwise True max 175 2nd 43 n>64 1 D 20
+rs 17 verify 32 full    in 0 base  616.7  -8.2  -5.8 bitwise True max 177 2nd 45 n>64 1 D 22
+rs 17 verify 32 full    in 1 base  618.0  -5.1  -4.6 bitwise True max 170 2nd 34 n>64 1 D 22
+rs 17 verify 32 full    in 2 base  601.9  -4.8  -3.8 bitwise True max 173 2nd 47 n>64 1 D 20
+rs 17 verify 32 full    in 3 base  593.5  -1.5  -2.0 bitwise True max 168 2nd 47 n>64 1 D 20
+rs 12 verify 32 sliding in 0 base  344.9  -3.0  -1.5 bitwise True max 166 2nd 102 n>64 2 D 18
+rs 12 verify 32 sliding in 1 base  365.7  -1.5  -2.0 bitwise True max 172 2nd 123 n>64 2 D 20
+rs 12 verify 32 sliding in 2 base  412.6  -4.0  -3.0 bitwise True max 137 2nd 91 n>64 2 D 25
+rs 12 verify 32 sliding in 3 base  371.6  -0.5  -0.1 bitwise True max 170 2nd 112 n>64 2 D 21
+rs 12 verify 32 full    in 0 base  588.3  -0.8  -0.0 bitwise True max 173 2nd 107 n>64 2 D 18
+rs 12 verify 32 full    in 1 base  599.4  -2.3  -0.1 bitwise True max 170 2nd 124 n>64 2 D 20
+rs 12 verify 32 full    in 2 base  566.8  -2.5  +0.4 bitwise True max 173 2nd 124 n>64 2 D 17
+rs 12 verify 32 full    in 3 base  590.9  -0.5  +0.0 bitwise True max 173 2nd 115 n>64 2 D 19
+MEAN verify 32 full sub_v181.py: -3.22 us over 8 (8 faster)
+MEAN verify 32 full sub_v180s_b.py: -1.98 us over 8 (6 faster)
+MEAN verify 32 sliding sub_v181.py: -1.99 us over 8 (8 faster)
+MEAN verify 32 sliding sub_v180s_b.py: -0.60 us over 8 (6 faster)

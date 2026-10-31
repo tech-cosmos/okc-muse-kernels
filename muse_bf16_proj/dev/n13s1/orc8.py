@@ -4,8 +4,7 @@ after the first batch, no outputs) when env PR8_FLAT is set at launch (= at grap
 import sys, pathlib
 full = pathlib.Path(sys.argv[1]).read_text()
 i0 = full.index("_GPR8_SRC = r'''"); i1 = full.index("'''", i0 + 20); src = full[i0:i1]
-a = """// s36 timing probe (from gemv19)"""
-assert src.count(a) == 1
+a = next(x for x in ("// s36 timing probe (from gemv19)", "__global__ void pred(") if src.count(x) == 1)  # n25: probe comment gone on v131+
 flat = """// n13s1 oracle only: flat grid-stride read of pr8's bytes (WS, WN, router), PDL like pr8 (trigger at start, wait after the 1st batch)
 __global__ void __launch_bounds__(1024, 1) flat8(const uint4* ws, long ns, const uint4* wn, long nn, const uint4* rw, long nr, float* sink) {
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");

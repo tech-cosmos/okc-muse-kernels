@@ -10638,6 +10638,10 @@ def prepare(weights):
         "hi_stream": _own_stream(weights["qkv_gate"].device, priority=-1),
     }
     _join_builds()
+    global _MOE_NSA, _moe__LIB
+    if _MOE_NSA == _moe_weights_sa(weights):
+        _MOE_NSA = not _MOE_NSA
+        _moe__LIB = None
     state["moe"] = _moe_prepare({"w13": weights["w13"], "w13_sf": weights["w13_sf"], "w13_gs": weights["w13_gs"],
                                  "w2": weights["w2"], "w2_sf": weights["w2_sf"], "w2_gs": weights["w2_gs"],
                                  "post_norm_w": weights["post_expert_norm"]})
@@ -15253,19 +15257,22 @@ PR1_BND = False
 G13_ESC = 8
 def _compress(w):
     """Lossless 12-bit BF16 (gemv13/gemv14): sign|mantissa byte and 4-bit exponent code c = e - base per weight
-    (base = max exponent - 15; decoded exponent 112 | c, so sums are rescaled by scale = 2^(base - 112)); weights below
-    the window (zeros, tiny values) are escapes: code 0, byte 0 (decodes to 2^(base - 127)) plus a per-row header of
+    (base = max exponent - 15 or - 16, fewest escapes; decoded exponent 112 | c, so sums are rescaled by scale = 2^(base - 112)); weights outside
+    the window (zeros, tiny values, a top outlier at base - 16) are escapes: code 0, byte 0 (decodes to 2^(base - 127)) plus a per-row header of
     G13_ESC (col, true / scale) entries (exact; kernels subtract 2^-15 = 2^(base - 127) / scale). None if a row has more than G13_ESC escapes."""
     n, k = w.shape
     b = w.contiguous().view(torch.int16).int() & 0xFFFF
     e = (b >> 7) & 0xFF
-    base = int(e.max()) - 15
-    if base < 1:
+    best = None
+    for base in (int(e.max()) - 15, int(e.max()) - 16):
+        code = e - base
+        esc = (code < 0) | (code > 15)
+        nr = esc.sum(1)
+        if base >= 1 and int(nr.max()) <= G13_ESC and (best is None or int(nr.sum()) < best[0]):
+            best = (int(nr.sum()), base, code, esc)
+    if best is None:
         return None
-    code = e - base
-    esc = code < 0
-    if int(esc.sum(1).max()) > G13_ESC:
-        return None
+    _, base, code, esc = best
     code = torch.where(esc, 0, code)
     sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F))
     scale = 2.0 ** (base - 112)
@@ -16057,6 +16064,9 @@ _MOE_TK2F_PRUNED = """
     TORCH_CHECK(nr == 8, "tk2f CW: T = 1 only");
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 8192>(0, TK2F_ARGS0);
   }
+#ifdef MOE_NSA
+  if (!bal && cfg == 84204) return tk2f_go<8, 4, 2, false, false, false, 8, 0, 4>(0, TK2F_ARGS0);  // n37: non-SA weights only
+#endif
   TORCH_CHECK(!bal && cfg == 184204, "layer MOE_PRUNE: tk2f cfg ", cfg, " not built");
   return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4>(0, TK2F_ARGS0);
 #undef TK2F_ARGS0
@@ -16072,11 +16082,17 @@ def _moe_prune(src):
         src = src[:a] + f'\n  TORCH_CHECK(false, "layer MOE_PRUNE: {fn} not built");\n  return -1;\n' + src[b:]
     a, b = _moe_body(src, "moe_tk2f_launch")
     return src[:a] + _MOE_TK2F_PRUNED.rsplit("}\n", 1)[0] + src[b:]
+_MOE_NSA = False
+def _moe_weights_sa(weights):
+    sfb = [weights[k][:LOCAL_EXPERTS].contiguous().view(torch.uint8) for k in ("w13_sf", "w2_sf")]
+    return all(bool((((b & 0x80) == 0) & ((b & 0x78) != 0) & (b != 0x7F)).all()) for b in sfb)
 def _moe__lib():
     global _moe__LIB
     if _moe__LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = _moe_CUDA_SRC.replace("#define TK2F_DIAG 0", "#define TK2F_DIAG 1") if _moe_TK2F_DIAG else _moe_CUDA_SRC
+        if _MOE_NSA:
+            src = "#define MOE_NSA 1\n" + src
         if _moe_TK2F_ORX:
             src = src.replace("#define TK2F_ORX 0", "#define TK2F_ORX 1")
         if MOE_PRUNE and not _moe_TK2F_DIAG:
