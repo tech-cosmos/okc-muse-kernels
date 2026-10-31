@@ -1,3 +1,7 @@
+## o7 12:10Z 10-31: lead 11:25Z tk2f FIXED COST: GATE FAILS. Free-prologue+split oracle (plan of the same input in one trip)
+## H100 in-layer: v1 +0.0/+0.5, d16 -0.2/-0.7, d32 -0.7/-0.9 us; the prologue is one ~1.3 us dependent trip (TLB+L2), its compute
+## is free; LUT-late dead. d16 lever = _routing's 2.9 us tail after the router (proj's item). Tools tools/o7. 0 judge runs.
+## (o6 ran against the lead's 11:25Z PARK of moe/slack, which I missed; slack parked now.)
 ## o6 11:50Z 10-31: moe/slack now a NET WIN on the H100 (still OFF, 0 judge runs): o5's loss was the kernel's serialized
 ## global loads (phase C 10 us per changed token), not PDL. Loads-first token_keys + score by shuffle (bitwise = o5) + PDL:
 ## in-layer on-off v16 sl/fu -3.9/-10.5, v32 -2.1/-2.2 us; 0 fails/288 slack_judge; 13/13. Branch moe/slack a9242fb (on v174).

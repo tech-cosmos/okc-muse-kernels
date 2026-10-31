@@ -3742,3 +3742,27 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   (limit .05), dropped lead 0.018 (limit .03), saved distinct v16 0.6-1.5, v32 0.7-1.0 (= o5). bench test 13/13 with
   slack at (128,256) + real tuner, at ALL T, and off. Branch moe/slack: 9704a5d, bcdba50, be3ab28, merge of main
   (v174 c62cdb0) a9242fb (13/13 again). SLACK_TOKENS = () on the branch.
+- (o6 addendum) I missed the lead's 11:25Z 'MOE: PARK moe/slack' line at session start (my grep of Human decisions cut
+  it); o6 ran against it. The branch work stands (moe/slack a9242fb, off); slack is parked from here.
+
+## o7 (2026-10-31 ~11:55-12:10Z): lead 11:25Z item tk2f FIXED COST at v1/d16/d32, in-layer on v174. GATE FAILS. 0 judge runs, 0 Modal
+- Tools muse_moe_w4a16/tools/o7 (run from muse_decode_layer/; stamps = fresh's tools/fresh/span/mkstamp.py on v174 submission.py;
+  run.py = fresh's run.py with the pr1 section skipped off T=1; TUNE pinned to ({},) in every A/B arm).
+- H100 stamps, us from the first tk2f CTA entry (globaltimer res 0.256 us), seeds 7/11/13:
+  v1 sl: routed 1.54 | first TMA 2.05-2.30 | first data 3.84 | ph1 end min/med/max e.g. 33.8/37.4/39.4 (E5) | cnt ok +1.0
+  after the max | ph2 data +0.26 | end med->max +1.3. rmsnorm done (WAITST) at 1.0-1.3.
+  d16 sl: routed 1.54 | TMA 1.79 | data 3.58; rmsnorm already done at entry (0-0.26). d32 sl: routed ~2.3 | TMA ~2.8-3.3
+  (tk2g_bound split ~0.5-1.0) ; rmsnorm done 1.54.
+- ORACLE (mkorc.py, mode via lib.moe_orset: 1 = compute + store plan, 2 = load the same input's plan): tk2f with a FREE
+  routing prologue + split bounds (plan + own bounds + mode in ONE trip). Output = base within the base's own
+  nondeterminism (chk.py: base vs base differs in output 2 by 4.7e-5 at v1). H100 ab_orc.py 4 seeds x 4 rounds, orc - base:
+  d1 +0.35/+0.43, d16 -0.21/-0.66, d32 -0.69/-0.85, v1 +0.04/+0.49 us (sl/fu). Stamps: mode 2 routed 1.54 = base: the
+  prologue is ONE dependent trip (~1.3 us after the flush: TLB + L2), its compute is free. A first version with 3 serial
+  trips (mode, plan, bounds) was slower: one trip ~0.7 us each.
+- LUTLATE (mklut.py: dequant LUT loaded to a register at entry, stored to smem at the post-scan barrier; bitwise): v1
+  stamps identical (routed 1.54) -> the LUT is not the gating trip. Dead.
+- d16 nsys (v174, seed 801): pooler g24 ends 62.1, router_split 61.9, _routing ends 64.8 (2.9 us later, KS=16 partials),
+  rmsnorm 62.1-64.8 in parallel, tk2f enters 65.0 (side stream) -> the d16 lever is _routing's tail, not tk2f (proj has
+  the _routing hoist/IDF item from lead 11:25Z).
+- Left in tk2f (each sub-gate or dead on record): first-data DRAM latency ~1.8 (PFX dead H200), ph1->ph2 grid sync ~1.0
+  (REL variants n6s6), ph1 end spread (static split; SM-weighted dead layer n13s2), last-wave K-split ~0.8/1.1 d16/d32 (o4).
