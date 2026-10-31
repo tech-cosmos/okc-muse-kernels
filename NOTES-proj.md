@@ -2935,3 +2935,21 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
     (~2.3 GPU-min). Build only if flat <= -1 us at v1 sl there.
   * Clock note: COORD lines n13s1b/c say 11:25Z/11:45Z; the real times were ~10:40Z/10:55Z (clock read at 11:02Z).
 - Session totals: 0 judge runs; Modal 14.1 GPU-min (6 runs; ledger 36/60 shared). Nothing handed off.
+
+## n14 (2026-10-31 11:04-13:35Z, unattended session 2): lead 11:25Z hoist port (T=8/16/32) + IDF8 measured; 0 judge runs, 0 Modal
+- Hoist port, paper (no build): T=8 pr8's finisher already loads router_bias into smem BEFORE griddepcontrol.wait; its only
+  post-wait small load (local_start, 1 scalar by t 0) is issued before the acquire spin on the router-item counter, so it
+  overlaps that wait: bound 0. T=16/32 `_routing`: layer n14s3 timeline shows routing off the critical path (d16 ends 0.7 us
+  before the rmsnorm hop, d32 before the pooler): bound ~0. Not built.
+- IDF8 (early moe_tk2f at T=8 on a pr8 routing release flag), BUILT in a /tmp copy of r-layer main v174
+  (patch dev/n14/idf8_layer.patch; TUNE option "idf8", env IDF8 default for tests): pr8 finisher resets the flag before the
+  grid triggers, st.release's 1 after the 8 routing warps (__threadfence + __syncthreads); rmsnorm TRIG at start (not TRIG2);
+  moe_set_idf(flag) before the T=8 tk2f launch (tk2f's existing IDF acquire spin + __ldcg ids).
+  * FIRST TRY (flag = constant 1, racy oracle) HUNG THE GPU in a replay (twice): tk2f routed on not-yet-written ids, its
+    counters never completed. A flagless IDF oracle is not usable at T=8 (fresh x8c saw the same).
+  * Correct: tools/replay_test.py IDF8=1, 30 fresh inputs x router seeds 11,7: verify 1 sl/full 0/120 fails.
+  * H100 (tl13b, same process, R 11, cold L2, GPU shared/100% util): graph end vs base: sl idf8 -0.48 / +0.13 (base2 -0.71),
+    full -0.12 / -0.16 (base2 +0.19) = TIE (noise ~0.7). Reason: pr8 = 1024 thr x 64 regs + ~140 KB smem on 129 of 132 SMs,
+    so early tk2f CTAs have no SM until pr8 blocks exit; tk2fx already reads routing pre-wait after pr8 completes.
+  * Below layer's 0.7 us gate (lead 12:25Z gave IDF8 to layer; this is my data point + a ready flag patch for them).
+- Lesson: in tl13b-style A/Bs a hung variant stalls inside the lock forever: run with `timeout -s ABRT` + `python -X faulthandler`.
