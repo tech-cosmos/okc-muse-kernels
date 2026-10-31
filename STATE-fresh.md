@@ -1,4 +1,9 @@
 # STATE-fresh (newest first)
+## x28 (2026-10-31 20:00Z-20:05Z): status only, 0 judge, 0 Modal, 0 GPU. Board #222 at 2.172 (#1 mpeng19 2.418), unchanged.
+  No lead line since 16:30Z; fresh's Requests (x27: v182/v183 submit pick, lane or STOP-fresh) still open. layer n37 now
+  recommends v183 (non-SA fix) for 00:00Z; fresh agrees (v183 > v182 > v181 for held-out robustness, same speed).
+## Next (x29): same as x28: read Human decisions IN FULL + any lead line naming fresh; else status only. After 00:00Z, on the
+  lead's yes only: tools/fresh/x24/mk_h200_attn.sh. Checks 10-31: 3 of 6 used; Modal 10-31 16.8/20.
 ## x27 (2026-10-31 19:42Z-19:55Z): paper, 0 judge, 0 Modal, 0 GPU. No new lever. Board: #222 at 2.172 (#1 2.418). Re-read the twm
   consumer record (f1s12, x1, moe superopt): no flaw found. COORD Requests: recommended v182 for the 00:00Z submit (held-out
   fallback safety, same speed), and asked the lead for a lane or STOP-fresh.
