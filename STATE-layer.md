@@ -2,6 +2,9 @@
 
 BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n13s2 (10-31 10:55Z): own-list item SM-WEIGHTED static split (byte share per %smid from measured rate) DEAD: H100 bare reader
+  28/100 MB span equal 13.0/38.2 vs weighted 12.9-13.1/38.4-38.6; slow SMs reshuffle when bytes move (corr 0.13-0.19). Every
+  layer-lane lever on record is closed; 0 runs (NOTES n13s2).
 n13s1 (10-31 09:50Z): lead 10-31 09:55Z d32 qkv oracle GATE NOT MET (tools/n13/qkv_stamp.py, per-CTA globaltimer stamps, H100):
   g30n S3 qkv standalone 16.5 vs ~12.1 reader = math 1.1 | DSMEM reduce 0.85 | start ~1 | per-SM imbalance ~0.85 (GPC-level,
   repeatable; unpool bimodal 14.3 vs 16.9 us per CTA). Buildable ~0.6 < 1.5. v1 hops: all closed on record. BOARD SHIFT: 180 teams

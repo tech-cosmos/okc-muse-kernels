@@ -3244,3 +3244,23 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   New row fields: 'screening' (screened/pending/under_review) and 'screened_speedup' (e.g. #10 2.354 -> screened 2.326).
   `okc check` of unchanged main v173 returned status 'duplicate' of 335f3f26 (content-hash dedupe; no run, no budget): judge drift
   can't be tested without a code change. Cause of the shift unknown (public solution? baseline?): for the human/lead.
+
+## n13s2 2026-10-31 10:00Z-10:55Z: own-list item (lead 09:55Z: both layer items closed in n13s1). SM-WEIGHTED static split DEAD; 0 judge runs, 0 Modal.
+- Re-read the record for an unclosed lever (d1 hops, PR1_BND, OB8, megakernel, batch-1 full attention (~/attn s73/s74/s92/s99,
+  proj n7s9 fa1), 11-bit/entropy formats (proj n5s13: dead; floor 10.54 bits), v1 tk2f (moe n5s13/n7s22)): all closed on record.
+- New item from n13s1's GPC finding: per-SM stream rate is repeatable under a static split, so give each SM a byte share
+  proportional to its measured rate (table indexed by %smid, calibrated from hardware in prepare(); no partials, no atomics).
+  Oracle tools/n13/smw_oracle.py: bare ld.global.v4 reader, 1 CTA/SM (132), range from table[%smid], cold L2, H100:
+  ```
+  28.2 MB  equal: event 18.30-18.38 us, span 12.98-12.99, loop mean 11.85 max 12.50 | weighted (2-3 iters, w 0.93-1.15):
+           event 18.34-18.51, span 12.86-13.10, max 12.38-12.61
+  99.9 MB  equal: event 43.47-43.63, span 38.22-38.24, loop mean 36.6 max 37.4  | weighted: event 44.1-44.3, span 38.4-38.6
+  per-SM loop time corr: equal vs equal 0.94 / 0.97; equal vs weighted 0.13 / 0.19
+  ```
+  The slow set reshuffles when bytes move: the per-SM rate is a share of a common bound, not an SM property. Static
+  reweighting gains 0 (slightly worse); max - mean under an equal split is not idle bandwidth. This also weakens n13s1's
+  "dynamic split ~1 us" estimate for unpool/qkv. CLOSED. (Caveat: bare reader at ~2.2 TB/s, not the g30n TMA kernel; same
+  mechanism expected, and n13s1's 'rot' showed slowness follows the SM only under a fixed pattern.)
+- Outside check: teams with 2-3 attempts sit at 2.23-2.26x on the layer board (rank 42: 3 attempts, rank 69: 2), 180 of the
+  teams ahead submitted 10-30/31: looks like shared know-how. Web search found no public solution; vLLM's MuseSpark MegaMoE
+  uses DeepGEMM fp4_fp4_mega_moe (FP4 activations: illegal here). muse_prefill_layer exists (no row; not counted on the overall board).
