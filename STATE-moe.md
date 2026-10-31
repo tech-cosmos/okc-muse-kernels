@@ -19,6 +19,9 @@
   (n6s1, n7s47/48, n9s2, n11a, o1, o4, o9: dq 7 int + 4 HMUL2 / 8 weights is the z3 minimum; SS costs 4.5 B/weight smem;
   FP8 activations fail 1.5%); bs1/d1 fixed cost (o7, o15, fresh x5/x10-x12; CW dead on the moe board 3e70d87c); lossless
   bytes (codes are 4.0 bit, S6 scales lose); tk2f stream (4.33 TB/s, n7s41); slack = PARKED for an organizer yes (moe/slack).
+- o42 (lead 22:55Z): v1 sl expert-side hop stamps (tools/o42, NOTES o42). Only unclosed hop = nu8 (D) 4.9 us past-wait->end;
+  BUILT nu8 'mmq' (compile-time nt MMA, bitwise class = base): H100 v1 sl -0.6..-0.9 / full -0.5..-0.6 us = under the 1 us gate;
+  posted as an optional rider for layer (`python tools/o42/stp_patch.py <layer sub> <out> mmq`). Not validated/H200 yet.
 - Sessions o20-o41 found no new lever (o22: test PASS on 8242d5e again; o27-o41 status only). Suggested to the lead: ~/STOP-moe until a build needs moe.
 
 ## Board

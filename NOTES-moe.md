@@ -4259,3 +4259,32 @@ Status only. No lead line after 21:50Z, no moe request. Hold aa51716 (board 5ef6
 Status only. No lead line after 21:50Z, no moe request (lead item = sliding attention, fresh+layer). Hold aa51716 (board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
 ## o41 (2026-10-31 22:40-22:45Z, session 39)
 Status only. No lead line after 21:50Z, no moe request; r-layer since aa51716 has no expert-path change (v185 = attention CSL_PW only). Hold aa51716 (board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
+## o42 (2026-10-31 22:56-23:45Z, session 40): lead 22:55Z MOE = v1 sl expert-side hop stamps; H100, 0 judge runs
+- Tool: muse_moe_w4a16/tools/o42/stamp_v1.py + stp_patch.py (run from a COPY of r-layer/muse_decode_layer; layer v185 d837bea5):
+  per-CTA %globaltimer stamps of pr8 / its routing finisher / moe_tk2f phases / nu8 (D path) / bnd2, injected into the module's
+  CUDA source strings just before `_PREBUILD` (after all runtime .replace()s). NU8=<mode> bakes nu8 variants; NOFLUSH=1 warm L2;
+  O42_KS=1 per-ks stamps in nu8's MMA. `python stp_patch.py <layer sub> <out> mmq` writes a variant file.
+- v1 sl timeline (seed 99, 30 replays, us from the first pr8 CTA entry; min/med/max over CTAs; stamped copy ~+1 us):
+    pr8 pooler past wait 11.5 | finisher all partials 27.3, routed 34.5 | pooler CTAs end 31.7/36.1/37.2
+    tk2f entry 38.6 (rmsnorm between) | routed 39.95 | past X wait 40.7 | producer start 40.75 | g13 1st full 41.5/42.5/44.7
+    g13 end 89.3/93.1/96.3 | g2 cnt ok 96.7 | g2 1st full 97.0 | tk2f end 116.2/120.4/122.3
+    nu8 past wait 122.96 | Y loaded 123.6 | end 126.5/126.7/127.8 | bnd2 past wait 128.4-129.3 | bnd2 end 130.5/130.9
+- Hops >= 0.5 us and causes:
+  (1) pooler end -> first expert data 5.3 us (rmsnorm hop 1.4, tk2f routing 1.2, split 0.8, first TMA 1.8). CLOSED on record:
+      proj n14 IDF8 (early tk2f on a pr8 routing flag) = tie, pr8 holds 129/132 SMs until it ends.
+  (2) g13 CTA-end spread 7 us -> gemm2 waits for the slowest: CLOSED on record (fresh x13 T=8 no-wait oracle +1.0/-0.5 us).
+  (3) tk2f end spread 6 us (116.2..122.3) = DRAM-bound tail on the H100 (H200 tail 0.3 us per moe n7s22): no H100 lever.
+  (4) nu8: past wait -> max end 4.9 us, of which the MMA phase 1.8 us (16 HMMA per warp at nl 9-16!) and the rg==0 CTAs'
+      serial sum-of-squares shuffles (+1.3 us straggler). bnd2 waits for the slowest nu8 CTA (PDL hop 0.6-1.3).
+- nu8 analysis: atomics are NOT the cost (oracle: plain stores = same 3.1 us; red.v4 same); not the i-cache (rolled ks loop
+  +1 us worse); ncu (isolated launch) MMA segment = stall_wait/no_inst/branch_resolving: 64 runtime `if (n < nt)` guards
+  serialize ~316 instr/warp. Per-ks stamps: 0.27 us per ks step.
+- BUILT (H100, layer copy; text patches in stp_patch.nu8_mode):
+  mmq = MMA body in a generic lambda dispatched on nt (switch 1..8, NTC compile-time): same per-accumulator order.
+  ssq = slot sums of squares spread over the 16 row groups (rg r does slots i = r mod 16): same per-slot partials.
+  Stamped: MMA 1.8 -> 1.1 us, nu8 tail (past wait -> max end) 5.2 -> 4.0 us.
+  ab_files 'verify 1' 8 rounds [base, fast, mmq, ssq, base, fast]: v1 sl 141.73 140.97 140.62 141.27 141.41 140.64;
+  full 156.82 155.61 156.18 157.63 156.46 156.38; v16 control 299.6/299.5/298.6/299.4/299.8/298.9 (noise ~+-0.5).
+  => fast/mmq -0.6..-0.9 us v1 sl, -0.5..-0.6 full; ssq alone noise. BELOW the lead's 1 us build gate.
+  files_eq mmq vs base, verify 1 x 3 seeds: output 0 identical; FP32 stream differs exactly as base vs base (atomic order).
+- Not done: validate.py on the variant, H200. Handed to layer as a cheap optional rider only (COORD Handoffs).
