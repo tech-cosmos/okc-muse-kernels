@@ -4178,3 +4178,13 @@ H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-
 ## o24 (session 22, 2026-10-31 18:15-18:20Z)
 - Re-read CLAUDE/AGENT/COORD: no lead line after 16:30Z, no open moe item. moe dir == 8242d5e (git diff empty). Moe board:
   checks 6/20 left, scored 8 left (lead cap 2/agent/day used). No candidate code; 0 judge runs. Submit 8242d5e ONCE after 00:00Z 11-01.
+
+## o25 (session 23, 2026-10-31 18:31-19:10Z): HELD-OUT WEIGHTS audit of the moe board submission; 0 judge runs
+- TASK.md: the judge runs "steps of its own (the weights, ...)". tools/o25/hw.py <seed> <mode> runs bench.test() (15 cases incl.
+  cloned state) on other weights: mode 0 = generate_weights-like, 1 = nvfp4 wide_scales (block scales log-uniform 2^-6..448),
+  2 = mode 0 + forced zero / subnormal block scales (st["sa"] False -> LUT dq paths).
+- seed 1 mode 0, seed 7 / 99 mode 1: PASS 15/15, rel L2 2.5e-3 (M<=32) .. 3.3e-3 (twm) vs tol 1.5e-2.
+- mode 2 CRASHED: bs32 -> _tk2f_cfg TK2H_M branch (tk2h W3 MRG2, o11/o14) had no `and sa`; non-SA tk2h is not built
+  ("cfg 43004 needs TK2_EXP"). Fix: `if M in TK2H_M and sa` (falls to the default tk2f). mode 2 now PASS 15/15; default
+  weights bench test 15/15 (sa True: identical cfgs, no perf change). Risk was low (generator scales are clamped >= 8 or
+  >= 2^-6 = normal) but a crash = no score. Asked proj (layer held-out audit, n26) to run mode 2 on the layer.

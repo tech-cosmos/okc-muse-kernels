@@ -6506,7 +6506,7 @@ def _tk2f_cfg0(M, st):
         return sa + 60000 + TK2X_M[M] * 1000 + 4
     if M in TK2F_BAL_M and sa:  # o13: layer TUNE_BASE T=16 "bal" (moe n8 BAL on SQ stages, PF 548)
         return sa + 98204
-    if M in TK2H_M:  # n6: {M: W}: GS16 tk2h + PF4 (moe_norm3), 2-group row weight (8 + W) / 8; SA only in TK2H_P4 builds
+    if M in TK2H_M and sa:  # o25: SA only (non-SA weights crashed); n6: {M: W}: GS16 tk2h + PF4 (moe_norm3), 2-group row weight (8 + W) / 8; SA only in TK2H_P4 builds
         return sa + 40000 + TK2H_M[M] * 1000 + 4
     if TK2W and M > 1:
         return sa + 70000 + TK2W * 1000
