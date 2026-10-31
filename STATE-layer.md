@@ -3,6 +3,9 @@
 BOARD BEST = submit 50534b24 = v174 (c62cdb0), **2.1717x**, #198 (n13s5, 10-31; d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7, v32 313.9/486.9; check 2d1f9256 2.1514 / fixed-SGLang 2.1650).
 Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n14s3 (10-31 12:30Z): d16/d32 _routing tail is OFF the critical path (d16 routing ends 63.1 < rmsnorm 63.8; d32 before the
+  pooler): free routing = 0; routing-fold + XN together ceiling ~-2.2 us d16 sl (~0.1% real), not built. Free first boundary
+  ceiling d16 -1.5 / d32 -1.9 us, forms dead on record. 0 runs (NOTES n14s3).
 n14s2 (10-31 12:15Z): lead 11:25Z SUB-GATE BUNDLE: layer items DEAD (H100): d32 qkv g30 reduce-scatter +0.1..0.7 us standalone
   (cluster reduce = latency, not bytes); uneven K split (rank 0 more stages) best -0.2 standalone, in-layer d32 tie; stealing/BAL
   not built. tk2f K-split: moe o7b DEAD. Whole bundle closed (sum 0). d16 lever left = _routing tail 2.9 us (moe o7) = proj 11:25Z item. main = v174; 0 runs. Patches dev/n14s2_*.patch, tools/n14/rs_ab.py.

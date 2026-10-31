@@ -3353,3 +3353,17 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - tk2f last-wave K-split d16/d32: inside moe's tk2f row scheduler (moe is stamping tk2f in o7) -> asked moe under Requests.
 - Bundle status: layer-side sum 0 us; nothing to check. Open for the bundle: moe's K-split, any new proj/fresh/moe handoff.
 - 12:15Z: moe o7b closed the tk2f last-wave K-split (DEAD at d16: tail-removal oracle -1.84 us < the bytes it skips). Whole bundle closed with 0 us. moe o7 points the d16 lever at _routing's tail (ends 2.9 us after router/pooler) = proj's 11:25Z hoist/IDF port to _routing/rg; layer integrates when handed off.
+
+## n14s3 2026-10-31 12:13Z-12:30Z: d16/d32 _routing tail + first boundary sized (H100, main v174, tools/n13/tlmed.py 25 cold replays, seed 99; GPU shared at 100% util, so only intervals count). Nothing built, 0 judge runs, 0 Modal.
+- _routing at T=16/32 is NOT on the critical path (moe o7's "tk2f enters 0.2 us after _routing" is the rmsnorm hop):
+  ```
+  d16 sl: pooler(g24) end 61.2 | router_split end 60.1 | _routing end 63.1 | _rmsnorm_gain 61.3-63.8 | tk2f start 63.7
+  d32 sl: pooler(g30k) end 70.2 | router_split end 64.9 | _routing end 68.5 | _rmsnorm_gain 70.1-73.2 | tk2f start 71.1
+  ```
+  d16: free routing alone saves 0 (norm ends 0.7 later); d32: routing ends before the pooler. A free norm alone = s12 XN
+  (-0.4..-0.8, bounded by routing at d16). Both free (routing folded into router_split's last CTA + XN in tk2f) bound
+  ~-2.2 us d16 sl (tk2f at pooler end + ~0.4) = ~0.2% ceiling over d16 sl+full, realistic ~half; d32 needs XN on g30k
+  stream-K slabs (dead). Not built: two builds in moe's tk2f for ~0.1%. => proj's 11:25Z hoist port to T=16/32 _routing has nothing to win.
+- First boundary at T=16/32 (tools/n13/orc_nobnd.py, ORC_NOBND=(16,32); stale h, so only o end -> rmsnorm end is valid):
+  rmsnorm end d16 64.1 -> 62.6 (-1.5 us), d32 74.0 -> 72.1 (-1.9 us) = CEILING of a free boundary. Forms that remove it are
+  dead on record (o-side grid barrier OB8; pooler-side prologue = every pooler CTA re-reads 16-32 rows of o + residual). No build.
