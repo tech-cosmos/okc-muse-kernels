@@ -3047,3 +3047,28 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   11.26, S8 -0.2..-0.3: noise-level (nvjet doesn't trigger dependents early). DEAD (not worth a check).
 - Verdict: router m128/m256 stays bmm4 + rsum. The ~6 us vs SoL is launch (2 kernels) + a latency-bound small-read structure
   (~2.5-4.5 us above a bare reader regardless of copy mechanism/tiling). No proj-board item >= 1 us with a new design left.
+
+## n19 (2026-10-31 15:23Z-, unattended session 7): proj board, lead 15:00Z lane; DSMEM split-K bound + G30_GX qkv tuner candidate
+- Per-shape table (dba12fb4 / 5b420410 / a670beb1, H200 us) re-read: by load the weakest are v16 1.20 / v32 1.19; per shape vs
+  SGLang the m128/m256 unpooler (1.02) and o (1.05) are cuBLAS-vs-cuBLAS ties; qkv m16/m32 12.1/12.6 vs a '12-bit bytes/4.3 + 2.5'
+  fit of ~9.1 is the largest gap in the small (high-weight-per-us) d16/d32 loads.
+- DSMEM REDUCE-SCATTER microbench (dev/n19/dsm.py, dsm2.py; H100 shared, 128 CTAs, FP32 partial P per CTA, rank r pulls slice r
+  from all C peers, ld.shared::cluster v4): pull rate ~13 GB/s/SM at C = 4/8/16 for P = 32-128 KB, ~20-24 GB/s/SM at C = 2;
+  unchanged with 1024 threads or 2-4x ILP (U) -> throughput wall, not latency. Local smem pass (C1) 128 KB = 1.2 us.
+  => any split-K GEMM reducing >= ~32 KB partials per CTA over DSMEM pays >= ~2.5 us per pass: extends n9s3's cluster-16 verdict
+  to clusters 2-8. Global FP32 partials through L2 (~50 GB/s/SM ingest) are faster than DSMEM. Closes 'small-cluster split-K
+  m128 GEMM' before building it.
+- G30_GX (n5s6: escapes out of g30's main loop) as a TUNER CANDIDATE for qkv m16/m32 (BF16_G30 cfg (3,16,16,"G30_GX=1"); prepare
+  stores st[("g30gx", layer, S)] = _g30_gx_tables; _run swaps hdr). Judge diag30e a670beb1 had qkv m32 standalone GX 12.86 vs
+  13.09 (H100 says GX loses +0.2..1.0 standalone: the H200 decides). diag30e turned off (its pooler/unp GX lose standalone).
+  bench.py: FORCE=gx forces GX picks; ESCV=bf16 makes esc use only escapes g30 keeps (the default esc set drops g30 entirely,
+  so it never exercised g30/GX). GX spike rows are near-exact, not bitwise, for tiny escapes (2^-15 + (v - 2^-15) in FP32 =
+  ordinary accumulation, lead 10-25 23:30Z); bench allows that for GX picks like g22. Tests 39/39 (+FORCE=gx), esc 16/16,
+  ESCV=bf16 FORCE=gx 24/24.
+- Judge: check 67759f2f (0740cb2) 1.3676 [1.347, 1.388] vs best dba12fb4 1.3847: NOT submitted. H200 tuner picked GX at qkv m16
+  (15.10 vs 15.49) and m32 (15.90 vs 16.10); board shapes qkv m16 11.94 (-0.17 vs a670beb1), m32 12.32 (-0.25) but SGLang's own
+  times moved the same (-0.16/-0.32): within noise. The overall drop comes from untouched lt shapes (qkv/o/unp m128 +0.6..0.8,
+  router m128/256 +0.3..0.4: SGLang slower there too), i.e. a slow node draw. GX kept on main (the tuner decides per run).
+- Budget 10-31: proj checks 5/20, scored 1/10. 0 Modal.
+- NEXT: nothing >= 1 us with a new design on the proj board (DSMEM split-K now closed for clusters 2-16 too). Standing: 00:00Z
+  H200 queue dev/n15/mk_h200.sh (pr8 v1 flat/NOW/TK1); stack small wins; lead's call for a lane.
