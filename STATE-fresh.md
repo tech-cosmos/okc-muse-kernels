@@ -1,17 +1,17 @@
 # STATE-fresh (newest first)
+## x32 (2026-10-31 21:03Z-21:30Z): HELD-OUT WEIGHT SEEDS for v184 (70591ea, submission sha1 926ce2ec = layer's 00:00Z submit), 0 judge,
+  0 Modal. /tmp copies with reference.WEIGHTS_SEED 31337 and 2 (never tested; proj n26 did v181 on 1/777), validate --quick
+  --skip=prep,fuzz: BOTH ALL OK (test 13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240, route 0/240; worst gap 0.0275/0.0214
+  (limit 0.05), drop-lead 0.0145/0.0187 (limit 0.03)). v184 is safe on held-out weights. Next (x33): Human decisions + lead lines; else status only.
 ## x31 (2026-10-31 20:48Z-20:55Z): status only, 0 judge, 0 Modal, 0 GPU. Board #223 at 2.172 (#1 pjmullin3 now 2.459). No lead
   line since 16:30Z. Next (x32): read Human decisions IN FULL + lead lines naming fresh; else status only. Checks 10-31: 3/6; Modal 16.8/20.
 ## x30 (2026-10-31 20:31Z-20:45Z): judge-data audit of the v182-v184 'slow d1/v1' (0 judge, 0 Modal, 0 GPU). NODE, not code:
   v1 sl (idx 6) is bimodal with SGLang moving along: fast 108/261 us (v181 84eb0719, v178 9117bd11), slow 115-119/274-279
   (v179 36474b5e = pre-fix code, v182, v183, v184). d1 sl 64.1-67.8 us with SGLang flat 171-172 = noise band. Backs layer n40's
   v184 submit at 00:00Z. Next (x31): read Human decisions + lead lines naming fresh; else status only.
-## x29 (2026-10-31 20:16Z-20:20Z): status only, 0 judge, 0 Modal, 0 GPU. Board #223 at 2.172 (#1 pjmullin3 2.430). No lead line
-  since 16:30Z. Next (x30): as x28's Next (read Human decisions IN FULL + lead lines naming fresh; else status only).
 ## x28 (2026-10-31 20:00Z-20:05Z): status only, 0 judge, 0 Modal, 0 GPU. Board #222 at 2.172 (#1 mpeng19 2.418), unchanged.
   No lead line since 16:30Z; fresh's Requests (x27: v182/v183 submit pick, lane or STOP-fresh) still open. layer n37 now
   recommends v183 (non-SA fix) for 00:00Z; fresh agrees (v183 > v182 > v181 for held-out robustness, same speed).
-## Next (x29): same as x28: read Human decisions IN FULL + any lead line naming fresh; else status only. After 00:00Z, on the
-  lead's yes only: tools/fresh/x24/mk_h200_attn.sh. Checks 10-31: 3 of 6 used; Modal 10-31 16.8/20.
 ## x27 (2026-10-31 19:42Z-19:55Z): paper, 0 judge, 0 Modal, 0 GPU. No new lever. Board: #222 at 2.172 (#1 2.418). Re-read the twm
   consumer record (f1s12, x1, moe superopt): no flaw found. COORD Requests: recommended v182 for the 00:00Z submit (held-out
   fallback safety, same speed), and asked the lead for a lane or STOP-fresh.
