@@ -1,0 +1,89 @@
+diff --git a/muse_decode_layer/g30_src.cu b/muse_decode_layer/g30_src.cu
+index 84f489c..4bb20d3 100644
+--- a/muse_decode_layer/g30_src.cu
++++ b/muse_decode_layer/g30_src.cu
+@@ -56,6 +56,14 @@
+ #define G30_PL 0
+ #endif
+ #define G30_ND (G30_MTOK / 2)
++#ifndef G30_RS
++#define G30_RS 0  // layer n14s2: reduce-scatter epilogue for the cluster K split (all ranks store 1/S)
++#endif
++#if G30_RSU == 1
++#define G30_RSO(jn, w) ((jn) % G30_S)
++#else
++#define G30_RSO(jn, w) (((jn) * 4 + (w)) % G30_S)  // owner rank of unit (token group jn, consumer warp w)
++#endif
+ #ifndef G30_S
+ #define G30_S 1  // proj s95: K split over a (1, S, 1) cluster, rank 1 sums into rank 0 via DSMEM (S <= 2)
+ #endif
+@@ -407,7 +415,47 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const __grid_constant__ CUte
+   if (wg == 1) return;
+ #pragma unroll
+   for (int j = 0; j < G30_ND; j++) d[j] += red[j * 128 + t];
+-#if G30_S > 1
++#if G30_S > 1 && G30_RS
++  // layer n14s2: reduce-SCATTER. Unit u = (token group jn, warp w) = jn * 4 + w is owned by rank u % S: every rank pushes the
++  // units it does not own into their owner's rbuf slot (sender s -> slot s - (s > owner)), then sums and stores only its own
++  // units, in rank order p0 + p1 + p2 (bitwise = the rank-0 reduce). Each CTA waits for its own S - 1 arrivals before exit.
++  const int rk = (int)blockIdx.y, w4 = warp & 3;
++  {
++    uint32_t rb[G30_S];
++#pragma unroll
++    for (int o = 0; o < G30_S; o++)
++      rb[o] = 0;
++#pragma unroll
++    for (int o = 0; o < G30_S; o++)
++      if (o != rk) asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(rb[o]) : "r"(smem_u32(rbuf + (rk - (rk > o)) * G30_ND * 128)), "r"(o));
++#pragma unroll
++    for (int j = 0; j < G30_ND; j++) {
++      const int o = G30_RSO((j >> 2), w4);
++      uint32_t ro = rb[0];  // select, not a dynamic index (keeps rb in registers)
++#pragma unroll
++      for (int q = 1; q < G30_S; q++) ro = o == q ? rb[q] : ro;
++      if (o != rk) asm volatile("st.shared::cluster.f32 [%0], %1;" :: "r"(ro + (j * 128 + t) * 4), "f"(d[j]) : "memory");
++    }
++    asm volatile("bar.sync 2, 128;" ::: "memory");
++    if (t < G30_S && t != rk) {
++      uint32_t rm;
++      asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(rm) : "r"(smem_u32(rbar)), "r"(t));
++      asm volatile("fence.acq_rel.cluster;\nmbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];" :: "r"(rm) : "memory");
++    }
++    asm volatile(
++        "{\n .reg .pred p;\n G30_RW:\n"
++        " mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], 0;\n"
++        " @!p bra G30_RW;\n}\n" :: "r"(smem_u32(rbar)) : "memory");
++#pragma unroll
++    for (int j = 0; j < G30_ND; j++) {
++      if (G30_RSO((j >> 2), w4) != rk) continue;
++      float v = rk == 0 ? d[j] : rbuf[j * 128 + t];
++#pragma unroll
++      for (int s_ = 1; s_ < G30_S; s_++) v += s_ == rk ? d[j] : rbuf[((s_ - (s_ > rk)) * G30_ND + j) * 128 + t];
++      d[j] = v;
++    }
++  }
++#elif G30_S > 1
+   if (blockIdx.y > 0) {  // push the partial into rank 0's rbuf slot y - 1, one remote arrive
+     uint32_t rb, rm;
+     asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rb) : "r"(smem_u32(rbuf + (blockIdx.y - 1) * G30_ND * 128)));
+@@ -439,11 +487,19 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const __grid_constant__ CUte
+ #pragma unroll
+     for (int h = 0; h < 2; h++)
+ #pragma unroll
+-      for (int q = 0; q < 2; q++) stg[(8 * jn + tok + q) * 72 + r0 + 8 * h] = __float2bfloat16(d[4 * jn + 2 * h + q] * scale);
++      for (int q = 0; q < 2; q++) {
++#if G30_S > 1 && G30_RS
++        if (G30_RSO(jn, (warp & 3)) != (int)blockIdx.y) continue;
++#endif
++        stg[(8 * jn + tok + q) * 72 + r0 + 8 * h] = __float2bfloat16(d[4 * jn + 2 * h + q] * scale);
++      }
+   asm volatile("bar.sync 2, 128;" ::: "memory");
+ #pragma unroll
+   for (int q = 0; q < (G30_MTOK * 8 + 127) / 128; q++) {  // layer n5s5: MTOK 8 = 64 uint4 (threads 0..63)
+     const int idx = q * 128 + t, tk = idx >> 3, c = idx & 7;
++#if G30_S > 1 && G30_RS
++    if (G30_RSO((tk >> 3), (c >> 1)) != (int)blockIdx.y) continue;
++#endif
+     if (G30_MTOK >= 16 || idx < G30_MTOK * 8) *(uint4*)(out + (size_t)tk * N + g * 64 + c * 8) = *(const uint4*)(stg + tk * 72 + c * 8);
+   }
+ }

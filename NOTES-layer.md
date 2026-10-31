@@ -3335,3 +3335,20 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - proj's pr8 lever closed (n13s1d: pr8 already at a flat reader on a quiet H100): nothing to land there.
 - Tools (on the branch): tools/n14/slk_margins.py (savings vs margins), eq_files.py (two files' outputs on the same inputs),
   kprof.py (eager per-kernel times; PDL makes them unreliable).
+
+## n14s2 2026-10-31 11:53Z-12:15Z: lead 11:25Z SUB-GATE BUNDLE. Layer-owned items both DEAD; nothing to check; 0 judge runs, 0 Modal.
+- d32 qkv REDUCE-SCATTER (g30_src.cu G30_RS, dev/n14s2_g30_rs.patch; tools/n14/rs_ab.py = RS0/RS1 builds of the layer's
+  g30n qkv_gate (32,3,16,16) pick, bitwise check on 20 inputs + interleaved cold-L2 graph timing, H100 standalone):
+  every rank pushes the units it does not own into the owner's rbuf, sums its own in rank order (bitwise = rank-0 reduce,
+  verified). Unit = (token group, consumer warp) (32 B store pieces): +0.7 us (16.82 vs 16.10; a first build with a
+  dynamically indexed rb[] array had a 16 B stack, fixed with selects, same +0.7). Unit = token group (128 B rows, 2/1/1):
+  +0.1 (16.14 vs 16.05). => n13s1's 0.85 us cluster-reduce cost is LATENCY (fence/remote arrive/wait), not bytes;
+  spreading it over all ranks makes every rank wait for the slowest. DEAD.
+- New angle, UNEVEN K SPLIT (G30_SPL, dev/n14s2_g30_spl.patch): the even split gives rank 0 (the one that sums) the FEWEST
+  stages (K 8192 = 42/42/44). Rank 0 + SPL pairs: SPL 1 (44/42/42) +0.05, 2 (46/40/42) -0.28 / -0.17 (two runs), 3 +0.07,
+  4 +0.43 us standalone (not bitwise: other K ranges, FP32). In-layer H100 ab_files "decode 32" 8 rounds spl0 vs spl2:
+  sl 184.34 vs 184.44, full 413.02 vs 412.78 = TIE. DEAD. Code reverted (main byte-identical to v174).
+- In-cluster K stealing (~0.2 us standalone per n13s1) not built: same latency-bound tail, below any measurable in-layer size.
+- BAL d1 (proj n13s1): H100 +1.6 us per round on record -> fails the lead's H100-sum rule by itself; not re-run.
+- tk2f last-wave K-split d16/d32: inside moe's tk2f row scheduler (moe is stamping tk2f in o7) -> asked moe under Requests.
+- Bundle status: layer-side sum 0 us; nothing to check. Open for the bundle: moe's K-split, any new proj/fresh/moe handoff.
