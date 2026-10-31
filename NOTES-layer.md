@@ -3440,3 +3440,12 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   this run 250.0/337.4, 303.7/484.7 (fast draw). tools/fixed_sglang_score.py: v176 check added.
 - SUBMIT NOT DONE: layer 10-31 submit cap (2/agent/day, lead 09:55Z) used by n13s5 + n17s1. v176 passes the bar
   (fixed > 2.1650): next session after 00:00Z 11-01 may `okc submit` v176 unchanged (it has its check) once.
+
+## n19s1 (2026-10-31 14:48-15:00Z, real clock): v176 baseline timelines; nothing new; 0 judge runs, 0 Modal.
+- Real clock note: n18s1's '14:39-15:05Z' stamps were ahead of the real clock (this session started 14:47Z after it).
+- H100 tools/n13/tlmed.py v176 (main b051588), 25 cold replays, seed 99, GPU shared (~30% util from others):
+  d1 sl: g13 qkv 0-12.7 | csl 13.3-17.7 | g13 o -21.7 | bnd -25.3 | pr1 21.5-43.5 | rmsnorm -45.0 | tk2f 31.7-75.5 |
+         n2u 71.1-80.2 | bnd 75.2-82.1 (total 82.1; tk2f end - pr1 end 32.0 vs 34.8 v173: CW visible).
+  v1 sl: g14 qkv 0-14.9 | vtk -19.5 | g30 o -26.8 | bnd -30.0 | pr8 19.3-50.3 | rmsnorm -52.1 | tk2f 50.9-133.1 |
+         nu8 -138.4 | bnd2 -141.5 (total 141.5; tk2f 82.8 us after pr8 = moe bs-fit stream rate, fixed cost = fresh x13 CW T=8).
+- No hop >= 1 us outside the closed record. Waiting on fresh x13 (CW T=8/16/32) handoff; v176 submit after 00:00Z 11-01 stands.
