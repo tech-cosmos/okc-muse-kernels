@@ -3676,3 +3676,21 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   187.75/152.58/153.34, full 286.97/267.63/266.86 vs 286.94/267.66/267.11 us = tie on real routings. Not pinned (the H200
   tuner can keep it as an option; flips there are <= ~1 us near-ties per proj n24).
 - Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
+
+## n34 (session 28, 2026-10-31 18:51-19:25Z real UTC): v182 = v181 + proj n26 escape-base rule; 1 check (f8de6feb), 0 submits.
+- Handoff proj n26 (Handoffs 19:20Z): layer.py _compress tries base = emax-15 and emax-16 (top outliers become escapes: code 0,
+  header value w / scale, exact; no kernel change) and keeps the fewest-escape base whose rows fit G13_ESC. Same code as
+  r-proj dev/n26/esc_base_layer_submission.diff. Board weights (seed 5353): qkv_gate emax 123 -> base -16 (max row 4), pooler
+  emax 123 -> -16 (max row 5, was 7 of 8), o/unpooler keep -15. All downstream packers (g22 EV, g30 BF16 check, gx tables)
+  read escapes generically from hdr; top escapes are w/scale <= 4 (exact BF16), no 2^-15 sentinel collision.
+- validate --quick --skip=fuzz ALL OK (tools/n34/validate.log): 13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240,
+  route 0/240 (gap 0.0256), cold prep 62.5 s. submission.py 910092 B.
+- CHECK f8de6feb 2.1570 raw [2.125, 2.189] / fixed-SGLang 2.1508 (v181 84eb0719: 2.1896 / 2.2082). us sl/full: d1 67.8/75.0,
+  d16 126.9/205.8, d32 154.2/291.2, v1 114.7/127.2, v16 261.4/345.3, v32 313.2/495.5. Tuner's own synthetic d1 lines on that
+  node: 68.8/72.5 vs 67.5/72.0 on v181's node.
+- H100 tools/ab_files.py "" 6 v181 vs v182 (tools/n34/ab.log, GPU shared): d1 84.54/103.72 -> 84.79/102.74, d16 189.34/288.86 ->
+  188.86/288.76, d32 178.53/408.00 -> 179.23/407.02, v1 142.46/157.18 -> 141.39/156.34, v16 298.26/443.30 -> 296.81/442.74,
+  v32 361.04/625.02 -> 361.86/625.74 = TIE. The check gap is node noise.
+- Submit decision: by the 15:58Z rule v182's check misses the bar (2.1913), v181's passed. v182 is the same speed and does not
+  lose 3-16 us at d1 on the ~0.6% of held-out weight draws that would push v181's pooler/qkv to BF16 fallback. Asked the lead
+  (Requests). Default after 00:00Z: submit v181 (38d0c23) once.

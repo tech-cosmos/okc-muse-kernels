@@ -3,6 +3,12 @@
 BOARD BEST = submit 50534b24 = v174 (c62cdb0), **2.1717x**, #198 (n13s5, 10-31; d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7, v32 313.9/486.9; check 2d1f9256 2.1514 / fixed-SGLang 2.1650).
 Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n34 (10-31 19:25Z): **main = v182** (856cc18) = v181 + proj n26 escape-base rule (_compress base emax-15 or -16, fewest escapes;
+  board weights: qkv/pooler now emax-16, pooler max escapes/row 7 -> 5; held-out fallback 6/1000 -> 0/1000 per proj n26). validate ALL
+  OK. H100 ab_files 6 rounds all 12 shapes = TIE (each within +-1.5 us; d1 full -1.0, v1 -0.8..-1.1). CHECK f8de6feb 2.1570 raw /
+  fixed-SGLang 2.1508 < bar 2.1913 (node draw: d1/v1 sl slow, v32 sl fast). **NEXT after 00:00Z 11-01: submit v181
+  (`git show 38d0c23:muse_decode_layer/submission.py`) per the rule, UNLESS the lead says v182 (same speed, robust to held-out
+  weights; asked under Requests).**
 n33 (10-31 18:45Z): T=16 {g30n:unpool} TUNE_BASE pin = H100 tie on 3 real-routing seeds (not pinned); d1 sl v181 timeline = record. 0 runs.
 n32 (10-31 18:50Z): DIAG check 2657b536 (v181 + tuner SM-clock probe, tools/n32/mk_diag.py; never submit): judge H200 THROTTLES
   under sustained T=256 (1500 replays: sl 1926->1870 MHz +1.5%, full 1908->1840->1617 MHz +11%); T=16 flat; H100 flat. Mostly
