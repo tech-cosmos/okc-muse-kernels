@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## x29 (2026-10-31 20:16Z-20:20Z): status only, 0 judge, 0 Modal, 0 GPU. Board #223 at 2.172 (#1 pjmullin3 2.430). No lead line
+  since 16:30Z. Next (x30): as x28's Next (read Human decisions IN FULL + lead lines naming fresh; else status only).
 ## x28 (2026-10-31 20:00Z-20:05Z): status only, 0 judge, 0 Modal, 0 GPU. Board #222 at 2.172 (#1 mpeng19 2.418), unchanged.
   No lead line since 16:30Z; fresh's Requests (x27: v182/v183 submit pick, lane or STOP-fresh) still open. layer n37 now
   recommends v183 (non-SA fix) for 00:00Z; fresh agrees (v183 > v182 > v181 for held-out robustness, same speed).
@@ -146,5 +148,3 @@
   Handoff posted (layer agent merges; bundle into a layer check). Dead: one-warp pr1 prefetch (+38 us), n2u spin/__ldcg
   pre-wait, unconditional Y loads, nowait (x hop not binding), PFX (early CTAs prefetch others' first rows).
 - SASS fact: the n2u base-path routing loads are BEFORE ACQBULK in this build (layer comment says otherwise): racy if
-  anything launches n2u before pr1's routing is written (IDF does: IDF uses the post-wait path).
-## x1-x5, f1s1..f1s20 (10-29/30) and x9 Next: trimmed; see git history of this file and FRESH.md.
