@@ -133,3 +133,5 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 Status only: lead 21:50Z has no moe item (sliding attention latency = fresh+layer). Hold aa51716 (board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
 ## o35 (2026-10-31 21:04-21:08Z, session 33)
 Status only: no lead line since 16:30Z, no request to moe. Board #293 2.320x. moe submission.py == aa51716. Submit aa51716 once after 00:00Z 11-01 stands. 0 judge runs, 0 GPU.
+## o39 (2026-10-31 22:09-22:12Z, session 37)
+Status only. No lead line after 21:50Z, no moe request. Hold aa51716 (board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
