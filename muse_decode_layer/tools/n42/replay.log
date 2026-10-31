@@ -1,0 +1,49 @@
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 83.1us | {'g10alt:o': 1} 82.8us (confirm default 83.3 vs 82.8us) -> {'g10alt:o': 1}
+layer tune T=1 full: default 86.8us | {'g10alt:o': 1} 86.8us (confirm default 86.9 vs 87.0us) -> default
+layer tune T=16 sliding: default 228.0us | {'g30n:unpool': True} 227.0us | {'g30n:qkv_gate': True} 229.8us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 228.3us (confirm default 228.0 vs 227.0us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 288.7us | {'g30n:unpool': True} 287.1us | {'g30n:qkv_gate': True} 286.7us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 285.7us (confirm default 289.2 vs 285.0us) -> {'g30n:unpool': True, 'g30n:qkv_gate': True}
+layer tune T=32 sliding: default 195.1us | {'g30kgx:pooler': False} 195.6us | {'g19:o': True} 195.1us | {'tk2h': 3} 196.8us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 195.1us (confirm default 195.4 vs 195.5us) -> default
+layer tune T=32 full: default 425.2us | {'g30kgx:pooler': False} 425.5us | {'g19:o': True} 424.9us | {'tk2h': 3} 426.3us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 424.8us (confirm default 424.3 vs 424.2us) -> default
+layer tune T=8 sliding: default 125.0us | {'g30n:o': False} 125.5us | {'g14alt:qkv_gate': 1} 125.0us (confirm default 124.9 vs 124.6us) -> {'g14alt:qkv_gate': 1}
+layer tune T=8 full: default 146.9us | {'g30n:o': False} 148.7us | {'g14alt:qkv_gate': 1} 146.1us (confirm default 146.6 vs 146.1us) -> {'g14alt:qkv_gate': 1}
+layer tune T=128 sliding: default 303.5us | {'lt:o': True} 303.3us | {'ltalt:pooler': 2} 306.9us (confirm default 303.8 vs 302.8us) -> {'lt:o': True}
+layer tune T=128 full: default 434.8us | {'lt:o': True} 434.0us | {'ltalt:pooler': 2} 437.8us (confirm default 434.8 vs 434.3us) -> {'lt:o': True}
+layer tune T=256 sliding: default 366.7us | {'lt:o': True} 368.1us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 368.5us -> default
+layer tune T=256 full: default 593.2us | {'lt:o': True} 593.6us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 593.3us -> default
+rs 31 decode 1 sliding fails 0/30
+rs 31 decode 1 full    fails 0/30
+rs 31 decode 16 sliding fails 0/30
+rs 31 decode 16 full   fails 0/30
+rs 31 decode 32 sliding fails 0/30
+rs 31 decode 32 full   fails 0/30
+rs 31 verify 1 sliding fails 0/30
+rs 31 verify 1 full    fails 0/30
+rs 31 verify 16 sliding fails 0/30
+rs 31 verify 16 full   fails 0/30
+rs 31 verify 32 sliding fails 0/30
+rs 31 verify 32 full   fails 0/30
+layer tune T=1 sliding: default 85.0us | {'g10alt:o': 1} 86.0us -> default
+layer tune T=1 full: default 88.5us | {'g10alt:o': 1} 88.3us (confirm default 88.1 vs 87.9us) -> {'g10alt:o': 1}
+layer tune T=16 sliding: default 218.1us | {'g30n:unpool': True} 217.2us | {'g30n:qkv_gate': True} 219.1us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 218.0us (confirm default 218.3 vs 217.1us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 297.5us | {'g30n:unpool': True} 296.2us | {'g30n:qkv_gate': True} 295.8us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 294.2us (confirm default 297.2 vs 294.2us) -> {'g30n:unpool': True, 'g30n:qkv_gate': True}
+layer tune T=32 sliding: default 212.9us | {'g30kgx:pooler': False} 213.7us | {'g19:o': True} 213.9us | {'tk2h': 3} 213.3us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 213.2us -> default
+layer tune T=32 full: default 442.9us | {'g30kgx:pooler': False} 442.6us | {'g19:o': True} 442.5us | {'tk2h': 3} 443.5us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 442.5us (confirm default 442.6 vs 442.4us) -> default
+layer tune T=8 sliding: default 132.6us | {'g30n:o': False} 134.0us | {'g14alt:qkv_gate': 1} 133.2us -> default
+layer tune T=8 full: default 156.6us | {'g30n:o': False} 157.1us | {'g14alt:qkv_gate': 1} 156.3us (confirm default 156.1 vs 156.6us) -> default
+layer tune T=128 sliding: default 306.8us | {'lt:o': True} 301.9us | {'ltalt:pooler': 2} 306.3us (confirm default 306.3 vs 302.3us) -> {'lt:o': True}
+layer tune T=128 full: default 425.7us | {'lt:o': True} 424.6us | {'ltalt:pooler': 2} 426.3us (confirm default 425.8 vs 423.6us) -> {'lt:o': True}
+layer tune T=256 sliding: default 386.3us | {'lt:o': True} 387.4us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 387.7us -> default
+layer tune T=256 full: default 588.3us | {'lt:o': True} 588.5us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 587.8us (confirm default 588.1 vs 587.2us) -> {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True}
+rs 37 decode 1 sliding fails 0/30
+rs 37 decode 1 full    fails 0/30
+rs 37 decode 16 sliding fails 0/30
+rs 37 decode 16 full   fails 0/30
+rs 37 decode 32 sliding fails 0/30
+rs 37 decode 32 full   fails 0/30
+rs 37 verify 1 sliding fails 0/30
+rs 37 verify 1 full    fails 0/30
+rs 37 verify 16 sliding fails 0/30
+rs 37 verify 16 full   fails 0/30
+rs 37 verify 32 sliding fails 0/30
+rs 37 verify 32 full   fails 0/30

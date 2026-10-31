@@ -1,0 +1,49 @@
+env: torch 2.14.1+cu130, triton 3.8.0
+layer tune T=1 sliding: default 85.6us | {'g10alt:o': 1} 85.4us (confirm default 85.3 vs 85.4us) -> default
+layer tune T=1 full: default 87.5us | {'g10alt:o': 1} 87.9us -> default
+layer tune T=16 sliding: default 227.7us | {'g30n:unpool': True} 226.9us | {'g30n:qkv_gate': True} 229.5us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 228.5us (confirm default 227.9 vs 226.6us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 287.4us | {'g30n:unpool': True} 285.7us | {'g30n:qkv_gate': True} 285.1us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 283.4us (confirm default 286.9 vs 284.0us) -> {'g30n:unpool': True, 'g30n:qkv_gate': True}
+layer tune T=32 sliding: default 193.7us | {'g30kgx:pooler': False} 194.2us | {'g19:o': True} 193.5us | {'tk2h': 3} 193.8us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 193.6us (confirm default 193.6 vs 193.7us) -> default
+layer tune T=32 full: default 424.5us | {'g30kgx:pooler': False} 423.7us | {'g19:o': True} 423.6us | {'tk2h': 3} 424.7us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 423.2us (confirm default 424.0 vs 424.1us) -> default
+layer tune T=8 sliding: default 124.2us | {'g30n:o': False} 124.9us | {'g14alt:qkv_gate': 1} 124.3us -> default
+layer tune T=8 full: default 147.6us | {'g30n:o': False} 148.0us | {'g14alt:qkv_gate': 1} 146.6us (confirm default 147.3 vs 146.9us) -> {'g14alt:qkv_gate': 1}
+layer tune T=128 sliding: default 304.2us | {'lt:o': True} 302.8us | {'ltalt:pooler': 2} 303.6us (confirm default 304.1 vs 303.2us) -> {'lt:o': True}
+layer tune T=128 full: default 433.5us | {'lt:o': True} 433.7us | {'ltalt:pooler': 2} 435.4us -> default
+layer tune T=256 sliding: default 366.9us | {'lt:o': True} 365.2us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 364.6us (confirm default 366.9 vs 364.9us) -> {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True}
+layer tune T=256 full: default 590.3us | {'lt:o': True} 591.5us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 589.4us (confirm default 589.8 vs 588.9us) -> {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True}
+rs 31 decode 1 sliding fails 0/30  ours gap 0.0073 drop-lead 0.0041 | fp8ref gap 0.0045 drop-lead 0.0041
+rs 31 decode 1 full    fails 0/30  ours gap 0.0058 drop-lead 0.0026 | fp8ref gap 0.0059 drop-lead 0.0059
+rs 31 decode 16 sliding fails 0/30  ours gap 0.0107 drop-lead 0.0070 | fp8ref gap 0.0101 drop-lead 0.0077
+rs 31 decode 16 full   fails 0/30  ours gap 0.0118 drop-lead 0.0077 | fp8ref gap 0.0119 drop-lead 0.0093
+rs 31 decode 32 sliding fails 0/30  ours gap 0.0141 drop-lead 0.0096 | fp8ref gap 0.0114 drop-lead 0.0096
+rs 31 decode 32 full   fails 0/30  ours gap 0.0149 drop-lead 0.0112 | fp8ref gap 0.0149 drop-lead 0.0112
+rs 31 verify 1 sliding fails 0/30  ours gap 0.0186 drop-lead 0.0061 | fp8ref gap 0.0104 drop-lead 0.0043
+rs 31 verify 1 full    fails 0/30  ours gap 0.0188 drop-lead 0.0188 | fp8ref gap 0.0188 drop-lead 0.0188
+rs 31 verify 16 sliding fails 0/30  ours gap 0.0046 drop-lead 0.0022 | fp8ref gap 0.0226 drop-lead 0.0125
+rs 31 verify 16 full   fails 0/30  ours gap 0.0193 drop-lead 0.0132 | fp8ref gap 0.0193 drop-lead 0.0149
+rs 31 verify 32 sliding fails 0/30  ours gap 0.0046 drop-lead 0.0034 | fp8ref gap 0.0197 drop-lead 0.0175
+rs 31 verify 32 full   fails 0/30  ours gap 0.0214 drop-lead 0.0289 | fp8ref gap 0.0215 drop-lead 0.0289
+layer tune T=1 sliding: default 85.7us | {'g10alt:o': 1} 85.5us (confirm default 85.5 vs 85.8us) -> default
+layer tune T=1 full: default 89.0us | {'g10alt:o': 1} 89.0us (confirm default 87.7 vs 88.0us) -> default
+layer tune T=16 sliding: default 218.0us | {'g30n:unpool': True} 217.2us | {'g30n:qkv_gate': True} 219.5us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 218.2us (confirm default 218.2 vs 216.8us) -> {'g30n:unpool': True}
+layer tune T=16 full: default 298.2us | {'g30n:unpool': True} 296.6us | {'g30n:qkv_gate': True} 296.1us | {'g30n:unpool': True, 'g30n:qkv_gate': True} 295.5us (confirm default 297.8 vs 295.7us) -> {'g30n:unpool': True, 'g30n:qkv_gate': True}
+layer tune T=32 sliding: default 213.0us | {'g30kgx:pooler': False} 213.8us | {'g19:o': True} 213.7us | {'tk2h': 3} 213.0us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 213.1us -> default
+layer tune T=32 full: default 442.3us | {'g30kgx:pooler': False} 442.7us | {'g19:o': True} 442.2us | {'tk2h': 3} 442.5us | {'g24sk2:pooler': True, 'g24sk2:unpool': True, 'tk2h': 4, 'lt:o': True, 'g24:qkv_gate': True} 442.7us (confirm default 442.6 vs 442.8us) -> default
+layer tune T=8 sliding: default 133.3us | {'g30n:o': False} 134.3us | {'g14alt:qkv_gate': 1} 133.7us -> default
+layer tune T=8 full: default 156.8us | {'g30n:o': False} 157.5us | {'g14alt:qkv_gate': 1} 157.3us -> default
+layer tune T=128 sliding: default 306.8us | {'lt:o': True} 305.1us | {'ltalt:pooler': 2} 307.1us (confirm default 307.1 vs 305.5us) -> {'lt:o': True}
+layer tune T=128 full: default 425.6us | {'lt:o': True} 424.8us | {'ltalt:pooler': 2} 426.1us (confirm default 426.0 vs 424.7us) -> {'lt:o': True}
+layer tune T=256 sliding: default 386.4us | {'lt:o': True} 387.1us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 386.1us (confirm default 386.3 vs 386.8us) -> default
+layer tune T=256 full: default 589.9us | {'lt:o': True} 589.5us | {'lt:pooler': True, 'lt:unpool': True, 'lt:o': True} 589.6us (confirm default 590.0 vs 590.0us) -> default
+rs 37 decode 1 sliding fails 0/30  ours gap 0.0033 drop-lead 0.0030 | fp8ref gap 0.0033 drop-lead 0.0030
+rs 37 decode 1 full    fails 0/30  ours gap 0.0106 drop-lead 0.0046 | fp8ref gap 0.0106 drop-lead 0.0046
+rs 37 decode 16 sliding fails 0/30  ours gap 0.0180 drop-lead 0.0263 | fp8ref gap 0.0180 drop-lead 0.0164
+rs 37 decode 16 full   fails 0/30  ours gap 0.0144 drop-lead 0.0134 | fp8ref gap 0.0128 drop-lead 0.0084
+rs 37 decode 32 sliding fails 0/30  ours gap 0.0133 drop-lead 0.0085 | fp8ref gap 0.0133 drop-lead 0.0085
+rs 37 decode 32 full   fails 0/30  ours gap 0.0182 drop-lead 0.0108 | fp8ref gap 0.0184 drop-lead 0.0092
+rs 37 verify 1 sliding fails 0/30  ours gap 0.0122 drop-lead 0.0053 | fp8ref gap 0.0153 drop-lead 0.0031
+rs 37 verify 1 full    fails 0/30  ours gap 0.0138 drop-lead 0.0085 | fp8ref gap 0.0134 drop-lead 0.0077
+rs 37 verify 16 sliding fails 0/30  ours gap 0.0038 drop-lead 0.0029 | fp8ref gap 0.0212 drop-lead 0.0159
+rs 37 verify 16 full   fails 0/30  ours gap 0.0256 drop-lead 0.0154 | fp8ref gap 0.0256 drop-lead 0.0179
+rs 37 verify 32 sliding fails 0/30  ours gap 0.0043 drop-lead 0.0039 | fp8ref gap 0.0176 drop-lead 0.0147
+rs 37 verify 32 full   fails 0/30  ours gap 0.0215 drop-lead 0.0146 | fp8ref gap 0.0223 drop-lead 0.0195
