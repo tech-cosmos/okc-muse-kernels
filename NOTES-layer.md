@@ -3550,3 +3550,17 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - SUBMIT PLAN after 00:00Z 11-01: submit **v178** = `git show 161c986:muse_decode_layer/submission.py > /tmp/sub_v178.py;
   okc submit /tmp/sub_v178.py --json` (its check 9117bd11 2.1886 beats board 2.1717; v179's own check does not). v179 stays
   on main; give it one check after 00:00Z and submit it too if that check beats the board (it's new code, not a resubmit).
+
+## n26s1 (10-31 16:40-17:10Z): v180 = v179 + moe o17 HOT_ET race fix + fresh x18 nvs QLO; check 55b9da18
+- v180 (30d3612): layer.py += moe e24be08 (moe_routegathern CTA 0 `meta[67] = 0; __threadfence();` before its PDL trigger,
+  both RG_XPRE branches: the T=128/256 HOT_ET stale-flag race on main since v171, demonstrated by moe o17 with a widened
+  window); attn_src.py = r-fresh da0d17d (x16 two-term E4M3 queries in nvs = v16/v32 sliding routing-fail insurance).
+  submission.py 999018 B (cap 1 MB: ~1 KB left). validate ALL OK: 13/13, scored 0/24, opt 0/40, tk2f 0/1200, replay 0/480,
+  route 0/240 (worst gap 0.0256, drop-lead 0.0172), fuzz 0/188, cold prep 66.7 s.
+- CHECK 55b9da18 **2.1977 raw** [2.165, 2.231] = best raw on record (board 2.1717); fixed-SGLang 2.1629 (< lead bar 2.1913).
+  us sl/full: d1 66.0/73.1, d16 130.1/200.7, d32 157.8/294.3, v1 103.8/122.4, v16 267.4/356.2, v32 325.0/498.2. Node mix:
+  v16 sl +14.6 / d32 sl +8.9 us vs v178's check (nvs QLO expected +0.2-0.4 only; d32 untouched) while v1 sl -4.1, d32 full -5.6.
+  v32 profiles: hot 137/140 + twm 195/189 us (HOT_SL slices active).
+- Not submitted (10-31 layer submit cap used). SUBMIT RECOMMENDATION after 00:00Z: v180 instead of v178 (v178 carries the
+  HOT_ET race; v180 = v178 + bitwise/near-free changes; v180's own check raw 2.1977 beats the board, the CLAUDE.md rule).
+  Re-checking unchanged v180 gives 'duplicate' (content dedupe), so no further check of the same file is possible.
