@@ -14884,8 +14884,16 @@ __device__ __forceinline__ float token_keys(const Args& a, int t, int ls, int la
     bb[k] = __ldg(a.bias + e);
   }
 #pragma unroll
+  for (int k = 0; k < 8; k++) if (a.ks > 1) l0[k] += l1[k];
+  for (int q = 2; q < a.ks; q++) {  // split-K routers at small T (ks 8/16): one round trip per partial
+#pragma unroll
+    for (int k = 0; k < 8; k++) l1[k] = __ldcg(a.part + (size_t)q * a.sks + (size_t)t * a.st + ((ls + lane + 32 * k) & (E - 1)));
+#pragma unroll
+    for (int k = 0; k < 8; k++) l0[k] += l1[k];
+  }
+#pragma unroll
   for (int k = 0; k < 8; k++) {
-    const float lg = a.ks > 1 ? l0[k] + l1[k] : l0[k];
+    const float lg = l0[k];
     key[k] = 1.f / (1.f + __expf(-lg * a.mult)) + bb[k];
     sg[k] = 1.f / (1.f + expf(-lg * a.mult));
   }
@@ -15113,7 +15121,7 @@ void slack_launch(torch::Tensor part, int64_t ks, int64_t sks, int64_t st, torch
                   torch::Tensor ids, torch::Tensor lids, torch::Tensor wts, torch::Tensor scratch, int64_t T,
                   double mult, double reps, double rt, double kt, double tie, double dmarg, double rmarg, int64_t trig) {
   TORCH_CHECK(T >= 1 && T <= slk::MAXT, "slack: T out of range");
-  TORCH_CHECK(ks >= 1 && ks <= 2, "slack: ks must be 1 or 2");
+  TORCH_CHECK(ks >= 1, "slack: ks >= 1");
   // scratch int32 [>= 5 * 256 + 1]: masks, then the ticket (zero at first use; the kernel resets it)
   slk::Args a{part.data_ptr<float>(), (int)ks, (int)sks, (int)st, bias.data_ptr<float>(), ls.data_ptr<int>(),
               ids.data_ptr<int>(), lids.data_ptr<int>(), wts.data_ptr<float>(), (uint32_t*)scratch.data_ptr<int>(),
