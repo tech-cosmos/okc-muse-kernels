@@ -836,11 +836,7 @@ except Exception as _e:
     _CSL = None
 VTK_MAX_BATCH = 1
 CSL_MAX_BATCH = 16
-_NVS_SRC = r'''// agent2 nvs: native verify-SLIDING attention (L 8, G 8, D 64, HKV 2, page 1), from tools/s71/nverify.cu.
-// One CTA per (split, request): warpgroup 0 gathers both KV heads' K/V rows (128-B lines) with cp.async and
-// transposes V to FP8 V^T; warpgroups 1/2 (KV head 0/1) normalize + RoPE their queries, run QK^T (FP8 wgmma),
-// the online softmax and P@V with P in E4M3 (FA3's FP8 path), QK(i) overlapping PV(i-1). Partials in
-// _attn_split's layout [B, HKV, S, 64, 64] FP32 for _combine_hb. NVS_NEW: split S-1 also attends the 8 new tokens.
+_NVS_SRC = r'''#include <cuda_fp16.h>
 #define NV_NS 5
 #ifndef NVS_PW
 #define NVS_PW 1  // as NDS_PW
@@ -936,7 +932,7 @@ template <int NS> struct Smem {
     alignas(1024) uint8_t k[NS][BN * 128];     // both heads' K rows, SW128 (wgmma B, K-major)
     alignas(1024) uint8_t vs[NS][BN * 128];    // V rows as gathered; 16-byte chunk c of row r at c ^ vsw(r)
     alignas(1024) uint8_t vt[NS][2][HD * BN];  // per head V^T [d][key slot], SW64 (wgmma B, K-major), keys permuted
-    alignas(1024) uint8_t q[2][MR * HD];       // per head FP8 queries [row][d], SW64
+    alignas(1024) uint8_t q[2][2 * MR * HD];   // per head FP8 queries [row][d], SW64; hi plane, then lo
     int ptr[8][(1 + NV_HALF) * BN];                            // page 1: page-table entries of tiles i .. i + NV_PFD (ring of 8)
     int lim[8];                                // and each tile's last valid key
     uint64_t ready[NS], empty[NS];
@@ -947,8 +943,6 @@ template <int NS> struct Smem {
     alignas(1024) uint8_t knew[BN * 128];      // last split: the 8 new keys as a K tile (rows 0-7; rows 8-63 zero)
     alignas(1024) uint8_t vtnew[2][HD * BN];   // and their V^T (key slots 0-7 of group 0; the rest zero)
 };
-// Staging swizzle: SW128 (r & 7) for the ldmatrix transpose (8 consecutive rows per phase), else conflict-free for
-// the 4-row register transpose.
 __device__ __forceinline__ uint32_t vsw(int r) { return NV_TR ? (r & 7) : (((r >> 1) & 3) | (((r >> 4) & 1) << 2)); }
 
 
@@ -968,9 +962,6 @@ __device__ __forceinline__ void cp4ca(uint32_t dst, const void* src) {
 }
 
 #if NV_HALF
-// NV_HALF: the CTA serves one KV head H; smem row r of tile i holds key lo0 + 64 i + r of half 0 in bytes 0-63 and key
-// lo1 + 64 i + r of half 1 in bytes 64-127 (both head H), so the consumer / transpose layout is the 2-head one with
-// "head" = half.
 template <int NS, int LAG>
 __device__ __forceinline__ void producer(Smem<NS>& sm, const uint8_t* __restrict__ kc, const uint8_t* __restrict__ vc,
                                          const int* __restrict__ pt, Range r0, Range r1, int H, int maxp) {
@@ -1027,8 +1018,6 @@ __device__ __forceinline__ void producer(Smem<NS>& sm, const uint8_t* __restrict
     const int tid = threadIdx.x;  // 0..127
     const int total = rg.n;
     const int* ptr = pt + (long long)rg.b * maxp;
-    // Warp 0 stages each tile's page-table entries NV_PFD tiles ahead in sm.ptr (2 x 4-byte cp.async per lane: the
-    // window start is not 16-byte aligned).
     auto stage = [&](int j) {
         const int kb = rg.lo + j * BN;
         if (kb + tid < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][tid]), ptr + kb + tid);
@@ -1139,6 +1128,8 @@ __device__ __forceinline__ void issue_qk(float (&s)[32], uint32_t qa, uint32_t k
     wg_fence();
     qk_k32(s, mdesc(qa, 512, 2), mdesc(ka, 1024, 1), 0);
     qk_k32(s, mdesc(qa + 32, 512, 2), mdesc(ka + 32, 1024, 1), 1);
+    qk_k32(s, mdesc(qa + MR * HD, 512, 2), mdesc(ka, 1024, 1), 1);
+    qk_k32(s, mdesc(qa + MR * HD + 32, 512, 2), mdesc(ka + 32, 1024, 1), 1);
     wg_commit();
 }
 __device__ __forceinline__ void issue_pv(float (&o)[32], const uint32_t (&p)[8], uint32_t va) {
@@ -1147,8 +1138,6 @@ __device__ __forceinline__ void issue_pv(float (&o)[32], const uint32_t (&p)[8],
     pv8_k32(o, p[4], p[5], p[6], p[7], mdesc(va + 32, 512, 2));
     wg_commit();
 }
-// Score masks: key column col (of this tile) is out if col >= nvalid (past the split's end) or col < thr0 / thr1
-// (rows of token 2w / 2w + 1: before the sliding window's start).
 __device__ __forceinline__ void mask(float (&s)[32], int lane, int nvalid, int thr0) {
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
@@ -1160,8 +1149,6 @@ __device__ __forceinline__ void mask(float (&s)[32], int lane, int nvalid, int t
     }
 }
 
-// layer s72 (QSS at verify sliding): qkv may be 2 FP32 split-K slabs qss elements apart (one batched GEMM, no
-// split-K reduce kernel): the partials are added in FP32 and rounded to BF16 (RN) at the load (= splitKreduce + BF16 out).
 struct qs2 { float v; };
 __device__ __forceinline__ unsigned qpk(float lo, float hi) {
     __nv_bfloat162 t = __floats2bfloat162_rn(lo, hi);
@@ -1187,7 +1174,6 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const QT* __restri
                                          uint8_t* __restrict__ kc,
                                          uint8_t* __restrict__ vc, const long long* __restrict__ loc, float ksv,
                                          float vsv, int H, int total, int qss) {
-    // NV_HALF: h is the consumer's half (smem slot) of KV head H's split; else h is the KV head (H unused).
     const int tid = threadIdx.x & 127, lane = tid & 31, w = tid >> 5;
     const int HH = NV_HALF ? H : h;
     const bool isnew = NV_HALF ? (split == S - 1 && h == 1) : split == S - 1;
@@ -1233,8 +1219,6 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const QT* __restri
 #pragma unroll
         for (int j = 0; j < 8; ++j) pk[j] = pack_e4(x[4 * j], x[4 * j + 1], x[4 * j + 2], x[4 * j + 3]);
         if (isnew) {
-            // The block's new token t = tid / 16, d 4 (tid % 16) + 0..3 of this KV head: RMS-norm + RoPE, E4M3 (as
-            // _new), stored into the cache and into the new-token K / V^T tiles.
             const int t = tid >> 4, d0 = (tid & 15) * 4, tok = b * 8 + t, npos = rg.seq + t;
             const QT* kp = qkv + (long long)tok * qkv_w + (16 + HH) * HD + d0;
             const uint2 kr = qld4(kp, qss), vr = qld4(kp + 2 * HD, qss);
@@ -1255,8 +1239,6 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const QT* __restri
             *reinterpret_cast<uint32_t*>(kc + slot * 128 + HH * HD + d0) = kq;
             *reinterpret_cast<uint32_t*>(vc + slot * 128 + HH * HD + d0) = vq;
             {
-                // Zero the tiles' unused rows / slots, then place this lane's 4 key bytes (row t, SW128 chunk) and
-                // 4 value bytes (V^T rows d0 .. d0 + 3, key slot of t in group 0: word t / 2, byte t % 2).
                 const uint4 z = make_uint4(0, 0, 0, 0);
                 uint4* vz = reinterpret_cast<uint4*>(&sm.vtnew[h][0]);
                 vz[tid] = z; vz[tid + 128] = z;
@@ -1282,6 +1264,18 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const QT* __restri
         uint8_t* qd = &sm.q[h][0];
         *reinterpret_cast<uint4*>(qd + swz64(r * 64 + half * 32)) = make_uint4(pk[0], pk[1], pk[2], pk[3]);
         *reinterpret_cast<uint4*>(qd + swz64(r * 64 + half * 32 + 16)) = make_uint4(pk[4], pk[5], pk[6], pk[7]);
+        uint32_t pl[8];  // x16 QLO: lo plane, QK^T = hi + lo
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            uint32_t f01, f23;
+            asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(f01) : "h"((unsigned short)(pk[j] & 0xffff)));
+            asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(f23) : "h"((unsigned short)(pk[j] >> 16)));
+            const float2 h01 = __half22float2(*reinterpret_cast<const __half2*>(&f01));
+            const float2 h23 = __half22float2(*reinterpret_cast<const __half2*>(&f23));
+            pl[j] = pack_e4(x[4 * j] - h01.x, x[4 * j + 1] - h01.y, x[4 * j + 2] - h23.x, x[4 * j + 3] - h23.y);
+        }
+        *reinterpret_cast<uint4*>(qd + MR * HD + swz64(r * 64 + half * 32)) = make_uint4(pl[0], pl[1], pl[2], pl[3]);
+        *reinterpret_cast<uint4*>(qd + MR * HD + swz64(r * 64 + half * 32 + 16)) = make_uint4(pl[4], pl[5], pl[6], pl[7]);
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
         asm volatile("bar.sync %0, 128;" ::"r"(2 + h) : "memory");
     }
@@ -1290,11 +1284,9 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const QT* __restri
     for (int i = 0; i < 32; ++i) o[i] = 0.f;
     float m[2] = {-1e30f, -1e30f}, l[2] = {0.f, 0.f}, alpha[2];
     uint32_t pa[8], pb[8];
-    // Window start for this warp's token 2w rows, relative to key lo: keys t < seq - (win - 1) + 2w are out.
     const int thr = win > 0 ? rg.seq - (win - 1) + 2 * w - lo : -(1 << 30);
     bool newdone = false;
     if (isnew) {
-        // The new tokens first, as one causal 8-key tile on the tensor cores, while the cached tiles' gathers fly.
         issue_qk(s, qa, smem_u32(&sm.knew[0]) + h * 64);
         wg_wait<0>();
         fence_regs(s);
@@ -1353,7 +1345,6 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const QT* __restri
     l[0] += __shfl_xor_sync(0xffffffff, l[0], 1); l[0] += __shfl_xor_sync(0xffffffff, l[0], 2);
     l[1] += __shfl_xor_sync(0xffffffff, l[1], 1); l[1] += __shfl_xor_sync(0xffffffff, l[1], 2);
 #if NV_HALF
-    // Release the producer's tiles this half has no keys for, then merge half 1 into half 0 through smem.
     for (int i = n; i < total; ++i) {
         mb_wait(&sm.ready[i % NS], (i / NS) & 1);
         if (lane == 0) mb_arrive(&sm.empty[i % NS]);
@@ -1422,7 +1413,6 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const QT* __restrict__ qkv, 
     __syncthreads();
     const int split = blockIdx.x % S;
 #if NV_HALF
-    // CTA (request, KV head H, split); consumer c takes half c of the split's ch keys.
     const int H = (blockIdx.x / S) & 1, bb = blockIdx.x / (2 * S);
     const Range r0 = rng(seq, bb, 2 * split, ch / 2, win), r1 = rng(seq, bb, 2 * split + 1, ch / 2, win);
     if (wg == 0) {
@@ -1460,8 +1450,6 @@ void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
          torch::Tensor loc, torch::Tensor pt,
          torch::Tensor seq, torch::Tensor pacc, torch::Tensor pml, double qk_scale, int64_t S, int64_t ch, int64_t win,
          int64_t pf_ptr, int64_t pf_bytes, int64_t qss) {
-    // Producer lag NV_LAG (1) at every S: LAG 2 at 4 splits was H100 -0.18 us but H200 +0.2 (check 9249146d, verify 32).
-    // qss > 0 (layer s72): qkv = FP32 slab 0 of 2 split-K slabs qss elements apart, summed at the loads.
     const int smem = (int)sizeof(nv::Smem<NV_NS>) + 1024;
     const int B = (int)seq.size(0);
 #define NVS_LAUNCH(QT_) { \
@@ -1497,7 +1485,8 @@ except Exception as _e:
     print("nvs build failed, using Triton:", _e)
     _NVS = None
 NVS_HALF = '#define NV_HALF 1' in _NVS_SRC
-_NVSCL_SRC = r'''// agent2 nvs: native verify-SLIDING attention (L 8, G 8, D 64, HKV 2, page 1), from tools/s71/nverify.cu.
+_NVSCL_SRC = r'''#include <cuda_fp16.h>
+// agent2 nvs: native verify-SLIDING attention (L 8, G 8, D 64, HKV 2, page 1), from tools/s71/nverify.cu.
 // One CTA per (split, request): warpgroup 0 gathers both KV heads' K/V rows (128-B lines) with cp.async and
 // transposes V to FP8 V^T; warpgroups 1/2 (KV head 0/1) normalize + RoPE their queries, run QK^T (FP8 wgmma),
 // the online softmax and P@V with P in E4M3 (FA3's FP8 path), QK(i) overlapping PV(i-1). Partials in
@@ -1605,7 +1594,7 @@ template <int NS> struct Smem {
     alignas(1024) uint8_t k[NS][BN * 128];     // both heads' K rows, SW128 (wgmma B, K-major)
     alignas(1024) uint8_t vs[NS][BN * 128];    // V rows as gathered; 16-byte chunk c of row r at c ^ vsw(r)
     alignas(1024) uint8_t vt[NS][2][HD * BN];  // per head V^T [d][key slot], SW64 (wgmma B, K-major), keys permuted
-    alignas(1024) uint8_t q[2][MR * HD];       // per head FP8 queries [row][d], SW64
+    alignas(1024) uint8_t q[2][2 * MR * HD];   // per head FP8 queries [row][d], SW64; hi plane, then lo
     int ptr[8][(1 + NV_HALF) * BN];                            // page 1: page-table entries of tiles i .. i + NV_PFD (ring of 8)
     int lim[8];                                // and each tile's last valid key
     uint64_t ready[NS], empty[NS];
@@ -1810,6 +1799,8 @@ __device__ __forceinline__ void issue_qk(float (&s)[32], uint32_t qa, uint32_t k
     wg_fence();
     qk_k32(s, mdesc(qa, 512, 2), mdesc(ka, 1024, 1), 0);
     qk_k32(s, mdesc(qa + 32, 512, 2), mdesc(ka + 32, 1024, 1), 1);
+    qk_k32(s, mdesc(qa + MR * HD, 512, 2), mdesc(ka, 1024, 1), 1);
+    qk_k32(s, mdesc(qa + MR * HD + 32, 512, 2), mdesc(ka + 32, 1024, 1), 1);
     wg_commit();
 }
 __device__ __forceinline__ void issue_pv(float (&o)[32], const uint32_t (&p)[8], uint32_t va) {
@@ -1929,6 +1920,18 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const __nv_bfloat1
         uint8_t* qd = &sm.q[h][0];
         *reinterpret_cast<uint4*>(qd + swz64(r * 64 + half * 32)) = make_uint4(pk[0], pk[1], pk[2], pk[3]);
         *reinterpret_cast<uint4*>(qd + swz64(r * 64 + half * 32 + 16)) = make_uint4(pk[4], pk[5], pk[6], pk[7]);
+        uint32_t pl[8];  // x16 QLO: lo plane, QK^T = hi + lo
+#pragma unroll
+        for (int j = 0; j < 8; ++j) {
+            uint32_t f01, f23;
+            asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(f01) : "h"((unsigned short)(pk[j] & 0xffff)));
+            asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(f23) : "h"((unsigned short)(pk[j] >> 16)));
+            const float2 h01 = __half22float2(*reinterpret_cast<const __half2*>(&f01));
+            const float2 h23 = __half22float2(*reinterpret_cast<const __half2*>(&f23));
+            pl[j] = pack_e4(x[4 * j] - h01.x, x[4 * j + 1] - h01.y, x[4 * j + 2] - h23.x, x[4 * j + 3] - h23.y);
+        }
+        *reinterpret_cast<uint4*>(qd + MR * HD + swz64(r * 64 + half * 32)) = make_uint4(pl[0], pl[1], pl[2], pl[3]);
+        *reinterpret_cast<uint4*>(qd + MR * HD + swz64(r * 64 + half * 32 + 16)) = make_uint4(pl[4], pl[5], pl[6], pl[7]);
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
         asm volatile("bar.sync %0, 128;" ::"r"(2 + h) : "memory");
     }
@@ -16410,6 +16413,7 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
   if (tid < 32) { cnt[tid] = 0; pre[tid] = 0; }
 #if !RG_XPRE
   asm volatile("griddepcontrol.wait;" ::: "memory");
+  if (tok == 0 && tid == 0) { meta[67] = 0; __threadfence(); }  // moe o17: zero HOT_ET's flag word BEFORE the trigger
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   __syncthreads();
 #endif
@@ -16439,6 +16443,9 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
 #pragma unroll
   for (int i = 0; i < KD / 2 / 256; ++i) gp[i] = __ldg(reinterpret_cast<const float2*>(gain) + sw[i]);
   asm volatile("griddepcontrol.wait;" ::: "memory");
+  // moe o17 race fix: moe_hot (HOT_ET) triggers moe_twm before its own wait and twm polls meta[67] bit 30; meta[67] still
+  // holds the previous replay's set bit (or pool garbage) until zeroed below, so zero it here, before this trigger
+  if (tok == 0 && tid == 0) { meta[67] = 0; __threadfence(); }  // moe o17: zero HOT_ET's flag word BEFORE the trigger
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   __syncthreads();
 #endif
