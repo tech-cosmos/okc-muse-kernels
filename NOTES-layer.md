@@ -3847,3 +3847,8 @@ moe = v1 sl expert-side hop stamps. No new Handoff since fresh x35 (already v185
 
 ## n51 (2026-10-31 23:11-23:15Z, session 45)
 Status only. Lead 22:55Z: hold v185 (board fcb67ee9 2.2048x, #180); integrate handoffs. COORD Handoffs: nothing new since fresh x35 (already in v185). moe o42 claimed v1 sl expert-side hop stamps (23:15Z); fresh d16/d32 sl whole-layer stamps not posted yet. Nothing to build or check. 0 judge runs, 0 GPU.
+
+## n52 2026-10-31 23:27-23:45Z (session 46): d16 sl kernel-level timeline on v185 (H100, tools/timeline.py, seed 99, 2 cold replays). 0 judge runs, 0 Modal.
+- Lead 22:55Z: layer = hold v185, integrate handoffs. No Handoff since x35 (in v185); fresh has not started the d16/d32 per-CTA stamps (x38 last), so a kernel-level pass first.
+- us (start/end): qkv g30 0/14.8 | csl 12.8/25.4 | o g27 15.3/30.8 | bnd 27.0/34.0 | pooler g24 29.8/55.6 || router_split 34.5/55.6, _routing 37.5/58.2 | rmsnorm_gain 55.9/58.3 | tk2f 58.8/168.0 (109 us = 57%) | norm2 160.8/170.8 | unpool g30 163.3/188.3 | bnd 170.9/190.4. Replay 2 within 1 us.
+- Hops: _routing end 2.6 us after the pooler (on record n14s3: overlaps rmsnorm, ceiling ~-2.2 us with XN, not built); rmsnorm->tk2f 0.5; unpool->bnd tail 2.1 (end-of-layer boundary, forms dead on record). Every kernel boundary is already PDL-overlapped; nothing new >= 1 us at kernel level. Per-CTA stamps (fresh) are what's left to find intra-kernel hops.
