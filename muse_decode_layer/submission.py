@@ -7590,7 +7590,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   extern __shared__ __align__(1024) uint4 smem_tw[];
   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
   __shared__ uint32_t slut[256];
-  __shared__ int s_e[64], s_so[64], s_ns[64], s_sz[64], s_off[33], s_item[NSTG], s_nh;
+  __shared__ int s_e[64], s_so[64], s_ns[64], s_sz[64], s_g0[64], s_off[33], s_item[NSTG], s_nh;
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   int* done = meta + 68;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
@@ -7621,14 +7621,14 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const unsigned b = __ballot_sync(0xffffffffu, h), bm = __ballot_sync(0xffffffffu, ns > 1);
     if (!bm) {
       const int p = __popc(b & ((1u << tid) - 1));
-      if (h) { s_e[p] = e; s_so[p] = 0; s_ns[p] = 1; s_sz[p] = NH; }
+      if (h) { s_e[p] = e; s_so[p] = 0; s_ns[p] = 1; s_sz[p] = NH; s_g0[p] = p; }
       if (tid == 0) s_nh = __popc(b);
     } else {
       int pos = ns;
 #pragma unroll
       for (int o = 1; o < 32; o <<= 1) { const int y = __shfl_up_sync(0xffffffffu, pos, o); if (tid >= o) pos += y; }
       const int sz = ns > 1 ? (((nt + ns - 1) / ns + 15) & ~15) : NH;
-      for (int q = 0; q < ns; ++q) { s_e[pos - ns + q] = e; s_so[pos - ns + q] = q * sz; s_ns[pos - ns + q] = ns; s_sz[pos - ns + q] = sz; }
+      for (int q = 0; q < ns; ++q) { s_e[pos - ns + q] = e; s_so[pos - ns + q] = q * sz; s_ns[pos - ns + q] = ns; s_sz[pos - ns + q] = sz; s_g0[pos - ns + q] = pos - ns; }
       if (tid == 31) s_nh = pos;
     }
   }
@@ -7650,7 +7650,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
         break;
       }
       const int g2 = item >= n13, it = g2 ? item - n13 : item, nrb = g2 ? HN::NRB : HG::NRB;
-      const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e] + s_so[a];
+      const int a0 = it / nrb, ns0 = s_ns[a0], g0 = s_g0[a0], loc = it - g0 * nrb, rb = ns0 > 1 ? loc / ns0 : it - a0 * nrb, a = ns0 > 1 ? g0 + loc - rb * ns0 : a0, e = s_e[a], off = s_off[e] + s_so[a];
       const char* wsrc = (g2 ? W2 : W13) + ((size_t)e * nrb + rb) * 64 * HG::WB;
       const char* ssrc = (g2 ? S2 : S13) + ((size_t)e * nrb + rb) * 64 * HG::SB;
       const CUtensorMap* map = g2 ? &maps2.m[NH == 128 ? 5 : 3] : &maps13.m[NH == 128 ? 5 : 3];
@@ -7683,7 +7683,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int item = s_item[st];
     if (item < 0) break;
     const int g2 = item >= n13, it = g2 ? item - n13 : item, nrb = g2 ? HN::NRB : HG::NRB;
-    const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e] + s_so[a], nv = min(s_sz[a], s_off[e + 1] - off);
+    const int a0 = it / nrb, ns0 = s_ns[a0], g0 = s_g0[a0], loc = it - g0 * nrb, rb = ns0 > 1 ? loc / ns0 : it - a0 * nrb, a = ns0 > 1 ? g0 + loc - rb * ns0 : a0, e = s_e[a], off = s_off[e] + s_so[a], nv = min(s_sz[a], s_off[e + 1] - off);
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
 #define HOT_ITEM(NN) tw_item<2, 1, NN, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, \
                                                                            nv, off, rb, gsc, sroutes, g2 ? Y : Inter, g2)
