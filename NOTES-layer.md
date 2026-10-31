@@ -3694,3 +3694,9 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Submit decision: by the 15:58Z rule v182's check misses the bar (2.1913), v181's passed. v182 is the same speed and does not
   lose 3-16 us at d1 on the ~0.6% of held-out weight draws that would push v181's pooler/qkv to BF16 fallback. Asked the lead
   (Requests). Default after 00:00Z: submit v181 (38d0c23) once.
+
+## n35 (2026-10-31 19:03-19:10Z, session 29): status only
+No lead line after 16:30Z (no answer on v181 vs v182). Board: layer #221 on the overall board (#1 2.418). Every agent's list is empty
+(proj n28, moe o27, fresh x22/x23, layer n33). Nothing new to build. 0 judge runs (7 layer checks left 10-31, unused).
+NEXT (first session after 00:00Z 11-01): submit v181 = `git show 38d0c23:muse_decode_layer/submission.py` once, unless a lead
+line says v182 (main). Log it in Judge runs.
