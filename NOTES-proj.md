@@ -2927,3 +2927,11 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
     x32 staged 10.2 (~boundary end), router partials stored 14.3 (max 20), released 17.7 (max 20.5), pooler loop end 28.2
     (23.8-30.2), epilogue 30.5, finisher 30.5: the pooler loop starts ~7.5 us after x is ready (s36 record: the bulk L2
     prefetch npf 220 streams during that window).
+  * CLEAN H100 (waited for 15 s of 0% GPU util, 11:03Z; tl13b R 11, same process, separate flat8): pr8 base 20.5 / 21.3 us
+    after the boundary, flat +0.16 sl / +0.45 full (= pr8 is AT a flat reader of its bytes on the H100), norouter (no router
+    item, illegal) -2.7 / -1.6. Earlier H100 runs this session were under other agents' unlocked load: ignore them.
+  * v1 verdict: no H100 bound; H200 unknown (the only H200 run used the inflated build). QUEUED: one Modal run after 00:00Z,
+    /tmp/pj13/ov8-style overlay = orc8.py output + tl13b.py, cmd LOAD="verify 1" TOK=8 KN="pr8::" VARJ base/flat/base2
+    (~2.3 GPU-min). Build only if flat <= -1 us at v1 sl there.
+  * Clock note: COORD lines n13s1b/c say 11:25Z/11:45Z; the real times were ~10:40Z/10:55Z (clock read at 11:02Z).
+- Session totals: 0 judge runs; Modal 14.1 GPU-min (6 runs; ledger 36/60 shared). Nothing handed off.
