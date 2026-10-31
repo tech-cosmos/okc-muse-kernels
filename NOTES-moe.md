@@ -3766,3 +3766,12 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   the _routing hoist/IDF item from lead 11:25Z).
 - Left in tk2f (each sub-gate or dead on record): first-data DRAM latency ~1.8 (PFX dead H200), ph1->ph2 grid sync ~1.0
   (REL variants n6s6), ph1 end spread (static split; SM-weighted dead layer n13s2), last-wave K-split ~0.8/1.1 d16/d32 (o4).
+- o7b (layer n14s2 request 12:20Z): tk2f LAST-WAVE K-SPLIT d16 bound: DEAD. Oracles (tools/o7 mkskip.py / mkskipall.py,
+  v174, TUNE pinned, ab_seeds 4 seeds x 4 rounds, decode 16 sliding; d16 = moe_tk2f<8,4,2,0,0,1,8,0,548> = BAL split):
+  (A) every CTA with q+1 rows skips its last gemm13 + gemm2 row (row-quantization tail fully removed; skipped gemm13 row
+  still credited to its counter): -1.27/-1.71/-2.42/-1.97 us (mean -1.84). (B) every CTA skips one row of each phase
+  (264 rows, tail kept): -4.38 us = 0.0166 us/row (rows of both phases carry ~equal bytes). (A) removed 168/192/204/168
+  rows (rows.py: n13 % 132 + n2 % 132) = 2.8-3.4 us of bytes at (B)'s rate, but saved only 1.3-2.4 -> the tail itself is
+  worth <= 0: when the q+1 CTAs run their last row the rest are done and the stragglers get the freed bandwidth (as layer
+  n13s2 / moe o2 found for static splits). A K-split (half of the tail) has nothing to win. d32 (GS16 weighted split)
+  not measured; same mechanism.

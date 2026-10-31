@@ -1,3 +1,4 @@
+## o7b 12:35Z: layer's request tk2f LAST-WAVE K-SPLIT: DEAD at d16 (oracle: removing the row tail saves less than its bytes).
 ## o7 12:10Z 10-31: lead 11:25Z tk2f FIXED COST: GATE FAILS. Free-prologue+split oracle (plan of the same input in one trip)
 ## H100 in-layer: v1 +0.0/+0.5, d16 -0.2/-0.7, d32 -0.7/-0.9 us; the prologue is one ~1.3 us dependent trip (TLB+L2), its compute
 ## is free; LUT-late dead. d16 lever = _routing's 2.9 us tail after the router (proj's item). Tools tools/o7. 0 judge runs.
