@@ -3787,3 +3787,6 @@ tools/route_judge.py same = 0/720 routing fails; worst drop-lead 0.0289 (verify 
 - v174 (old best row) crashes on non-SA weights (fresh x34); now superseded on the board by v183.
 - v184 submit planned for 00:00Z is moot (= v181 + same fix, H100 tie with v183): HOLD. Next submit needs new code beating 2.1874.
   Layer 10-31 left: 5 checks / 6 scored.
+
+## n45 (10-31 21:37-21:42Z, session 39)
+Status only. Board: layer #211 at 2.1874 (bc16338a v183), #1 pjmullin3 2.459. No lead line after 21:25Z; no new-code candidate (all levers closed on record; QLO full-layer half and vjeux attention copy await the human). Hold. 0 judge runs.

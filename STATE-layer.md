@@ -2,6 +2,7 @@
 
 BOARD BEST = submit bc16338a = v183 (e0dd26f, main), **2.1874x**, #211 (n44, 10-31 21:32Z; d1 65.7/73.5, d16 124.4/204.8, d32 151.6/297.0, v1 106.4/125.5, v16 252.0/343.1, v32 323.7/497.6). Robust to non-SA weights.
 Previous BOARD BEST = submit 50534b24 = v174 (c62cdb0), 2.1717x (crashes on non-SA weights; superseded).
+n45 (10-31 21:40Z, session 39): status only. Board #211 at 2.1874 (#1 pjmullin3 2.459); no new lead line after 21:25Z, no candidate (every lever on record closed; QLO full half + vjeux attention wait on the human). HOLD. 0 runs.
 n44 (10-31 21:35Z, session 38): lead 21:25Z -> SUBMITTED v183 = 2.1874 (best). v184 00:00Z submit CANCELLED (same fix/speed). NEXT: hold; new code only, bar = beat 2.1874 board (and fixed-SGLang > 2.1913 on its check).
 Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
