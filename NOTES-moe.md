@@ -4188,3 +4188,5 @@ H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-
   ("cfg 43004 needs TK2_EXP"). Fix: `if M in TK2H_M and sa` (falls to the default tk2f). mode 2 now PASS 15/15; default
   weights bench test 15/15 (sa True: identical cfgs, no perf change). Risk was low (generator scales are clamped >= 8 or
   >= 2^-6 = normal) but a crash = no score. Asked proj (layer held-out audit, n26) to run mode 2 on the layer.
+- check 5a45c7a7 aa51716 2.3456x (CI 2.310-2.381): bs1 25.4, bs16 88.0, bs32 116.7, bs8 64.0, bs128 192.9, bs256 231.6 us
+  (= 8242d5e's 8c75ecb3 2.3498 within noise). Beats board 2.3198: SUBMIT aa51716 ONCE after 00:00Z 11-01. moe checks 15/20 today.

@@ -8,7 +8,7 @@
   bs8 2.253, bs128 2.377, bs256 2.750). Best check on record: c015407f 2.3737x (cbd4bcf).
 - o25: HELD-OUT WEIGHTS audit (tools/o25/hw.py <seed> <0 normal|1 wide_scales|2 forced zero/subnormal scale>): seeds 1/7w/99w
   PASS 15/15 (rel L2 2.5-3.3e-3 vs tol 1.5e-2). Forced non-SA scales CRASHED bs32 (TK2H_M branch had no `and sa`): fixed, PASS 15/15.
-- QUEUED: after 00:00Z 11-01 SUBMIT aa51716 (= 8242d5e + the non-SA guard; same kernels when sa) ONCE (beats board 2.3198; lead cap 2 submits/agent/day, 10-31 used 2).
+- QUEUED: after 00:00Z 11-01 SUBMIT aa51716 (= 8242d5e + the non-SA guard; same kernels when sa) ONCE (check 5a45c7a7 2.3456x; beats board 2.3198; lead cap 2 submits/agent/day, 10-31 used 2).
   Never resubmit unchanged code. Log in NOTES + COORD Judge runs.
 - Board: best submit e37e578e 2.3198x (#285 at 17:30Z 10-31). #1 dolanzhao 2.758x, #10 2.590x.
   H200 us (o10 submit): bs1 25.3, bs16 87.3, bs32 118.6, bs8 63.2, bs128 194.0, bs256 234.3. Floors (TASK, 4.8 TB/s):
