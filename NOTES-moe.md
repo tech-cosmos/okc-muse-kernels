@@ -3814,3 +3814,22 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   bs128 -1.8, bs256 -3.1 us). Board #316 -> #282 (#1 dolanzhao 2.758x). So the H200 confirms fresh's reading: PDL norm with
   the LATE trigger wins (n5s19's +3.4 us loss was the entry trigger). Layer may want the same late-trigger idea where a
   PDL secondary follows tk2f.
+
+## o11 (2026-10-31 14:17Z - ): moe board: layer's moe_hot hotdyn + HOT128 ported; check e59302f4 2.3275x; CW (lead 14:30Z) port
+- Found: the moe-board submission never got the layer's moe_hot work (v169 hotdyn `per`, v170 HOT128, v171 HOT_ET). Moe-board
+  routings (reference.generate_input, 200 seeds): bs128 has a 65..128-token expert in 37% (2 in 2%); bs256 nh>=3 ~5%.
+- Port (main 2f20f9f): moe_hot `per` arg (grid = base*1e5 + per*1e3 + CTAs; CTAs >= max(base, per*nh) exit at once) +
+  HOT_M {128: 16048, 256: 3216064}. Bitwise vs old on 32 seeds (tools/o11/hot.py), test 15/15, graph replay 0/400
+  (tools/o11/race.py). H100 bs128 16 seeds: off 247.2 / 16032 239.9 / 16048 240.0 / 32064 241.7 / 12032 255 (too few CTAs);
+  routings with a hot expert -16 us, without +1.1 (moe_hot launch in front of twm). bs256: all variants tie (no nh>=3 seed).
+- check e59302f4 = 2.3275x (CI 2.293-2.362) vs board 2.3198: bs128 193.2 us (x2.389 vs 2.360), bs256 234.2 (x2.683 vs 2.643);
+  bs1 26.5 / bs16 92.9 / bs8 68.1 drew slow (untouched code). Submit held: 1 submit left today (lead 2/agent/day), bundle with CW.
+- HOT_ET (layer v171) NOT ported: its gain is the ~1 us no-hot cost only. Protocol note for the layer: moe_routegather(n)
+  triggers PDL right after its wait and zeroes meta[67] later, and meta is a per-call buffer, so twm's poll of meta[67] bit 30
+  can in principle see the previous call's bit (or garbage). In a stress copy here (HOT_ET exactly as the layer, bs128, 400
+  graph replays with fresh inputs) 0 mismatches: the window (routegather's count pass ~1-2 us vs two PDL launches) seems
+  never hit on the H100. Posted as a Request to layer (low priority, theoretical).
+- CW (fresh a269066, lead 14:30Z): ported to the moe board's tk2f (SQ stages; PF 8192 is also the dead GS16 HYB bit here, so
+  CW = PF 8192 && GS 8; cfg 84294; python TK2F_CW, M = 1 only). Copy /tmp/o11cw: test 15/15, bitwise vs main 0/500 eager +
+  0/1000 replay (tools/o11/eq1.py). H100 A/B (tools/o11/ab.py, 8 seeds x 4 rounds): mean +0.07 us = TIE (2-expert routings
+  +0.3..0.6, 3-4 experts -0.6..0).

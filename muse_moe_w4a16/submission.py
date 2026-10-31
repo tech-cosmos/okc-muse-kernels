@@ -112,7 +112,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TK2G_PAR 1       // n4s5: GS16 weighted split bounds by warp 0 (tk2g_bound) instead of every thread (tk2g_split)
 #endif
 #define TK2F_S6K 0       // n20: build the S6 (6-bit scale code) tk2f kernels (_lib sets it when TK2F_S6 or DIAG)
-#define TK2H_P4 0        // n6: build only the SA tk2h PF4 kernels (cfg 1x3x004 GS8 / 1x4w004 GS16) without TK2_EXP: layer tuner use
+#define TK2H_P4 1        // o11: on (moe board bs32 runs tk2h W3 as the layer's H200 tuner picks at T=32); n6: build only the SA tk2h PF4 kernels (cfg 1x3x004 GS8 / 1x4w004 GS16) without TK2_EXP: layer tuner use
 #define TK2H_REG 1       // n18: tk2h keeps each phase's X/Out/gs pointers in registers (H100: one LDC stall per segment start)
 #define TK2F_SQRT 0      // n18: run-time L2 hint modes (per phase) on SQ stages (PF 576/580; DIAG builds)
 #define TK2_EXP 0        // s12: tk2h (TK2H/PSC) and weighted-split (TK2W) instantiations: H200 diags, no gain (off: compile time)
@@ -6414,7 +6414,7 @@ TK2H_MIN16 = 1
 TK2H_MIN = 1  # n4s5: TK2H applies from this M (below: the main tk2f cfg); 9 = only calls that can have 2-group rows
 TK2W = 0  # s12: weighted static row split for M > 1 (extra-group rows weigh TK2W / 8; 0 = by count), cfg + 70000
 TK2H_PSC = 0  # s12: 1 = per-segment gemm13 -> gemm2 counters (cnt[64 + seg]) instead of the global one
-TK2H_M = {}  # n6: per-M GS16 tk2h PF4 weight W (overrides TK2H/TK2W); layer TUNE option "tk2h" = W + 1
+TK2H_M = {32: 3}  # o11: layer TUNE_BASE T=32 tk2h 4 (= W 3).  # n6: per-M GS16 tk2h PF4 weight W (overrides TK2H/TK2W); layer TUNE option "tk2h" = W + 1
 TK2H_PF4 = 0  # n6: 1 = tk2h writes y32 like tk2f PF 4 (slot order, pre-scaled) -> moe_norm3 (cfg + 4; kinds 3/4 only)
 TK2F_SQ4_DIAG = False  # n5s15: k44/k45 lost on the H200 (ddfc1353);
 TK2F_SQ8_DIAG = False  # n5s15: KPS 1 SQ images for the k14/k16 DIAG variants (lost: 14ddda06)
