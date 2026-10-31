@@ -2631,6 +2631,9 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 #define TWM_TL 0
 #endif
 #ifndef HOT_EMU
+#ifndef HOT_XN
+#define HOT_XN 16  // layer v172 (fresh f1s6): moe_hot NH 128 items at wgmma N = nv rounded up to 16 (0 = N 128)
+#endif
 #define HOT_NX 0  // n5s21: exact-N moe_hot probe builds (tests only)
 #define HOT_EMU 0  // s29: H200-proxy emulation in moe_twm/moe_hot (tests only; see moe_twm)
 #endif
@@ -3146,6 +3149,8 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   }
   __syncthreads();
   const int nh = s_nh, n13 = nh * HG::NRB, nitems = n13 + nh * HN::NRB;
+  const bool xn = !(per & (1 << 30));
+  per &= ~(1 << 30);
   // n7s32 HOT_PER (layer v169 hotdyn, o11 here): per > 0 = only max(per >> 8, (per & 255) * nh) CTAs work (<= the grid);
   // the others exit at once, so their SMs go to moe_twm (the PDL secondary)
   if (per > 0 && (int)blockIdx.x >= max(per >> 8, (per & 255) * nh)) return;
@@ -3199,8 +3204,20 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int g2 = item >= n13, it = g2 ? item - n13 : item, nrb = g2 ? HN::NRB : HG::NRB;
     const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e], nv = s_off[e + 1] - off;
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
-    tw_item<2, 1, NH, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, nv, off, rb,
-                                                           gsc, sroutes, g2 ? Y : Inter, g2);
+#define HOT_ITEM(NN) tw_item<2, 1, NN, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, \
+                                                                           nv, off, rb, gsc, sroutes, g2 ? Y : Inter, g2)
+    // layer HOT_XN (fresh f1s6): wgmma N = nv rounded up to 16 (80..128): the padded tokens' MMA work is skipped; the x
+    // box stays 128 rows, so only the wgmma N and the accumulator count change (rows >= nv were never stored: exact)
+    if constexpr (NH == 128 && HOT_XN == 16) {
+      if (!xn) HOT_ITEM(128);
+      else if (nv <= 80) HOT_ITEM(80);
+      else if (nv <= 96) HOT_ITEM(96);
+      else if (nv <= 112) HOT_ITEM(112);
+      else HOT_ITEM(128);
+    } else {
+      HOT_ITEM(NH);
+    }
+#undef HOT_ITEM
     if (!g2) {
       asm volatile("fence.proxy.async.global;" ::: "memory");
       asm volatile("bar.sync 1, 256;" ::: "memory");
@@ -3237,7 +3254,9 @@ template <bool SA, int NH>
 static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
-  const int per = (grid / 100000) << 8 | (grid / 1000) % 100;  // n7s32 HOT_PER: grid = base * 1e5 + per * 1e3 + CTAs
+  const int xoff = grid >= 100000000 ? 1 << 30 : 0;  // grid + 1e8 = HOT_XN off for this call (A/B)
+  grid %= 100000000;
+  const int per = ((grid / 100000) << 8 | (grid / 1000) % 100) | xoff;  // n7s32 HOT_PER: grid = base * 1e5 + per * 1e3 + CTAs
   grid %= 1000;
   constexpr int NSTG = 8;
   constexpr int SMEM = NSTG * ((NH > 64 ? 128 : NH) * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024 + (TWM_EPI ? 8192 : 0);
