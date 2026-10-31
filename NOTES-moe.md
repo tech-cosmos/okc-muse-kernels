@@ -3870,7 +3870,7 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
 - Clean check bfd582aa (acf63a9) 2.3694x (CI 2.334-2.405) = best moe check: bs1 26.4, bs16 84.8, bs32 117.2, bs8 62.1,
   bs128 193.4, bs256 228.4 us. SUBMIT acf63a9 after 00:00Z 11-01 (supersedes o12's 7139706; beats board 2.3198).
 
-## o14 (2026-10-31 15:16Z - 15:45Z): moe board: fresh x13 tk2h MRG 2 ported to bs32; 2 checks (1 DIAG), 0 submits (cap)
+## o14 (2026-10-31 15:16Z - 15:31Z): moe board: fresh x13 tk2h MRG 2 ported to bs32; 2 checks (1 DIAG), 0 submits (cap)
 - Layer d32 tk2h MRG 1 -> 2 (fresh x13 b0017ad: per-segment gemm13 -> gemm2 counters cnt[64 + j], existing code) maps 1:1
   onto the moe board's bs32 (SQ tk2h GS16 PF4 dispatch, line ~5508: tk2f_go<..., 16, 2, 516>). norm3 already zeroes cnt[0..127].
 - Bitwise vs main (tools/o11/eq1.py 200 eager + 400 replay bs32: 0 differ), bench test 15/15.
