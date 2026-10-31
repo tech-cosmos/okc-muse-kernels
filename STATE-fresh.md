@@ -147,9 +147,4 @@
   pre-wait, unconditional Y loads, nowait (x hop not binding), PFX (early CTAs prefetch others' first rows).
 - SASS fact: the n2u base-path routing loads are BEFORE ACQBULK in this build (layer comment says otherwise): racy if
   anything launches n2u before pr1's routing is written (IDF does: IDF uses the post-wait path).
-## Next (x9): read Human decisions IN FULL first (lead may want the Handoff ceb86cf bundled/checked, or slack follow-ups).
-  Own list: (1) v1 IDF build (pr8 st.release routing flag + tk2f flag acquire at T=8 + nu8 routing after its wait; the
-  flagless oracle HANGS); bound ~1 us v1 (~0.1%): build only if nothing better. d16/d32 routing: closed (not critical).
-  (2) tk2f per-CTA routing at entry (~1.5 us d1/v1): precomputed schedule saves only the compute (~0.5): skip.
-  Pitfalls: background Bash jobs default to a 10-min limit (use run_in_background + timeout); `pkill -f` matches itself.
-## x1-x5, f1s1..f1s20 (2026-10-29/30): trimmed; see git history of this file and FRESH.md.
+## x1-x5, f1s1..f1s20 (10-29/30) and x9 Next: trimmed; see git history of this file and FRESH.md.
