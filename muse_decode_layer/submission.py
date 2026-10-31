@@ -2241,17 +2241,13 @@ assert '#define NV_HALF 1' in _NVSCL_SRC and '#define NV_STAMP 0' in _NVSCL_SRC
 NVS_CL_BATCH = 32
 NVS_MIN_BATCH = 16
 _NDS_SRC = r'''#define NV_NS 3
+// (fresh x14: line comments dropped for the 1 MB cap; nvs's source above has the same code commented)
 #ifndef NDS_PW
 #define NDS_PW 1  // fresh x14: PDL secondary of qkv
 #endif
 #define NV_MAXR 96
 #define NV_PREGS 40
 #define NV_CREGS 152
-// agent2 nds (decode sliding, both KV heads in one consumer warpgroup) built on nvs: native verify-SLIDING attention (L 8, G 8, D 64, HKV 2, page 1), from tools/s71/nverify.cu.
-// One CTA per (split, request): warpgroup 0 gathers both KV heads' K/V rows (128-B lines) with cp.async and
-// transposes V to FP8 V^T; warpgroups 1/2 (KV head 0/1) normalize + RoPE their queries, run QK^T (FP8 wgmma),
-// the online softmax and P@V with P in E4M3 (FA3's FP8 path), QK(i) overlapping PV(i-1). Partials in
-// _attn_split's layout [B, HKV, S, 64, 64] FP32 for _combine_hb. NVS_NEW: split S-1 also attends the 8 new tokens.
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
@@ -2354,8 +2350,6 @@ template <int NS> struct Smem {
     alignas(1024) uint8_t knew[BN * 128];      // last split: the 8 new keys as a K tile (rows 0-7; rows 8-63 zero)
     alignas(1024) uint8_t vtnew[2][HD * BN];   // and their V^T (key slots 0-7 of group 0; the rest zero)
 };
-// Staging swizzle: SW128 (r & 7) for the ldmatrix transpose (8 consecutive rows per phase), else conflict-free for
-// the 4-row register transpose.
 __device__ __forceinline__ uint32_t vsw(int r) { return NV_TR ? (r & 7) : (((r >> 1) & 3) | (((r >> 4) & 1) << 2)); }
 
 
@@ -2380,8 +2374,6 @@ __device__ __forceinline__ void producer(Smem<NS>& sm, const uint8_t* __restrict
     const int tid = threadIdx.x;  // 0..127
     const int total = rg.n;
     const int* ptr = pt + (long long)rg.b * maxp;
-    // Warp 0 stages each tile's page-table entries NV_PFD tiles ahead in sm.ptr (2 x 4-byte cp.async per lane: the
-    // window start is not 16-byte aligned).
     auto stage = [&](int j) {
         const int kb = rg.lo + j * BN;
         if (kb + tid < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][tid]), ptr + kb + tid);
@@ -2499,8 +2491,6 @@ __device__ __forceinline__ void issue_pv(float (&o)[32], const uint32_t (&p)[8],
     pv8_k32(o, p[4], p[5], p[6], p[7], mdesc(va + 32, 512, 2));
     wg_commit();
 }
-// Score masks: key column col (of this tile) is out if col >= nvalid (past the split's end) or col < thr0 / thr1
-// (rows of token 2w / 2w + 1: before the sliding window's start).
 __device__ __forceinline__ void mask(float (&s)[32], int lane, int nvalid, int thr0) {
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
@@ -2524,14 +2514,12 @@ __device__ __forceinline__ void pv16_k32(float (&o)[64], uint32_t a0, uint32_t a
     asm volatile("wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3 " R64 ", {%64,%65,%66,%67}, %68, 1, 1, 1;\n"
                  : D64(o) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db));
 }
-// QK over the whole 128-B K row (both heads; each query row is zero in the other head's 64 d).
 __device__ __forceinline__ void issue_qk2(float (&s)[32], uint32_t qa, uint32_t ka) {
     wg_fence();
 #pragma unroll
     for (int k = 0; k < 4; ++k) qk_k32(s, mdesc(qa + 32 * k, 1024, 1), mdesc(ka + 32 * k, 1024, 1), k);
     wg_commit();
 }
-// P@V into both heads' 128 output columns (V^T of head 0 then head 1: 128 SW64 rows).
 __device__ __forceinline__ void issue_pv2(float (&o)[64], const uint32_t (&p)[8], uint32_t va) {
     wg_fence();
     pv16_k32(o, p[0], p[1], p[2], p[3], mdesc(va, 512, 2));
@@ -2546,7 +2534,6 @@ __device__ __forceinline__ void dmask(float (&s)[32], int lane, int nvalid, int 
         if (col + 1 >= nvalid || col + 1 < thr) { s[j * 4 + 1] = -INFINITY; s[j * 4 + 3] = -INFINITY; }
     }
 }
-// Row lane / 4 is head 0 (output columns 0-63), row lane / 4 + 8 head 1 (columns 64-127).
 __device__ __forceinline__ void drescale(float (&o)[64], const float (&alpha)[2]) {
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
@@ -2555,11 +2542,6 @@ __device__ __forceinline__ void drescale(float (&o)[64], const float (&alpha)[2]
     }
 }
 
-// Decode (L 1, G 8): one consumer warpgroup for both KV heads. m64 rows 0-7 = head 0's 8 query heads (d 0-63 of the
-// K row; 64-127 zero), rows 8-15 = head 1's (d 64-127), rows 16-63 zero: only warp 0 has live rows and runs the
-// softmax; warps 1-3 just take part in the wgmmas (P = 0).
-// layer s29 (QF32 at T=32): qkv may be the FP32 output of the qkv GEMM; each element is rounded to BF16 (RN, as the
-// torch cast / GEMM output it replaces) at its load: everything downstream is bit-identical to the BF16 input.
 __device__ __forceinline__ unsigned qpk(float lo, float hi) {
     __nv_bfloat162 t = __floats2bfloat162_rn(lo, hi);
     return *(unsigned*)&t;
@@ -2574,8 +2556,6 @@ __device__ __forceinline__ uint2 qld4(const float* p) {
     const float4 a = *reinterpret_cast<const float4*>(p);
     return make_uint2(qpk(a.x, a.y), qpk(a.z, a.w));
 }
-// proj s22 (QSS): qkv as 2 FP32 split-K slabs qss elements apart (one batched GEMM, no split-K reduce kernel): the
-// two partials are added in FP32 and rounded to BF16 (RN) at the load, as cuBLAS's splitKreduce + BF16 output does.
 struct qs2 { float v; };
 __device__ __forceinline__ uint4 qld8(const __nv_bfloat16* p, int) { return qld8(p); }
 __device__ __forceinline__ uint4 qld8(const float* p, int) { return qld8(p); }
@@ -2663,8 +2643,6 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
         *reinterpret_cast<uint4*>(qd + r * 128 + ((z0 ^ (r & 7)) << 4)) = make_uint4(0, 0, 0, 0);
         *reinterpret_cast<uint4*>(qd + r * 128 + (((z0 + 1) ^ (r & 7)) << 4)) = make_uint4(0, 0, 0, 0);
         if (last_split) {
-            // The step's new token: lane = KV head (lane / 16), d 4 (lane % 16) + 0..3: RMS-norm + RoPE, E4M3 (as
-            // _new), stored into the cache and into the new-token K row 0 / V^T key slot 0.
             const int hh = lane >> 4, d0 = (lane & 15) * 4, npos = rg.seq;
             const QT* kp = qkv + (long long)b * qkv_w + (16 + hh) * HD + d0;
             const uint2 kr = qld4(kp, qss), vr = qld4(kp + 2 * HD, qss);
@@ -2700,7 +2678,6 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
 #pragma unroll
     for (int i = 0; i < 8; ++i) { pa[i] = 0u; pb[i] = 0u; }
     const bool live = w == 0;
-    // Window start relative to key lo: keys t < seq - (win - 1) are out.
     const int thr = win > 0 ? rg.seq - (win - 1) - lo : -(1 << 30);
     bool newdone = false;
     if (last_split) {
@@ -2876,8 +2853,9 @@ _COUNTERS = {}
 DOT_DTYPE = tl.float16
 USE_PDL = True
 LZ = 10
-CB_HB_TRIG = False
+CB_HB_TRIG = True
 MERGE1 = True
+GD_PW = True
 USE_GDEC = True
 USE_GSLIDE = False
 BRED = True
@@ -3365,7 +3343,7 @@ if HAVE_GLUON:
                  BAL: gl.constexpr = False, B: gl.constexpr = 1, B_PAD: gl.constexpr = 32, NP: gl.constexpr = 1,
                  NID: gl.constexpr = 1, RED: gl.constexpr = False, red_ptr=None, rcnt_ptr=None, out_ptr=None,
                  NR: gl.constexpr = 4, epi=True, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0, DX: gl.constexpr = 0,
-                 QF: gl.constexpr = False):
+                 QF: gl.constexpr = False, PW: gl.constexpr = False):
         h = gl.program_id(2) * 2
         if BAL:
             pid = gl.program_id(0)
@@ -3385,8 +3363,9 @@ if HAVE_GLUON:
             split = gl.program_id(0)
             b = gl.program_id(1)
             nsp = S
-        gl.inline_asm_elementwise("griddepcontrol.launch_dependents;", "=r", [], dtype=gl.int32, is_pure=False,
-                                  pack=1)
+        if not PW:
+            gl.inline_asm_elementwise("griddepcontrol.launch_dependents;", "=r", [], dtype=gl.int32, is_pure=False,
+                                      pack=1)
         C: gl.constexpr = 2 * D
         M: gl.constexpr = 2 * G
         QKV_W: gl.constexpr = (2 * HQ + 2 * HKV) * D
@@ -3423,7 +3402,7 @@ if HAVE_GLUON:
         r = gl.arange(0, M, layout=gl.SliceLayout(1, BL))
         hp = r // G
         q_ok = (c_g // D)[None, :] == hp[:, None]
-        if QF:
+        if QF and not PW:
             xq = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], q_ok, QSS)
         for j in gl.static_range(NS - 1):
             t = lo + j * BN + n_g
@@ -3439,7 +3418,10 @@ if HAVE_GLUON:
         pg = gl.load(pt_row + t // PAGE, mask=t < hi, other=0)
         if SEQ_IN:
             pg = gl.maximum(pg, 0)
-        if QF:
+        if PW:
+            gl.inline_asm_elementwise("griddepcontrol.wait;", "=r", [], dtype=gl.int32, is_pure=False, pack=1)
+            gl.inline_asm_elementwise("griddepcontrol.launch_dependents;", "=r", [], dtype=gl.int32, is_pure=False, pack=1)
+        if QF and not PW:
             x = xq.to(gl.bfloat16).to(gl.float32)
         else:
             x = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], q_ok,
@@ -3626,14 +3608,14 @@ if HAVE_GLUON:
                  BAL: gl.constexpr = False, B: gl.constexpr = 1, B_PAD: gl.constexpr = 32, NP: gl.constexpr = 1,
                  NID: gl.constexpr = 1, SPEC: gl.constexpr = 0, RED: gl.constexpr = False, red_ptr=None,
                  rcnt_ptr=None, out_ptr=None, NR: gl.constexpr = 4, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0,
-                 DX: gl.constexpr = 0, QF: gl.constexpr = False):
+                 DX: gl.constexpr = 0, QF: gl.constexpr = False, PW: gl.constexpr = False):
         if SPEC > 0:
             real = gl.load(seq_ptr + gl.program_id(1))
-            _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW, QSS, DX, QF)
+            _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW, QSS, DX, QF, PW)
             if real != SPEC:
-                _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF)
+                _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF, PW)
         else:
-            _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF)
+            _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF, PW)
     @gluon.jit
     def _gw_verify(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale,
                    HQ: gl.constexpr, HKV: gl.constexpr, G: gl.constexpr, L: gl.constexpr, D: gl.constexpr,
@@ -4742,7 +4724,7 @@ def _decode_gluon(data, cfg, plan):
             HQ=hq, HKV=hkv, G=group, D=d, PAGE=cfg["page_size"], MAX_PAGES=page_table.shape[1], S=splits,
             BN=plan["block_n"], NS=plan["stages"], WINDOW=cfg["window"], ROPE=bool(cfg["rope_theta"]),
             Q16=plan.get("q16", True), KST=plan.get("kst", True), BAL=True, B=batch, B_PAD=b_pad, NP=progs, NID=nid,
-            **(_red_args(batch, group, d, nid, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, QF=plan.get("qf", False), num_warps=1)
+            **(_red_args(batch, group, d, nid, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, QF=plan.get("qf", False), PW=GD_PW and batch > 1, launch_pdl=GD_PW and batch > 1, num_warps=1)
         if red:
             _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, nid, True)
             return out
@@ -4766,7 +4748,7 @@ def _decode_gluon(data, cfg, plan):
         ROPE=bool(cfg["rope_theta"]), SEP=sep, Q16=plan.get("q16", True),
         KST=plan.get("kst", True),
         SPEC=page_table.shape[1] - 1 if plan.get("spec") and batch == 1 and cfg["page_size"] == 1 else 0,
-        **(_red_args(batch, group, d, s, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, QF=plan.get("qf", False), num_warps=1)
+        **(_red_args(batch, group, d, s, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, QF=plan.get("qf", False), PW=GD_PW and batch > 1, launch_pdl=GD_PW and batch > 1, num_warps=1)
     if red:
         _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, s, False)
         return out
