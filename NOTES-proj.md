@@ -3095,3 +3095,14 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   consumer use off = s_off[e] + slice offset, nv = min(128, ...); gemm2 waits for HG::NRB * slices gemm13 items of the
   expert; NORM_EARLY finish flag at HN::NRB * slices - 1); moe_twm skips nt > 64 when hot is on (was 65..128). NH 64
   (moe_twq) unchanged. Output bitwise = v177 (same tw_item math, 128-row slices are disjoint token ranges).
+- H100 A/B v177 vs HOT_SL (dev/n20/ab_route.py: same router seeds + inputs, interleaved replays, tuner off; log in /tmp only,
+  numbers here): 9 routers (5,12,17,20,7,9 dominant-ish; 1,3,8 never) x 4 inputs x v16/v32 sl/full: inputs with a > 128
+  expert v32 sl -9.62 us (19/19 faster), full -11.40 (22/22); others v32 sl -0.77 / full +0.14 (tie); v16 sl -1.1 / full
+  -0.4 (tie; T=128 never has > 128). Outputs bitwise = v177 in 144/144, check_implementation 144/144.
+- validate --quick --skip=prep on the patched v177: ALL OK (13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240, route
+  0/240 worst gap 0.0256 drop-lead 0.0179, fuzz 0/58); replay_test 20 inputs on dominant routers 5,12,17 v32 sl/full 0/120.
+- Handoff (COORD): dev/n20/hotsl_moe_src.diff (git apply in r-layer; checked to apply on 51eaeff). Judge effect only on runs
+  whose router has a dominant expert (~35-45%): ~3% on v32 sl/full there (~+0.4-0.5% score); H200 maybe more (e0f2159f twm
+  231 vs 176-189 us). 0 judge runs, 0 Modal. Lesson: `pgrep -f <pattern>` in a wait loop matches the loop's own command line.
+- NEXT: layer merges HOT_SL (v178) + check. Proj: if wanted, the same audit at d32 (T=32: experts <= 32 tokens, no hot path;
+  layer n24s1 found T=8 bytes-only). 00:00Z H200 queue dev/n15/mk_h200.sh stands.
