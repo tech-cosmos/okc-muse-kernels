@@ -2225,6 +2225,9 @@ assert '#define NV_HALF 1' in _NVSCL_SRC and '#define NV_STAMP 0' in _NVSCL_SRC
 NVS_CL_BATCH = 32
 NVS_MIN_BATCH = 16
 _NDS_SRC = r'''#define NV_NS 3
+#ifndef NDS_PW
+#define NDS_PW 1  // fresh x14: nds is the qkv GEMM's PDL secondary (KV producer before the wait)
+#endif
 #define NV_MAXR 96
 #define NV_PREGS 40
 #define NV_CREGS 152
@@ -2598,6 +2601,12 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
         }
         asm volatile("bar.sync 2, 128;" ::: "memory");
     }
+#if NDS_PW
+    // fresh x14 NDS_PW: the producer streamed page-table rows and old KV (inputs only) before this; qkv after. Trigger
+    // only now: _combine_hb (our PDL secondary) loads its qkv gate before its own wait.
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
     if (w == 0) {   // Queries: row r = query head r (KV head r / 8); 2 lanes per row (32 d each).
         const int r = lane >> 1, half = lane & 1, h = r >> 3;
         const int pos = rg.seq;
@@ -2775,7 +2784,9 @@ const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               const uint8_t* __restrict__ pf, long long pfb) {
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
+#if !NDS_PW
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
     const int tid = threadIdx.x, wg = tid >> 7;
     if (tid == 0) {
         for (int i = 0; i < NS; ++i) { mb_init(&sm.ready[i], 4); mb_init(&sm.empty[i], 4); }
@@ -2809,8 +2820,14 @@ void nds(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
     auto f = nv::nds<NV_NS, QT>; \
     static bool once = false; \
     if (!once) { cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; } \
-    f<<<dim3((unsigned)(S * B)), 256, smem, c10::cuda::getCurrentCUDAStream()>>>( \
-        (const QT*)qkv.data_ptr(), NDS_ARGS); }
+    cudaLaunchConfig_t cfg = {}; \
+    cfg.gridDim = dim3((unsigned)(S * B)); cfg.blockDim = dim3(256); cfg.dynamicSmemBytes = smem; \
+    cfg.stream = c10::cuda::getCurrentCUDAStream(); \
+    cudaLaunchAttribute at[1]; \
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; \
+    at[0].val.programmaticStreamSerializationAllowed = 1; \
+    cfg.attrs = at; cfg.numAttrs = NDS_PW ? 1 : 0; \
+    cudaLaunchKernelEx(&cfg, f, (const QT*)qkv.data_ptr(), NDS_ARGS); }
 #define NDS_ARGS (const float*)cs.data_ptr(), (uint8_t*)kc.data_ptr(), \
         (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(), \
         (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(), \
