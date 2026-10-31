@@ -3606,3 +3606,17 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   ceiling ~1 us x (0.033+0.011) %/us = 0.04%. Not built. BND_SPLIT at T=256 was already noise (s74).
 - H200 profile of check 84eb0719 (v181): v32 sl hot 123 + twm 197 (concurrent), T=256 GEMMs nvjet 26-35 us each (~17 GFLOP:
   near compute); d32 sl tk2f 83 of 144 us. Layer-lane list stays empty; v181 submit after 00:00Z 11-01 stands.
+
+## n30 (session 24, 2026-10-31 17:46-17:52Z real UTC): T=128/256 qkv Triton split-K oracle DEAD; 0 judge runs, 0 Modal.
+- No lead line after 16:30Z; fresh x20 asks the lead whether an own dense T=128/256 GEMM (qkv N=2304 K=8192 first) is worth it.
+  Cheap first test of that question on the H100 (cold L2 200 MB flush, CUPTI via torch.profiler, median of 40, GPU lock;
+  shared GPU): Triton split-K FP32 slabs [S,M,N] + torch slab sum vs F.linear (cuBLAS/nvjet incl. its own ~3 us reduce at m128).
+  * tools/n30/qkv_splitk.py (plain pointer loads): m128 cuBLAS 24.9 | best S7 128x128x64 126 CTAs 23.3 + 3.9 sum = 27.1;
+    m256 cuBLAS 29.5 | best S3 128x128x64 108 CTAs 32.5 + 4.1 = 36.6 (S6 128x256 31.6 + 5.2).
+  * tools/n30/qkv_tma.py (TMA tensor descriptors, warp_specialize on/off): worse: m128 best 26.1 + 3.9 = 30.0, m256 36.9 + 6.9;
+    BK 128 / 128x256 tiles exceed smem at 3-4 stages.
+  Even the GEMM part alone never beats cuBLAS's total, and the slab sum adds 4-7 us (would need an in-kernel/cluster reduce).
+  Reading: cuBLAS m128 22 us is ~2x the H100 byte time (37.7 MB ~ 11-13 us), so headroom exists, but Triton-level kernels
+  (~26 GB/s/SM effective) are nowhere near; only a hand-written CUTLASS/CuTe-class kernel (fresh x20's lockstep-x, 12-bit W,
+  >= 16 KB stages, cluster reduce) could get it: a multi-day build, lead's call (fresh x20 Request). Not built by layer.
+- Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
