@@ -14989,8 +14989,8 @@ __device__ __forceinline__ void finish(const Args& a) {
     __shared__ float lgs[MT * E], bs_[E];
     __shared__ int done, ls_;
     if (t < E) bs_[t] = __ldg(a.bias + t);
+    if (t == E) ls_ = __ldg(a.ls);  // layer n15: hoisted above the wait (a graph input; after it, a DRAM trip behind the pooler)
     asm volatile("griddepcontrol.wait;" ::: "memory");
-    if (t == 0) ls_ = __ldg(a.ls);
     if (t == 0) {
         int v;
         do {
@@ -15028,7 +15028,7 @@ __global__ void __launch_bounds__(NGT * WG * 32, NGT == 4 ? 1 : 2) fused(const A
     static_assert(NA % (PF * XP) == 0 && XR <= 4 && XR <= XP && XP <= 8, "x pieces");
     constexpr int PA = NA / XP, PB = KC / XP * 2;
     constexpr int XS = XR * PB + 64;
-    extern __shared__ __align__(16) unsigned char smem[];
+    extern __shared__ __align__(128) unsigned char smem[];  // layer n15: 128-B base (a 16-B base after a static smem change cost v1 ~+4.5 us H100)
     unsigned char* xs = smem;
     float4* accp = (float4*)(smem + M * XS);
     float2* hs = (float2*)(smem + M * XS + blockDim.x / 32 * TT * 512);
@@ -18175,7 +18175,7 @@ RF_TRIG_DEFAULT = True
 TK2FX_TOKENS = (1, 8)
 TK2FJ_TOKENS = (16, 32)
 TK2FJ_DEFAULT = True
-IDF8_DEFAULT = True
+IDF8_DEFAULT = False
 IDF_DEFAULT = True
 TK2FX_DEFAULT = True
 NU8_KB = 512

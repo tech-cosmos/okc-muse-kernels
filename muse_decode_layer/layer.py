@@ -3801,7 +3801,9 @@ RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 ->
 TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
 TK2FJ_TOKENS = (16, 32)  # s27: the same at T = 16/32 after joining the router's side stream before the rmsnorm
 TK2FJ_DEFAULT = True  # H100 ab_files 5 rounds: d16 212.4/313.3 -> 209.9/313.8, d32 205.7/433.8 -> 203.7/432.0 us
-IDF8_DEFAULT = True  # layer n15 IDF8 (T = 8): IDF on pr8's routing release flag (see idf8 in _kernel_fn). TUNE option "idf8"
+IDF8_DEFAULT = False  # layer n15 IDF8 (T = 8): IDF on pr8's routing release flag (see idf8 in _kernel_fn). TUNE option "idf8"
+# n15 DEAD (H100, TUNE pinned, 8 rounds): on vs off v1 sl +0.8..1.1, full +0.8/-0.4 us; replay 0/120. tk2f starts only ~2 us
+# earlier (pr8's 129 blocks leave 3 free SMs) and ends at the same time: its 83 us weight stream, not its prologue, is the path.
 IDF_DEFAULT = True  # n7s7 IDF (T = 1): early moe_tk2f on pr1's routing release flag (see the moe_set_idf patch). TUNE option "idf"
 # fresh x8: ON. Both n7s8 reasons were fixable: pr1's routing came ~1.5 us before pr1's end (bias/ls DRAM trips behind the
 # pooler stream; now hoisted: ~10 us), and n2u's IDF routing loads were LDG.STRONG.GPU (+~3 us; now plain, after the wait).
