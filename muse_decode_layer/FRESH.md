@@ -815,3 +815,24 @@ H100 cold-L2 graph us minus empty, cuBLAS 20.3-21.2:
    ~5 us in ANY form (global slabs or DSMEM: it is handshake latency + the slowest split, not bytes). Best case = no-epi 15.95
    + the cheapest reduce measured (~2.9) ~ 18.9 vs cuBLAS 20.6: <= ~1.7 us on v16 qkv (~0.07% score). DEAD below gate.
 Closes the dense lane on my side for T=128 and T=256 (x21). Agrees with layer n10 (cluster reduce = latency) and n30/n31.
+
+## x23 (2026-10-31 18:52Z-19:10Z): own pick, COLD CODE after the judge's L2 flush (H100, 0 judge, 0 Modal)
+Idea: the 512 MB flush read also evicts every kernel's SASS from L2, so each kernel's first execution of its post-wait code
+fetches instructions from DRAM (x9's i-cache mechanism, but L2-cold). The per-kernel i-cache audits on record (proj n15,
+moe GS16/twm) looked at code SIZE, never at code-from-DRAM over the whole graph.
+Oracle tools/fresh/x23/codewarm.py: twin states (prepare() twice, TUNE pinned off) and twin inputs; per rep flush, then
+replay twin B untimed (puts all code in L2; B's data lines do not help A), then time A. Control 'warmflush' = B then a
+second flush (= base, as expected). 3 rounds x 5 x 30 reps, medians, us (graph time incl. empty-graph floor):
+| load | base | code-warm | delta |
+|---|---|---|---|
+| d1 sl  | 86.45  | 85.10  | -1.35 |
+| d1 full| 105.50 | 105.16 | -0.34 |
+| v1 sl  | 143.98 | 144.70 | +0.71 (B's dirty KV/activation lines write back during A: bias against warm) |
+| d32 sl | 181.86 | 182.66 | +0.80 (same bias) |
+=> cold code is worth <= ~1.4 us at d1 sl, ~0 elsewhere. Not buildable anyway: device code cannot read a kernel's code
+address (tools/fresh/x23/fp.cu: ld.global from a __global__ function pointer = illegal memory access), so an L2 code
+prefetch has no address; a dry run of post-wait code pre-wait would add more code than it warms. CLOSED.
+Side check (tools/fresh/x23/det.py, same state, fresh identical inputs, 4 runs): sliding loads bitwise run-to-run; FULL loads
+are not: d1 full 1-2 FP32 ulps in the stream, v1 full 1 element, d16 full ~3-6K hidden elements by 1 BF16 ulp and ~25K stream
+elements by <= 0.0154 (= 1 BF16 ulp at |x| 2-4, a BF16 rounding flip from accumulation order). Benign order noise, no race
+signature (max diff fixed at one ulp across runs); compare full loads with tolerances, not torch.equal.

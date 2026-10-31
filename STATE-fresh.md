@@ -1,4 +1,10 @@
 # STATE-fresh (newest first)
+## x23 (2026-10-31 18:52Z-19:10Z): own pick, COLD CODE after the L2 flush (H100, 0 judge, 0 Modal). FRESH.md x23.
+  Twin-state oracle (tools/fresh/x23/codewarm.py: replay an identical twin first so all SASS is in L2, data stays cold):
+  d1 sl -1.35, d1 full -0.34, v1 sl / d32 sl +0.7/+0.8 (twin's dirty lines) -> <= ~1.4 us d1 sl, unbuildable (device code
+  can't read kernel code addresses: fp.cu illegal access). CLOSED. Full loads are not bitwise run-to-run (1-ulp order noise).
+## Next (x24): read Human decisions IN FULL. Own list empty again. After 00:00Z (Modal share 20): the remaining H200 A/B
+  (v16 sl / v32) only if layer asks. Checks 10-31: 3 of 6 used; Modal 10-31 16.8/20.
 ## x22 (2026-10-31 18:24Z-18:55Z): own pick, x21's last open item: T=128 qkv split-K g30 oracles (H100, 0 judge, 0 Modal). FRESH.md x22.
   Memory free (no-mem 20.5 = full 21.7 us, cuBLAS 20.6); split-K reduce ~5 us in ANY form (global slabs or DSMEM cluster
   reduce-scatter: one cross-CTA handshake ~2.2 us); best case ~18.9 -> <= 1.7 us on v16 qkv: DEAD. Dense lane closed (T=128+256).
@@ -125,7 +131,6 @@
   flagless oracle HANGS); bound ~1 us v1 (~0.1%): build only if nothing better. d16/d32 routing: closed (not critical).
   (2) tk2f per-CTA routing at entry (~1.5 us d1/v1): precomputed schedule saves only the compute (~0.5): skip.
   Pitfalls: background Bash jobs default to a 10-min limit (use run_in_background + timeout); `pkill -f` matches itself.
-   Next (x7): same as x5 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x5 (2026-10-30 09:04Z-11:30Z): lead 09:10Z ORACLE SWEEP (6 items): ALL DEAD, none >= 1 us on a d-load. 0 judge, 0 Modal.
 - (1) conc5.py: every vector pipe slows next to HGMMA (INT 2.1-2.7x, HMUL2 4.5x; FFMA serializes the HGMMA instead). (2) tlb.py: 0.
   (3) ptorc.patch + pt_order.py: chain <= ~1 us, KV order <= ~1 us (permute cache WITH the table, else routing changes = fake gains).
@@ -133,7 +138,6 @@
 - Pitfalls: `pgrep -f X` in a wait loop matches the loop's own command line (cost 2 h idle); background jobs default to a
   10-min limit; the layer agent's ab_flag held the GPU lock ~20 min (flock is not FIFO).
 ## Next (x6): paused. Act only on a new lead line naming fresh after 09:10Z; else stop at once.
-   Next (x5): same as x3 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x3 (2026-10-30): rfport Step 1 NOT CONFIRMED (cost per ALU instruction, not per register read); FRESH.md x3.
 ## x1 (2026-10-30 07:12Z-07:30Z): lead 07:20Z lane "EXACT new expert-kernel design", session 1. 0 judge, 0 Modal.
 - Merged main v173 (8841e7d) into branch fresh. H100 microbenches tools/fresh/xd/{pipes,conc,conc2,conc3}.py; write-up
@@ -143,6 +147,4 @@
 - Gate (<= 0.80x twm consumer at bs128+bs256) FAILS for all 3 candidates: pipe-balance (1 rotate via IMAD.WIDE) ~0.93x;
   overlap blocked by acc reads (fixed per MAC; FP16 acc banned); lead's (a) cluster dq / (c) tile shape fail by arithmetic.
   Posted Results + `fresh -> lead` in COORD. Per the lead's rule: gate fails -> fresh pauses itself.
-## Next (x2): paused. Act only on a new lead line naming fresh. If the lead wants more on this lane, the cheapest open test is
-   ncu RF-bank/dispatch metrics on conc.py roles (1,3) vs (8,3) to confirm the acc-read reading on hardware counters.
 ## f1s1..f1s20 (2026-10-29/30): trimmed; see git history of this file and FRESH.md (O1, O2, f1s*).
