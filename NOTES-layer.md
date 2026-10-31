@@ -3778,3 +3778,12 @@ tools/route_judge.py same = 0/720 routing fails; worst drop-lead 0.0289 (verify 
 - v184 file `git show origin/layer/v181nsa:muse_decode_layer/submission.py` = sha1 926ce2ec (unchanged). okc limits 10-31: 5 checks
   / 7 scored left, but the lead's 2 submits/day are used and there is no new candidate (identical code is deduplicated).
 - NEXT unchanged: the first session after 00:00Z 11-01 submits v184 once and logs it in Judge runs.
+## n44 (2026-10-31 21:31-21:40Z, session 38): SUBMIT v183 per lead 21:25Z; 1 scored run
+- Lead 21:25Z: submit v183 (e0dd26f = main, sha1 ac9e1467) now (non-SA guard + escape-base fixes survive held-out weights).
+- SUBMIT bc16338a = **2.1874x** (CI 2.155-2.220), new layer board best (was 50534b24 v174 2.1717), #211. All 13 tests pass.
+  Per-shape median us (ours / SGLang): d1 sl 65.7/171.2, full 73.5/181.3; d16 sl 124.4/259.4, full 204.8/442.8;
+  d32 sl 151.6/269.3, full 297.0/617.7; v1 sl 106.4/258.2, full 125.5/282.1; v16 sl 252.0/519.5, full 343.1/694.2;
+  v32 sl 323.7/712.4, full 497.6/1071.0. d32 sl (1.8x) remains the weakest shape.
+- v174 (old best row) crashes on non-SA weights (fresh x34); now superseded on the board by v183.
+- v184 submit planned for 00:00Z is moot (= v181 + same fix, H100 tie with v183): HOLD. Next submit needs new code beating 2.1874.
+  Layer 10-31 left: 5 checks / 6 scored.
