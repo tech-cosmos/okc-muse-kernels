@@ -876,3 +876,37 @@ Question: does the prepare()-time tuner's choice add variance to judge runs / fi
 candidate vs default (its own synthetic timing): median 0.0 (T=1/8), 0.7-1.2 (T=16), 0.3 (T=32), 0.4-0.5 (T=128), 0.6-0.7 (T=256) us;
 max 1.4-3.0 (T<=16), 6.6-10.6 (T=32/128/256, single logs, mostly with a 'confirm' line that re-times default within ~1 us).
 So the candidates are near-ties and a wrong pick costs ~<= 1 us typical: not a variance source worth pinning (<= 0.1%). CLOSED.
+
+## x35 (2026-10-31 21:47Z-): lead 21:50Z 'per-CTA stamps of d1 sl / v1 sl attention in-layer on v183' (H100, 0 judge, 0 Modal)
+Tool: tools/fresh/x35/astamp.py <sub> '<shape>' [reps] patches a timing copy (csl, vtk, g13, g14, g30 entry; %globaltimer to a
+fixed device buffer; a stamp that waits for a load reads the timer under a predicate on the loaded value). Stamped replay =
+unstamped (105.0 vs 104.3 us d1 sl, same method). Medians of 40 cold-L2 replays, us from the first qkv CTA's entry:
+| d1 sl hop (csl<1,bf16,false>, 32 CTAs) | t (med / max)  | hop us |
+| qkv g13 last CTA end (132 CTAs end 11.3..14.2) | 14.2 max | - |
+| csl entry (plain launch after g13)     | 15.3-15.6      | 1.3 launch gap |
+| page table / q arrived                 | 16.5-16.9      | 1.2 first loads (cold code + L2 trip) |
+| KV arrived (KV_PF warm in L2)          | 16.75-17.1     | 0.3 |
+| QK + PV done                           | 17.3-17.7      | 0.55 |
+| premerge + cluster barrier             | 17.6-18.0      | 0.35 |
+| merge rx ok -> out stored              | 17.9 -> 18.8   | 0.9 (incl. a stamp fence) |
+| o g13 x arrived (PDL wait release)     | 19.6-20.0      | 0.85 |
+| o g13 end                              | 22.5-22.9 (max 23.6) | |
+| v1 sl hop (vtk<1,bf16,true> PW, 256 CTAs) | t (med / max) | hop us |
+| qkv g14 end (96 CTAs end 13.0..15.9)   | 15.9 max       | - |
+| vtk entry                               | 14.8-15.3     | (no early start: 16-CTA clusters don't fit beside g14) |
+| page table arrived / PDL wait ok       | 16.8 / 17.1    | 1.8 first loads; wait 1.2 after g14's last CTA |
+| q arrived / KV arrived                 | 17.7 / 18.2    | 0.7 / 0.45 |
+| QK+PV / premerge+cluster / merge rx    | 18.8 / 19.2 / 19.8 | 0.65 / 0.4 / 0.6 |
+| out stored                             | 20.8           | 1.0 |
+| o g30 entry                            | 16.0           | (PDL, waits) |
+Two biggest hops: d1 = the FRONT (qkv end -> csl's q in registers 2.7 us: launch 1.3 + first loads 1.2) and the TAIL (merge ->
+o has x: 1.8 us); v1 = first loads after entry (1.8) and merge -> store (1.0) + g14's 2.9 us CTA end spread.
+- FOUND: s62's 'CSL_PW at d1 +1.3..1.7 us' was not SM crowding: the csl PW instance sets PreferredSharedMemoryCarveout 100
+  (for T=16 co-residence beside g19). H100 ab_files d1 sl, 6 rounds, mirrored order, pinned tuner: base 83.59/83.86;
+  PW start-trigger + carve 85.95/85.99 (s62 replica); PW + no carve: start 82.41/82.90, g13 late trigger at last issue
+  82.40/82.42, after last chunk 82.65/82.01. -> -1.2..-1.4 us, start trigger is enough (no g13 change).
+  Stamps of the late form: csl enters 1.9 us earlier but the griddepcontrol.wait releases ~1.9 us after qkv's last CTA (vs a
+  plain launch 1.3): the gain is the code/page-table/KV loads done before the wait.
+- BUILT on branch fresh: layer.py CSL_PW_TOKENS (16, 1); attn_src.py carveout only for the FP32-qkv (T=16) PW instance.
+  d1 sl/full graph_eq vs v183 BITWISE (8 inputs); pw_race d1 20/20 split 0 (joint2 positive control 20); d16 differences
+  1e-3 are base-vs-base noise (same).
