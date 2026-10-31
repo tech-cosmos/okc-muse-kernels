@@ -1,3 +1,8 @@
+## o19 17:40Z 10-31: main 8242d5e = 2ab9ba1 + proj n22 HOT_IL (IL=2: moe_hot claims a >128-token expert's slices rb-major,
+## 2nd W read of a row block = L2 hit). Bitwise (eager 180/180, replay 120/120), test 15/15. H100 bs256 (seeds 100-123, 3 rounds):
+## >128 inputs -3.58 us (11/11), others +0.10 (13). Check 8c75ecb3 2.3498x (bs1 3.060x, bs16 2.151, bs32 1.737, bs8 2.253,
+## bs128 2.377, bs256 2.750). NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 8242d5e ONCE (supersedes 2ab9ba1/34dd790).
+## moe board 10-31: 14 checks, 2 submits used. TLB warm-up for bs1 first-data: dead on record (fresh x5 (2)).
 ## o18 16:57Z 10-31: main 2ab9ba1 = 34dd790 + proj n21 HOT_SL (balanced >128-token expert slices in moe_hot) + SLW
 ## (slice path: hot working CTAs = max(32, 132*16s/(16s+5*others)); fixes H100 seed-115 +11.5 us mode). Bitwise, test 15/15.
 ## Check db1cf043 2.3494x (bs256 225.7). H200 DIAG2 e93ab795 (old hot vs new, 40 >128-token + 8 control bs256 inputs,

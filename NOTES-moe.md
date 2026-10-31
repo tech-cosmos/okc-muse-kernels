@@ -3965,3 +3965,14 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   -6.1..-20.4), controls +0.38 (7/8 slightly slower: the extra ballot/smem slice table), maxdiff 0. H100 same DIAG: -7.0
   mean. => bs256 ~-5 us mean on the H200 (~2% of that shape, ~0.35% moe geomean). Its own timed run 2.3576x.
 - moe board 10-31: 13 checks, 2 submits. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 2ab9ba1 ONCE.
+
+## o19 (2026-10-31 17:00Z - 17:40Z): proj n22 HOT_IL onto the moe board bs256; 1 check
+- IL=2 python r-proj/muse_bf16_proj/dev/n22/mk_il.py (copy in tools/o19) applied cleanly to 2ab9ba1's moe_hot (s_g0 slice
+  group table; ns 1 = old decode). Test 15/15; proj n21 stress.py: eager 180/180 bitwise (65 with a >128-token expert),
+  replay bs256 60/60, bs257 60/60.
+- H100 proj n21 ab_moe.py bs256 seeds 100-123 x 3 rounds (tools/o19/ab256.log): maxnt>128 n=11 -3.58 us (11/11 faster,
+  -1.3..-7.7), maxnt<=128 n=13 +0.10 (tie). bs128 can't take the slice path (unchanged). ~-1.6 us bs256 mean on H100.
+- Check 8c75ecb3 2.3498x (bs1 3.060x, bs16 2.151, bs32 1.737, bs8 2.253, bs128 2.377, bs256 2.750 vs 2.738 in db1cf043).
+  > board 2.3198; 2 submits used today -> SUBMIT 8242d5e ONCE AFTER 00:00Z 11-01 (supersedes 2ab9ba1).
+- Looked for a bs1 first-data lever: TLB pre-touch is dead on record (fresh x5 (2): pre-touched pages = plain flush within
+  0.1 us). Nothing else built. moe board 10-31: 14 checks, 2 submits.
