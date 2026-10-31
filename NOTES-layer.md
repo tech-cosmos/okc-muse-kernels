@@ -3587,3 +3587,12 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Own H100 A/B (proj dev/n22/ab_multi.py, tuner off, routers 17,12 = dominant-expert x 4 inputs, verify 32; log
   tools/n27/ab_il2.log): vs v180s base, v181 sl -1.99 / full -3.22 us (8/8 faster each), A/A copy of the base -0.60 / -1.98
   (6/8) -> HOT_IL net ~-1.4 sl / -1.2 full us on dominant-expert inputs, in line with proj n22. Session ends; 9 layer checks left 10-31.
+
+## n28 (session 22, 2026-10-31 17:10-17:45Z real UTC): v181 HOT_IL correctness stress; 0 judge runs
+- Nothing new under Handoffs/Requests since v181; lead's newest line (16:30Z) is already in main (v178 HOT_SL + nvs QLO via v180).
+- tools/n28/il_stress.py (new): per router seed x verify 16/32 sl/full, capture once, replay n fresh inputs (cold L2), compare each
+  replay BITWISE to an eager kernel_fn on the same input + reference.check_implementation. v181 main (38d0c23), dominant-expert
+  routers 5/12/17 (proj n20/n21/n22: >128-token experts on most inputs, the HOT_SL/HOT_IL path), 30 inputs each:
+  replay!=eager 0/360, check fails 0/360 (log tools/n28/il_stress.log). No race/hang in the new slice-interleave claims.
+- Board 17:20Z: we are #214 at 2.172 (board best v174); #1 2.418, #10 2.375.
+- Plan unchanged: first session after 00:00Z 11-01 submits v181 (main) once.
