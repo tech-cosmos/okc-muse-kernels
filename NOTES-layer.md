@@ -3840,3 +3840,7 @@ Status only. Board: layer #211 at 2.1874 (bc16338a v183), #1 pjmullin3 2.459. No
 - Pooler (pr1, 58 MB) L2 prefetch during csl/o/bnd: dead on record (pr1 npf 6-12 tie..+0.6, G10_PFL2 +1.8, n7 oracle 2: prefetch
   slows the gather). Pooler-on-s-before-attention linear split: doubles pooler bytes + changes rounding before routing: dead on paper.
 - NEXT unchanged: hold v185; new code only (bar 2.2048 board). Waiting items need the human (routing slack, QLO full half, vjeux).
+
+## n50 (10-31 22:56-23:00Z, session 44): status only
+Lead 22:55Z: layer holds v185 (fcb67ee9 2.2048x, #180) and integrates handoffs. fresh = whole-layer hop stamps d16/d32 sl;
+moe = v1 sl expert-side hop stamps. No new Handoff since fresh x35 (already v185). No build, 0 judge runs, 0 GPU.
