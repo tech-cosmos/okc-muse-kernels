@@ -490,3 +490,9 @@ ids written -1.54 | pooler blocks end -4.1 / -3.1 med / -1.54 max | tk2f entry 0
     their routing): H100 +1.0/+1.1/+1.5 sl; H200 (h200_pfx.txt, 5 seeds x 6 rounds) -0.16/+0.42 sl, -0.12/+0.92 full = DEAD.
   * What is left of the d1 tk2f fixed cost: per-CTA routing at entry (~1.3-1.8 us) + first-data DRAM latency (~1.8) +
     transition ~1.3 + tail. Item (b) closed with the Handoff ceb86cf.
+- v1 (T=8) early-tk2f timing oracle (rmsnorm TRIG at start instead of TRIG2, no flag; /tmp/fx8/v1early.py): HANGS (40-min
+  timeout, no result). Expected: without pr8's release flag tk2f CTAs read routing at different times -> inconsistent
+  row splits -> the gemm13->gemm2 counter never completes. A valid v1 IDF needs a pr8 routing flag + nu8's routing path
+  after the wait (as T=1). Bound by analogy with d1 ~1 us at v1 (~0.1%); not built.
+- d16/d32 routing (item 1 of x8 'Next'): H200 timeline n7s1: _routing ends 0.3 us after the rmsnorm at d16 and before it
+  at d32: not on the critical path. Closed.
