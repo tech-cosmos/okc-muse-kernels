@@ -1,6 +1,6 @@
 ## o10 14:20Z 10-31: fresh x10 'late' on moe board: check bef7bd02 2.3201x, SUBMIT e37e578e 2.3198x = NEW MOE BOARD BEST
 ## (was aeba42c5 2.2792): bs1 25.3, bs16 87.3, bs32 118.6, bs8 63.2, bs128 194.0, bs256 234.3 us. main f90bcaf. moe 10-31: 1 check, 1 submit.
-## NEXT (13:45Z 10-31): o9 closed (gate fails); no moe item >= gate. Lead: name the next one. Slack: PARKED-READY (moe/slack a9242fb;
+## NEXT (14:25Z 10-31): o10 done. Big-M twm PDL trigger stays at entry (NORM_EARLY 1 = moe_norm waits per expert during twm: early is right). Candidates: fresh CW handoff (bs1 ~1 us) -> moe check; else lead names one. Slack: PARKED-READY (moe/slack a9242fb;
 ## o8 cluster kernel tools/o8/s3.cu, bitwise, untimed, ~2-3 us of the 6-7 us overhead if approved).
 ## o9 13:40Z 10-31: lead 12:25Z TWM NON-DQ OVERHEAD: GATE FAILS (tools/o9, real tw_item harness, H100). 269 instr/stage RT4 N32 =
 ## dq 192 + 16 HGMMA + 8 WG + ~19 uniform + ~34 vector. Exact hoist (empty-barrier address, -4 instr) tie; whole ring protocol free
