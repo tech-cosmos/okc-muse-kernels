@@ -1,0 +1,43 @@
+env: torch 2.14.1+cu130, triton 3.8.0
+env: torch 2.14.1+cu130, triton 3.8.0
+env: torch 2.14.1+cu130, triton 3.8.0
+env: torch 2.14.1+cu130, triton 3.8.0
+rs 17 verify 32 sliding in 0 base  353.6  -2.4  -4.5  -0.3 bitwise True max 183 2nd 43 n>64 1 D 21
+rs 17 verify 32 sliding in 1 base  380.5  -5.0  -4.0  -0.4 bitwise True max 181 2nd 41 n>64 1 D 22
+rs 17 verify 32 sliding in 2 base  369.5  -3.9  -4.7  -2.0 bitwise True max 179 2nd 46 n>64 1 D 21
+rs 17 verify 32 sliding in 3 base  361.8  -1.5  -2.0  +0.2 bitwise True max 175 2nd 43 n>64 1 D 20
+rs 17 verify 32 full    in 0 base  614.4  -5.6  -4.8  -3.4 bitwise True max 177 2nd 45 n>64 1 D 22
+rs 17 verify 32 full    in 1 base  618.7  -6.3  -5.2  -5.0 bitwise True max 170 2nd 34 n>64 1 D 22
+rs 17 verify 32 full    in 2 base  601.9  -4.3  -4.5  -1.3 bitwise True max 173 2nd 47 n>64 1 D 20
+rs 17 verify 32 full    in 3 base  595.3  -2.6  -4.3  -1.9 bitwise True max 168 2nd 47 n>64 1 D 20
+rs 12 verify 32 sliding in 0 base  336.3  -1.9  -1.9  +0.7 bitwise True max 166 2nd 102 n>64 2 D 18
+rs 12 verify 32 sliding in 1 base  365.9  -0.2  -1.7  +1.6 bitwise True max 172 2nd 123 n>64 2 D 20
+rs 12 verify 32 sliding in 2 base  411.8  -1.7  -0.7  +1.2 bitwise True max 137 2nd 91 n>64 2 D 25
+rs 12 verify 32 sliding in 3 base  364.0  +0.9  -1.4  +0.8 bitwise True max 170 2nd 112 n>64 2 D 21
+rs 12 verify 32 full    in 0 base  592.0  -4.2  -4.3  -3.9 bitwise True max 173 2nd 107 n>64 2 D 18
+rs 12 verify 32 full    in 1 base  601.2  -0.8  -2.6  -1.3 bitwise True max 170 2nd 124 n>64 2 D 20
+rs 12 verify 32 full    in 2 base  569.2  -1.2  -3.6  +0.3 bitwise True max 173 2nd 124 n>64 2 D 17
+rs 12 verify 32 full    in 3 base  592.5  -1.8  -4.4  +1.7 bitwise True max 173 2nd 115 n>64 2 D 19
+rs 3 verify 32 sliding in 0 base  394.5  +1.6  +1.1  +2.6 bitwise True max 95 2nd 69 n>64 2 D 24
+rs 3 verify 32 sliding in 1 base  431.5  +2.2  -1.6  -1.6 bitwise True max 90 2nd 64 n>64 1 D 27
+rs 3 verify 32 sliding in 2 base  392.7  +2.3  +0.8  +0.6 bitwise True max 93 2nd 81 n>64 2 D 24
+rs 3 verify 32 sliding in 3 base  414.5  +2.3  -0.2  +0.5 bitwise True max 96 2nd 68 n>64 2 D 26
+rs 3 verify 32 full    in 0 base  605.9  +1.5  -2.2  +0.6 bitwise True max 94 2nd 82 n>64 2 D 22
+rs 3 verify 32 full    in 1 base  620.2  -0.8  -3.2  +0.1 bitwise True max 87 2nd 81 n>64 2 D 24
+rs 3 verify 32 full    in 2 base  651.8  -0.6  -2.0  -0.8 bitwise True max 92 2nd 75 n>64 2 D 26
+rs 3 verify 32 full    in 3 base  673.4  +0.6  -4.1  +0.6 bitwise True max 98 2nd 63 n>64 1 D 27
+rs 1 verify 32 sliding in 0 base  359.6  +2.0  +1.0  -0.4 bitwise True max 65 2nd 62 n>64 1 D 21
+rs 1 verify 32 sliding in 1 base  344.8  +1.4  +1.6  -1.2 bitwise True max 72 2nd 72 n>64 2 D 20
+rs 1 verify 32 sliding in 2 base  364.8  +0.5  +0.3  -0.7 bitwise True max 73 2nd 71 n>64 2 D 20
+rs 1 verify 32 sliding in 3 base  336.6  +0.3  +0.9  -0.6 bitwise True max 84 2nd 71 n>64 2 D 18
+rs 1 verify 32 full    in 0 base  627.9  -1.0  -0.9  +0.0 bitwise True max 67 2nd 64 n>64 1 D 21
+rs 1 verify 32 full    in 1 base  609.5  +0.7  -0.4  -0.0 bitwise True max 75 2nd 63 n>64 1 D 19
+rs 1 verify 32 full    in 2 base  613.2  +3.4  -0.9  +2.9 bitwise True max 73 2nd 72 n>64 2 D 22
+rs 1 verify 32 full    in 3 base  596.9  +1.8  +1.3  +3.1 bitwise True max 83 2nd 72 n>64 2 D 19
+MEAN verify 32 full il.py: -1.32 us over 16 (11 faster)
+MEAN verify 32 full il2.py: -2.88 us over 16 (15 faster)
+MEAN verify 32 full base2.py: -0.52 us over 16 (8 faster)
+MEAN verify 32 sliding il.py: -0.19 us over 16 (7 faster)
+MEAN verify 32 sliding il2.py: -1.08 us over 16 (10 faster)
+MEAN verify 32 sliding base2.py: +0.06 us over 16 (8 faster)
+EXIT 0
