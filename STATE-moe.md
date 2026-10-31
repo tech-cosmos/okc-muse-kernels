@@ -1,3 +1,8 @@
+## o17 16:55Z 10-31: HOT_ET RACE in layer main (v171+) DEMONSTRATED + FIXED: branch moe/hotet-race e24be08 (moe_routegathern
+## zeroes meta[67] + fence BEFORE its PDL trigger; forced window: main hangs / illegal instr, fix 0 fails; H100 tie). Request to
+## layer (v178) + lead (withdraw call) in COORD. Moe-board HOT_ET (fixed) = tie -> not ported. main 34dd790 unchanged.
+## NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE. Then: proj's HOT_SL (>128-token expert slices) onto moe board bs256
+## (+ bs128 if proj n21 says it maps) when proj hands it off (lead 15:58Z). Moe board 10-31: 10 checks, 2 submits used.
 ## o16 15:55Z 10-31: main 34dd790 = cbd4bcf + layer IDW in moe_norm2/norm3 (ids/tw before griddepcontrol.wait, Y .cg;
 ## SASS checked), bitwise, test 15/15; H100 bs1 -0.32, bs8 -0.44, bs16 -0.34, bs32 -0.07 us. Check ce1a1aa4 2.3335x (bs1 25.8,
 ## bs16 90.1, bs32 123.3, bs8 67.4, bs128 190.8, bs256 230.9: bs8/16/32 slow draws, untouched paths). moe board 10-31: 10 checks,
