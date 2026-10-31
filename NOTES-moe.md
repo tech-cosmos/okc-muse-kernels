@@ -4162,3 +4162,10 @@ H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-
   word skips its shift: 7 int + 4 HMUL2 per 8 weights = what twm already has (n9s2). Nothing new.
 - STATE-moe.md rewritten to 127 lines (NOW block on top); its old session log was appended above as "STATE archive o21".
 - Queued, unchanged: SUBMIT 8242d5e ONCE after 00:00Z 11-01.
+
+## o22 (2026-10-31 17:43Z - 17:55Z, session 20): no new lever; 0 judge runs, 0 Modal
+- No lead line after 16:30Z; the lead's moe items through 16:30Z are done (o10-o19). Re-read o20/o21 record: same closed list.
+- Paper re-check (dead, not built): applying the block scale on the accumulator per k16 wgmma (exact unscaled E2M1 MMA) costs
+  N/2 FFMA per thread per k16 vs 4 HMUL2 for dq scaling, worse for N >= 8, and needs a separate accumulator. smem LUT dq
+  (byte -> bf16x2) = 4 addr ops + 4 LDS per 8 weights + the same 4 HMUL2: more issue slots than the 7 int ops now.
+- main moe dir == 8242d5e: bench.py test PASS (all shapes + cloned state). Still queued: SUBMIT 8242d5e ONCE after 00:00Z 11-01.
