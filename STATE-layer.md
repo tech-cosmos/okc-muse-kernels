@@ -3,11 +3,13 @@
 BOARD BEST = submit 50534b24 = v174 (c62cdb0), **2.1717x**, #198 (n13s5, 10-31; d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7, v32 313.9/486.9; check 2d1f9256 2.1514 / fixed-SGLang 2.1650).
 Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n20s1 (10-31 15:10Z): lead 15:00Z: SUBMIT e0f2159f v176 = 2.1497x (fixed-SGLang 2.1533; v32 slow node draw, SGLang slow too) <
+  board 2.1717. v176 is now SUBMITTED: do NOT submit it again (the n18s1 'submit after 00:00Z' item is DONE). Bar for new code:
+  fixed-SGLang > 2.1913. Waiting on fresh MRG 2 (d32 tk2h) Modal A/B after 00:00Z 11-01.
 n19s1 (10-31 14:58Z): v176 d1/v1 H100 timelines (NOTES n19s1): no new hop; still waiting for fresh CW T>1; 0 runs.
 n18s1 (10-31 15:05Z): **main = v176** (b051588) = v175 + fresh a269066 TK2F_CW (T=1 tk2f chunk-wait). H100 d1 sl -0.3, full
   -1.2..-2.2 us; test 13/13, replay 0/480. CHECK 0ac4a2f0 2.1584 raw / **fixed-SGLang 2.1913 (best on record)**.
-  NOT submitted: 10-31 cap reached. **NEXT SESSION after 00:00Z 11-01: `okc submit muse_decode_layer/submission.py` (v176,
-  unchanged, already checked) once**; log it. Then integrate fresh's CW T=8/16/32 when handed off.
+  NOT submitted: 10-31 cap reached. (submit DONE n20s1: e0f2159f 2.1497, slow draw). Then integrate fresh's CW T=8/16/32 when handed off.
 n17s1 (10-31 14:40Z): **main = v175** (da9b87c) = v174 + RF_EARLY_ALL (batched _red_fin triggers o at entry): H100 d16/d32 full
   -2.0/-2.2 us, rest tie; check d8fc46c5 2.1705 (fixed-SGLang 2.1846 best on record) -> submit 68c3ba66 2.1641 < board 2.1717
   (noise; don't resubmit unchanged). d1 full oracles: gd math 0.6, atomics 0.6, G13_O PF2 dead, red_fin trigger moves dead.

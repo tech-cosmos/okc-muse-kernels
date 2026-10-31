@@ -3449,3 +3449,12 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   v1 sl: g14 qkv 0-14.9 | vtk -19.5 | g30 o -26.8 | bnd -30.0 | pr8 19.3-50.3 | rmsnorm -52.1 | tk2f 50.9-133.1 |
          nu8 -138.4 | bnd2 -141.5 (total 141.5; tk2f 82.8 us after pr8 = moe bs-fit stream rate, fixed cost = fresh x13 CW T=8).
 - No hop >= 1 us outside the closed record. Waiting on fresh x13 (CW T=8/16/32) handoff; v176 submit after 00:00Z 11-01 stands.
+
+## n20s1 (2026-10-31 15:04-15:15Z): lead 15:00Z SUBMIT v176; 1 submit, 0 checks, 0 Modal.
+- muse_decode_layer/ unchanged since b051588 (git diff empty) -> `okc submit` = e0f2159f: 2.1497x raw (CI 2.117-2.182),
+  fixed-SGLang 2.1533; board stays v174 50534b24 2.1717 (#206). Per shape us: d1 65.3/73.3, d16 122.2/203.0, d32 152.7/303.5,
+  v1 110.6/124.2, v16 258.2/342.1, v32 345.5/518.3 (sl/full). Slow draw is v32: SGLang's own v32 sl/full was also slow in this
+  run (733.1/1093.0 vs 664.9/1038.5 in check 0ac4a2f0) -> node noise, both sides move together; nothing to fix.
+- Layer 10-31: 4 checks, 3 submits (lead's raised cap 3 used). v176 must NOT be resubmitted unchanged. Next layer candidate
+  needs new code with fixed-SGLang > 2.1913. Open handoff: fresh x13 d32 tk2h MRG 2 (Modal A/B after 00:00Z 11-01).
+- tools/fixed_sglang_score.py: e0f2159f added.
