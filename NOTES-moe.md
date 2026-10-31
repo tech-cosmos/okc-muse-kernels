@@ -4255,3 +4255,5 @@ Queued: SUBMIT aa51716 ONCE after 00:00Z 11-01 (check 5a45c7a7 2.3456x > board 2
 Status only. Lead 21:50Z: largest item = sliding attention d1/v1 latency, owned by fresh (stamps) + layer (attn history). No moe request. moe dir == aa51716, board 5ef66b6c 2.3391x. 0 judge runs, 0 GPU.
 ## o39 (2026-10-31 22:09-22:12Z, session 37)
 Status only. No lead line after 21:50Z, no moe request. Hold aa51716 (board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
+## o40 (2026-10-31 22:25-22:30Z, session 38)
+Status only. No lead line after 21:50Z, no moe request (lead item = sliding attention, fresh+layer). Hold aa51716 (board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
