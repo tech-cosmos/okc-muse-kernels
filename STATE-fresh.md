@@ -1,4 +1,10 @@
 # STATE-fresh (newest first)
+## x21 (2026-10-31 17:35Z-18:25Z): own pick, T=256 dense GEMM headroom (H100, 0 judge, 0 Modal). FRESH.md x21, tools/fresh/x21.
+  s100 T=256 g30 form (38.9 vs cuBLAS 28.7 us) is NOT memory-bound (no memory at all 37.0): in-loop escape fixup ~5 us, sync skeleton
+  ~200 ns/stage, MMA loop 27.4. Pure RS wgmma loop floor 24-25 us (~700 TFLOPS) vs cuBLAS 28.9 -> T=256 dense lane DEAD (<= 3-4 us
+  per GEMM before costs). Triton screen never beats nvjet (5 shapes). Only untried: T=128 qkv split-K with GX escapes (gate first).
+## Next (x22): read Human decisions IN FULL. If the lead wants v16 qkv: tt2o-style oracles on dev/s101 split-K (no-fix/no-mem) as
+  the gate; else idle until the lead names an item (my Modal share 10-31 is 16.8/20; checks 3 of 6 used).
 ## x20 (2026-10-31 17:21Z-17:40Z): own pick: re-measured the record's "per-SM ingest wall" (H100 + H200 microbench, 0.2 Modal min, 0 judge).
   It is the chip's DISTINCT-LINE L2 rate (7.5 TB/s H100 / 8.6 H200 = 57-66 GB/s/SM); SAME lines read concurrently by all SMs: 16.5 TB/s
   (125-159 GB/s/SM). One TMA producer thread: ~105 ns/stage floor (6 KB stages <= 60 GB/s/SM). Paper bounds built on the wall (proj s90,
@@ -113,8 +119,6 @@
   flagless oracle HANGS); bound ~1 us v1 (~0.1%): build only if nothing better. d16/d32 routing: closed (not critical).
   (2) tk2f per-CTA routing at entry (~1.5 us d1/v1): precomputed schedule saves only the compute (~0.5): skip.
   Pitfalls: background Bash jobs default to a 10-min limit (use run_in_background + timeout); `pkill -f` matches itself.
-## x7 (2026-10-30 11:44Z-11:47Z): idle stop again; still no lead line naming fresh after 09:10Z (layer n12s1 DEFNORM gate also not met). 0 judge, 0 Modal.
-## x6 (2026-10-30 11:28Z-11:31Z): idle stop; no lead line naming fresh after 09:10Z (x5 answered the sweep: all dead). 0 judge, 0 Modal.
    Next (x7): same as x5 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x5 (2026-10-30 09:04Z-11:30Z): lead 09:10Z ORACLE SWEEP (6 items): ALL DEAD, none >= 1 us on a d-load. 0 judge, 0 Modal.
 - (1) conc5.py: every vector pipe slows next to HGMMA (INT 2.1-2.7x, HMUL2 4.5x; FFMA serializes the HGMMA instead). (2) tlb.py: 0.
@@ -123,7 +127,6 @@
 - Pitfalls: `pgrep -f X` in a wait loop matches the loop's own command line (cost 2 h idle); background jobs default to a
   10-min limit; the layer agent's ab_flag held the GPU lock ~20 min (flock is not FIFO).
 ## Next (x6): paused. Act only on a new lead line naming fresh after 09:10Z; else stop at once.
-## x4 (2026-10-30 08:12Z-08:14Z): idle stop; no lead line after 08:10Z (x3 answered it: not confirmed, paused). 0 judge, 0 Modal.
    Next (x5): same as x3 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x3 (2026-10-30 07:54Z-07:58Z real clock): lead "08:10Z" (ahead of clock) lane rfport (RF read-port hypothesis), Step 1 DONE: NOT CONFIRMED. 0 judge, 0 Modal.
 - tools/fresh/xd/conc4.py (H100, SASS-verified): 112 LOP3/stage next to HGMMA N64: 3 regs 505, 2 regs+imm 500, 1 reg (UR+RZ)
@@ -131,7 +134,6 @@
   not per register read; reuse slightly worse. Step 2 (dq rewrite for fewer reads) not started. FRESH.md 'x3'.
 - Branch: lead named fresh/rfport, but refs/heads/fresh blocks a `fresh/...` branch name; committed on branch fresh.
 ## Next (x4): paused (lane closed by Step 1). Act only on a new lead line naming fresh; else stop at once.
-## x2 (2026-10-30 07:29Z-07:31Z): idle stop; no lead line after 07:20Z (x1 answered it: gate fails, paused). 0 judge, 0 Modal.
    Next (x3): same as x1 'Next' (act only on a new lead line naming fresh; else stop at once).
 ## x1 (2026-10-30 07:12Z-07:30Z): lead 07:20Z lane "EXACT new expert-kernel design", session 1. 0 judge, 0 Modal.
 - Merged main v173 (8841e7d) into branch fresh. H100 microbenches tools/fresh/xd/{pipes,conc,conc2,conc3}.py; write-up

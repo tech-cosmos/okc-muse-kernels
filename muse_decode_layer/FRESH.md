@@ -778,3 +778,23 @@ Reading:
 - twm (v16/v32): x boxes are re-read by CTAs on dynamic tickets (out of lockstep): W 4.6 + x ~2.3 TB/s at RT4 N32 = ~80% of the H200
   distinct-line cap. Not a proven limiter (in-layer oracle (iii) stream+skeleton runs fast), but an x-in-lockstep schedule (all
   CTAs of one expert take its row tiles in the same K order at the same time) is the cheap form if the consumer ever gets faster.
+## x21 (2026-10-31 17:35Z-18:25Z): own pick (no lead answer to x20's lane question): T=256 dense GEMM headroom, H100, 0 judge, 0 Modal
+Question: x20 showed the "ingest wall" that closed the s100 T=256 g30 form (dev/s100_g30_tt2.cu, 38.9-40.7 us vs cuBLAS 27.6) is
+not a per-SM limit. So what DID limit it, and is there >= 1% left in the T=256 (v32) dense GEMMs?
+- tools/fresh/x21/tri.py: Triton TMA/wgmma GEMM screen (BM/BN/BK/split-K/warps/stages) on (256,4096,8192), (256,8192,4096),
+  (256,2304,8192), (128,2304,8192), (128,4096,8192): never beats nvjet (best +1..+27%). (Flush with zero_() = dirty-L2 writebacks
+  inside the timed GEMM, +5-15 us: flush by READING, as bench.time_graph does.)
+- tools/fresh/x21/tt2o.py + tt2o.cu (s100 tt2 + oracle defines), unpool 8192x4096 at M=256, H100 graph us minus empty, cuBLAS 28.5-28.9:
+    base 38.9 | x L2-hot (O_X=4) 39.0 | W L2-hot 38.6 | both hot 38.6 | no x loads at all 38.5 | no x + no W loads (no memory) 37.0
+    no MMA 25.7 | no MMA, no memory 17.3 | + no escape fixup 12.8 | skeleton (no MMA/mem/decode) 12.8
+    no escape fixup (G30_FIX) 33.8 | MMA only (no mem/decode/fix) 27.4 | no-decode with memory 30.0
+  => memory is NOT the limit (-1.9 us with no memory at all). Consumer-bound: in-loop escape fixup ~5 us, sync skeleton ~200 ns
+  per stage, and the MMA loop itself 27.4 us. Decode is ~free.
+- gen_mma.py (pure RS wgmma loop, 128/132 CTAs x 64 rows x K 4096 x 256 tokens, event timing incl. launch): n128 both-WGs 24.4-25.6 us,
+  n256 alternating stages 24.3-24.8 = 690-730 TFLOPS. So a T=256 4096x8192 GEMM has a tensor floor ~22-25 us on the H100 and
+  cuBLAS (28.5-28.9 standalone) sits within ~3-4 us of it. Same for pooler/FR (17 GF) and less for qkv (9.7 GF).
+Verdict: T=256 dense lane DEAD: ceiling ~3-4 us per GEMM x 3 GEMMs on v32 only, before any real-kernel costs (~0.2-0.4% score max),
+and nvjet's tensor rate equals our best loop. (The H200 has the same tensor rate; its faster HBM only makes T=256 more tensor-bound.)
+Left open (not measured): T=128 qkv (v16): nvjet ~17-18 us vs ~9 us 12-bit-bytes/~6.6 tensor floors. s101's split-K g30 qkv
+(= cuBLAS 20.8 H100) carried the in-loop escape fixup (~5 us/64 stages here) and the ~200 ns/stage skeleton; a GX-escape (out of
+loop) split-K form is the only untried variant I can name. Gate before building: tt2o-style oracles on s101 (no-fix, no-memory).
