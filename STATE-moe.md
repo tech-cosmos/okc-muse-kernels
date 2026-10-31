@@ -19,7 +19,7 @@
   (n6s1, n7s47/48, n9s2, n11a, o1, o4, o9: dq 7 int + 4 HMUL2 / 8 weights is the z3 minimum; SS costs 4.5 B/weight smem;
   FP8 activations fail 1.5%); bs1/d1 fixed cost (o7, o15, fresh x5/x10-x12; CW dead on the moe board 3e70d87c); lossless
   bytes (codes are 4.0 bit, S6 scales lose); tk2f stream (4.33 TB/s, n7s41); slack = PARKED for an organizer yes (moe/slack).
-- Sessions o20-o30 found no new lever (o22: test PASS on 8242d5e again; o27-o30 status only). Suggested to the lead: ~/STOP-moe until a build needs moe.
+- Sessions o20-o31 found no new lever (o22: test PASS on 8242d5e again; o27-o31 status only). Suggested to the lead: ~/STOP-moe until a build needs moe.
 
 ## Board
 - (old, see NOW for current) Best submit was **aeba42c5 @a60019d (TWM_EPI), 2.2792x** (21:30Z 10-28; check fc7e86d6 2.3127x). Was 4fb734c6 @eb8c03c 2.2703x. Was 951c17e0 @21deb8a (bs256 hot32+split66), 2.2535x (2026-10-28 05:45Z; check cefcc133 2.2632x). Was febfcb1f @72d1274 (SCB) 2.2469x. Was 6a92803a 2.190x. Board is a TEST BED only (lead 01:45Z): the layer counts.
