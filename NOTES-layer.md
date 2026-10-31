@@ -3747,3 +3747,17 @@ line says v182 (main). Log it in Judge runs.
   code by content hash; no rerun.** Not worked around (padding the file to force a rerun = against the dedup's intent).
 - Unknown: whether a SUBMIT of code identical to an earlier check is also deduped (and what it returns). v181 was checked
   (84eb0719) but never submitted; v183 checked (662fa349). Whoever submits after 00:00Z: read the submit's `status` field.
+
+## n40 (2026-10-31 ~20:35-20:55Z, session 34): v181 vs v184 H100 A/B = tie; 00:00Z submit -> v184; 0 judge runs, 0 Modal
+- Question: v181 (38d0c23) is the only build whose check clears the lead's fixed-SGLang bar (84eb0719 ~2.21), but it crashes
+  on non-SA weights (n37). v184 (layer/v181nsa 70591ea) = v181 + the n37 fix only; its check 612cdd17 drew 2.1554 raw / 2.1252
+  fixed (d1/v1 sl slow). Is v184 slower, or was that the node?
+- Construction: for SA weights (every generator draw) `_MOE_NSA` stays False, no rebuild, and the only source change in the moe
+  lib is an `#ifdef MOE_NSA` block that the preprocessor drops: same kernels as v181; prepare() adds one scale scan (untimed).
+- H100 tools/ab_files.py "" 4 rounds, files v181, v184, v184, v181 (tools/n40/ab.log), medians us:
+  d1 sl 82.6/83.3/83.2/83.5, d1 full 102.9/102.5/102.7/102.5, d16 sl 189.3/188.9/189.1/189.4, d16 full 289.5/287.9/288.6/289.7,
+  d32 sl 178.3/179.8/179.2/178.0, d32 full 408.1/408.3/408.3/408.2, v1 sl 142.0/141.7/141.5/141.7, v1 full 157.7/157.0/156.5/157.8,
+  v16 sl 300.2/298.8/299.3/300.1, v16 full 442.6/444.3/445.4/442.1, v32 sl 358.8/358.2/358.3/358.4, v32 full 624.9/625.4/625.7/625.0.
+  = TIE (all within +-1.5 us; same spread as copy vs copy). v184's slow judge draw was the node.
+- Decision for the first session after 00:00Z 11-01: submit v184 once (v181's speed + crash fix; v184's own check is within 1%
+  of the board, 09:28Z rule; v181's check is the speed evidence for identical kernels). v181 only if a lead/human line says so.
