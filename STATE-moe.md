@@ -128,3 +128,6 @@ bs8 10 (max 2); bs128 25 (max 28); bs256 26 (max 49).
 - (s9) Post-expert norm fused into tk2f (last-M-CTA tickets, one-pass register norm): judge bs1 +2 us (168fa04c).
   Also s7's grid-barrier version. A separate norm2 kernel is as cheap as any in-kernel tail on the H200.
 - n7s23: tk2f XPF (gemm2 rows L2-prefetched at phase-1 end) and WAVE (two-wave row order to hide the phase barrier): H200 +0.7..5.9 us (DIAG 798fd574 / 87ee0bc0); the transition is not HBM idle.
+
+## o32 (2026-10-31 20:17-20:22Z, session 30)
+Status only: no lead line since 16:30Z, no request to moe. Board #293 2.320x. moe submission.py == aa51716. Submit aa51716 once after 00:00Z 11-01 stands. 0 judge runs, 0 GPU.
