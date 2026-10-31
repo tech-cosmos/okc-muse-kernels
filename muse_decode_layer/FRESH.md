@@ -989,3 +989,9 @@ Hops >= 0.5 us (producer's last exit -> consumer's first release), H100:
   median 25.1 = 7.7 us after entry: the gathers before the wait are latency-bound); d32 qkv end -> combine end 15.3 us.
   Attention lane is closed for fresh (x36); listed for the attention owner.
 => No hop >= 1 us at d16/d32 sl that is not bounded on record. Nothing built.
+- Per-CTA follow-up (tools/fresh/x39/cta.py, strag.py): the unpool's last CTAs are the layer's tail. d16 unpool g24: CTAs
+  116-131 enter at ~181 (when norm2's 16 CTAs leave their SMs; a 512-thread g24 CTA can't share an SM), reach the wait
+  2-3 us later (first W stage + decode before griddepcontrol.wait), release 183-185.8 vs 182.3, exit up to 202.9 vs median
+  198.9 (H100). d32 unpool g30n: CTAs 112-127 enter at 169.7-170.1 (after norm2), exit 188-189.3 vs median 187.3. Bound on
+  record: proj n7s1 R2 oracle (norm2 cut to 1 block, i.e. 15-31 SMs freed early) H200 d16 sl -0.5 / d32 sl -0.9 us. Not
+  built. Other kernels have no straggler CTA (max - 2nd exit 0.03-0.3 us; tk2f 0.26-0.67).
