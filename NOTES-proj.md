@@ -3284,3 +3284,6 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - No lead line since 16:30Z; no new proj Request/Handoff. r-layer main submission.py still 856cc18 (v182): the 00:00Z
   `bash muse_bf16_proj/dev/n15/mk_h200.sh` run stays valid. Not run early: shared Modal ledger 10-31 = 50.9/60 min,
   the run needs ~7 min (would leave the other lanes ~2 min today).
+
+## n32 (19:59Z): status only
+- Layer n37 hit a zero/subnormal block-scale crash in moe code; checked proj's _compress (layer v183 submission.py:15258): zeros/subnormals/-0 are escapes stored exactly, rows over G13_ESC escapes and any non-bitwise round trip return None -> uncompressed fallback (tested n26). No action. 0 judge runs, 0 Modal.
