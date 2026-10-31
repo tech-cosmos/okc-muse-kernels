@@ -4657,7 +4657,7 @@ def _plan(cfg, max_pages, device):
 @triton.jit
 def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ: tl.constexpr, HKV: tl.constexpr,
              G: tl.constexpr, D: tl.constexpr, M: tl.constexpr, S: tl.constexpr, NR: tl.constexpr,
-             SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False, TRIG: tl.constexpr = False,
+             SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False, TRIG: tl.constexpr = 0,
              QSS: tl.constexpr = 0):
     """plan red's merge (one KV head pair, M = 2 G rows = query heads; program b = request b): the NR replicas of
     the sums at reference max 0, merged exactly with any listed out-of-range partials (slot ids in rcnt[2:]); then
@@ -4675,8 +4675,10 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
     col = r[:, None] * D + d[None, :]
     gate = _qld(qkv_ptr + (HQ + 2 * HKV) * D + col, QSS).to(tl.bfloat16).to(tl.float32)
     vs = tl.load(vs_ptr)
+    if TRIG == 2:  # layer n17s1 RF_EARLY: the o GEMV launches before the wait (its W ring under _gd_full's tail)
+        gdc_launch_dependents()
     gdc_wait()
-    if TRIG:  # layer s27 RF_TRIG: the o GEMV (PDL secondary, W preload before its wait) launches only now
+    if TRIG == 1:  # layer s27 RF_TRIG: the o GEMV (PDL secondary, W preload before its wait) launches only now
         gdc_launch_dependents()
     a = tl.zeros([M, D], tl.float32)
     l = tl.zeros([M], tl.float32)
@@ -4983,6 +4985,10 @@ RF_NW1 = 16
 RF_TRIG = True  # layer s27 (TUNE option rf_trig at T=1; H100 d1 full -1.5..-3.1 us): batch 1: trigger the dependents right after the wait (s4's +2.5 us was a trigger at entry)
 RF_NW = 4
 RF_TRIG_ALL = True  # layer n5s17: batched _red_fin (decode 16/32 full) also triggers after its wait (g30 o W ring under the merge)
+# layer n17s1: batched _red_fin triggers at entry instead (o launches while _gd_full's last programs run; safe: _red_fin
+# launches only after every _gd_full program started, and o's wait still covers _red_fin). H100 ab_files 4 rounds x 2
+# copies: decode 16 full -2.3, decode 32 full -2.1 us; batch 1 tie (s4's +2.5 was batch 1 with the old o GEMV).
+RF_EARLY_ALL = True
 CB_TRIG = True  # layer n5s17: _combine (verify 1 full) triggers its dependents after its wait (g30n:o W ring under the merge)
 
 
@@ -4990,7 +4996,7 @@ def _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, sl,
     red, rcnt, rcw = _red_bufs(batch, group, d, sl, qkv.device)
     _red_fin[(batch,)](qkv, red, rcnt, pacc, pml, data["v_scale"], out, HQ=hq, HKV=hkv, G=group, D=d, M=2 * group,
                        S=splits, NR=4 if batch == 1 else BNR, SL=0 if batch == 1 else sl, RCW=rcw, BAL=bal, num_warps=RF_NW1 if batch == 1 else RF_NW, launch_pdl=True,
-                       TRIG=RF_TRIG and (batch == 1 or RF_TRIG_ALL), QSS=data.get("qkv_ss", 0))
+                       TRIG=(2 if batch > 1 and RF_EARLY_ALL else 1) if RF_TRIG and (batch == 1 or RF_TRIG_ALL) else 0, QSS=data.get("qkv_ss", 0))
 
 
 def _decode_gluon(data, cfg, plan):
