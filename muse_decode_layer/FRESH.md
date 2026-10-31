@@ -836,3 +836,24 @@ Side check (tools/fresh/x23/det.py, same state, fresh identical inputs, 4 runs):
 are not: d1 full 1-2 FP32 ulps in the stream, v1 full 1 element, d16 full ~3-6K hidden elements by 1 BF16 ulp and ~25K stream
 elements by <= 0.0154 (= 1 BF16 ulp at |x| 2-4, a BF16 rounding flip from accumulation order). Benign order noise, no race
 signature (max diff fixed at one ulp across runs); compare full loads with tolerances, not torch.equal.
+
+## x24 (2026-10-31 19:00Z-19:55Z): own pick, PUBLIC REPOS per shape (0 judge, 0 Modal; tools/fresh/x24)
+Web search now finds 8 public OKC repos (lead 10-29 compared board totals only). Board 19:20Z: Madhavan113 layer 2.200
+(#182; public repo 721c627 of 10-29 = its 2.08-2.11 runs, 28 judge profiles), vjeux 2.102, ruwwww 2.075, theluckystrike
+1.95, lee101 1.79, infraax 1.43; none of them publishes a moe/attention entry ahead of ours (attention: vjeux 2.610,
+ruwwww 2.603, ours 2.596, top 3.22; moe: Madhavan 2.357, ruwwww 2.337, ours 2.32 board / 2.37 check, top 2.76).
+Per-shape judge medians, top-3 runs each (cmp_profiles.py), Madhavan 10-29 (2.11) vs ours (2.17), us:
+  d1 sl 77 vs 65 | d1 fu 83 vs 75 | d16 sl 131-137 vs 124-125 | d16 fu 209-214 vs 202-206 | d32 sl 153-155 vs 149-158 |
+  d32 fu 294-307 vs 306-308 | v1 sl 107-115 vs 108-115 | v1 fu 117-120 vs 121-124 | v16 sl 250-265 vs 255-267 |
+  v16 fu 336-348 vs 346-358 | v32 sl 323-330 vs 320-331 | v32 fu 490-494 vs 490-526.
+  => no sliding shape where they lead (sliding = 74% of the weight); FULL layers d32/v1/v16/v32 they lead by ~3-12 us.
+  Per-kernel (judge profiles): their attention is vjeux's one-kernel design (flat q8 = FP8 wgmma QK^T AND P@V, P in E4M3,
+  in-kernel finalize; flat q1 for decode full): v32 full 184.6 med vs our _gw_verify 190.7 + _combine_bal tail; v16 full
+  101.7 vs 100.7 + tail; d32 full 170 vs _gd_full 167 + _red_fin tail. Their MoE is one kernel (moe_fused): d32 85 vs our
+  tk2f 95 + norm2 14; d1 28 vs our 21.
+- H100 standalone attention (~/attn tools/bench.py, both 16/16 test): vjeux vs ours d16 fu 125.1/125.6, d32 fu 242.1/244.0,
+  v16 fu 135.0/132.9, v32 fu 257.5/253.4, sliding ours faster by 0.1-1.3 us; geomean 2.01 vs 2.065. H100 is HBM-bound here,
+  so the H200 decides: tools/fresh/x24/mk_h200_attn.sh (after 00:00Z, ~11 GPU-min).
+- Value if their full-layer attention were taken over at d32/v1/v16/v32 full: <= ~0.2-0.4% score (full shapes weigh 16 of
+  62 per load). FP8 P@V was measured H200 tie in ~/attn s71 (native CUDA) and s22 (ceiling -10 us all-L2); the lead/human
+  decide whether copying an Apache-2.0 public kernel is in the spirit (I'd say it is legal and must be credited).
