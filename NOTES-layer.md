@@ -3499,3 +3499,13 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   g30n:qkv_gate on). Unresolved on the H200 -> NOT submittable (bar). v177 stays on main (H100 + tests clean).
 - NEXT: after 00:00Z 11-01, H200 Modal A/B v176 vs v177 per shape (fresh planned MRG 2 A/B; ask to include x14 and v1 full).
   If v1 full / d16 full lose on the H200, drop GD_PW (batched only; v1 = batch 1, so v1 full can't be GD_PW: check CB_HB_TRIG/NVS_PW).
+
+## n23s1 (2026-10-31 15:42-16:05Z, real clock): v177 v1 full '+1.1 us' = tuner noise, not x14; 0 judge runs, 0 Modal.
+- x14 reach at v1 (T=8, batch 1): GD_PW is gated `batch > 1` (off), NVS_PW is the v16/v32 sl kernel (v1 sl runs vtk),
+  MRG 2 is T=32 only. Only CB_HB_TRIG can touch v1.
+- H100 tools/ab_flag.py v177 "verify" 4 rounds, SEEDS=99,7,13, CB_HB_TRIG True vs False: v1 full s7 128.67/128.79,
+  s13 155.57/155.72 (s99 same tie), v16 sl/full all within +-0.5 us both ways -> CB_HB_TRIG ties at T=8.
+  So n22s1's v1 full 155.9 -> 157.0 (ab_files, tuner ON in each file's prepare) is a tuner-pick difference, not code.
+  Pinned-tuner rule (fresh x14 lesson) applies to every future whole-file A/B.
+- Side note for proj's variance audit: v1 full spreads 128.7 (s7) vs 155.6 us (s13) by routing seed alone on the H100.
+- Nothing to build; next is still fresh's post-00:00Z Modal H200 A/B v176 vs v177 (d32 sl/full, v16 sl, d16 full).

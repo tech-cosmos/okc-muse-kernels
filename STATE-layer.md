@@ -3,6 +3,8 @@
 BOARD BEST = submit 50534b24 = v174 (c62cdb0), **2.1717x**, #198 (n13s5, 10-31; d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7, v32 313.9/486.9; check 2d1f9256 2.1514 / fixed-SGLang 2.1650).
 Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n23s1 (10-31 16:05Z): v177's H100 v1 full +1.1 us = tuner noise (GD_PW off at batch 1, NVS_PW not at v1, CB_HB_TRIG
+  ab_flag tie over 3 seeds). Nothing to build; v1 full spreads 128.7 vs 155.6 us by routing seed (H100). 0 runs.
 n22s1 (10-31 16:20Z): **main = v177** (51eaeff) = v176 + fresh x13 tk2h MRG 2 + x14 attn PDL-secondary (NDS/NVS/GD_PW,
   CB_HB_TRIG). validate ALL OK (63 s cold prep). H100 d32 sl -4.6 / full -3.1, d16 full -2.3, sl -1.2, v1 full +1.1 us.
   CHECK a4582885 2.1776 raw / fixed-SGLang 2.1673 < bar 2.1913 (H200 node noise; only d32 sl visibly better): NOT submittable.
