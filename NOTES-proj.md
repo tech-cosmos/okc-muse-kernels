@@ -3173,3 +3173,28 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   +-0.4 -> ~-1.1 us mean per bs256 input (37% have a >128 expert). Handoff to moe. 0 judge runs this session.
 - NEXT: layer takes IL into v181 (after v180's post-00:00Z submit); moe takes il2_moe_board.diff into its next moe-board
   check. Proj standing: 00:00Z H200 queue dev/n15/mk_h200.sh.
+
+## n24 (2026-10-31 18:07-18:25Z, unattended session 12): T=128 qkv re-check vs fresh x20 (closed) + tuner variance audit; 0 judge runs
+- No lead line for proj after 16:30Z; took fresh x20 (same-line L2 broadcast 16.5 TB/s vs distinct-line 7.5) as the question:
+  does it reopen an own T=128/256 GEMM? NO, by measured records, not paper: layer s99 already built g30 x-multicast (G30_CL:
+  CL=2 tie 23.1 vs 21.9, CL=4 39.8) and ablated g30 unp S1 (no x 21.1 / no MMA 20.6 / no W 18.1 vs 21.9: latency-bound
+  pipeline, no single wall), and G30_ROT (desynchronised x reads) was WORSE (lockstep already used). qkv g30 S3 slab (108
+  CTAs) 16.4 vs cuBLAS 20.0 H100, but the reduce was +5 (s101). A cluster-3 DSMEM reduce-scatter (~2-2.5 us at 32 KB/peer, n19
+  rates) would at best be about -1 us on the H100, and the H200 rejects g30 at T=128 standalone (unp lt 22.66 vs g30 24.58,
+  NOTES-proj ~line 2058), so it is DEAD on paper from measured parts. Layer n30/n31 (Triton, TileLang, CUTLASS) agree.
+- TUNER VARIANCE AUDIT (judge logs r-layer profiles, 10 newest runs): pick flips at T=1/16/128/256 are near-ties. Every
+  candidate is within ~0.3-1.3 us of the default on 60-530 us loads (<0.4%), so a 'wrong' pick costs <= ~1 us. The one steady
+  winner is T=16 sliding {g30n:unpool}: first-pass median lower in 10/10 runs (-0.4..-1.3 us), but the confirm step dropped it
+  2/10 times (margin 0.1%). Pinning it in TUNE_BASE[(16, True)] = ~-0.15 us on average, less variance. Low priority (layer's call).
+- ODD: the tuner's CONFIRM loop at T=256 FULL is +10..+20 us (~3%) slower than its own first pass on the SAME graphs and data
+  in 25/25 judge logs (sliding: 0..+5 normally, +14/+28 twice); T=1/16/128 show no such shift. H100 repro (dev/n24/conf.py:
+  3 captures, tuner's A 3-way x 43 then B 2-way x 40, then a long series C; flush.zero_ per replay, nvidia-smi 20 ms):
+  v32 full A 623.4/622.0/621.1, B 621.3/621.2, C flat 620-624 (2400 replays, 1.75 s); v32 sl A 350.0, B 349.8. No effect on the
+  H100: SM clock 1980 MHz throughout, reasons 0; power (lagging sensor) climbs to ~530 W of 700 W over 1.75 s at v32 full.
+  Hypothesis: the H200 (same 700 W cap, HBM3e) hits the power cap under sustained T=256 full and clocks down; the judge's
+  scored v32 full (491-524 us) sits between the tuner's first-pass (477-518) and confirm (496-537) medians. If so, energy per
+  step matters at T=256 (spin-waiting warps, redundant DQ). Test queued: dev/n24/mk_h200.sh (after 00:00Z, ~3-5 Modal min:
+  conf.py on r-layer main, 'verify 32', 2400-replay series, clocks/power/throttle reasons per phase).
+- NEXT: 00:00Z H200 queue: dev/n24/mk_h200.sh (power/clock), then dev/n15/mk_h200.sh. If the H200 shows SW power cap at T=256
+  full: tell the lead (ranking uses medians of reruns: a power-throttled T=256 is a lever for energy cuts, e.g. nanosleep in
+  mbarrier spin loops).
