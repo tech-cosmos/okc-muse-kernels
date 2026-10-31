@@ -3245,3 +3245,18 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   in these W-bound kernels). Value = robustness only (~0.6% of weight draws would lose 3-12 us at d1 without it).
 - Handoff to layer (sub-gate, robustness): apply to layer.py _compress; not bitwise vs main (summation order of the halved
   escapes changes), within test bounds. Also fine for the proj board (not applied; board does not count).
+
+## n27 (2026-10-31 18:38-19:25Z, unattended session 15): x21 T=128 qkv GX gate (paper) + n26 escape-base rule on the proj board
+- x21's 'only untried form' (T=128 qkv split-K g30 with escapes out of the loop, GX) closed from measured parts: layer s101
+  ablations (real weights, H100) put the whole escape cost of split-K g30 qkv m128 at 0.5 us (fence+ticket 1.4, reduce 3.5), and
+  the H200 run (layer NOTES n5s21: s101 split real S3 21.0-21.2 vs cuBLAS 17.3-17.5 us same run) leaves +3.2 us even with free
+  escapes. GX cannot close it. Gate FAILS, no build.
+- Proj board held-out weights: same generator/shapes as the layer, so n26's MC (fallback 6/1000 -> 0/1000) applies. dev/n27/seeds.py
+  lists per weight seed the base each layer picks: the board seed 5151 itself picks emax-16 for qkv_gate and pooler (rows max 6 -> 4
+  escapes); ~1/3 of seeds pick emax-16 for qkv or pooler; unpooler/o always emax-15.
+- Ported the n26 rule into dev/sub_template.py _compress (d71fa42). bench.py: WSEED=<n> env overrides reference.WEIGHTS_SEED.
+  Tests: test 39/39, esc 16/16, FORCE=gx test 39/39, ESCV=bf16 FORCE=gx esc 24/24, WSEED 1/5/22/24(+gx) test 39/39, WSEED=13 esc 16/16.
+  H100 bench ABAB (old HEAD vs new, 2 rounds): tie; qkv/pooler m16/m32/m128 -0.2..-0.4 us (fewer escapes in g30), rest noise.
+- Judge: check 798e7fda (d71fa42) 1.3883 [1.368, 1.409] > best 1.3847 -> SUBMIT 813c5e7a 1.3863 [1.366, 1.407] = NEW PROJ BEST
+  (marginal, within CI; value is robustness in the held-out reruns). Board #480 (rows shifted). Budget 10-31: proj checks 6/20, scored 2/10.
+- Pitfall: zsh does not word-split `set -- $v`; run env-var loops under bash.
