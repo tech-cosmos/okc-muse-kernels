@@ -15847,7 +15847,7 @@ def _g10_lib():
                     "G19_CASE(%d,%d,%d,%d,1,%d)" % (c[0], c[1], c[2], c[3], c[5]) for c in sorted(set(G19_CFG.values()) | set(G19_BUILD))))
             else:
                 src = src + "\nvoid g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
-            src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
+            src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n#define N2U_PRE %d\n" % int(N2U_PRE) + _N2U_SRC
             if _GPR1_SRC is not None:
                 src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
                 if _GPR8_SRC is not None:
@@ -16059,6 +16059,7 @@ void g17_gemv(torch::Tensor w, torch::Tensor x, torch::Tensor out, int64_t mp, i
 '''
 N2U_TOKENS = (1,)
 N2U_PFW = True
+N2U_PRE = 2
 N2U_SLOT = True
 N2U_CFG = (8, 1)
 N2U_BOUNDARY = False
@@ -16489,6 +16490,12 @@ def _moe__lib():
                                 extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
 _N2U_SRC = r'''namespace n2u {
+// n16s1: weak (non-.nc) 16-B load in asm volatile: neither nvcc nor ptxas moves it above griddepcontrol.wait
+__device__ __forceinline__ float4 ldy(const float4* p) {
+    float4 v;
+    asm volatile("ld.global.v4.f32 {%0, %1, %2, %3}, [%4];" : "=f"(v.x), "=f"(v.y), "=f"(v.z), "=f"(v.w) : "l"(p) : "memory");
+    return v;
+}
 // SLOT (s14, moe_tk2f PF & 4): y32 row = route slot s, pre-scaled by gs2 * 256 (no inv / gs loads); the routing (ids, tw:
 // pr1's, complete before tk2f passed its own griddepcontrol.wait) is read before griddepcontrol.wait, so only the y32
 // loads stay behind it (H100 stamps: 3 dependent L2 round trips after the wait cost ~2.5-3 us).
@@ -16528,21 +16535,28 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
     bool loc[8];
     float twv[8];
     if (SLOT) {
-        if (!idf) {  // n7s7 IDF: with an early moe_tk2f, read the routing after griddepcontrol.wait (below); a flag spin
-                     // here (+__ldcg loads) cost ~4 us H100 d1 tail. These plain loads are safe only because ptxas
-                     // sinks them below griddepcontrol.wait: forced pre-wait (__ldcg) they read stale routing
-                     // (replay_test d1 3/10 + 5/10 fails)
+        if (!idf || N2U_PRE) {  // n16s1 N2U_PRE: the routing (pr1's) is complete before n2u launches (n2u = PDL secondary of
+                     // moe_tk2f, whose CTAs trigger only after their griddepcontrol.wait, i.e. after the rmsnorm, which
+                     // waited for pr1), with or without IDF. n7s7's 'stale routing' with these loads forced pre-wait was
+                     // NOT the routing: once loc[] is known pre-wait, ptxas hoists the .nc Y loads (moe_tk2f's output)
+                     // above griddepcontrol.wait (SASS n16s1). So Y is loaded with ldy (weak ld.global, never hoisted).
+            __shared__ int s_id[8];
+            __shared__ float s_tw[8];
+            if (N2U_PRE >= 2) {  // n16s1: 8 threads fetch the routing into smem; the barrier keeps the trip pre-wait
+                if (tid < 8) { s_id[tid] = ids[tid]; s_tw[tid] = tw[tid]; }
+                __syncthreads();
+            }
 #pragma unroll
             for (int s = 0; s < 8; ++s) {
-                const int e = ids[s] - start;
+                const int e = (N2U_PRE >= 2 ? s_id[s] : ids[s]) - start;
                 loc[s] = e >= 0 && e < count;
-                twv[s] = tw[s];
+                twv[s] = N2U_PRE >= 2 ? s_tw[s] : tw[s];
             }
         }
     }
     asm volatile("griddepcontrol.wait;" ::: "memory");
     if (blockIdx.x == 0 && tid < 128) zc[tid] = 0;
-    if (SLOT && idf) {  // n7s7 IDF: pr1 complete (moe_tk2f completed after its rmsnorm's wait). fresh x8: plain loads
+    if (SLOT && idf && !N2U_PRE) {  // n7s7 IDF: pr1 complete (moe_tk2f completed after its rmsnorm's wait). fresh x8: plain loads
                         // (LDG.CONSTANT, SASS: after ACQBULK); __ldcg (LDG.STRONG.GPU) here cost ~3 us of d1 tail
 #pragma unroll
         for (int s = 0; s < 8; ++s) {
@@ -16564,7 +16578,7 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
         if (loc[s]) {
             const float gsc = SLOT ? 1.0f : gs[e] * 256.0f;
             const float4* p = reinterpret_cast<const float4*>(Y + (size_t)(SLOT ? s : inv[s]) * K + tid * 8);
-            const float4 c = p[0], d = p[1];
+            const float4 c = N2U_PRE ? ldy(p) : p[0], d = N2U_PRE ? ldy(p + 1) : p[1];
             const float f[8] = {c.x, c.y, c.z, c.w, d.x, d.y, d.z, d.w};
             if (SLOT) {
 #pragma unroll
