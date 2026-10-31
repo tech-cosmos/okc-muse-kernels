@@ -3662,3 +3662,16 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   (K halves tie, AUTO halves, quarters/eighths, row-split tails, orders, R1 gate). Nothing new to build.
 - Nothing in the moe lane reaches the lead's gates (>= 1.5 us on a d-load, >= 0.2% score). Ranked leftovers (all below gate):
   tk2f last-wave K-split of rows d16/d32 (~0.8/1.1 us), twm overhead-instruction trims (<1 us), HOT128 no-hot cost (0.9 us v16, 1/40).
+
+## o3 (2026-10-31 10:04Z - ~10:50Z): own item: SCALE-D-0 PROMOTION in twm (from fresh x1's acc-read finding): DEAD by oracle; 0 judge runs, 0 Modal
+- Mechanism (not on record): dq without the 4 HMUL2 + wgmma scale-d 0 into a per-k16 partial P + FP32 FFMA acc += s_row * P
+  (exact products, FP32 sums: legal). Hoped: no acc read by the HGMMA -> dq overlaps better; FFMA is x5's cheap 1.3x class.
+- H100 stage microbench tools/o3/ovl10.py (RESULTS.txt table): bound SD0N (no promotion) 0.81-0.86x prod (only 6-10% under
+  o1's NOH: the acc-read relief is small in the real stage); promotion ideal-overlap SD0X 1.25-1.8x, wait0-ordered SD0W 1.28-1.8x,
+  double-buffered SD0F serialized by ptxas C7514 (1.6-2.0x). N/2 FFMA per tile per k16 + scale decode > the 4 HMUL2 removed at
+  every N; next to HGMMA every ALU op costs ~4-5 cyc (o1). DEAD. No layer value, nothing built.
+- TRAP (cost me 20 min, reusable): C7514 fires when LLVM hoists acc-reading register math above an inline-asm wait_group (asm
+  volatile "memory" does not order register-only math): one post-loop `acc += P` above the final wait serialized every HGMMA in
+  the function. Fix = empty asm "+f" fence on each acc register right after the wait. Diagnose: exec the script's SRC into k.cu
+  with an explicit instantiation, `nvcc -arch=sm_90a -ptx`, `ptxas` to reproduce, then list non-wgmma PTX lines reading the
+  wgmma output registers (python regex over the {..} lists). Also: scale-d as immediate 0 lets ptxas delete dead wgmmas.

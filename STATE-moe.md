@@ -1,3 +1,6 @@
+## o3 10:50Z 10-31: own item SCALE-D-0 PROMOTION in twm (wgmma scale-d 0 per k16 + FP32 FFMA block scale, from fresh x1): DEAD
+## by H100 oracle (tools/o3): bound w/o promotion 0.81-0.86x, promotion ALU (N/2 FFMA/tile/k16) 1.25-1.8x even ideal; ptxas C7514
+## trap documented (NOTES o3). Nothing in the moe lane >= gate. 0 judge runs, 0 Modal.
 ## o2 10:35Z 10-31: own-list oracles DEAD: power/clock lever (n9s1: dq+wgmma-free twm clocks 1.80 GHz = base -> clock not compute-set),
 ## GPC static imbalance in tk2f (inside n7s41 tail bound <= 2.2 us d32), twm structure (= drain, dead on record). NOTES o2. 0 judge runs, 0 Modal.
 ## o1 10:30Z 10-31: lead 09:55Z PIPE-BALANCED DQ: GATE FAILS by oracle (tools/o1: twm w/o HMUL2 0.87-0.93x = bound; HMUL2->1 IADD

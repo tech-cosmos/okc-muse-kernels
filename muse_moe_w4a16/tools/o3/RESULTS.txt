@@ -1,0 +1,24 @@
+o3 (2026-10-31 ~10:10-10:50Z, H100, own item after o1/o2): SCALE-D-0 PROMOTION in twm = DEAD (oracle, not built).
+Idea: fresh x1 found the dq||HGMMA slowdown is the HGMMA's FP32 accumulator read (scale-d 0 -> LOP3 loop barely slows). So: dq
+WITHOUT the 4 HMUL2 (codes straight to the RS wgmma), wgmma scale-d 0 into a per-k16 partial P, block scale applied in FP32
+(acc += s_row * P: exact products, FP32 accumulation = legal), FFMA being the cheap class next to HGMMA (x5: 1.3x).
+tools/o3/ovl10.py (= o1 ovl9 + roles 18-22), 2 consumer WGs, cyc/stage (WG1):
+          prod  NOH(o1) SD0N  SD0F         SD0W   SD0X
+RT4 N8    802   703     660   1307 C7514   1028   1006
+RT4 N16   888   782     719   1452 C7514   1219   1216
+RT4 N32   987   876     846   1943 C7514   1594   2038 (spills)
+RT2 N32   535   500     463    917 C7514    878    912
+RT2 N40   580   540     505   1021 C7514    929   1030
+RT2 N64   722-739 667   599   1413 C7514   1318   1310
+SD0N = dq w/o HMUL2 + scale-d-0 wgmma, no promotion (BOUND: 0.81-0.86x prod; only ~6-10% better than NOH, so the acc-read
+       relief is small inside the real stage). SD0F = P double-buffered, FFMA on P[j-1] after wait<1>: ptxas C7514 serializes
+       every HGMMA (it refuses any non-wgmma read of a wgmma accumulator while another wgmma is in flight). SD0W = wait<0> then
+       FFMA then the next wgmma (dq still overlaps): no C7514, 1.28-1.8x. SD0X = same FFMA + scale-decode ALU on non-wgmma registers
+       (no dependency = ideal overlap): 1.25-1.8x. The promotion costs N/2 FFMA per tile per k16 (+ e4m3->f32 scale decode)
+       vs the 4 HMUL2 it removes: more ALU at every N >= 8, and every ALU op costs ~4-5 cyc next to HGMMA (o1). DEAD for any N.
+TRAPS (reusable): (1) ptxas reports C7514 also when LLVM hoists register math that reads accumulators ABOVE an inline-asm
+  wgmma.wait_group (asm volatile + "memory" does NOT order register-only math). The post-loop `acc += P` was hoisted above the final
+  wait -> every HGMMA in the function serialized (dep0 = HGMMA count). Fix: asm volatile("" : "+f"(x) :: "memory") on each acc
+  register right AFTER the wait (CUTLASS warpgroup_fence_operand). Diagnose with nvcc -ptx + a scan for non-wgmma readers of the
+  wgmma output registers (/tmp/o3p recipe in NOTES o3). (2) scale-d as an immediate 0 lets ptxas drop dead wgmmas (hg count falls):
+  pass it as a runtime register.
