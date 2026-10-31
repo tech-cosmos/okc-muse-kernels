@@ -1,0 +1,17 @@
+o1 (2026-10-31 ~10:05Z, H100, lead 09:55Z PIPE-BALANCED DQ oracle): tools/o1/ovl9.py = n11a ovl8 + roles
+  NOH = dq without the 4 HMUL2 (masked codes straight into the RS wgmma: zero-cost scale step, wrong values)
+  IAD = each HMUL2 replaced by one IADD (1 int op per bf16x2 pair, wrong values)
+2 consumer WGs, cyc/stage (WG1), same weight/x bytes:
+RT2 N40: prod 580 | NOH 540 (0.931x) | IAD 591 (1.019x) | mma-only 383
+RT2 N48: prod 637 | NOH 584 (0.917x) | IAD 642 (1.008x) | mma-only 429
+RT2 N56: prod 694 | NOH 627 (0.903x) | IAD 685 (0.987x) | mma-only 448
+RT2 N64: prod 722 | NOH 666 (0.922x) | IAD 737 (1.021x) | mma-only 512
+RT4 N8:  prod 802 | NOH 703 (0.877x) | IAD 812 (1.012x) | mma-only 416
+RT4 N16: prod 903 | NOH 782 (0.866x) | IAD 902 (0.999x) | mma-only 416
+RT4 N24: prod 941 | NOH 814 (0.865x) | IAD 932 (0.990x) | mma-only 424
+RT4 N32: prod 988 | NOH 876 (0.887x) | IAD 1015 (1.027x) | mma-only 512
+Verdict: GATE (<= 0.93x at bs128 AND bs256, exact) FAILS. A 1-op-per-pair integer replacement ties (0.99-1.03x): next to
+HGMMA an int op costs what an HMUL2 costs (x5's 4.5x is a ratio on HMUL2's 2x faster base, not a higher absolute cost).
+An exact integer product needs >= 3-4 ops per pair (1.5x-mantissa codes renormalize: (1+a/2)(1+b/8) >= 2 for b >= 3;
+code 0 needs its own zero), so it is slower than today. Even the free bound is only 0.87-0.93x here, and in-layer it was
+measured as v16 -3.1 / v32 -3.4 us sliding (n5s34 'ors', H100). Not built.
