@@ -71,8 +71,8 @@ layer = layer.replace("_G10_SRC = None  # @@G10@@\n", "_G10_SRC = r" + Q3 + g10 
 g12 = (here / "g12_src.cu").read_text()  # proj's gemv12 (m = 8)
 assert Q3 not in g12 and layer.count("_G12_SRC = None  # @@G12@@\n") == 1
 layer = layer.replace("_G12_SRC = None  # @@G12@@\n", "_G12_SRC = r" + Q3 + g12 + Q3 + "\n")
-DEAD_SRCS = ("22", "OB8", "PR32")  # moe/slack: PR32 too (PR32_TOKENS = (), never built) for the slack source; n5s6: g22 (G22_CFG = {}, s22 dead) and ob8 (OB8 False, s86 dead) not embedded: judge 1 MB limit
-for _n in ("13", "14", "19", "22", "24", "27", "30", "PR3", "PR1", "PR8", "OB8", "PR32", "BND2", "SLACK"):  # proj's gemv13 / gemv14 (compressed BF16 weights), router3 (hi/lo, T 9..128)
+DEAD_SRCS = ("22", "OB8", "PR32", "SLACK8")  # layer n14: SLACK8 (SLACK_T8 False, dead at T = 8); moe/slack: PR32 too (PR32_TOKENS = (), never built) for the slack source; n5s6: g22 (G22_CFG = {}, s22 dead) and ob8 (OB8 False, s86 dead) not embedded: judge 1 MB limit
+for _n in ("13", "14", "19", "22", "24", "27", "30", "PR3", "PR1", "PR8", "OB8", "PR32", "BND2", "SLACK", "SLACK8"):  # proj's gemv13 / gemv14 (compressed BF16 weights), router3 (hi/lo, T 9..128)
     assert layer.count(f"_G{_n}_SRC = None  # @@G{_n}@@\n") == 1
     if _n in DEAD_SRCS:  # n5s6: left None (size limit); their paths are off and never built
         continue

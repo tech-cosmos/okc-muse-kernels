@@ -13845,6 +13845,9 @@ _GPR1_SRC = r'''// pr1: the layer's pooler + router + routing at 1 token in ONE 
 namespace pr1 {
 #ifndef BPRE
 #define BPRE 1
+#ifndef PR1_SLK  // layer n14: routing-slack selection in the routing warp (layer.py defines it with SLACK_T1)
+#define PR1_SLK 0
+#endif
 #endif
 #define XI(k) (((k) >> 4) * 20 + ((k) & 15))
 constexpr int ESC = 8, MAXC = 16, E = 256, K = 8192, TOPK = 8;
@@ -14070,6 +14073,9 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
         key[i] = sc[i] + sbias[e];
     }
     int myid = 0; float mysc = 0.f, sum = 0.f;
+#if PR1_SLK
+    float mykey = 0.f, v8 = 0.f;
+#endif
 #pragma unroll
     for (int k = 0; k < TOPK; ++k) {
         float bk = key[0]; int bi = lane; float bs = sc[0];
@@ -14087,8 +14093,80 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
         for (int i = 0; i < E / 32; ++i)
             if (lane + 32 * i == bi) key[i] = -INFINITY;
         if (lane == k) { myid = bi; mysc = bs; }
+#if PR1_SLK
+        if (lane == k) mykey = bk;
+        v8 = bk;
+#endif
         sum += bs;
     }
+#if PR1_SLK
+    // layer n14 (moe/slack, NOT for submission until the organizers approve): moe's slack_kernel rule at T = 1, in this
+    // warp (no extra launch). Local top-8 experts leading the 9th best by <= KT are droppable; keep the lowest local
+    // indices of them until |kept| >= max(nR - X, distinct floor) (X = non-local candidates outside the top 8, floor =
+    // (nR + local near-ties within TIE of the 8th + DM) * 0.85 - 2); replace the dropped (slot order) by the best
+    // non-local candidates (score + bias >= 8th - RT; lowest index on ties); weights renormalized over the new 8.
+    {
+        float v9 = -INFINITY; int near = 0, nx = 0;
+#pragma unroll
+        for (int i = 0; i < E / 32; ++i) {
+            const int e = lane + 32 * i;
+            const bool lc = ((e - sls) & (E - 1)) < a.local;
+            v9 = fmaxf(v9, key[i]);
+            near += lc && key[i] >= v8 - PR1_SLK_TIE;
+            nx += !lc && key[i] >= v8 - PR1_SLK_RT;
+        }
+#pragma unroll
+        for (int o = 16; o; o >>= 1) {
+            v9 = fmaxf(v9, __shfl_xor_sync(0xffffffffu, v9, o));
+            near += __shfl_xor_sync(0xffffffffu, near, o);
+            nx += __shfl_xor_sync(0xffffffffu, nx, o);
+        }
+        const int myl = (myid - sls) & (E - 1);
+        const bool isl = lane < TOPK && myl < a.local;
+        const uint32_t Rm = __ballot_sync(0xffffffffu, isl);
+        const uint32_t Dm = __ballot_sync(0xffffffffu, isl && !(mykey - v9 > PR1_SLK_KT));
+        const int nR = __popc(Rm), D = __popc(Dm);
+        const float floor_d = (float)(nR + near + PR1_SLK_DM) * 0.85f - 2.f;
+        const float floor_r = (float)(nR + near + PR1_SLK_RM) * 0.92f - 4.f;
+        const int target = max(nR - nx, (int)ceilf(floor_d));
+        const int nd = D - min(D, max(0, target - (nR - D)));
+        if (nd > 0 && (float)(nR - nd) >= floor_r && (float)(nR - nd) >= floor_d) {
+            // drop the nd droppable slots with the highest local index
+            int higher = 0;
+#pragma unroll
+            for (int j = 0; j < TOPK; ++j) {
+                const int lj = __shfl_sync(0xffffffffu, myl, j);
+                higher += ((Dm >> j) & 1u) && lj > myl;
+            }
+            const bool drop = ((Dm >> lane) & 1u) && higher < nd;
+            const uint32_t Xm = __ballot_sync(0xffffffffu, drop);
+            const int rank = __popc(Xm & ((1u << lane) - 1u));  // replacement index of a dropped slot
+#pragma unroll
+            for (int i = 0; i < E / 32; ++i)  // candidates only: non-local, not picked, >= 8th - RT
+                if (((lane + 32 * i - sls) & (E - 1)) < a.local || !(key[i] >= v8 - PR1_SLK_RT)) key[i] = -INFINITY;
+            for (int r = 0; r < nd; ++r) {
+                float bk = key[0]; int bi = lane; float bs = sc[0];
+#pragma unroll
+                for (int i = 1; i < E / 32; ++i)
+                    if (key[i] > bk) { bk = key[i]; bi = lane + 32 * i; bs = sc[i]; }
+#pragma unroll
+                for (int o = 16; o; o >>= 1) {
+                    const float ok = __shfl_xor_sync(0xffffffffu, bk, o);
+                    const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
+                    const float os = __shfl_xor_sync(0xffffffffu, bs, o);
+                    if (ok > bk || (ok == bk && oi < bi)) { bk = ok; bi = oi; bs = os; }
+                }
+#pragma unroll
+                for (int i = 0; i < E / 32; ++i)
+                    if (lane + 32 * i == bi) key[i] = -INFINITY;
+                if (drop && rank == r) { myid = bi; mysc = bs; }
+            }
+            sum = 0.f;
+#pragma unroll
+            for (int j = 0; j < TOPK; ++j) sum += __shfl_sync(0xffffffffu, mysc, j);
+        }
+    }
+#endif
     if (lane < TOPK) {
         a.ids[lane] = myid;
         int loc = (myid - sls + E) % E;
@@ -15143,11 +15221,32 @@ void slack_launch(torch::Tensor part, int64_t ks, int64_t sks, int64_t st, torch
   cudaLaunchKernelEx(&cfg, slk::slack_kernel, a);
 }
 '''
+_GSLACK8_SRC = None
 SLACK = True
 SLACK_TOKENS = ()
 SLACK_MR, SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM = 0.023, 0.022, 0.0, 2.0, 8.0
 _GSLACK = {}
 _SLACK_DBG = None
+SLACK_T1 = True
+SLACK1_MR, SLACK1_MK, SLACK1_TIE, SLACK1_DM, SLACK1_RM = SLACK_MR, SLACK_MK, 0.02, 0.0, 0.0
+SLACK_T8 = False
+def _pr8_slk(src):
+    """layer n14: at T = 8 the slack selection runs in pr8's finish block right after its routing (slack8_src.cu)."""
+    if not (SLACK and SLACK_T8) or _GSLACK8_SRC is None:
+        return src
+    call = "    if (wp < MT) route_token(a, lgs, bs_, ls_, wp, lane);\n"
+    assert src.count(call) == 1
+    keep = KEEP_TOL[0]
+    defs = ("#define SLK8_RT %.9ef\n#define SLK8_KT %.9ef\n#define SLK8_TIE %.9ef\n#define SLK8_DM %.9ef\n"
+            "#define SLK8_RM %.9ef\n") % (ROUTE_TOL - SLACK1_MR, keep - SLACK1_MK, SLACK1_TIE, SLACK1_DM, SLACK1_RM)
+    return defs + _GSLACK8_SRC + "\n" + src.replace(call, call + "    slk8::select(lgs, bs_, ls_, MT, a.ids, a.lids, a.wts, a.mult, a.reps);\n")
+def _pr1_slk_defs():
+    if not (SLACK and SLACK_T1):
+        return ""
+    keep = KEEP_TOL[0]
+    return ("#define PR1_SLK 1\n#define PR1_SLK_RT %.9ef\n#define PR1_SLK_KT %.9ef\n#define PR1_SLK_TIE %.9ef\n"
+            "#define PR1_SLK_DM %.9ef\n#define PR1_SLK_RM %.9ef\n") % (ROUTE_TOL - SLACK1_MR, keep - SLACK1_MK, SLACK1_TIE,
+                                                                       SLACK1_DM, SLACK1_RM)
 def _slack_build():
     if not SLACK or not SLACK_TOKENS or _GSLACK_SRC is None or "lib" in _GSLACK:
         return
@@ -15591,9 +15690,9 @@ def _g10_lib():
                 src = src + "\nvoid g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
             if _GPR1_SRC is not None:
-                src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
+                src = src + "\n" + _pr1_slk_defs() + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
                 if _GPR8_SRC is not None:
-                    src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
+                    src = src + "\n" + _pr8_slk(_GPR8_SRC).replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
             else:
                 src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
             if _GOB8_SRC is not None and OB8:
@@ -18159,7 +18258,8 @@ def _kernel_fn(data, state):
             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
                                    ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)
-        _slack(logits, 1, 0, N_EXPERTS, state, data["local_start"], topk_ids, local_ids, topk_weights, tokens)
+        if not (SLACK_T1 or tokens == 8):
+            _slack(logits, 1, 0, N_EXPERTS, state, data["local_start"], topk_ids, local_ids, topk_weights, tokens)
     elif (pr32 := (tokens in PR32_TOKENS and state.get("pr32", {}).get(tokens) is not None
                    and _opt(state, tokens, "pr32", PR32_DEFAULT))):
         side_stream.wait_stream(main_stream)

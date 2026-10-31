@@ -940,6 +940,7 @@ _GPR8_SRC = None  # @@GPR8@@
 _GOB8_SRC = None  # @@GOB8@@
 _GBND2_SRC = None  # @@GBND2@@
 _GSLACK_SRC = None  # @@GSLACK@@
+_GSLACK8_SRC = None  # @@GSLACK8@@
 # moe/slack (moe s5 2026-10-31): ROUTING-SLACK selection step (slack_src.cu): after the routing, re-route inside
 # TASK.md's routing tolerance onto the fewest local experts (greedy + redundancy pass; = fresh x8's exact minimum on
 # 11/12 scored loads). NOT for submission until the organizers approve it (lead 2026-10-31T10:25Z). Margins: picks
@@ -956,6 +957,36 @@ SLACK_TOKENS = ()
 SLACK_MR, SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM = 0.023, 0.022, 0.0, 2.0, 8.0
 _GSLACK = {}
 _SLACK_DBG = None
+# layer n14: at T = 1 the same rule runs inside pr1's routing warp, independent of SLACK_TOKENS (no extra launch: moe's one-CTA slack_kernel costs
+# ~10 us at d1 on the H100 even when it changes nothing). T <= 8 margins: the reference's local count is bounded by
+# ours + local near-ties within SLACK1_TIE of the 8th (instead of the fixed DM/RM margins, which save 0 at T <= 8).
+SLACK_T1 = True
+SLACK1_MR, SLACK1_MK, SLACK1_TIE, SLACK1_DM, SLACK1_RM = SLACK_MR, SLACK_MK, 0.02, 0.0, 0.0
+# layer n14 T = 8: OFF (no selection at all at T = 8). In pr8's finish block (slack8_src.cu) the rule costs +1.5..5 us at
+# v1 sl on the H100 even when never executed (ptxas re-schedules pr8's main path; forceinline +5.5, noinline +1.5..4.7),
+# moe's separate slack_kernel ~+9 us; the gain is only ~0.39 experts x ~4.5 us at v1 (tools/n14, NOTES-layer n14s1).
+SLACK_T8 = False
+
+
+def _pr8_slk(src):
+    """layer n14: at T = 8 the slack selection runs in pr8's finish block right after its routing (slack8_src.cu)."""
+    if not (SLACK and SLACK_T8) or _GSLACK8_SRC is None:
+        return src
+    call = "    if (wp < MT) route_token(a, lgs, bs_, ls_, wp, lane);\n"
+    assert src.count(call) == 1
+    keep = KEEP_TOL[0]
+    defs = ("#define SLK8_RT %.9ef\n#define SLK8_KT %.9ef\n#define SLK8_TIE %.9ef\n#define SLK8_DM %.9ef\n"
+            "#define SLK8_RM %.9ef\n") % (ROUTE_TOL - SLACK1_MR, keep - SLACK1_MK, SLACK1_TIE, SLACK1_DM, SLACK1_RM)
+    return defs + _GSLACK8_SRC + "\n" + src.replace(call, call + "    slk8::select(lgs, bs_, ls_, MT, a.ids, a.lids, a.wts, a.mult, a.reps);\n")
+
+
+def _pr1_slk_defs():
+    if not (SLACK and SLACK_T1):
+        return ""
+    keep = KEEP_TOL[0]
+    return ("#define PR1_SLK 1\n#define PR1_SLK_RT %.9ef\n#define PR1_SLK_KT %.9ef\n#define PR1_SLK_TIE %.9ef\n"
+            "#define PR1_SLK_DM %.9ef\n#define PR1_SLK_RM %.9ef\n") % (ROUTE_TOL - SLACK1_MR, keep - SLACK1_MK, SLACK1_TIE,
+                                                                       SLACK1_DM, SLACK1_RM)
 
 
 def _slack_build():
@@ -1329,9 +1360,9 @@ def _g10_lib():
                 src = src + "\nvoid g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
             if _GPR1_SRC is not None:
-                src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
+                src = src + "\n" + _pr1_slk_defs() + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
                 if _GPR8_SRC is not None:
-                    src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
+                    src = src + "\n" + _pr8_slk(_GPR8_SRC).replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
             else:
                 src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
             if _GOB8_SRC is not None and OB8:  # s86: dead (H100), built only when forced on
@@ -4149,7 +4180,8 @@ def _kernel_fn(data, state):
             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
                                    ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)
-        _slack(logits, 1, 0, N_EXPERTS, state, data["local_start"], topk_ids, local_ids, topk_weights, tokens)
+        if not (SLACK_T1 or tokens == 8):  # layer n14: T = 1 selects inside pr1; T = 8 in pr8 (SLACK_T8) or not at all
+            _slack(logits, 1, 0, N_EXPERTS, state, data["local_start"], topk_ids, local_ids, topk_weights, tokens)
     elif (pr32 := (tokens in PR32_TOKENS and state.get("pr32", {}).get(tokens) is not None
                    and _opt(state, tokens, "pr32", PR32_DEFAULT))):
         side_stream.wait_stream(main_stream)  # nothing runs there, but the later joins need it forked in the capture
