@@ -3195,6 +3195,9 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   scored v32 full (491-524 us) sits between the tuner's first-pass (477-518) and confirm (496-537) medians. If so, energy per
   step matters at T=256 (spin-waiting warps, redundant DQ). Test queued: dev/n24/mk_h200.sh (after 00:00Z, ~3-5 Modal min:
   conf.py on r-layer main, 'verify 32', 2400-replay series, clocks/power/throttle reasons per phase).
+- Counter-evidence: the judge's SCORED series show no in-run drift (12 logs, median of first vs last third of the 20 runs, ours
+  v32 full 488/492, 513/533, 505/481, ...; SGLang the same mixed signs): whatever slows the tuner confirm does not visibly reach
+  the scored medians -> low priority; the H200 test only says whether energy is a lever at all.
 - NEXT: 00:00Z H200 queue: dev/n24/mk_h200.sh (power/clock), then dev/n15/mk_h200.sh. If the H200 shows SW power cap at T=256
   full: tell the lead (ranking uses medians of reruns: a power-throttled T=256 is a lever for energy cuts, e.g. nanosleep in
   mbarrier spin loops).
