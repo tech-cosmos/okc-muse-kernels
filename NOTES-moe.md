@@ -3976,3 +3976,10 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   > board 2.3198; 2 submits used today -> SUBMIT 8242d5e ONCE AFTER 00:00Z 11-01 (supersedes 2ab9ba1).
 - Looked for a bs1 first-data lever: TLB pre-touch is dead on record (fresh x5 (2): pre-touched pages = plain flush within
   0.1 us). Nothing else built. moe board 10-31: 14 checks, 2 submits.
+
+## o20 (2026-10-31 17:08Z - 17:20Z, session 18): no new lever; 0 judge runs, 0 Modal
+- Lead lines through 16:30Z hold no open moe item (o13-o19 covered bs8/bs16 BAL, MRG2 bs32, IDW, HOT_ET race, HOT_SL/IL).
+- Re-checked the record before building anything: big-M (bs128/256 ~+50/+75 us over bytes) = twm consumer, RS/SS overlap
+  wall (n6s1, n7s47, o9); bs1 fixed cost (o7, o15, fresh x5/x10-x12, CW dead on moe board); lossless bytes dead (codes 4.0 bit,
+  S6 scales). No mechanism outside those lists found in this session.
+- main 515070e: muse_moe_w4a16 identical to 8242d5e; bench.py test 15/15 PASS. Submit 8242d5e once after 00:00Z 11-01.

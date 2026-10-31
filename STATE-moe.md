@@ -1,3 +1,7 @@
+## o20 17:08-17:20Z 10-31 (session 18): no new lever. Re-read record: big-M twm consumer (RS/SS wall, n6s1/n7s47/o9), bs1 fixed
+## cost (o7/o15/fresh x5/x10-x12/CW), lossless bytes (codes 4.0 bit, scales S6 dead) all closed; lead lines up to 16:30Z done.
+## main 515070e moe dir == 8242d5e, bench test 15/15 PASS again. 0 judge runs. STILL QUEUED: SUBMIT 8242d5e ONCE after 00:00Z 11-01.
+## Suggest pausing moe (~/STOP-moe) until the lead names a build that needs moe.
 ## o19 17:40Z 10-31: main 8242d5e = 2ab9ba1 + proj n22 HOT_IL (IL=2: moe_hot claims a >128-token expert's slices rb-major,
 ## 2nd W read of a row block = L2 hit). Bitwise (eager 180/180, replay 120/120), test 15/15. H100 bs256 (seeds 100-123, 3 rounds):
 ## >128 inputs -3.58 us (11/11), others +0.10 (13). Check 8c75ecb3 2.3498x (bs1 3.060x, bs16 2.151, bs32 1.737, bs8 2.253,
