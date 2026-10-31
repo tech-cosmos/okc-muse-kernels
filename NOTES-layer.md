@@ -3386,3 +3386,27 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   leave 3 SMs, and the T=8 tk2f is an 83 us weight stream: its routing prologue is not on the path. proj n14 built the same
   independently (r-proj dev/n14/idf8_layer.patch): tie. Finisher local_start hoist above the wait: tie (proj: overlaps spin).
 - Next item (proj T=8/16/32 hoist handoff): proj n14 says bound ~0, not built: nothing to integrate. 0 judge runs, 0 Modal.
+
+## n16s1 (2026-10-31 14:04-14:20Z): lead 13:58Z 'late' port = nothing maps; smem-base audit clean; n2u pre-wait routing DEAD (and the n7s7 race re-diagnosed). 0 judge runs, 0 Modal.
+- 'late' (fresh x10: slot y32 + norm3, PDL norm, tk2f trigger at gemm2 rows): the layer already has all three at T=1
+  (84204 + n2u SLOT, n2u PDL secondary, TK2F_LATE_TRIG 3) and at T=8 (84204 + nu8 PDL, LATE_TRIG 3 covers every
+  instantiation). No piece to port (fresh x10 says the same). CW (fresh) not handed off yet.
+- Dynamic-smem base audit (follow-up of n15s1's pr8 0x2810 finding): cuobjdump -res-usage of all 147 kernels loaded by a
+  v174 run (16 .so, /tmp/smaud): every kernel's static smem is a 128-B multiple except csl/vtk (22408 / 23184 B), which
+  use only small static arrays (no dynamic smem, no bulk copies into them). nds/nvs/nvscl declare extern __align__(1024).
+  CLEAN, nothing to fix. (Global weight layout was fresh's x5: dead.)
+- n2u pre-wait routing (fresh x8's H200 'n2u base path' oracle -1.84 vs -0.64 us d1 sl suggested ~1.2 us):
+  * Re-ran n7s7's failing form (ids/tw __ldcg before griddepcontrol.wait under IDF, /tmp/n16/b): replay_test d1 seeds 11,7:
+    sl 9/20 + 6/20, full 10/20 + 10/20 FAIL (35/80) = reproduced.
+  * BUT the routing is not stale: timeline d1 sl pr1 ends 44.4, n2u starts 74.8 (n2u launches only when every tk2f CTA hits
+    its gemm2-row trigger, after its griddepcontrol.wait = after the rmsnorm, which waited for pr1). SASS of the failing build:
+    the predicated Y loads (@P LDG.E.128.CONSTANT [y32 + s*0x4000], moe_tk2f's OUTPUT) are hoisted ABOVE ACQBULK once loc[]
+    is known pre-wait (Y is const __restrict__ = .nc). That is the race, in n7s7 too, and in fresh x8's oracle (its gain
+    included the illegal Y prefetch).
+  * Fix (branch layer/n2upre, N2U_PRE): routing before the wait, Y via asm volatile ld.global.v4.f32 (weak: SASS LDG.E.128,
+    all after ACQBULK). N2U_PRE 1 (plain loads; ptxas still sank tw below the wait) and 2 (8 threads LDG -> STS -> BAR.SYNC
+    -> LDS, all pre-wait in SASS): replay_test d1 0/80 each.
+  * H100 ab_files d1 8 rounds (base,v,v,base): v1 sl 83.87 vs 83.71, full 104.11 vs 103.80; v2 sl 84.06 vs 83.70, full
+    104.26 vs 103.97 = TIE (+0.3). The routing trip after the wait is not what costs; the Y trip is, and it must stay behind
+    the wait (or a per-row flag: spins dead on record n7s7/V2). DEAD below the 0.5 us gate. Not merged.
+- main: n2u comment corrected (comment only; submission.py rebuilt, test 13/13). Tools: /tmp/n16/mk.py (variant maker).

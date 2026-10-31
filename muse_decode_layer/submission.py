@@ -16529,9 +16529,10 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
     float twv[8];
     if (SLOT) {
         if (!idf) {  // n7s7 IDF: with an early moe_tk2f, read the routing after griddepcontrol.wait (below); a flag spin
-                     // here (+__ldcg loads) cost ~4 us H100 d1 tail. These plain loads are safe only because ptxas
-                     // sinks them below griddepcontrol.wait: forced pre-wait (__ldcg) they read stale routing
-                     // (replay_test d1 3/10 + 5/10 fails)
+                     // here (+__ldcg loads) cost ~4 us H100 d1 tail. n16s1: the routing itself is complete before n2u
+                     // launches; the n7s7 replay fails with these loads forced pre-wait were ptxas hoisting the .nc Y
+                     // loads (moe_tk2f's output) above griddepcontrol.wait once loc[] is known (SASS). Branch
+                     // layer/n2upre: routing pre-wait + weak Y loads is correct but an H100 tie.
 #pragma unroll
             for (int s = 0; s < 8; ++s) {
                 const int e = ids[s] - start;
