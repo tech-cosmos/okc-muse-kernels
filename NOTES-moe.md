@@ -4191,7 +4191,7 @@ H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-
 - check 5a45c7a7 aa51716 2.3456x (CI 2.310-2.381): bs1 25.4, bs16 88.0, bs32 116.7, bs8 64.0, bs128 192.9, bs256 231.6 us
   (= 8242d5e's 8c75ecb3 2.3498 within noise). Beats board 2.3198: SUBMIT aa51716 ONCE after 00:00Z 11-01. moe checks 15/20 today.
 
-## o26 (session 24, 2026-10-31 18:40Z - 19:30Z): moe-board ROUTING-VARIANCE audit (held-out reruns); H100; 0 judge runs, 0 Modal
+## o26 (session 24, 2026-10-31 18:39Z - 18:45Z sandbox clock): moe-board ROUTING-VARIANCE audit (held-out reruns); H100; 0 judge runs, 0 Modal
 - Why: final ranking = medians of reruns, possibly on other routings; proj n20 found a routing-triggered slow mode in the layer
   (>128-token expert at T=256). Did the moe board submission (aa51716) have one?
 - tools/o26/rv.py <bs> <n>: 40 reference.generate_input seeds (5000-5039) per scored bs, our graph time (cold L2) vs distinct
