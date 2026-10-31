@@ -2982,3 +2982,25 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   base -> how much of it is the pooler W stream vs the skeleton (x32 queue / router item / finisher). Supersedes the n13s1d
   queue line (same base/flat plus two bounds).
 - Tools: dev/n15/st15.py (stamps incl. finisher; zeroes only the trace region), dp_patch.py (DP + persistent part), diffs.
+
+## n16 (2026-10-31 14:02-14:58Z, unattended session 4): lead 13:58Z PROJ BOARD (port layer pieces, check+submit on proj budget)
+- Per-shape gap table (eb166fc0 vs 'bytes(12-bit)/4.3 + 2.5 us' fit, n9s1 model): v16 m128 qkv +6.3 pool +6.8 unp +5.6 router +4.3
+  (load 72.1 vs 47.4); d16/d32 qkv +3.6/+3.9, pool +2.1/+2.4, router m32 +2.0; v32 router +6.0; v1 qkv +2.6 pool +2.3.
+  NB n9s1's 'm16/m32 stale (uncompressed lt)' was wrong: the judge tuner already picks 12-bit g30 at m16/m32 for qkv/pool/unp.
+- H100 router3 bounds (dev/n16/r3b.py + r3v.cu, DEFS R3_NOZERO/R3_NORED): zero kernel costs 0.7-1.2 us at EVERY m
+  (m8 6.91->6.14, m16 6.94->6.27, m32 8.16->7.07, m128 10.50->9.47, m256 13.82->12.61); atomics ~0 at m<=32, ~1 us at m128/256.
+- BUILT (on main): router m128/m256 = ONE strided-batched cuBLAS GEMM over S K-slices (torch.bmm on x.view(m,S,K/S).transpose,
+  router_hl_t.view(S,K/S,512), out_dtype fp32) + pj_rsum (dev/router3.cu tail: out = sum_s ws[s][:, :256] + ws[s][:, 256:]).
+  Replaces torch.mm(stacked) + splitKreduce + torch add (3 kernels -> 2). H100 dev/n16/bmm.py: m256 S4 11.1-11.4 vs 13.5-13.6,
+  m128 S4/S8 10.2-10.3 vs router3 10.4. _tune_router now times cublas / router3 / ("bmm", 4|8) at m128 and m256 (ROUTER_BMM_TUNE);
+  rpick is consulted FIRST in _router. H200 tune: m256 bmm4 12.35-12.67 vs cublas 14.75-14.88; m128 bmm8 11.84-12.06 vs r3 12.38.
+- Dropped lt cfg (66,124,35,1,0,0,0,3) for qkv m256: bimodal on the H200 (tunes 27.26 / 21.15; judge 20.18 vs 17.5-18.3 for ..0,2).
+- Judge: check a93d1734 (52c9490) 1.3640 (router m256 11.38 -> 8.98; qkv m256 +1.9 from the bad cfg); check 8494e76f (e3eedb0)
+  1.3754; SUBMIT dba12fb4 (e3eedb0) 1.3847 [1.364, 1.405] = NEW PROJ BEST (was eb166fc0 1.3574). H200 router m256 9.1-9.5, m128 8.4.
+- DEAD: (a) R3_FA 'first arriver stores, later arrivers wait on its flag then add' (no zero kernel; ticket after the math):
+  H100 +2-3 us at every m (ticket RT + store + fence + flag poll chain, as the s11 round-trip rule says).
+  (b) R3_CL cluster = all S K-splits of a tile, DSMEM sum, plain stores: correct, but S=16 needs NT 32 / 2-4 warps per CTA
+  (config alone +1.8 us) and cluster-16 sync/scheduling +2.2 us more: m16 10.3, m32 10.8 vs 6.9/7.2.
+- Tuner pick noise across 4 judge runs (eb166/a93d/8494/dba1): o m16 picked F.linear once (7.10 vs lt394 6.4-6.75), o m8 None vs
+  lt393 (6.74 vs 6.34-6.56); rest within ~0.3-0.5 us noise. Candidate: pin o m16 lt (66,394,..,7,4) and o m8 lt (66,393,..,3,4) (~0.3-0.5 us).
+- Budget 10-31: proj checks 2/20, scored 1/10. 0 Modal.

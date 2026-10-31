@@ -7,6 +7,7 @@
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
+#include <cooperative_groups.h>
 
 namespace pr3 {
 __device__ __forceinline__ unsigned smem_u32(const void* p) { return (unsigned)__cvta_generic_to_shared(p); }
@@ -111,6 +112,28 @@ __global__ void __launch_bounds__(WM * WN * 32) router(const __nv_bfloat16* __re
             *reinterpret_cast<float2*>(red + row * RS + col) = make_float2(acc[i][j][0], acc[i][j][1]);
             *reinterpret_cast<float2*>(red + (row + 8) * RS + col) = make_float2(acc[i][j][2], acc[i][j][3]);
         }
+#ifdef R3_CL
+    // cluster = all S K-splits of this tile: partials stay in smem, rank q sums float4 slice q over DSMEM, plain stores
+    {
+        namespace cg = cooperative_groups;
+        cg::cluster_group cl = cg::this_cluster();
+        __syncthreads();
+        cl.sync();
+        const int S = gridDim.x, rank = (int)cl.block_rank();
+        constexpr int TOT1 = MT * (NT / 4);
+        for (int i = rank * NTH + t; i < TOT1; i += S * NTH) {
+            const int r = i / (NT / 4), c = (i % (NT / 4)) * 4;
+            float4 a = make_float4(0.f, 0.f, 0.f, 0.f);
+            for (int q = 0; q < S; ++q) {
+                const float4 v = *reinterpret_cast<const float4*>(cl.map_shared_rank(red, q) + r * RS + c);
+                a.x += v.x; a.y += v.y; a.z += v.z; a.w += v.w;
+            }
+            if (m0 + r < m) *reinterpret_cast<float4*>(out + (size_t)(m0 + r) * 256 + n0 + c) = a;
+        }
+        cl.sync();
+        return;
+    }
+#endif
 #ifdef R3_FA
     // first arriver per tile stores its partial; later arrivers wait for its flag, then add (no zero kernel)
     __shared__ unsigned fa_t;
@@ -162,10 +185,15 @@ __global__ void zero(float4* __restrict__ p, int n4) {
 }
 }  // namespace pr3
 
-#if defined(R3_NOZERO) || defined(R3_FA)
+#if defined(R3_NOZERO) || defined(R3_FA) || defined(R3_CL)
 #define NOZERO 1
 #else
 #define NOZERO 0
+#endif
+#ifdef R3_CL
+#define CLX 1
+#else
+#define CLX 0
 #endif
 #define PR3_CASE(MT, NT, WM, WN, KC, NS)                                                                           \
     if (mt == MT && nt == NT && wmn == WM && wnn == WN && kc == KC && ns == NS) {                                  \
@@ -179,10 +207,13 @@ __global__ void zero(float4* __restrict__ p, int n4) {
         lc.blockDim = dim3(WM * WN * 32);                                                                          \
         lc.dynamicSmemBytes = SMEM;                                                                                \
         lc.stream = stream;                                                                                        \
-        cudaLaunchAttribute at[1];                                                                                 \
+        cudaLaunchAttribute at[2];                                                                                 \
         at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;                                             \
         at[0].val.programmaticStreamSerializationAllowed = !NOZERO;                                                      \
-        lc.attrs = at; lc.numAttrs = 1;                                                                            \
+        at[1].id = cudaLaunchAttributeClusterDimension;                                                            \
+        at[1].val.clusterDim.x = CLX ? K / KC : 1; at[1].val.clusterDim.y = 1; at[1].val.clusterDim.z = 1;         \
+        if (CLX) cudaFuncSetAttribute(f, cudaFuncAttributeNonPortableClusterSizeAllowed, 1);                       \
+        lc.attrs = at; lc.numAttrs = 2;                                                                            \
         cudaLaunchKernelEx(&lc, f, reinterpret_cast<const __nv_bfloat16*>(w.data_ptr()),                           \
                            reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), out.data_ptr<float>(), m, K);     \
         return;                                                                                                    \
