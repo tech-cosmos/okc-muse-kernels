@@ -3297,3 +3297,15 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - No lead line since 16:30Z, no new proj Request/Handoff. r-layer main submission.py still e0dd26f (v183): n33's
   `mk_h200.sh --dry` stays valid; run it without --dry after 00:00Z (gate flat <= -1 us v1 sl on the H200).
 - proj n35 (20:47-20:52Z): status only, 0 judge/Modal/GPU; no lead line since 16:30Z; r-layer origin/main submission.py still v183 (e0dd26f): 00:00Z pr8 mk_h200.sh run stays ready (re-dry if layer moves main to v184).
+
+## n36 (2026-10-31 21:03-21:50Z, unattended session 24): d32 (T=32) routing-draw variance audit (n20 NEXT item); 0 judge runs, 0 Modal
+- Layer main v183 (submission.py e0dd26f), H100, tuner off: `route_var.py /tmp/pj36/muse_decode_layer <sub> 1,3,5,7,8,9,12,17,20,2,4,6 6
+  "decode 32"` (12 routers x 6 inputs x d32 sl/full, cold L2, median of 9 replays); log dev/n36/sweep.log, fit dev/n36/an32.py
+  (adds n16 = local experts with > 16 tokens). The GPU was ~95% busy with another agent's work during the run (noise up).
+- d32 sl: 178.0 us mean [147, 240]; us = 88.5 + 7.96 D + 0.41 R, R2 0.91, resid sd 5.5; n16 coef only +2.0 (an early
+  19-row fit said +5.7: small sample). Router-level residual means sd 2.1 us (-4.2..+2.8; ~1%).
+  d32 full: 404.6 [378, 446]; us = 325 + 8.0 D + 0.26 R, R2 0.90; n16 +1.3; router means sd 1.75 (-3.3..+2.5; ~0.4%).
+- Verdict: NO structural slow mode at T=32 (unlike T=256's >128-token expert, n20). Time follows distinct experts (~8 us
+  each, as SGLang's does), so the per-rep ratio stays tight. A 17-32-token expert costs ~1-2 us extra (per-row consumer
+  cost; 16-token segments are dead on record, STATE-moe s10/s12). Nothing to fix; with n20 (T=128/256) and layer n24s1
+  (T=8/16) the routing-variance audit now covers every T. 00:00Z dev/n15/mk_h200.sh (pr8) stays queued.
