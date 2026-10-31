@@ -3596,3 +3596,13 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   replay!=eager 0/360, check fails 0/360 (log tools/n28/il_stress.log). No race/hang in the new slice-interleave claims.
 - Board 17:20Z: we are #214 at 2.172 (board best v174); #1 2.418, #10 2.375.
 - Plan unchanged: first session after 00:00Z 11-01 submits v181 (main) once.
+
+## n29 (session 23, 2026-10-31 17:27-17:50Z real UTC): T=256/128 bnd2 L2-warm oracle DEAD; 0 judge runs, 0 Modal.
+- No lead line after 16:30Z and no new Handoff/Request for layer (fresh x19 H200 A/B: keep all of x14 + MRG 2, already in main).
+- Own-list item from n21s1 (L2-prefetch the second boundary's pre-expert inputs s FP32 8 MB + x1 BF16 4 MB during the
+  compute-bound T=256 unpool, est. ~-3 us H200): oracle tools/n29/bnd_warm.py, standalone _boundary NOS=2, CUPTI kernel
+  times, median of 60, flush 200 MB then touch f only (cold) vs f+s+x1 (warm): T=256 12.86/12.85 cold vs 11.86/11.87 warm
+  (-1.0 us), T=128 6.40 vs 5.76 (-0.6 us). The kernel is not bound by those reads (warm still 11.9 us vs ~4 us of writes):
+  ceiling ~1 us x (0.033+0.011) %/us = 0.04%. Not built. BND_SPLIT at T=256 was already noise (s74).
+- H200 profile of check 84eb0719 (v181): v32 sl hot 123 + twm 197 (concurrent), T=256 GEMMs nvjet 26-35 us each (~17 GFLOP:
+  near compute); d32 sl tk2f 83 of 144 us. Layer-lane list stays empty; v181 submit after 00:00Z 11-01 stands.
