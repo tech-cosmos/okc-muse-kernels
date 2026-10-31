@@ -934,3 +934,58 @@ o has x: 1.8 us); v1 = first loads after entry (1.8) and merge -> store (1.0) + 
   KV_PF at v1 <= 0.3 (layer n46). With the d1 front (CSL_PW T=1) built, nothing on d1/v1 sliding attention clears the 1 us
   gate. Attention lane CLOSED for fresh.
 - Next (after 00:00Z): Modal H200 A/B of CSL_PW T=1 (tools/fresh/x35/mk_h200.sh, ~3-4 GPU-min), then hand off/drop.
+
+## x39 (2026-10-31 23:03Z-): lead 22:55Z WHOLE-LAYER HOP STAMPS at d16 sl and d32 sl (H100, 0 judge, 0 Modal)
+Tool: tools/fresh/x39/lstamp.py (hooks torch load_inline: every CUDA kernel gets an RAII per-warp entry/exit stamp and a
+pre/post stamp around each griddepcontrol.wait; launched Triton kernels get the same per program) + lan.py (per kernel
+instance: first entry, first-arrival-at-wait 'pre', wait release, exit med/max; medians of 30 cold-L2 replays, us from the
+first stamp). Run on v185 (main d837bea5) with TUNE pinned to defaults. g27 (o at T=16) left unstamped: with the guard it
+dies in prepare with 'unspecified launch failure' (intermittent, o 16 / o 32 test; not the address-cache bug I also fixed;
+not explained, compute-sanitizer OOMed beside another agent). Stamped replay 216-224 us vs 215-219 unstamped (d16 sl).
+| d16 sl (pinned) | entry | at wait (min/med) | release (min/med/max) | exit med / max |
+| qkv g24 (132)     | 0.0   | 1.3 / 3.9   | 1.7 / 4.9 / 6.9     | 14.8 / 18.2 |
+| csl PW (512)      | 17.4  | 20.2 / 25.1 | 21.4 / 26.3 / 29.9  | 28.9 / 31.8 |
+| o g27 (unstamped) | CUPTI ends 5.2 us after csl |
+| boundary (64)     | 33.5  | 35.2 / 36.9 | 37.6                | 39.4 / 39.6 |
+| pooler g24 (108)  | 37.4  | 39.7 / 42.1 | 42.8 / 43.6 / 44.9  | 61.2 / 64.1 |
+| router_split (128, side) | 43.9 | - | -                 | 61.8 / 63.4 |
+| routing (16, side)| 48.0  | 52.5        | 63.9                | 66.4 |
+| rmsnorm_gain (16) | 65.3  | -           | -                   | 66.9 |
+| tk2f (132)        | 68.1  | 70.6 / 71.0 | 71.0 / 73.6 / 74.7  | 173.3 / 178.3 |
+| norm2 (16)        | 169.4 | 172.1       | 179.1               | 181.5 |
+| unpool g24 (132)  | 173.3 | 175.1 / 177.7 | 182.3 / 182.4 / 189.5 | 198.1 / 203.1 |
+| boundary 2 (64)   | 196.3 | 198.8       | 203.5               | 205.2 |
+| d32 sl (pinned) | entry | at wait | release | exit med / max |
+| qkv g30n (108)    | 0.0   | 1.6 / 6.1   | 2.0 / 6.7 / 8.0     | 17.0 / 19.8 |
+| nds (48 + 208)    | 1.6 / 16.5 | 5.5 / 17.9 | 20.6 / 20.9 / 23.7 | 28.1 / 31.7 |
+| combine_hb (256)  | 24.1  | 25.3        | 32.5                | 34.4 / 35.1 |
+| o g30n (128)      | 27.2  | 28.8 / 33.1 | 35.8 / 35.8 / 36.3  | 39.2 / 39.7 |
+| boundary (64)     | 34.8 (med 39.6: starved of SMs) | 36.3 / 41.8 | 40.4 / 41.9 / 42.1 | 43.6 / 43.8 |
+| pooler g30k (104) | 41.5  | 43.2 / 44.1 | 46.5 / 46.7 / 48.3  | 66.6 / 69.2 |
+| router_split (side)| 47.2 | -           | -                   | 61.8 / 63.5 |
+| routing (32)      | 51.0  | 53.0        | 64.3                | 67.8 |
+| rmsnorm_gain (32) | 69.9  | -           | -                   | 72.5 |
+| tk2f (132)        | 71.6  | 74.5 / 75.4 | 75.0 / 77.7 / 79.3  | 160.5 / 166.9 |
+| norm2 (32)        | 147.8 | 151.0       | 167.6               | 170.3 |
+| unpool g30n (128) | 155.1 | 157.6 / 166.1 | 171.1 / 171.1 / 175.3 | 187.0 / 190.2 |
+| boundary 2 (64)   | 171.1 / 185.5 | 172.7 / 187.2 | 190.6       | 192.1 / 192.2 |
+Hops >= 0.5 us (producer's last exit -> consumer's first release), H100:
+- PDL release baseline is 0.4-0.8 us (nds 0.8, combine 0.8, o 0.7, bnd 0.7, norm2 0.7-0.8, unpool 0.8, final bnd 0.4,
+  routing 0.5 after router_split).
+- LONG releases, 2.7-3.2 us: boundary -> pooler (d16 3.2, d32 2.7) and qkv -> csl (d16 3.2). Both consumers issue their
+  pre-wait burst (pooler W ring / csl page table + KV gathers) right as the producer ends; the release comes late. Not idle
+  HBM: the burst is streaming then. Bound on record: a FREE first boundary saves only 1.5 (d16) / 1.9 (d32) us (layer n14s3
+  orc_nobnd), which caps any fix of the bnd -> pooler hop below the 1 us build gate after realism. Not built.
+- d32 boundary programs are SM-starved (entry min 34.8, median 39.6): o g30n (128) + the early pooler g30k (104) hold the
+  SMs; its release spread 40.4-42.1 is late arrival, not PDL. Inside the free-boundary bound above.
+- pooler end -> tk2f release: d16 64.1 -> 71.0 (6.9 us), d32 69.2 -> 75.0 (5.8): routing tail (d16 2.5 us of routing
+  after router_split), rmsnorm 1.6 / 2.6 us, tk2f launch (d16 enters 1.2 us after rmsnorm's end; d32 during it), tk2f
+  pre-wait prologue 2.5 / 2.9 us. tk2f can't enter early: its 132 one-per-SM CTAs don't fit beside the pooler's 104-132
+  (entry follows pooler exit in both loads). Every piece is on record (moe o7 free-prologue oracle -0.2..-0.85; layer
+  n12s1/n14s3 rmsnorm/routing; IDF8 tie for the same SM reason). Not built.
+- tk2f CTA end spread: d16 173.3 med -> 178.3 max (5.0 us), d32 160.5 -> 166.9 (6.4): on record (o4 last-wave K-split
+  ~0.8/1.1, o7b dead, SM-weighted split dead n13s2).
+- attention phase: d16 qkv end -> csl end 13.6 us for ~8 MB of page-1 random gathers (csl CTAs reach their wait at
+  median 25.1 = 7.7 us after entry: the gathers before the wait are latency-bound); d32 qkv end -> combine end 15.3 us.
+  Attention lane is closed for fresh (x36); listed for the attention owner.
+=> No hop >= 1 us at d16/d32 sl that is not bounded on record. Nothing built.
