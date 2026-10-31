@@ -1,4 +1,13 @@
 # STATE-fresh (newest first)
+## x25 (2026-10-31 19:07Z-19:15Z): own pick, paper only (0 judge, 0 Modal, 0 GPU). FRESH.md x25. Nothing to build.
+  PDL per-kernel rows can't be compared across teams (x24's "their d32 MoE 85 vs our 95+14" is wrong: moe_fused d32 sl is 86-100
+  vs our tk2f 64.8). Attention-board #1's lead is probably sliding batch-1 latency; in the layer, the free-oracle cap is
+  d1 2.4 / v1 3.3 us (<= 0.6%). Weakest loads d32 1.83-1.93 / v16 1.99-2.06 are already mapped in the record.
+## Next (x26): read Human decisions IN FULL. After 00:00Z (Modal share resets to 20): tools/fresh/x24/mk_h200_attn.sh (~11 min,
+  vjeux vs ours, H200 full shapes) if the lead still wants it; build only on a lead line + >= 5 us at v32 full.
+  Checks 10-31: 3 of 6 used; Modal 10-31 16.8/20.
+## x24 (2026-10-31 ~18:10Z-19:06Z): public OKC repos per shape (FRESH.md x24): no sliding lead anywhere; full d32/v1/v16/v32
+  public code ~3-12 us ahead via vjeux's one-kernel attention (<= 0.2-0.4%); H100 standalone tie. 0 judge, 0 Modal.
 ## x23 (2026-10-31 18:52Z-19:10Z): own pick, COLD CODE after the L2 flush (H100, 0 judge, 0 Modal). FRESH.md x23.
   Twin-state oracle (tools/fresh/x23/codewarm.py: replay an identical twin first so all SASS is in L2, data stays cold):
   d1 sl -1.35, d1 full -0.34, v1 sl / d32 sl +0.7/+0.8 (twin's dirty lines) -> <= ~1.4 us d1 sl, unbuildable (device code
@@ -131,20 +140,4 @@
   flagless oracle HANGS); bound ~1 us v1 (~0.1%): build only if nothing better. d16/d32 routing: closed (not critical).
   (2) tk2f per-CTA routing at entry (~1.5 us d1/v1): precomputed schedule saves only the compute (~0.5): skip.
   Pitfalls: background Bash jobs default to a 10-min limit (use run_in_background + timeout); `pkill -f` matches itself.
-## x5 (2026-10-30 09:04Z-11:30Z): lead 09:10Z ORACLE SWEEP (6 items): ALL DEAD, none >= 1 us on a d-load. 0 judge, 0 Modal.
-- (1) conc5.py: every vector pipe slows next to HGMMA (INT 2.1-2.7x, HMUL2 4.5x; FFMA serializes the HGMMA instead). (2) tlb.py: 0.
-  (3) ptorc.patch + pt_order.py: chain <= ~1 us, KV order <= ~1 us (permute cache WITH the table, else routing changes = fake gains).
-  (4) uniq.py + ncu: DRAM bytes = unique bytes. (5) layout.py: 0. (6) router real FP32. Tools in muse_decode_layer/tools/fresh/sw.
-- Pitfalls: `pgrep -f X` in a wait loop matches the loop's own command line (cost 2 h idle); background jobs default to a
-  10-min limit; the layer agent's ab_flag held the GPU lock ~20 min (flock is not FIFO).
-## Next (x6): paused. Act only on a new lead line naming fresh after 09:10Z; else stop at once.
-## x3 (2026-10-30): rfport Step 1 NOT CONFIRMED (cost per ALU instruction, not per register read); FRESH.md x3.
-## x1 (2026-10-30 07:12Z-07:30Z): lead 07:20Z lane "EXACT new expert-kernel design", session 1. 0 judge, 0 Modal.
-- Merged main v173 (8841e7d) into branch fresh. H100 microbenches tools/fresh/xd/{pipes,conc,conc2,conc3}.py; write-up
-  FRESH.md 'x1'. Pipe rates: LOP3/SHF/PRMT 2 cyc (ALU), IMAD 2 (FMA, co-issues with LOP3), HMUL2 ~1, IMAD.WIDE 4.
-- NEW mechanism: an HGMMA in flight slows ALU work in another WG ~1.3-2.2x (grows with N, same for SS and RS); with scale-d 0
-  (no accumulator read) the slowdown almost vanishes => dq/MMA serialization = FP32 accumulator reads through the RF.
-- Gate (<= 0.80x twm consumer at bs128+bs256) FAILS for all 3 candidates: pipe-balance (1 rotate via IMAD.WIDE) ~0.93x;
-  overlap blocked by acc reads (fixed per MAC; FP16 acc banned); lead's (a) cluster dq / (c) tile shape fail by arithmetic.
-  Posted Results + `fresh -> lead` in COORD. Per the lead's rule: gate fails -> fresh pauses itself.
-## f1s1..f1s20 (2026-10-29/30): trimmed; see git history of this file and FRESH.md (O1, O2, f1s*).
+## x1-x5, f1s1..f1s20 (2026-10-29/30): trimmed; see git history of this file and FRESH.md.

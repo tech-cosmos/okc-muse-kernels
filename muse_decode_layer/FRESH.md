@@ -857,3 +857,16 @@ Per-shape judge medians, top-3 runs each (cmp_profiles.py), Madhavan 10-29 (2.11
 - Value if their full-layer attention were taken over at d32/v1/v16/v32 full: <= ~0.2-0.4% score (full shapes weigh 16 of
   62 per load). FP8 P@V was measured H200 tie in ~/attn s71 (native CUDA) and s22 (ceiling -10 us all-L2); the lead/human
   decide whether copying an Apache-2.0 public kernel is in the spirit (I'd say it is legal and must be credited).
+
+## x25 (2026-10-31 19:07Z-19:15Z): own pick, re-read of the x24 public profiles + the attention board (0 judge, 0 Modal, 0 GPU)
+- Per-kernel judge rows under PDL can't be compared across teams: each row includes its wait for the one before it. Madhavan's
+  one-kernel moe_fused at d32 sl is 86-100 us (9 runs) against our tk2f row of 64.8 (c5419971), so x24's "their d32 MoE 85 vs
+  our 95+14" doesn't hold. Per-load totals (x24) are the only fair comparison, and they show no sliding lead.
+- Attention board (ours 2.596, #1 3.22): each load is 46 sliding + 16 full, so at batch 1 the sliding latency carries the load
+  (d1: 46 x 4.44 = 204 vs 16 x 13.6 = 217; floor 0.1 us). #1's lead there is most likely sliding batch-1/8 latency. In the
+  layer that piece is capped by the record's free oracle (NOTES-layer n5s26: sliding attention free = d1 2.4 / v1 3.3 us H100,
+  every overlap form dead) at <= ~0.6% score even if it cost nothing. Not a lane.
+- Our per-load speedups (checks 84eb0719/55b9da18/0ac4a2f0/9117bd11): d1 2.55-2.61, d16 2.08-2.14, d32 1.83-1.93,
+  v1 2.36-2.38, v16 1.99-2.06, v32 2.17-2.25. The weakest loads (d32, v16) are the ones the record already mapped in full
+  (d32: dense GEMMs free +1.0% ceiling (proj n5s14), experts at stream rate; v16: twm consumer, nvjet T=128).
+=> Nothing to build. Own list still empty.
