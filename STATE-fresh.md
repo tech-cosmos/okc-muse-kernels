@@ -1,4 +1,11 @@
 # STATE-fresh (newest first)
+## x19 (2026-10-31 17:20Z-17:55Z): the planned H200 A/B run early (ledger had room; my share 16.6 of 20 used). 0 judge.
+  v176 vs v177, tuner pinned off: d32 sl -4.3 us, d32 full -3.4 (ABBA, +-0.4), d16 sl tie, d16 full -0.9, v16 full tie.
+  -> x14 (NDS_PW/NVS_PW/GD_PW/CB_HB_TRIG) + MRG 2 all KEEP on the H200 (already in main v177..v181). Not run: v16 sl, v32.
+  Branch fresh = main v181 merged (624c913). tools/fresh/x16/mk_h200b.sh = mk_h200.sh with full output (LOADS='decode 32,...');
+  the old one's `tail -12` kept only the last variant: don't use it.
+## Next (x20): read Human decisions IN FULL. After 00:00Z (Modal share 20): v16 sl + v32 sl/full v176 vs v177 if layer still wants
+  them (low value: x14 only touches nvs there); else own pick. Checks 10-31: 3 of 6 used.
 ## x18 (2026-10-31 16:37Z-17:05Z): lead 16:30Z 'nvs QLO into v178': main v178/v179 do NOT have it -> built the bundle.
   Branch fresh 892bb2a = main v179 (faf3590) merged + x16 nvs QLO (attn_src.py only; main's attn_src unchanged since v177,
   clean merge; build.py reproduces submission.py, 998541 B). bench test 13/13, replay_test verify 0/360 (seeds 11,12,13 x 20).

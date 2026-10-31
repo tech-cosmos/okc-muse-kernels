@@ -736,3 +736,11 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   (fails scale with tokens: v32 256, v16 128, d32 32); nds has free A rows 16-31 but in another warp (needs a cross-warp add).
 - Cheaper GW forms to try if wanted: none obvious (hi+lo = 2 FP8 MMAs = the tensor cost of one FP16 QK^T; K is FP8, so FP16 Q
   would also need K upconverted).
+
+## x19 (2026-10-31 17:20Z-17:55Z): H200 A/B v176 (b051588) vs v177 (51eaeff), Modal, tuner pinned off (TUNE = {} and ...), 0 judge
+- Modal bench.py bench per load, one container per load (absolute times are Modal's, compare within a run only):
+  decode 32 ABBA: sl base 146.10/146.19, cand 142.06/141.68 (-4.3); full base 304.42/304.83, cand 301.22/301.28 (-3.4).
+  decode 16 (1 round): sl 144.66 -> 144.64 (tie); full 218.18 -> 217.30 (-0.9).
+  verify 16 (partial, the first script's tail -12): full 345.76 (base, last round) vs 346.85 (cand) = tie.
+- Verdict: everything v177 added (MRG 2, NDS_PW, CB_HB_TRIG, GD_PW, NVS_PW) is neutral-or-better on the H200; d32 gains match
+  the H100 (-4.6/-3.1). ~ +0.35% score from d32 alone. Modal 16.6 GPU-min (ledger 49/60 on 10-31).
