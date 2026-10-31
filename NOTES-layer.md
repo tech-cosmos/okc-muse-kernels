@@ -3767,7 +3767,7 @@ Status only. No lead/human line since n40. Verified v184 = `git show 70591ea:mus
 (v181 38d0c23 = fa4865e6). okc problems: layer 15/20 checks, 3/10 scored used on 10-31; no new candidate to check, every lever
 in STATE is closed. Plan: first session after 00:00Z 11-01 submits v184 once. 0 judge runs, 0 Modal min.
 
-## n42 (2026-10-31 ~21:05-21:45Z, session 36): pre-submit stress of v184; 0 judge runs, 0 Modal
+## n42 (2026-10-31 ~21:05-21:15Z, session 36): pre-submit stress of v184; 0 judge runs, 0 Modal
 No new lead/human line. Stressed the exact 00:00Z file (`git show 70591ea:muse_decode_layer/submission.py`, sha1 926ce2ec)
 with NEW router seeds 31,37 (H100): tools/replay_test.py 30 inputs x 12 shapes x 2 seeds = 0/720 output fails;
 tools/route_judge.py same = 0/720 routing fails; worst drop-lead 0.0289 (verify 32 full, rs 31) = fp8ref's own 0.0289
