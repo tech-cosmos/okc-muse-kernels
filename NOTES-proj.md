@@ -2953,3 +2953,32 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
     so early tk2f CTAs have no SM until pr8 blocks exit; tk2fx already reads routing pre-wait after pr8 completes.
   * Below layer's 0.7 us gate (lead 12:25Z gave IDF8 to layer; this is my data point + a ready flag patch for them).
 - Lesson: in tl13b-style A/Bs a hung variant stalls inside the lock forever: run with `timeout -s ABRT` + `python -X faulthandler`.
+
+## n15 (2026-10-31 13:31-14:10Z, unattended session 3): no open proj item -> own picks: icache audit + pr8 skeleton (v1); 0 judge runs, 0 Modal
+- ICACHE AUDIT (fresh x9 mechanism: first-run straight-line SASS ~0.8 us/16 KB, worse under a DRAM stream; > ~32 KB thrashes)
+  of proj kernels in layer v174 (cuobjdump of the cached builds): g24 d16/d32 forms 25-41 KB total but the first W load is
+  ~2.3 KB in; g30n/g30k 25-38 KB (TMA kernels, same picture); g13 14 KB (fresh: clean). pr1<2,4,1,4> 46 KB: hot pooler loops
+  4.4 + 3.4 KB, the 33 KB outer loop = role loop incl. the ~18 KB unrolled top-8 (fresh fixed it, layer-neutral). pr8 63 KB:
+  pooler loops 2.0 + 1.7 KB, the 22 KB loop = finisher top-8 (8 warps, WARPSYNC.COLLECTIVE shuffles). => no proj hot loop
+  near the i-cache limit; no lever. CLOSED.
+- pr8 SKELETON (v1, quiet H100 0% util, tl13b same process, R 11, us post-boundary sl/full): base 20.54/20.83, flat 20.99/
+  19.58 (= n13s1d: pr8 at a flat reader on the H100); separate builds: NOW (pooler W re-read from L2) 16.06/17.31, NOW+NOMATH
+  15.58/16.16, NOMATH alone 24.61/25.73 (slower than base: build/scheduling effect, not understood). => with no pooler W
+  from HBM pr8 still takes ~16 us: on the H200 (flat ~12.9 if like pr1's) the skeleton, not bytes, is what limits pr8.
+- Clean per-block stamps (st15.py, PR8_TRACE + finisher stamps; us from pr8's first block; base / NOW):
+  wait returns 0.8 | x32 landed med 9.2 / 9.5 (8.4 us after the wait: queued behind the pre-wait router W 8 MB + PF atoms
+  6 MB) | router stored 12.8 / 12.8 | released 15.1 / 14.6 (~2.3 us of syncthreads + red.release fence under the stream) |
+  pooler loop end med 25.1 (max 26.9) / 22.3 (23.3) | epilogue max 27.6 / 24.1 | finisher: counter seen 20.5 / 17.2 (~4 us
+  after the last release in base), sums +3.1 / +1.7, top-8 +3.8 / +3.9 -> end 27.4 / 22.8. Pooler and finisher chains end
+  together in base.
+- Candidates (dev/n15/pr8_n15.diff defines, all exact; replay_test verify 1 sl/full seeds 11+7: 0/60 each):
+  * TK1 (`#pragma unroll 1` on pr8's top-8 k loop): finisher -0.3..0.8; graph end clean H100 tie (140.3/156.4 vs 140.3/156.3).
+  * RMID 4/8/16 (router item mid-loop; s36 H100 tie) in the NOW proxy: pooler end +1.8/+3.9/+5.3. DEAD again.
+  * DP (no counter/fence: partials st.relaxed.gpu, finisher polls them against a 0xFFFFFFFF sentinel and re-arms; persistent
+    state['pr8_part']): released phase gone but pooler loop end -0.7 med / max tie (NOW tie), finisher still sees the last
+    partial ~4 us after its store; non-trace graph end +3.2 sl / +2.2 full (143.5/158.5). DEAD.
+- QUEUED for 00:00Z (proj Modal share; ~7 GPU-min): `muse_bf16_proj/dev/n15/mk_h200.sh` (regenerates from r-layer main:
+  base + separate flat8, NOW, TK1; `--dry` builds only). Reading: flat <= -1 us -> the v1 lever exists on the H200; NOW vs
+  base -> how much of it is the pooler W stream vs the skeleton (x32 queue / router item / finisher). Supersedes the n13s1d
+  queue line (same base/flat plus two bounds).
+- Tools: dev/n15/st15.py (stamps incl. finisher; zeroes only the trace region), dp_patch.py (DP + persistent part), diffs.
