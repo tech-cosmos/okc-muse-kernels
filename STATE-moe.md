@@ -22,6 +22,7 @@
 - o42 (lead 22:55Z): v1 sl expert-side hop stamps (tools/o42, NOTES o42). Only unclosed hop = nu8 (D) 4.9 us past-wait->end;
   BUILT nu8 'mmq' (compile-time nt MMA, bitwise class = base): H100 v1 sl -0.6..-0.9 / full -0.5..-0.6 us = under the 1 us gate;
   posted as an optional rider for layer (`python tools/o42/stp_patch.py <layer sub> <out> mmq`). Not validated/H200 yet.
+- o43: mmq rider being integrated by layer (r-layer working tree 23:46Z); nothing open for moe.
 - Sessions o20-o41 found no new lever (o22: test PASS on 8242d5e again; o27-o41 status only). Suggested to the lead: ~/STOP-moe until a build needs moe.
 
 ## Board

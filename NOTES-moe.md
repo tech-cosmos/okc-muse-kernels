@@ -4288,3 +4288,7 @@ Status only. No lead line after 21:50Z, no moe request; r-layer since aa51716 ha
   => fast/mmq -0.6..-0.9 us v1 sl, -0.5..-0.6 full; ssq alone noise. BELOW the lead's 1 us build gate.
   files_eq mmq vs base, verify 1 x 3 seeds: output 0 identical; FP32 stream differs exactly as base vs base (atomic order).
 - Not done: validate.py on the variant, H200. Handed to layer as a cheap optional rider only (COORD Handoffs).
+## o43 (2026-10-31 23:46-23:55Z, session 41)
+Status only. No lead line after 22:55Z. The o42 nu8 'mmq' rider is already in r-layer's working tree (uncommitted, layer agent
+integrating): moe did not re-validate it (would duplicate layer's validate/ab). With fresh x39 (d16/d32) + o42 (v1), no
+expert-side hop >= 1 us is left open. Hold aa51716 (moe board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
