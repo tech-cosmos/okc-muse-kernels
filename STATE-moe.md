@@ -1,5 +1,9 @@
-## NEXT (12:15Z 10-31): no moe item >= gate left (o1-o4, o7, o7b closed by oracle). Open lever = moe/slack (a9242fb, OFF,
-## H100 net -3.9/-10.5 v16, -2.1/-2.2 v32 us) once the organizers rule; its remaining overhead +6..7 us (fuse into _routing).
+## NEXT (13:45Z 10-31): o9 closed (gate fails); no moe item >= gate. Lead: name the next one. Slack: PARKED-READY (moe/slack a9242fb;
+## o8 cluster kernel tools/o8/s3.cu, bitwise, untimed, ~2-3 us of the 6-7 us overhead if approved).
+## o9 13:40Z 10-31: lead 12:25Z TWM NON-DQ OVERHEAD: GATE FAILS (tools/o9, real tw_item harness, H100). 269 instr/stage RT4 N32 =
+## dq 192 + 16 HGMMA + 8 WG + ~19 uniform + ~34 vector. Exact hoist (empty-barrier address, -4 instr) tie; whole ring protocol free
+## (illegal) 0.945x RT4 N32 / 0.970x RT2 N64; + scales free 0.924/0.913; half the full waits tie. 0 judge runs, 0 Modal.
+## o8 12:45Z 10-31: slack cluster kernel built (bitwise = o6 on 270 cases), stopped untimed per lead 12:25Z. NOTES o8.
 ## o7b 12:12Z: layer's request tk2f LAST-WAVE K-SPLIT: DEAD at d16 (oracle: removing the row tail saves less than its bytes).
 ## o7 12:05Z 10-31: lead 11:25Z tk2f FIXED COST: GATE FAILS. Free-prologue+split oracle (plan of the same input in one trip)
 ## H100 in-layer: v1 +0.0/+0.5, d16 -0.2/-0.7, d32 -0.7/-0.9 us; the prologue is one ~1.3 us dependent trip (TLB+L2), its compute

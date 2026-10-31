@@ -3775,3 +3775,31 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   worth <= 0: when the q+1 CTAs run their last row the rest are done and the stragglers get the freed bandwidth (as layer
   n13s2 / moe o2 found for static splits). A K-split (half of the tail) has nothing to win. d32 (GS16 weighted split)
   not measured; same mechanism.
+
+## o8 (2026-10-31 12:15Z - ~12:45Z): moe/slack kernel as one thread-block cluster; STOPPED (lead 12:25Z: no more slack work, read late); 0 judge runs, 0 Modal
+- Started because every non-slack moe item was closed (o1-o7b); the lead's 12:25Z line (slack PARKED-READY, new item twm
+  non-dq overhead) landed while this ran and I saw it at ~12:45Z -> stopped, nothing committed to moe/slack.
+- Stamps of the o6 kernel (tools/o8/st.cu + kts.py, standalone graph, H100, us from CTA 0 entry): v32 phase A done 1.8 |
+  ticket 2.9 | mask reload 3.9 | greedy B 4.4 | B2 4.5 | C list 4.9 | C pick (1 changed token) 7.6 (token_keys reload trip
+  1.1 + ~1.4 compute) | end 7.9. v16 (no change): end 4.7. => ticket + mask reload ~1.7 us, C reload ~1.1 us.
+- Built tools/o8/s3.cu: one cluster of min(8, T) CTAs x ceil(T / CN) warps (one token per warp), masks to the leader CTA by
+  DSMEM, leader runs B/B2 + unchanged-route counts, every warp re-picks its own token from the keys it still holds (no
+  reload), new routes/experts by DSMEM atomics, 5 cluster barriers. Bitwise = o6 kernel on 270 cases (6 loads x 5 seeds x
+  ks 1/2/8 x 3 margin sets, 318 re-routed tokens; tools/o8/cmp.py). PITFALL: split barrier.cluster.arrive.relaxed/wait at
+  entry/exit gave intermittent 'unspecified launch failure' (clean under compute-sanitizer); full arrive.release +
+  wait.acquire pairs fixed it. NOT timed (GPU lock held by another agent's stuck run), not on any branch.
+- If slack is approved: s3.cu should save ~2-3 us of the ~6-7 us overhead at v16/v32 (ticket + mask trip + C reload);
+  time it with /tmp/slack/o6/kt/kt.py <file> and the o6 in-layer A/B before using it.
+
+## o9 (2026-10-31 12:50Z - ~13:40Z): lead 12:25Z TWM NON-DQ OVERHEAD: GATE FAILS by oracle; 0 judge runs, 0 Modal
+- Tool tools/o9/ovr.py: the REAL tw_item (string-extracted from r-layer moe_src.py v174, twm config) in a 1-CTA harness with a
+  data-free mbarrier producer; variants by -DOVRV; table + SASS breakdown in tools/o9/RESULTS.txt, loop SASS loop_rt4n32_sass.txt.
+- SASS RT4 N32: 269 instr/stage (o1's 284 was the full kernel's count) = dq core 192 + 16 HGMMA + 8 WARPGROUP + ~19 uniform +
+  ~34 vector (LDS 5, scale decode 8, empty-barrier address 5 recomputed per stage, SYNCS 2, loop/phase ~9, stage pointer 3).
+- Exact hoist of the empty-barrier address (V8; needs a volatile mov or ptxas rematerializes it: plain hoist = same 269): -4
+  instr, cyc/stage 0.99-1.01x = tie. Oracles: whole ring protocol free 0.945x RT4 N32 / 0.970x RT2 N64 (0.85-0.94 on the rare
+  small-N / RT2 N32 items); + scale decode free 0.924 / 0.913. Nothing exact gets near 0.94x on the dominant v16/v32 shapes.
+- Coarser ring sync oracle (V16: full waits on even stages only, arrives kept): 0.98-1.03x = tie. Item CLOSED.
+- Harness pitfalls: (1) a literal gsc let ptxas fold the TWM_ORC 16 runtime skip and drop acc (228 cyc/stage for every N) -> pass
+  gsc as a kernel arg; (2) a data-free producer must arrive ONCE per stage before the first consumer wait (2 arrivals -> the
+  parity-0 wait waits for phase 2 = hang; my sweep held /tmp/okc-gpu.lock ~10 min hung before I killed it). Smoke-test unlocked first.
