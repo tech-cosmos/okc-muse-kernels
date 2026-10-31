@@ -3152,3 +3152,24 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - validate --quick --skip=prep on /tmp/n22/il2.py: ALL OK (13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240, route
   0/240 worst gap 0.0256, fuzz 0/58). Handoff to layer (sub-gate bundle) + moe (moe board bs256 has the same HOT_SL moe_hot).
   0 judge runs. NEXT: layer takes HOT_IL into the next bundle; 00:00Z H200 queue dev/n15/mk_h200.sh stands.
+
+## n23 (2026-10-31 16:53Z-, unattended session 11): HOT_IL re-measured on layer main v180 (+ SLW test)
+- v180 (30d3612) already carries HOT_SL + n21 balanced slices + fast path; only n22 HOT_IL is missing. `IL=2 python
+  dev/n22/mk_il.py <v180 submission.py> out.py` applies cleanly (999304 B, cap 1e6: 696 B left).
+- H100 dev/n22/ab_multi.py v32 sl/full, routers 17,12,5 (a >128-token expert) + 3 (none) x 4 inputs, tuner off, base v180,
+  A/A copy (dev/n23/ab_v180il.log): IL full -2.69 (A/A -0.59) -> ~-2.1 us; sl -0.78 (A/A +0.22) -> ~-1.0 us; router 3
+  (no >128) tie. bitwise 32/32.
+- SLW (moe o18: hot working CTAs = 132*16s/(16s+5*others) when slices exist) on v180+IL (dev/n23/ab_slw.log, same
+  routers/inputs, base v180+IL, A/A copy): full +0.20 (A/A -0.46), sl -0.49 (A/A -0.17): TIE in the layer -> dead here
+  (consistent with n22's HOT256 sweep: 32/16/64 already fits the layer's expert mix; moe's win was vs its board's own per).
+- validate --quick --skip=prep on /tmp/n23/v180il.py (v180 + IL=2): ALL OK: test 13/13, scored 0/12, opt 0/40, tk2f 0/300,
+  replay 0/240, route 0/240 (worst gap 0.0256 drop-lead 0.0172), fuzz 0/58.
+- Handoff files: dev/n23/il2_on_v180_moe_src.diff (git apply --check OK on main 64f3bf7 muse_decode_layer/moe_src.py),
+  dev/n23/il2_on_v180_submission.diff (diff of the built file). mk_il.py IL=2 also applies cleanly to the moe board's
+  submission (moe o18 2ab9ba1, with SLW).
+- MOE BOARD IL (dev/n23/il2_moe_board.diff on r-moe 2ab9ba1 = o18 HOT_SL+SLW): dev/n21/stress.py bitwise eager 180/180 (65
+  with a >128 expert) + replay bs256 60/60, bs257 60/60. ab_moe.py bs256 seeds 100-123 x 4 rounds (mb_ab.log): >128 inputs
+  -3.43 us (n=11, 10 faster, seed 115 -7.7), <=128 +0.36 (n=13); A/A (mb_aa.log, seeds 100-111): +0.06 / +0.00, per seed
+  +-0.4 -> ~-1.1 us mean per bs256 input (37% have a >128 expert). Handoff to moe. 0 judge runs this session.
+- NEXT: layer takes IL into v181 (after v180's post-00:00Z submit); moe takes il2_moe_board.diff into its next moe-board
+  check. Proj standing: 00:00Z H200 queue dev/n15/mk_h200.sh.
