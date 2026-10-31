@@ -3540,3 +3540,27 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - NOT submitted: lead 15:25Z = no more layer submits on 10-31. QUEUED for the first session after 00:00Z 11-01: submit v178
   (161c986) once. It beats the board best raw (CLAUDE.md rule) and meets the 09:28Z rule (within 1% of the 2.1913 bar + per-shape
   profile evidence on its target shape); fixed-SGLang 2.1874 is 0.2% under the lead's fixed bar = noise. If the lead objects, hold.
+- v179 (faf3590) = v178 + proj n21 balanced HOT_SL slices (r-proj dev/n21/bal_on_hotsl_moe_src.diff via git apply; ns slices of
+  ceil(nt/ns) rows rounded to 16; ballot fast path when no expert > 128). submission.py 999109 B (cap ~1 MB: ~0.9 KB left!).
+  validate ALL OK (cold prep 63.6 s). H100 ab_route v178 A vs v179 B, verify 32: dominant routers 5/12/17 x 3 inputs sl
+  -2.2/-8.9/-0.2, +0.5/-3.4/-2.8, -2.5/+0.5/-3.2 | full -0.5/-1.9/-2.5, -4.3/-4.3/-0.8, -3.7/-2.5/-3.5; control routers 1/2/3
+  (max expert <= 121) mean sl +0.4 / full -0.8; A/A v178 vs v178 on 1/3: per-input +-3, mean -1.2/-0.7 = noise. bitwise all.
+- CHECK 36474b5e v179 **2.1634** (fixed-SGLang 2.1450): slow node on UNTOUCHED shapes (v1 sl 116.8 vs 107.9, d32 sl 156.8 vs
+  148.9, d1 sl 65.7 vs 64.1); v32 sl/full 317.7/498.5 ~ v178 (hot 133 + twm 190 us in the v32 profile). Not a v179 regression.
+- SUBMIT PLAN after 00:00Z 11-01: submit **v178** = `git show 161c986:muse_decode_layer/submission.py > /tmp/sub_v178.py;
+  okc submit /tmp/sub_v178.py --json` (its check 9117bd11 2.1886 beats board 2.1717; v179's own check does not). v179 stays
+  on main; give it one check after 00:00Z and submit it too if that check beats the board (it's new code, not a resubmit).
+
+## n26s1 (10-31 16:40-17:10Z): v180 = v179 + moe o17 HOT_ET race fix + fresh x18 nvs QLO; check 55b9da18
+- v180 (30d3612): layer.py += moe e24be08 (moe_routegathern CTA 0 `meta[67] = 0; __threadfence();` before its PDL trigger,
+  both RG_XPRE branches: the T=128/256 HOT_ET stale-flag race on main since v171, demonstrated by moe o17 with a widened
+  window); attn_src.py = r-fresh da0d17d (x16 two-term E4M3 queries in nvs = v16/v32 sliding routing-fail insurance).
+  submission.py 999018 B (cap 1 MB: ~1 KB left). validate ALL OK: 13/13, scored 0/24, opt 0/40, tk2f 0/1200, replay 0/480,
+  route 0/240 (worst gap 0.0256, drop-lead 0.0172), fuzz 0/188, cold prep 66.7 s.
+- CHECK 55b9da18 **2.1977 raw** [2.165, 2.231] = best raw on record (board 2.1717); fixed-SGLang 2.1629 (< lead bar 2.1913).
+  us sl/full: d1 66.0/73.1, d16 130.1/200.7, d32 157.8/294.3, v1 103.8/122.4, v16 267.4/356.2, v32 325.0/498.2. Node mix:
+  v16 sl +14.6 / d32 sl +8.9 us vs v178's check (nvs QLO expected +0.2-0.4 only; d32 untouched) while v1 sl -4.1, d32 full -5.6.
+  v32 profiles: hot 137/140 + twm 195/189 us (HOT_SL slices active).
+- Not submitted (10-31 layer submit cap used). SUBMIT RECOMMENDATION after 00:00Z: v180 instead of v178 (v178 carries the
+  HOT_ET race; v180 = v178 + bitwise/near-free changes; v180's own check raw 2.1977 beats the board, the CLAUDE.md rule).
+  Re-checking unchanged v180 gives 'duplicate' (content dedupe), so no further check of the same file is possible.

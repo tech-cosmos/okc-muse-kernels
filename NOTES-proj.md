@@ -3131,3 +3131,24 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   (13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240, route 0/240 worst gap 0.0256, fuzz 0/58).
 - NEXT: layer merges balanced slices into v178/v179 before its post-00:00Z check; moe takes hotsl_moe_board.diff for the moe
   board (its own check). Proj standing: 00:00Z H200 queue dev/n15/mk_h200.sh.
+
+## n22 (2026-10-31 16:35Z-, unattended session 10): T=256 moe_hot after HOT_SL: CTA balance (dead) + slice interleave HOT_IL
+- Lead lines had no new proj item; took the judge v178 v32 profile (moe_hot 133 beside moe_twm 193 us) as the question:
+  is moe_hot's CTA count (HOT256 = base 32, 16 per hot slice, cap 64) leaving SMs idle? Tool dev/n22/ab_multi.py = n20
+  ab_route with N variants interleaved (base = /tmp/n21keep/v178bal.py = v178 + balanced slices, tuner off).
+  NOTE: bench.SCORED names are 'verify 32' / 'decode 16', and paths must be absolute (the script chdirs).
+- HOT256 sweep (dev/n22/sweep1.log, routers 5,12,17 x 3 inputs, v32 sl/full, deltas vs 3216064): 1608064 +17..96 us,
+  2412064 -1..+22, 3224096 (24/slice, cap 96) +4..+19, 4816064 (base 48) -3..+6 (tie), 3208064 -2..+44. DEAD: the current
+  setting is the optimum; fewer hot CTAs make moe_hot the critical path.
+- HOT_IL (dev/n22/mk_il.py): the ns slices of a >128-token expert each read the expert's full W (dequant per item); items
+  were claimed slice-major (nrb items apart, W loaded evict_first) -> claim rb-major / slice-minor so the 2nd W read of a
+  row block follows the first (L2). Same items, same math: bitwise. Plain version (divides in every item decode):
+  dominant routers 0..-4 us but control router 3 +1.8 (7/8; dev/n22/il1.log). Gated IL=2 (smem s_g0 slice-group start,
+  old decode when ns == 1): dev/n22/il2.log, v32 x routers 17,12 (dominant), 3,1 (no >128) x 4 inputs, with an A/A copy:
+  A/A noise +-2-3 us/row (r17 full A/A -1.3..-5.0!). il2 vs A/A copy: r17 sl -3.2 / full -1.8, r12 sl -2.5 / full -2.9,
+  r1 sl +1.7 / full -1.7, r3 sl -0.5 / full -3.0; vs base, dominant rows 16/16 faster (mean -3.3), bitwise 64/64.
+  => ~-2.5 us on v32 inputs with a >128-token expert (~0.7% of those), tie otherwise: SUB-GATE item for the layer bundle.
+  Diff dev/n22/il2_on_bal_moe_src.diff (on n21 bal moe_src); mk_il.py with IL=2 also applies to r-layer's WIP moe_src.py.
+- validate --quick --skip=prep on /tmp/n22/il2.py: ALL OK (13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240, route
+  0/240 worst gap 0.0256, fuzz 0/58). Handoff to layer (sub-gate bundle) + moe (moe board bs256 has the same HOT_SL moe_hot).
+  0 judge runs. NEXT: layer takes HOT_IL into the next bundle; 00:00Z H200 queue dev/n15/mk_h200.sh stands.

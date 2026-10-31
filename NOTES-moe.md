@@ -3935,3 +3935,33 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
 - Moe board HOT_ET (fixed form, /tmp/o17/etfix; race.py 0/400 bs128, 0/200 bs256, 0/100 bs256 with the delay): H100
   tools/o11/ab.py 8 seeds x 4 rounds: bs128 -0.12, bs256 -0.07 us = TIE (seed spread +-3) -> NOT ported. Moe main stays
   34dd790. Tools: tools/o17/mk.py (variant writer: fix, delay), printf_poll.py (eager poll printf driver). 0 judge runs.
+
+## o18 (2026-10-31 16:27Z - 16:57Z): proj n21 HOT_SL onto the moe board bs256 + SLW (slice-aware moe_hot CTA count)
+- Applied r-proj dev/n21/hotsl_moe_board.diff (balanced >128-token slices in moe_hot, twm skips every >64 expert) on
+  34dd790. Test 15/15, proj stress.py vs 34dd790: eager 180/180 bitwise, replay bs256/257 120/120.
+- H100 ab_moe.py (seeds 100-115, 3 rounds): >128 inputs -2.7 mean BUT seed 115 [256,192 + 26 others] +11.5 us
+  (reproduced 6 rounds). Cause: hotdyn HOT_M[256] = base 32, per 16, grid 64 -> 4 slices = 64 hot CTAs; moe_twm's 26
+  other experts get only 68 SMs. Fixed-cap sweep vs plain HOT_SL (seeds 109,112,115,124,121 + 10 seeds with >= 4 slices):
+  cap 32 cliff (+55 on 112), 40 best when many others (115 -14) but +40/+30 on 449/462 (16-17 others), 48 robust
+  (mean -2.6, worst +6.3), 56 -5..-6 on 112/115. Best cap tracks the twm expert count.
+- SLW (#define SLW 1): in moe_hot's slice path only (bm != 0), working CTAs = max(32, 132*16s/(16s + 5*others)),
+  s = slices, others = nact - hot experts (slice ~3.2 x a <= 64-token twm expert). Fast path (no >128 expert) unchanged;
+  bs128 can't take the slice path. vs plain HOT_SL on the 14 slice-heavy seeds: mean -4.3, 12/14 faster, worst +0.8
+  (124, noise level); 112 -10.8, 115 -10.9. vs 34dd790 (seeds 100-115): >128 inputs -5.6 us (8), <=128 +0.1 (8).
+  Bitwise vs 34dd790 (stress 180/180 + 120/120), test 15/15. Commit 2ab9ba1.
+- Check db1cf043 2.3494x (bs1 26.6, bs16 87.9, bs32 117.1, bs8 66.8, bs128 196.6, bs256 225.7; bs256 was 228.4-230.9 in
+  the last 4 checks). > board 2.3198, but 2 submits used 10-31: SUBMIT 2ab9ba1 ONCE AFTER 00:00Z 11-01 (supersedes 34dd790).
+- Fast-path base 0 at bs256 (HOT_M 16064: 1 hot expert -> 16 CTAs instead of 32): H100 -1.65 us on 16 one-hot inputs
+  (12/16). H200 DIAG 50c32442 (/tmp copy with a runtime SLW-off bit: grid + 2e8; 48 seeds 500-547, 6 interleaved
+  graphs): new / b32 / plain HOT_SL = 227.2 / 227.4 / 227.1 us = tie in every class (fast nh1 new-b32 -0.06, n=20;
+  noise between identical paths 0.3-0.5); only 1 seed of 48 had >= 4 slices (SLW's case; ~2.5% of bs256 inputs).
+  -> base 0 reverted, main stays 2ab9ba1. Its own timed run 2.3453x.
+- SLW in the LAYER (copy of r-layer main v179 submission.py, 4 string edits; proj's dev/n20/ab_route.py, routers
+  5,12,17,20,7 x 4 inputs verify 32): sl -0.05 / full +0.15 us = TIE (real routers: one dominant 130-190-token
+  expert -> 2-3 slices, SLW count ~ the old rule). No handoff.
+- H200 DIAG2 e93ab795 (tools/o18/diag2.diff on 2ab9ba1: runtime 'old hot' switch = moe_hot h nt <= 128 via grid + 2e8,
+  twm skip back to 65..128 via moe_set_hot bit 64; 40 bs256 inputs with a >128-token expert + 8 controls, seeds 500-597,
+  2 interleaved pairs x 30 cold replays): old 236.98/236.90 -> new 225.51/225.38 us; >128 inputs -13.86 us (40/40,
+  -6.1..-20.4), controls +0.38 (7/8 slightly slower: the extra ballot/smem slice table), maxdiff 0. H100 same DIAG: -7.0
+  mean. => bs256 ~-5 us mean on the H200 (~2% of that shape, ~0.35% moe geomean). Its own timed run 2.3576x.
+- moe board 10-31: 13 checks, 2 submits. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 2ab9ba1 ONCE.

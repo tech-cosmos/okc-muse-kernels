@@ -1,3 +1,9 @@
+## o18 16:57Z 10-31: main 2ab9ba1 = 34dd790 + proj n21 HOT_SL (balanced >128-token expert slices in moe_hot) + SLW
+## (slice path: hot working CTAs = max(32, 132*16s/(16s+5*others)); fixes H100 seed-115 +11.5 us mode). Bitwise, test 15/15.
+## Check db1cf043 2.3494x (bs256 225.7). H200 DIAG2 e93ab795 (old hot vs new, 40 >128-token + 8 control bs256 inputs,
+## tools/o18/diag2): -13.9 us 40/40, controls +0.4 -> bs256 ~-5 us mean. H200 DIAG 50c32442: SLW / base-0 = tie (1 >=4-slice
+## seed of 48) -> base 0 reverted. SLW in the layer v32 = tie (real routers: 2-3 slices) -> no handoff.
+## NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 2ab9ba1 ONCE (supersedes 34dd790). moe board 10-31: 13 checks, 2 submits used.
 ## o17 16:25Z 10-31: HOT_ET RACE in layer main (v171+) DEMONSTRATED + FIXED: branch moe/hotet-race e24be08 (moe_routegathern
 ## zeroes meta[67] + fence BEFORE its PDL trigger; forced window: main hangs / illegal instr, fix 0 fails; H100 tie). Request to
 ## layer (v178) + lead (withdraw call) in COORD. Moe-board HOT_ET (fixed) = tie -> not ported. main 34dd790 unchanged.
@@ -137,62 +143,7 @@
 - => the transition is not HBM idle; tk2f d1/v1 = DRAM latency prologue + bytes at ~4.1-4.2 TB/s. Diff: tools/n7s23/wave_xpf_dead.diff.
 - Nothing queued in the moe lane. Asked the lead for a lane (COORD Results n7s23). Budget 10-29: moe checks 9/20, 0 Modal.
 
-## WAS-n7s22 (2026-10-29): lead 07:40Z d1/v1 tk2f fixed-cost breakdown = DONE on the H200 (DIAG 81391142)
-- d1 E2: kernel span 18.7 vs 13.9 us ideal stream: prologue to first weight request 2.3 (largest) | first-data latency 1.5 |
-  transition 1.5 (ring refills, publish 0.5) | tail 0.3; standalone norm2 gap 1.0 + 2.6-3.0. Full table NOTES n7s22.
-- TK2F_IDH 1 (ids load before the slut copy) on main 0006dff: bitwise, test 15/15, H100 + H200 = tie. Not for the layer.
-- Next candidate: lean T<=4 routing (one warp, one barrier): bound 0.5-0.8 us d1 only. Tools: tools/n7s22/mktl.py, mkdiag.py.
-- Budget 10-29: moe checks 7/20, Modal moe share used up.
-
-## WAS-n7s21 ( 2026-10-29 08:15Z): lead 07:05Z build order (T=256 unpool zero-local-token skip) -> gate built, H200 says DEAD
-- Custom variable-N swap-AB wgmma GEMM (tools/n7s21/ug.py, (1,2) cluster W multicast, stmatrix.trans epilogue, exact) on the
-  H200 (moe DIAG check 477afcc8): cuBLAS 28.03 | ug NT128 29.22 | NT112 27.81 | NT104 27.33 | NT96 26.78 us. v32 kept 201-212 ->
-  NT 104/112 = -0.2..-0.7 us per v32 layer before compaction costs -> ~0. The T=256 unpool is L2->SM bound, not tensor-bound.
-  Nothing ported to layer.py/moe_src.py. ptxas C7514 / release.cluster / 2x2-cluster pitfalls: NOTES n7s21 (reusable).
-- Budget 10-29: moe checks 6/20, layer 2 checks + 2 submits, Modal 46.4/60 (moe's 30 used up).
-
-## WAS-n7s13 (2026-10-29 ~05:00Z): lead 04:25Z items done; waiting on a new lane (COORD Requests n7s13)
-- Layer submit 725fc518 of moe/layer-twm 8309328 = 2.1350x (board stays 2.158, #50). Merged into main 9d2b3a8: layer main =
-  v163 + twm EPI/KSC2/REL + TK2F_REL 2 (bench test 13/13). Don't check/submit that code again unchanged.
-- R1 gate on LAYER v16/v32 routings (H200 Modal, tools/n7s13/tlb_layer.py): v16 idle 12.7-19.6 %, v32 ~8-20 % (moe_hot SMs
-  counted busy) -> FAIL, R1 not built. Remaining items (twm N16 epilogue, moe_hot REL) ~1-2 us/call: below the 4 us bundle bar.
-- Budget 10-29: layer 2 checks + 2 submits used, moe 5 checks, Modal 13.6/60.
-
-## WAS-n7s1 (n7s1 end, 2026-10-29 ~02:00Z): main = b39e4d2 kernels (unchanged); layer branch moe/layer-twm 8309328 (lead's call)
-- n7s1: REDESIGN R1 gate run on the H200 (Modal, board bs128/bs256 inputs, tools/n7s1/tlb.py): twm SM-idle 8-16 %
-  (drain 10-26 us, ramp ~4, gaps ~0.6) < the 20 % gate -> R1 NOT built (net <= ~5-8 us after split tax). R2 ceiling
-  <= ~1 us by n5s28's TK2FN result -> not built. Every moe-lane item >= 5 us/call is measured dead (NOTES n7s1 list).
-  Lane request posted (COORD Requests n7s1). Budget 10-29: moe checks 5/20, layer 1, submits 0, Modal 11.4/60.
-
-## WAS-n6s6 (n6s6 end, 2026-10-29 ~01:40Z): main b39e4d2 (= 7d2a079 kernels; TK2F_REL 0); layer branch moe/layer-twm 8309328
-- n6s6 TK2F_REL (tk2f/tk2h gemm13 publishes by a helper warp; tools/n6s6/patch_rel.py ports it to any copy): judge DIAG
-  8c5f1376: tk2h (layer T=32) d32 -0.75 us every seed; tk2f 1-group paths d1/v1 +0.25..0.3, d16 tie. moe default 0; layer
-  branch has TK2F_REL 2 (tk2h only), validate ALL OK. ~0.1% layer score: not worth a check on its own.
-- Layer branch moe/layer-twm = v163 + twm EPI/KSC2/REL (check 74dcb2bb 2.1569x vs board 2.1580, v16 -6.6/-6.8 us) + TK2F_REL 2.
-  Waiting on the lead (COORD Results n6s5): submit under the 09:28Z rule / merge into layer main? We are #49 overall, #50/#51
-  at 2.158/2.157: one noise draw away from dropping out of the top 50.
-- tk2f release lever: CLOSED (n6s6). Remaining moe items each <= ~2 us/call: (1) twm N16 gemm13 epilogue 2.2-3.8 us/item
-  (N24 duplicated gated body, store drain); (2) moe_hot REL. Tools new: tools/n6s6/ab_dec.py (paired H100 decode A/B,
-  bitwise), mkdiag_trel.py (decode-only DIAG, 2 libs: judge prepare 225 s), sass_tk2f.py, rundiag.py.
-- GIT: worktree /tmp/n6s5/wt is on moe/layer-twm (upstream set to origin/moe/layer-twm in n6s6; before that `git pull
-  --rebase` there rebased onto main: never pull in it without checking upstream).
-
-## WAS-n6s4 (n6s4 end, 2026-10-29 ~01:00Z): main 7d2a079 = TWM_KSC_DUAL 1 + TWM_REL 1 (bitwise, 15/15), H200-verified small wins
-- Judge H200 DIAGs on layer routings: dual (twm without K-split code for calls with no split) v16 -1.9 / v32 tie; REL
-  (helper warp 9 releases gemm13+gemm2 items) v16 -0.5 / v32 -1.4 us per call, every seed. Modal board: bs128 -1.7, bs256 -2.5.
-  Plain check a4054bf3 2.2790x = tie with board 2.2792x (decode drew slow) -> not submitted. Handoff posted for the layer.
-- H200 twm timeline (a18cfaed): epilogue 6-11 us per CTA per call (was 9-14), gemm13 N8 item end 1.4-2.2 us, N16 2.2-3.8.
-- LAYOUT RULE: after ANY twm/tk2f code change run `python tools/n5s17/loop64k.py <k.o> 'moe_twm|moe_hot'` (sass.py builds
-  k.o under /tmp/n6s4/sass_<hash>): an MMA loop across 64 KB = +4..12% (n5s17). NM (one tw_item per RT) DEAD.
-- DIAG copies: tools/n6s4/mkdiag_ksc.py / mkdiag_rel.py pattern (plain library, big-M routings only: prepare ~216 s).
-  NEVER run 2+ DIAG checks at once (34547d56 hit 323 s > 300 s cap while 3 compiled concurrently).
-- NEXT (ranked): (1) tk2f release analog (bar.sync 2 + thread-0 fence at each segment end stalls the next row's bar.sync 1;
-  no idle warp in tk2f: defer the non-final publishes / merge into the CTA-end publish when !BAL), H200 DIAG on d1/d16/d32/v1;
-  (2) remaining twm epilogue (N16 gemm13 2.2-3.8 us/item: N24's duplicated gated body, store drain); (3) moe_hot same REL.
-- Board stays 2.2792x (aeba42c5). Checks used 10-29 (after n6s6): moe 5 of 20 (4 DIAG + 1 plain), layer 1; submits 0. Modal 9/60 min.
-- Tools: tools/n6s3/ab2.py A.py B.py (paired H100 A/B, board bs128/256 + layer v16/v32, max|A-B|); tools/n6s4/sass.py <file>;
-  /tmp/n6s4/rundiag.py <diag copy> (local run of a DIAG prepare). The judge REJECTS `import reference`.
-
+## (WAS-n7s22 .. WAS-n6s4 blocks of 10-29 trimmed in o18; see NOTES-moe.md)
 ## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
 Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
 first; layer owns the full kernels (_gd_full d16/d32, _gw_verify v16/v32): don't work on those. Winners -> COORD Handoffs

@@ -1,0 +1,139 @@
+--- submission.py	2026-10-31 16:49:46.232197905 +0000
++++ /tmp/o18/diag2/submission.py	2026-10-31 16:50:21.639171898 +0000
+@@ -2821,7 +2821,7 @@
+     const int e = tid < nact ? meta[1 + sl] : 0;
+     s_e[tid] = e;
+     int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0;
+-    if (hx && nt > 64) nt = 0;  // proj n21 HOT_SL: moe_hot takes every >64-token expert (128-token slices)
++    if (hx && nt > 64 && (!(hx & 2) || nt <= 128)) nt = 0;  // proj n21 HOT_SL: moe_hot takes every >64-token expert (128-token slices)
+     const int big = nt > 32;
+     const int hc = hot && nt > 64 && nt <= 96;  // s17 hot class: one pass, 1 tile per warp
+     const int npass = hc ? 1 : big ? (nt + PB - 1) / PB : (nt + 31) / 32;
+@@ -3153,7 +3153,7 @@
+     const int nact = meta[0];
+     const int e = tid < nact ? meta[1 + tid] : 0;
+     const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0;
+-    const bool h = nt > (NH > 64 ? 64 : NH / 2) && (NH == 128 || nt <= NH);
++    const bool h = nt > (NH > 64 ? 64 : NH / 2) && ((NH == 128 && !(per & (1 << 29))) || nt <= NH);
+     const int ns = h ? (nt + NH - 1) / NH : 0;  // proj n21 HOT_SL: >128-token experts as ceil(nt / 128) slices (NH 128 only)
+     const unsigned b = __ballot_sync(0xffffffffu, h), bm = __ballot_sync(0xffffffffu, ns > 1);
+     if (!bm) {  // n21 fast path (no expert > 128 tokens): the old ballot compaction
+@@ -3175,7 +3175,7 @@
+   __syncthreads();
+   const int nh = s_nh, n13 = nh * HG::NRB, nitems = n13 + nh * HN::NRB;
+   const bool xn = !(per & (1 << 30));
+-  per &= ~(1 << 30);
++  per &= ~(3 << 29);
+   // n7s32 HOT_PER (layer v169 hotdyn, o11 here): per > 0 = only max(per >> 8, (per & 255) * nh) CTAs work (<= the grid);
+   // the others exit at once, so their SMs go to moe_twm (the PDL secondary)
+   if (per > 0 && (int)blockIdx.x >= max(per >> 8, SLW && s_cw ? s_cw : (per & 255) * nh)) return;
+@@ -3279,9 +3279,10 @@
+ static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
+                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
+                       torch::Tensor inter_, torch::Tensor y_, int grid) {
++  const int noslw = grid >= 200000000 ? 1 << 29 : 0; grid %= 200000000;  // o18 DIAG2: + 2e8 = old 65..128 hot (no HOT_SL)
+   const int xoff = grid >= 100000000 ? 1 << 30 : 0;  // grid + 1e8 = HOT_XN off for this call (A/B)
+   grid %= 100000000;
+-  const int per = ((grid / 100000) << 8 | (grid / 1000) % 100) | xoff;  // n7s32 HOT_PER: grid = base * 1e5 + per * 1e3 + CTAs
++  const int per = ((grid / 100000) << 8 | (grid / 1000) % 100) | xoff | noslw;  // n7s32 HOT_PER: grid = base * 1e5 + per * 1e3 + CTAs
+   grid %= 1000;
+   constexpr int NSTG = 8;
+   constexpr int SMEM = NSTG * ((NH > 64 ? 128 : NH) * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024 + (TWM_EPI ? 8192 : 0);
+@@ -3349,7 +3350,7 @@
+       (const char*)PTR(w2h_), (const char*)PTR(s2h_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
+       (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(), (int*)tk_.data_ptr(),
+       (float*)part_.data_ptr(), (int)(ns >= 1022 && ns <= 1023 && part_.numel() >= 66 * 32768 && tk_.numel() >= 132 ? ns : std::min<int64_t>(ns, std::min<int64_t>(tk_.numel() / 2, part_.numel() / 32768))),
+-      g_hot & 1);
++      (g_hot & 1) | ((g_hot & 64) ? 2 : 0));
+ }
+ int64_t moe_twm_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
+                        torch::Tensor gs2_, torch::Tensor w13h_, torch::Tensor s13h_, torch::Tensor w2h_,
+@@ -6064,6 +6065,9 @@
+     st["w1"] = (1.0 + weights["post_norm_w"].float()).contiguous()
+     torch.cuda.synchronize()
+     global _DIAG_DONE
++    if O13_DIAG and not _DIAG_DONE:
++        _DIAG_DONE = True
++        _o13_diag(st)
+     if DIAG and not _DIAG_DONE:
+         _DIAG_DONE = True
+         _diag(st)
+@@ -6626,7 +6630,7 @@
+                 if DIAG_TL and tl >> 24 & 2: st["_tl"] = (part, meta)
+                 hg = HOT_M.get(M, 0)
+                 lib.moe_set_hot((1 if hg else 0) | (2 if TWM_PB_M.get(M, 64) == 48 else 0) | (HOT_TWG.get(M, 0) << 8 if hg else 0)
+-                                | (HOT_NXB if hg else 0))
++                                | (HOT_NXB if hg else 0) | (64 if hg and OLDSL else 0))
+                 if hg:  # s29: experts with 65..128 tokens in one N 128 pass, moe_twm (PDL secondary) skips them
+                     lib.moe_hot_launch(st["w13b2"], st["w13sb2"], st["gs13"], st["w2b2"], st["w2sb2"], st["gs2"], st["lut"],
+                                        xg, meta, sroutes, inter, y, hg)
+@@ -6656,3 +6660,69 @@
+     lib.moe_gemm2(p2, st["w2q"], st["w2s"], st["gs2"], st["lut"], inter, meta, sroutes, y)
+     lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out)
+     return out
++
++
++O13_DIAG = 1  # o18 DIAG2 copy ONLY (never submit): H200 HOT_SL+SLW vs old hot at bs256
++OLDSL = 0
++SEEDS = [500,501,502,506,507,508,511,514,519,520,523,524,527,530,532,534,541,542,551,553,555,557,558,559,560,562,571,572,574,578,580,582,583,585,586,588,590,592,596,597,503,504,505,509,510,512,513,515]
++
++
++def _o13_gen(bs, seed):  # = reference.generate_input(bs, "ep8", seed) (dist normal, rank busiest)
++    gen = torch.Generator(device="cuda").manual_seed(seed)
++    x = torch.randn((bs, 4096), generator=gen, device="cuda").to(torch.bfloat16)
++    scores = torch.rand((bs, 256), generator=gen, device="cuda")
++    z = torch.randn((256,), generator=gen, device="cuda")
++    u = torch.rand((256,), generator=gen, device="cuda").clamp(min=1e-12)
++    scores = scores + 0.03 * z / (-u.log()).sqrt()
++    routed = scores.topk(8, dim=-1)
++    ids = routed.indices
++    pairs = torch.bincount((ids // 32).flatten(), minlength=8)
++    ids = (ids - 32 * pairs.argmax()) % 256
++    return {"hidden_states": x, "topk_ids": ids.to(torch.int32),
++            "topk_weights": (routed.values / routed.values.sum(-1, keepdim=True)).float(),
++            "config": {"bs": bs, "d_hidden": 4096, "local_start": 0, "local_count": 32}}
++
++
++def _o13_diag(st):
++    g = globals()
++    flush = torch.zeros(256 << 20, dtype=torch.uint8, device="cuda").view(torch.int64)
++    sink = torch.empty((), dtype=torch.int64, device="cuda")
++    H0 = dict(HOT_M); vs = [(n, {"HOT_M": {**H0, 256: v}, "OLDSL": o}) for n, v, o in (("old", 203216064, 1), ("new", 3216064, 0), ("oldb", 203216064, 1), ("newb", 3216064, 0))]
++    res = {}
++    for bs in (256,):
++        for seed in SEEDS:
++            data = _o13_gen(bs, seed)
++            graphs = []
++            for name, ov in vs:
++                old = {k: g[k] for k in ov}
++                g.update(ov)
++                try:
++                    kernel_fn(data, st)
++                    torch.cuda.synchronize()
++                    gr = torch.cuda.CUDAGraph()
++                    with torch.cuda.graph(gr):
++                        o = kernel_fn(data, st)
++                    gr.replay()
++                    torch.cuda.synchronize()
++                    graphs.append((name, gr, o))
++                finally:
++                    g.update(old)
++            base = graphs[0][2].float()
++            ts = {n: [] for n, _, _ in graphs}
++            for _ in range(30):
++                for n, gr, _ in graphs:
++                    torch.sum(flush, 0, out=sink)
++                    a, b = torch.cuda.Event(True), torch.cuda.Event(True)
++                    a.record(); gr.replay(); b.record()
++                    torch.cuda.synchronize()
++                    ts[n].append(a.elapsed_time(b) * 1e3)
++            for n, _, o in graphs:
++                t = sorted(ts[n])[len(ts[n]) // 2]
++                err = (o.float() - base).abs().max().item()
++                res.setdefault((bs, n), []).append((t, err))
++            del graphs
++    for (bs, n), v in res.items():
++        print(f"o18diag MEAN bs{bs} {n}: {sum(x[0] for x in v) / len(v):.2f} us | seeds "
++              + " ".join(f"{x[0]:.1f}" for x in v) + f" | maxdiff {max(x[1] for x in v):.3g}", flush=True)
++    del flush
++    torch.cuda.synchronize()

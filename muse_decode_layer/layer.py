@@ -1761,6 +1761,7 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
   if (tid < 32) { cnt[tid] = 0; pre[tid] = 0; }
 #if !RG_XPRE
   asm volatile("griddepcontrol.wait;" ::: "memory");
+  if (tok == 0 && tid == 0) { meta[67] = 0; __threadfence(); }  // moe o17: zero HOT_ET's flag word BEFORE the trigger
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   __syncthreads();
 #endif
@@ -1790,6 +1791,9 @@ __global__ void __launch_bounds__(256) moe_routegathern(const int* ids, int nrou
 #pragma unroll
   for (int i = 0; i < KD / 2 / 256; ++i) gp[i] = __ldg(reinterpret_cast<const float2*>(gain) + sw[i]);
   asm volatile("griddepcontrol.wait;" ::: "memory");
+  // moe o17 race fix: moe_hot (HOT_ET) triggers moe_twm before its own wait and twm polls meta[67] bit 30; meta[67] still
+  // holds the previous replay's set bit (or pool garbage) until zeroed below, so zero it here, before this trigger
+  if (tok == 0 && tid == 0) { meta[67] = 0; __threadfence(); }  // moe o17: zero HOT_ET's flag word BEFORE the trigger
   asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   __syncthreads();
 #endif
