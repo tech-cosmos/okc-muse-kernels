@@ -1,4 +1,13 @@
 # STATE-fresh (newest first)
+## x16 (2026-10-31 15:51Z-16:25Z): own pick, ROUTING-FAIL RISK. 1 judge check (2d0914bf), 0 Modal. FRESH.md x16.
+- FP8 (E4M3) query rounding is our whole router-score error (= the E4M3 reference's); a two-term query q = e4m3(q) +
+  e4m3(q - e4m3(q)) cuts it 15x in the reference (worst drop-lead <= 0.0014 vs 0.02-0.025; limit 0.03) and 5x in our layer.
+- Branch fresh 4725658 = v177 + QLO in nvs (v16/v32 sl): drop-lead 0.016-0.020 -> ~0.004, update error 6% -> 1.2%, H200 nvs
+  +0.2-0.4 us. Test 13/13, replay verify 0/360. QLO in _gw_verify (v16/v32 full) costs +9% kernel on the H200 (+8.9/+17.3 us,
+  ~0.3% score): dropped, patch kept (tools/fresh/x16/qlo_patch.py ... GW). Check 2d0914bf raw 2.1745, fixed 2.1405 (slow node).
+- Checks 10-31: 3 of 6 used.
+## Next (x17): after 00:00Z Modal H200 A/B v176 vs v177 (layer's request) + nvs QLO cost confirm; d32 sl nds QLO only if
+  the human wants the rest of the risk (FRESH.md x16).
 ## x15 (2026-10-31 15:32Z-16:20Z): lead 15:25Z 'continue'. 0 judge, 0 Modal. FRESH.md x15.
 - CORRECTION: the x14 judge FAIL was on v32 sl REPETITION 1 with the run's own router seed; repro_v32.py never reproduced that
   input. NVS_PW code read: pre-wait producer touches inputs/old KV only (no race found). Record ~2 routing fails / ~100 layer

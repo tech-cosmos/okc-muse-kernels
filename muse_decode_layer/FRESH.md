@@ -711,3 +711,28 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
 - Next (x16, after 00:00Z): Modal H200 A/B (my 20 GPU-min share): v176 vs v177 (or v176 + x14 attn_src / + MRG 2 separately if
   v177's check is ambiguous), d32 sl+full, v16 sl, d16 full, `tools/h200.py muse_decode_layer base=<v176> cand=<cand> --cmd
   'python bench.py bench submission.py decode 32'` (~3 GPU-min per load pair; one load per call, R small: x? 11-min timeout).
+
+## x16 (2026-10-31 15:51Z-, own pick: the routing-check FAIL risk; 1 judge check 2d0914bf, 0 Modal)
+- Why: the judge failed a layer run twice on routing (05077ac2 v32 sl, f5fdc570 d1): ~1-2% of runs. Final ranks are medians
+  of reruns on held-out data, so a fail in a rerun could cost the whole problem. Is our router-score error our own or FP8's?
+- Reference oracle (tools/fresh/x16/qerr.py, reference only): ref with E4M3 queries vs the BF16-query reference, per scored
+  shape, 40-450 inputs, router seeds 11/23/37/41/53: max |d biased| 0.026-0.056, p99.99 0.022-0.030, worst dropped-keep lead
+  0.005 (d1) .. 0.020-0.025 (v16/v32), limit 0.03. Per-input worst drop-lead at v32 full: 3% of inputs > 0.015, 1% > 0.02 (tail
+  -> a fail every ~10^3-10^4 inputs at v16/v32, which matches ~1 per 100 runs x 60 reps). With two-term queries
+  q = e4m3(q) + e4m3(q - e4m3(q)) ('hilo'): max |d| 0.0016-0.0036, worst drop-lead <= 0.0014 at every shape (15x smaller).
+  Our kernels' margins equal the E4M3 reference's (route_judge), so the FP8 query rounding IS our routing error.
+- Built QLO in nvs (v16/v32 sl, both _NVS_SRC and _NVSCL_SRC): a lo plane next to q in smem, 2 more k32 wgmma per QK tile;
+  and in _gw_verify's gbal consumer (v16/v32 full; Gluon chained warpgroup_mma on the async token). Results (H100):
+  route_judge drop-lead v16/v32 sl 0.020/0.016 -> 0.0016-0.0048; v16/v32 full 0.013/0.018 -> 0.003/0.007; scored_test layer
+  update error 6% -> 1.2-1.6% (bound ~14.5%); test 13/13, replay_test verify 0/360. Kernel cost (tlmed, H100): nvs +0.3
+  (v16) / +0.7 (v32); _gw_verify +0.4..1 (HBM-bound on the H100).
+- CHECK 2d0914bf (v177 + QLO nvs + gw): raw 2.1745 (CI 2.142-2.207), fixed-SGLang 2.1405: slow node (SGLang v32 sl 756 vs 713,
+  v32 full 1120 vs 1057 in v177's a4582885). H200 per-kernel rows (vs a4582885): nvs 9.0 -> 9.4 (v16 sl), 13.8 -> 14.0 (v32 sl);
+  _gw_verify 99.1 -> 108.0 (v16 full), 190.2 -> 207.5 (v32 full) = +9%: the H200 verify-full kernel is MMA-bound enough that
+  +50% QK^T tensor work shows. ~0.3% score for GW -> DROPPED from the build; nvs QLO kept (~+0.3 us, ~0.02%).
+- Branch fresh 4725658 = v177 + QLO nvs only (997512 B; _NVS_SRC's comment-only lines dropped for the 1 MB cap).
+  GW variant: python tools/fresh/x16/qlo_patch.py <v177 file> <out> NVSCL,NVS,GW. Decision for the human: GW QLO buys the
+  v16/v32 full half of the fail risk for ~0.3% score. d32 sl (nds) / d16-d32 full (_gd_full) not done: ~10% of the risk
+  (fails scale with tokens: v32 256, v16 128, d32 32); nds has free A rows 16-31 but in another warp (needs a cross-warp add).
+- Cheaper GW forms to try if wanted: none obvious (hi+lo = 2 FP8 MMAs = the tensor cost of one FP16 QK^T; K is FP8, so FP16 Q
+  would also need K upconverted).
