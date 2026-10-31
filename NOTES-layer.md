@@ -3737,3 +3737,13 @@ line says v182 (main). Log it in Judge runs.
   67.6 s (one). The extra serial moe build costs +44 s, well inside the 10-15 min run. Nothing to change.
 - NEXT (first session after 00:00Z 11-01): unchanged from n37: submit v181 (38d0c23) once per the rule unless a lead line picks
   v183 (main e0dd26f, recommended). Log in Judge runs.
+
+## n39 (2026-10-31 20:20-20:45Z): v181 recheck = judge DUPLICATE, 0 checks spent
+- Lead silent on v181 vs v183 since n34/n37. v183's SA path = v181's byte-for-byte except an untimed prepare-time
+  `_moe_weights_sa` test (diff 856cc18..e0dd26f, layer.py): v182/v183/v184's slow d1/v1 can only be node draw (or escape rule,
+  already excluded by v184).
+- Tried to confirm by re-checking v181 itself (`git show 38d0c23:.../submission.py`, sha1 fa4865e6): okc check returned
+  `status: duplicate, duplicate_of 84eb0719b68c4693`, result None, checks used stayed 15/20. **The judge dedups identical
+  code by content hash; no rerun.** Not worked around (padding the file to force a rerun = against the dedup's intent).
+- Unknown: whether a SUBMIT of code identical to an earlier check is also deduped (and what it returns). v181 was checked
+  (84eb0719) but never submitted; v183 checked (662fa349). Whoever submits after 00:00Z: read the submit's `status` field.
