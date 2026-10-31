@@ -3524,3 +3524,19 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Verdict: v1's routing-seed variance is inherent byte cost (SGLang streams the same experts); unlike proj n20's T=256
   >128-token mode there is nothing to fix at T=8. Bonus for proj's audit: v16 seeds 1-16 also track distinct (sl 15:279 ..
   21:311, full 14:378 .. 21:449), ~5-6 us/expert at T=128, no outlier beyond +-1 tier.
+
+## n25s1 (2026-10-31 16:20-17:05Z): v178 = v177 + proj n20 HOT_SL; 1 check (9117bd11), 0 submits, 0 Modal.
+- Merge: `git apply` of r-proj muse_bf16_proj/dev/n20/hotsl_moe_src.diff@10d86ca (moe_src.py only, 7 edits: moe_hot<NH 128>
+  takes every >64-token expert as ceil(nt/128) 128-token slices; moe_twm with hx skips nt > 64; gemm2 waits/done counts x slices).
+  build.py -> submission.py 998564 B (1 MB cap: ~1.4 KB headroom left). main = v178 161c986.
+- validate ALL OK: 13/13, scored 0/24, opt 0/40, tk2f 0/1200, replay 0/480, route 0/240 (worst gap 0.0256), fuzz 0/188, cold prep 65.2 s.
+- H100 proj ab_route (v177 A vs v178 B, tuner off, routers 5,12 = dominant-expert, 3 = control, 3 inputs each): v32 sl/full
+  rs5 -10.4/-2.8/-5.5 | -11.1/-5.2/-14.4, rs12 -13.2/-10.5/-8.5 | -14.1/-12.9/-15.8, rs3 tie (-0.4..+0.2 / -0.7..-1.9);
+  means v32 sl -6.0 / full -8.7, v16 sl -1.1 / full -0.5, v1 tie; v16/v32 bitwise 36/36 (v1 T=8 non-bitwise = known atomics near-ties).
+- CHECK 9117bd11 **2.1886 raw** [2.156, 2.221] (fixed-SGLang 2.1874; v176 check 2.1917, bar 2.1913; board best 2.1717 raw).
+  us sl/full: d1 64.1/73.3, d16 131.9/202.7, d32 148.9/299.9, v1 107.9/120.7, v16 252.8/344.2, v32 317.2/498.9.
+  Per-shape evidence: v32 sl profile moe_hot<128> 133 us (takes the >128-token expert) beside moe_twm 193 us; submit e0f2159f's
+  slow-mode v32 sl profile had moe_hot 2.8 us (empty) + moe_twm 231 us. v32 full: hot 135 / twm 191 (e0f2159f 2.5 / 189).
+- NOT submitted: lead 15:25Z = no more layer submits on 10-31. QUEUED for the first session after 00:00Z 11-01: submit v178
+  (161c986) once. It beats the board best raw (CLAUDE.md rule) and meets the 09:28Z rule (within 1% of the 2.1913 bar + per-shape
+  profile evidence on its target shape); fixed-SGLang 2.1874 is 0.2% under the lead's fixed bar = noise. If the lead objects, hold.
