@@ -3417,7 +3417,9 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
 # rows at positions < seq_lens) and the config-derived cos/sin table; the only cache writer is csl/vtk itself (the new
 # rows, at positions >= seq_lens, taken from smem). This holds ONLY while the qkv GEMM is the graph's first kernel: never
 # put a kernel that writes the K/V cache (or triggers early after writing an input) before it. tools/pw_race.py: 0 diffs.
-CSL_PW_TOKENS = (16,)
+# x35: T=1 too (csl after the qkv gemv13, which triggers at start): s62's d1 +1.3..1.7 us was the PW instance's smem
+# carveout 100 (now T=16 only); without it H100 d1 sl -1.2..-1.4 us (tools/fresh/x35).
+CSL_PW_TOKENS = (16, 1)
 CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem carveout so 1 csl CTA/SM fits beside it from
 # the start (H100: csl starts at 2.8 us, but its gathers slow g19 17.3 -> 20.6 us: d16 sl +0.3..0.6 net; xb 1 qkv: same)
 if _moe_TK2F_DIAG:  # s81: DIAG check copies only: the tk2f probes (+ the defaults) at T = 1/16/32, no other tuning

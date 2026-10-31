@@ -406,7 +406,8 @@ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
 #define CSL_LAUNCH1(P, QT, PW) { \
         static bool set = false; \
         if (!set) { cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); \
-                    if (PW) cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributePreferredSharedMemoryCarveout, 100); \
+                    /* x35: the max-smem carveout only for the T=16 (FP32 qkv) PW instance: at d1 it cost ~1.3 us (H100) */ \
+                    if (PW && sizeof(QT) == 4) cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributePreferredSharedMemoryCarveout, 100); \
                     set = true; } \
         cudaLaunchKernelEx(&cfg, csl::decode<P, QT, PW>, CSL_ARGS(QT)); }
 #define CSL_LAUNCH(P, QT) { if (pw) CSL_LAUNCH1(P, QT, true) else CSL_LAUNCH1(P, QT, false) }

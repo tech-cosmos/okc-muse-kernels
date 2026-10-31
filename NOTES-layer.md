@@ -3808,3 +3808,14 @@ Status only. Board: layer #211 at 2.1874 (bc16338a v183), #1 pjmullin3 2.459. No
 - => no standalone-winning sliding design is left unported. The only lever is a new hop cut found by fresh's per-CTA stamps
   (21:50Z). Candidate hops to look for in them: launch->first load (~1 us), page-table trip (spec skips the seq wait only),
   cluster barrier + DSMEM push, owner merge -> out store -> o GEMV's griddepcontrol.wait.
+
+## n47 (2026-10-31 22:10Z-22:40Z, session 41): merged fresh x35 CSL_PW T=1 = v185; 0 judge runs
+- Lead 21:50Z: waited for fresh's per-CTA stamps (fresh x35). d1 hops: qkv end -> csl q ready 2.7 us (launch 1.3 + first
+  loads 1.2), KV 0.3, QK/PV 0.55, cluster 0.35, merge->store 0.9, store -> o 0.85. v1: vtk first loads 1.8, wait 1.2 after
+  g14's last CTA, merge->store 1.0; vtk early-start bound ~0.5 us (16-CTA clusters need free GPCs): under gate.
+- Fresh built the d1 front hop: CSL_PW_TOKENS (16, 1) + csl PW smem carveout 100 only for FP32 QT (T=16). Applied
+  e0dd26f..f064596 source diff to main = v185 (submission.py sha1 d837bea5, identical to f064596).
+  validate --quick ALL OK (test 13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240, route 0/240 gap .0256/.0172,
+  fuzz 0/58, prep 63.8 s).
+- Judge: fresh's check 4a3434a9 on this exact code: raw 2.1959, fixed 2.1629 (d1 sl 64.4 best recent; v32 sl 340.3 slow
+  draw). Below bar 2.1913 -> no submit; no re-check of identical code. Bundle with next candidate after 00:00Z.

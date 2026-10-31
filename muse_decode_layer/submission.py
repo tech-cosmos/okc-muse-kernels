@@ -426,7 +426,8 @@ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
 #define CSL_LAUNCH1(P, QT, PW) { \
         static bool set = false; \
         if (!set) { cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); \
-                    if (PW) cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributePreferredSharedMemoryCarveout, 100); \
+                    /* x35: the max-smem carveout only for the T=16 (FP32 qkv) PW instance: at d1 it cost ~1.3 us (H100) */ \
+                    if (PW && sizeof(QT) == 4) cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributePreferredSharedMemoryCarveout, 100); \
                     set = true; } \
         cudaLaunchKernelEx(&cfg, csl::decode<P, QT, PW>, CSL_ARGS(QT)); }
 #define CSL_LAUNCH(P, QT) { if (pw) CSL_LAUNCH1(P, QT, true) else CSL_LAUNCH1(P, QT, false) }
@@ -17393,7 +17394,7 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
              (16, False): {**_G24_ALL, "g30n:o": True, "bal": True}, (32, True): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
              (32, False): {"g24:pooler": True, "g24:unpool": True, "g24sk:pooler": True, "g24sk:unpool": True, "tk2h": 4, "g24:qkv_gate": True, "g30n:o": True, "g30k:pooler": 104, "g30n:unpool": True, "g30n:qkv_gate": True, "g30kgx:pooler": True},
              (256, True): {"hot": HOT256, "rg": True, "twf_split": 66}, (256, False): {"hot": HOT256, "rg": True, "twf_split": 66}}
-CSL_PW_TOKENS = (16,)
+CSL_PW_TOKENS = (16, 1)
 CSL_PW_CARVE = False
 if _moe_TK2F_DIAG:
     _TK2X = [{"tk2x": k, "diag": True} for k in (6, 1, 2, 3, 4, 5)]

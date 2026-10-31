@@ -1,5 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
 
+n47 (10-31 22:35Z, session 41): MAIN = v185 = v183 + fresh x35 CSL_PW at T=1 w/o carveout (sha1 d837bea5 = f064596; H100 d1 sl -1.2..-1.4 us, bitwise; validate --quick ALL OK, prep 63.8 s). Same code already checked by fresh 4a3434a9: fixed 2.1629 < bar 2.1913 (v32 sl slow draw, untouched shape) -> NOT submitted, not re-checked. NEXT: bundle v185 with the next new-code candidate after 00:00Z; one check; submit if fixed > 2.1913. Fresh stamps: no other hop >= 1 us (v1 early start <= 0.5).
 BOARD BEST = submit bc16338a = v183 (e0dd26f, main), **2.1874x**, #211 (n44, 10-31 21:32Z; d1 65.7/73.5, d16 124.4/204.8, d32 151.6/297.0, v1 106.4/125.5, v16 252.0/343.1, v32 323.7/497.6). Robust to non-SA weights.
 Previous BOARD BEST = submit 50534b24 = v174 (c62cdb0), 2.1717x (crashes on non-SA weights; superseded).
 n46 (10-31 22:15Z, session 40): lead 21:50Z attn-history audit: layer csl/vtk = attn main kernels + layer PDL/QSS extras; every attn-board sliding T=1/T=8 standalone winner is already in the layer; rest tie/lose (list in NOTES n46). Only unbuilt item: v1 KV_PF (<= 0.3 us, under gate). Waiting on fresh's per-CTA stamps to pick a hop. 0 runs.
