@@ -10,6 +10,7 @@ cfg = tuple(int(v) for v in (sys.argv[2] if len(sys.argv) > 2 else "32,3,16,16")
 reps = int(sys.argv[3]) if len(sys.argv) > 3 else 30
 VAR = os.environ.get("VAR", "")  # nomath: skip decode+wgmma (stream only)
 w, st = bench.weights_state(sub)
+w = {**st["dense"], "unpool": st["unpool"]}
 src = sub._G30_SRC
 ST = "asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(_gt)); g30_st[(blockIdx.y * gridDim.x + blockIdx.x) * 16 + (K)] = _gt;"
 hdr = ("__device__ unsigned long long g30_st[4096 * 16]; __device__ unsigned g30_sm[4096];\n"
@@ -71,15 +72,16 @@ cpp_extension.load_inline = li
 dfs = (["-DG30_ESC=0"] if "noesc" in VAR else []) + [f"-DG30_MTOK={cfg[0]}", f"-DG30_S={cfg[1]}", f"-DG30_NW={cfg[2]}", f"-DG30_NS={cfg[3]}"]
 lib = sub._g30_load("n13_g30st_" + VAR.replace(",", "_") + hashlib.sha256((src + " ".join(dfs)).encode()).hexdigest()[:10], dfs, False)
 cpp_extension.load_inline = orig
-_, e, N = st["g30n"][("qkv_gate", 32)]
+KEY = os.environ.get("KEY", "qkv_gate")
+_, e, N = st["g30n"][(KEY, cfg[0])]
 m = cfg[0]
-K = w["qkv_gate"].shape[1]
+K = w[KEY].shape[1]
 x = torch.randn((m, K), device="cuda").bfloat16()
 out = torch.empty((m, N), dtype=torch.bfloat16, device="cuda")
 lib.g30_gemm(x, e[0], e[1], out, e[2], 0)
 torch.cuda.synchronize()
 if VAR != "nomath":
-    ref = torch.nn.functional.linear(x, w["qkv_gate"]).float()
+    ref = torch.nn.functional.linear(x, w[KEY]).float()
     print("rel err", ((out.float() - ref).norm() / ref.norm()).item())
 fn = lambda: lib.g30_gemm(x, e[0], e[1], out, e[2], 0)
 t = bench.time_graph(fn, reps) - bench.empty_cost()
@@ -132,7 +134,7 @@ mL = L.mean(0)
 print(f"loop us (W issue -> loop end), mean over replays: CTAs with TPC sibling busy {mL[sib].mean():.2f} (n={int(sib.sum())}), alone {mL[~sib].mean():.2f} (n={int((~sib).sum())})")
 print("replay-to-replay corr of per-CTA loop time:", f"{torch.corrcoef(L)[0, 1:].mean():.2f}")
 y = torch.arange(G) // (N // 64); xg = torch.arange(G) % (N // 64)
-cl = mL.view(cfg[1], -1)  # [rank, tile]
+cl = mL.view(cfg[1], -1) if cfg[1] > 1 else mL.view(-1, 1)  # [rank, tile]
 print(f"cluster: mean of per-cluster max {cl.max(0).values.mean():.2f}, max {cl.max().item():.2f}, mean {cl.mean():.2f}, max of cluster means {cl.mean(0).max():.2f}")
 print("per rank mean", [f"{v:.2f}" for v in cl.mean(1).tolist()])
 order = mL.argsort()

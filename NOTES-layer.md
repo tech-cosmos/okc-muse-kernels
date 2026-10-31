@@ -3232,3 +3232,10 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Next item (lead's list) v1 boundary/o hops, H200 n7s1 timeline v1 sl: o end -> bnd end 2.4, pr8 end -> rmsnorm end 2.3, nu8 -> bnd 3.6.
   All on record: o+bnd fusion OB8 dead (s86), o speed doesn't move v1 (pr8 sets the front: s88, n5s5, n7s9), pr8 -> norm =
   DEFNORM 1.7 us H100 (n12s1), tail = moe n10s1 post-wait latency (closed 10-30 03:20Z). pr8 itself is proj's item. CLOSED on paper.
+- Same tool on the d32 UNPOOL (KEY=unpool, cfg 32,1,16,16: g30n S1, 128 CTAs x 393 KB, no cluster): graph 22.3 us (nomath 20.8).
+  Per-CTA loop time is BIMODAL and repeatable (corr 0.93): ~30 CTAs (smid groups 78-84, 124-125, 37-38, ...; every ~8th tile pair)
+  at 14.0-15.3 us, the rest 16.6-17.3 (max 18.5); mean 17.0 / max 18.5 (nomath 16.2 / 17.3). = GPC-level bandwidth sharing: SMs in
+  less crowded GPCs stream ~15% faster; a static equal split ends at the crowded GPCs. Applies to every static-split stream
+  kernel (qkv/o/unpool g30n, g30k, g24, tk2f's static T=1 split): ~7-8% of the stream phase per kernel. Dynamic fixes need
+  per-unit FP32 partials (slab traffic ~1 MB per extra slab at m32 = more than the ~1 us gain) -> not built. Posted for fresh's
+  d1 expert-span lane (tk2f T=1 static split: GPU-vs-bytes gap).
