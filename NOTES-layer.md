@@ -3830,3 +3830,13 @@ Status only. Board: layer #211 at 2.1874 (bc16338a v183), #1 pjmullin3 2.459. No
   Per-shape speedup (sl / full): d1 2.708 / 2.437, d16 2.109 / 2.156, d32 1.753 / 2.123, v1 2.410 / 2.276,
   v16 2.057 / 2.038, v32 2.241 / 2.175. d32 sl stays the weakest shape. Tuner picks: T=16 {g30n:unpool, g30n:qkv_gate}, rest default.
 - Layer budget 10-31 left: 4 checks / 5 scored. Do not resubmit v185. Next: new code only.
+
+## n49 (2026-10-31 22:38-22:55Z real clock, session 43): status + g14 tail audit; 0 judge runs, 0 Modal, 0 GPU.
+- Note: n47/n48 stamps (22:40Z/22:55Z) ran ahead of the real clock; this session started 22:38Z after them.
+- Board: #1 pjmullin3 2.469x; ours fcb67ee9 v185 2.2048x. Budget 10-31: 4 checks / 5 scored left, no new code to spend them on.
+- Audit (fresh x35 v1 lead): g14 qkv_gate at T=8 = 96 CTAs (S=3 k-chunks x bk 32), ends 13.0..15.9 us. n10 record: g14/g13/g24
+  qkv sit at the bare cold-HBM reader cost in first-op position (v1 excess -1.2 us), and n13s2 showed a per-SM-weighted split
+  doesn't help (slow SMs reshuffle). So the 2.9 us spread is the reader's, not g14's: no rebalance/stealing build.
+- Pooler (pr1, 58 MB) L2 prefetch during csl/o/bnd: dead on record (pr1 npf 6-12 tie..+0.6, G10_PFL2 +1.8, n7 oracle 2: prefetch
+  slows the gather). Pooler-on-s-before-attention linear split: doubles pooler bytes + changes rounding before routing: dead on paper.
+- NEXT unchanged: hold v185; new code only (bar 2.2048 board). Waiting items need the human (routing slack, QLO full half, vjeux).
