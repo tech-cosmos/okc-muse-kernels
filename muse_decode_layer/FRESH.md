@@ -496,3 +496,47 @@ ids written -1.54 | pooler blocks end -4.1 / -3.1 med / -1.54 max | tk2f entry 0
   after the wait (as T=1). Bound by analogy with d1 ~1 us at v1 (~0.1%); not built.
 - d16/d32 routing (item 1 of x8 'Next'): H200 timeline n7s1: _routing ends 0.3 us after the rmsnorm at d16 and before it
   at d32: not on the critical path. Closed.
+
+## x9 (2026-10-31 11:44Z-, lead 11:25Z: re-stamp v174 d1 tk2f prologue, then DRAM-trip hunt in pre-wait/prologues at d1/v1)
+H100 only (Modal 18/20 used in x8), 0 judge runs. Tools tools/fresh/x9 (stamp patchers + runners; /tmp/fx9 paths inside),
+tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted, us.
+- v174 d1 re-stamp (IDF on), vs tk2f first CTA entry: pooler blocks end med 10.5 / max 12.0; routing written 12.0-14.1;
+  tk2f entry med 10.5-11.3, routed med 14.1-14.9 (most CTAs wait ~3 us for the routing flag), first data med 16.1-17.2.
+- NEW: pr1's routing block (one warp) takes ~13 us from ticket to written (H100), split: fence 1.3, logits load 4-8, top-8
+  4-7. Two causes found:
+  (1) the 8 `__ldcg(logits)` are SERIALIZED in SASS (each LDG.STRONG.GPU after the previous sigmoid/div) = 8 L2 trips
+      under the pooler stream. Fix: load all 8 first (one trip). Bitwise.
+  (2) the top-8 is slow because its code is COLD: fully unrolled ~18 KB SASS on an SM that never ran it; per-k stamps
+      0.5-1.5 us per k. A redux.sync argmax (2 redux + 1 shfl per k, bitwise) did NOT help (~6 us); `#pragma unroll 1`
+      on the k loop did: top-8 6.5 -> 1.6 us, routing written ~3 us earlier.
+  Both bitwise (files_eq d1 = 0). But layer A/B (ab_files, 16 rounds, 2 base copies): NEUTRAL (c1 84.22 sl / 104.06 full
+  between base 84.36/84.58 and 103.42/104.67). Under IDF the routing is off the critical path (x8): early routing only
+  lets the early tk2f CTAs compete with the pooler stream. Not kept. Patch: tools/fresh/x9/pr1_redux.cu (+ unroll note).
+- i-cache microbench (tools/fresh/icache/ic.py, ic2.py; 1 warp, straight-line FFMA): the first pass over code costs
+  ~0.8 us per 16 KB more than the second (1024 FFMA 1.28 vs 0.51 us); a warm-up launch on the same SM does NOT carry over
+  to the next launch; > ~32 KB thrashes even when warm. In-layer under a DRAM stream it is much worse (pr1 top-8 above).
+- In-situ slope oracles (pad N dead-but-live FFMAs on the critical path):
+  * n2u right after its wait (tail, memory system idle): +8 KB ~0, +16 KB 0..+0.8 us end -> n2u's own ~11 KB post-wait
+    code is worth <= ~0.35 us. Dead.
+  * tk2f entry, all warps (during the expert stream): +8 KB ~+0.4 us graph, +16 KB +3.1/+3.6 us (late CTAs routed +2.4):
+    steep and nonlinear. tk2f runs ~19 KB straight-line from entry to its TMA wait (SASS ACQBULK at 0x49a0), ~8 KB of it the
+    4 inlined tk2w_bound (64-bit div calls). Rolled into a `#pragma unroll 1` loop (bitwise): late CTA entry->routed 2.3 ->
+    1.8 us in stamps, but ab_files neutral (85.05 vs base 83.87/85.46). Combined pr1+tk2f (c3, layout base,c3,c3,base):
+    85.01/85.59 vs 83.67/84.84 sl = no gain. Not kept.
+- ab_files caveat: file [0] is the fastest in almost every run (~0.5-1.5 us position bias at d1 on the H100). Compare
+  against a second base copy in a later slot, or use the base,c,c,base layout.
+- d1 SASS audit, post-ACQBULK loads: g13 qkv/o GEMVs clean (W/scales/aux before the wait, only x after). n2u: ids/tw after
+  the wait (IDF-correct), then Y; w1 (16 KB, every block) is written pre-wait but ptxas SINKS it after ACQBULK (0x1080):
+  oracle pre-wait cp.async.bulk.prefetch.L2 of w1 -> n2u end med -0..-0.5 (~-0.25) us. Below gate. n2u W bulk prefetch
+  (PFW) off: ab neutral/worse. nu8 (v1 tail): same pattern (`__ldg(w1 + k0 + tid)` after the wait, 2 KB/block): not tested,
+  same bound expected (~0.25).
+- n2u stamps (d1 sl, vs tk2f last CTA end): n2u CTAs land 0..0.26 (they cannot co-reside with tk2f), past wait ~1.0,
+  ids/tw 2.3-3.3, Y 3.3-4.1, unpool 4.6-5.4, end 4.9-5.6. Tail = landing + 3 dependent trips + W; on record (UPF*, N2U_*).
+- v1 (T=8) stamps (pr8 finish block + tk2f), vs tk2f first entry: pr8 router items done -12.3, partials summed -9.5,
+  routing (8 warps) -5.1..-5.9: OFF the critical path by ~5 us (tk2f launches only when pr8 completes). tk2f at v1: all
+  CTAs enter 0..1.0 together, routed 1.54 med / 2.05 max, first TMA 2.05-2.56, first data med 3.84 / max 5.6-6.4 (burst
+  of 132 first TMAs), so the v1 fixed cost ~2 us prologue + ~1.8-4 us first data. Handed to moe (its 11:25Z item).
+- d1 late tk2f CTAs: the last 12 tk2f CTA entries vs the last pooler block ends: all land within ~0.3 us EXCEPT one at
+  +0.8 (routing-block SM) and one at +2.8-3.0 (most likely the SM of the 1-block _rmsnorm_gain: tk2f cannot co-reside).
+  The late CTA's ph1end is only ~0.5-1.5 past the median (it gets bandwidth when others finish), so the bound is <= ~1 us.
+  Oracle: tk2f grid nsm-1 / nsm-2 at GS 8 (bitwise eager, files_eq d1 0): result below.
