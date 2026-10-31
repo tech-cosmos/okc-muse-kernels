@@ -5505,7 +5505,7 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #endif
 #if TK2H_P4 || TK2_EXP
     if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 40000 && cfg < 50000 && cfg % 1000 == 4)  // n16: tk2h GS16 + PF4 on SQ stages
-      return tk2f_go<8, 4, 2, false, false, true, 16, 1, 516>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+      return tk2f_go<8, 4, 2, false, false, true, 16, 2, 516>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);  // o14: MRG 2 = per-segment gemm13 -> gemm2 counters (fresh x13); H200 DIAG cc253b3b bs32 -0.7 us, bitwise
 #endif
 #if TK2X
     if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 60000 && cfg < 70000 && cfg % 1000 == 4)  // n5s16 HYB GS16 + PF4 on SQ stages
