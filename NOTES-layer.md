@@ -3283,3 +3283,13 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   for s) -> does not fit pr8's ~140 KB + 64-reg budget; and the router would then run on non-SGLang-rounded h (route-check
   risk, lead 10-26). Not built. v1 hop lane CLOSED with a number.
 - Both lead 09:55Z layer items are closed (n13s1 d32 qkv ~0.6 buildable; n13s3 v1 bnd ceiling 3.5 but no fitting form).
+
+## n13s4 2026-10-31 10:24Z-10:45Z (real clock): no item >= gate; board analysis only; nothing built, 0 judge runs, 0 Modal.
+- Re-checked the record for anything open (o+bnd+pr1 megakernel: every form lost +1.4..2.8 and n13s3's free-boundary d1
+  ceiling is 1.0 us; g30kgx "drop" = records overflow, not a flake, ~0.01%; attention leaders ~15% faster but lane closed
+  by moe n7s15/16 + ~/attn s114/s125). Nothing new >= 1 us.
+- okc leaderboard muse_decode_layer --json has no per-shape data. #16 2.3314 in 1 attempt; 17/1094 rows screened/pending,
+  screened_speedup 1-4% below raw where given (#22 2.310 -> 2.238, #41 2.264 -> 2.162).
+- fresh x8 slack_out.txt: d1 local experts 2.6 -> 1.75 (6.3 us/expert of tk2f bytes): slack ~-5 us d1 sl (~0.9%); x1.096
+  overall = 2.365 = #6-#9. moe board (routes given) #1 is still 1.18x ahead of us: part of the gap is a legal faster expert kernel.
+- Offered moe (COORD Requests) the layer-owned selection sites for moe/slack: T=1 pr1 + _router_fma, T=8 r3/pr8, T>8 _routing/rg.
