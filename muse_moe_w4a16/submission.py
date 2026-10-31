@@ -3113,7 +3113,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
     int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
-    __nv_bfloat16* __restrict__ Y) {
+    __nv_bfloat16* __restrict__ Y, int per = 0) {
   using HG = TWC<2, true, 8>;
   using HN = TWC<2, false, 8>;
   constexpr int NX = NH > 64 ? 128 : NH;  // n5s21: x box rows (exact-N classes 72..120 load the 128-row box)
@@ -3146,6 +3146,9 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   }
   __syncthreads();
   const int nh = s_nh, n13 = nh * HG::NRB, nitems = n13 + nh * HN::NRB;
+  // n7s32 HOT_PER (layer v169 hotdyn, o11 here): per > 0 = only max(per >> 8, (per & 255) * nh) CTAs work (<= the grid);
+  // the others exit at once, so their SMs go to moe_twm (the PDL secondary)
+  if (per > 0 && (int)blockIdx.x >= max(per >> 8, (per & 255) * nh)) return;
   if (warp >= 8) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
     if (warp > 8 || lane != 0) return;
@@ -3234,6 +3237,8 @@ template <bool SA, int NH>
 static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
+  const int per = (grid / 100000) << 8 | (grid / 1000) % 100;  // n7s32 HOT_PER: grid = base * 1e5 + per * 1e3 + CTAs
+  grid %= 1000;
   constexpr int NSTG = 8;
   constexpr int SMEM = NSTG * ((NH > 64 ? 128 : NH) * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024 + (TWM_EPI ? 8192 : 0);
   static bool init = false;
@@ -3247,7 +3252,7 @@ static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
   return launch_k(moe_hot<NSTG, SA, NH>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
-      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr());
+      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(), per);
 }
 int64_t moe_hot_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                        torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
@@ -6054,7 +6059,7 @@ RG = 1  # s33: moe_routegather (route + gather fused, one CTA per token) for M >
 TWM_PB_M = {}  # n12: {M: 48}: moe_twm's > 32-token experts run 48-token passes at wgmma N48 (s18 mb: 632 vs 737 cyc/stage at N64)
 HOT_TWG = {}  # n15: {M: k}: with moe_hot on, moe_twm runs on SMs - k CTAs (k = hot grid: no late-starting twm CTAs)
 HOT_NXB = 0  # n5s21: probe bits (16: NH 104, 32: NH 80; HOT_NX builds only)
-HOT_M = {256: 32}  # s29: {M: grid}: moe_hot (65..128-token experts, one N 128 pass) on that many CTAs before moe_twm
+HOT_M = {128: 16048, 256: 3216064}  # s29: {M: grid}: moe_hot (65..128-token experts, one N 128 pass) on that many CTAs before moe_twm; o11: hotdyn base*1e5 + per*1e3 + grid (max(base, per*nh) CTAs work), at bs128 too (H100 -7 us mean)
 TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
 TWM_HOT_M = {}  # s17: per-M override
 TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline,
