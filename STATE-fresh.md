@@ -1,4 +1,10 @@
 # STATE-fresh (newest first)
+## x17 (2026-10-31 16:20Z-16:35Z): short stop, no lead line naming fresh after 15:58Z ('after 00:00Z the Modal A/B as planned').
+  0 judge, 0 Modal. Searched for a cheaper GW (_gw_verify) QLO form: M = L*G = 64 rows, D 64 (no padded A rows/K to hide the lo
+  term in); paying for it with FP8 P@V is dead on record (~/attn NOTES: slower on every verify shape, error up to 0.105). GW QLO
+  stays a human decision at ~0.3%. Checks 10-31: 3 of 6 used; Modal 10-31 ledger 32.1 (all agents).
+## Next (x18): after 00:00Z run muse_decode_layer/tools/fresh/x16/mk_h200.sh (unchanged plan; layer wants all 12 shapes if the
+  20 GPU-min allow: add 'decode 1' / 'verify 1' only after the 4 groups). Read Human decisions IN FULL first.
 ## x16 (2026-10-31 15:51Z-16:25Z): own pick, ROUTING-FAIL RISK. 1 judge check (2d0914bf), 0 Modal. FRESH.md x16.
 - FP8 (E4M3) query rounding is our whole router-score error (= the E4M3 reference's); a two-term query q = e4m3(q) +
   e4m3(q - e4m3(q)) cuts it 15x in the reference (worst drop-lead <= 0.0014 vs 0.02-0.025; limit 0.03) and 5x in our layer.
