@@ -598,7 +598,8 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   flags need the t16c-style many-routing stress test (moe s7 lesson). Estimate: ~0.6 us d1, ~0.3-0.5 d16/d32, ~1 us
   standalone bs1 (bound 1.4). Lead's 11:25Z bar is 0.5 us at d1 sl: marginal; asked the lead before building.
 
-## x12 (2026-10-31 13:58Z-, lead 13:58Z: BUILD CW): built, bitwise, H100 NEUTRAL -> DEAD at the 0.5 us gate. 0 judge, 0 Modal.
+## x12 (2026-10-31 13:58Z-, lead 13:58Z: BUILD CW): v1 NEUTRAL (wrong permutation for d1's row counts); v3 WINS d1 sl -0.5 / full -1.55 us (H100). 0 judge, 0 Modal.
+- (v1 below: patch renamed tools/fresh/cw/cw_v1_dead.patch.)
 - Built (tools/fresh/cw/cw_helper_dead.patch on v174 = branch fresh b15f672; layer TK2F_CW, cfg 184294 = PF 4 | 8192, T=1
   only): gemm13 rows permuted in each 256-row segment (cw_row), CTA order (chunk, u, v & 3), producer walks the same
   order, T=1 x fragments kept across segments, per-(segment, chunk) counters cnt[64 + seg * 4 + c], gemm2 waits chunks
@@ -618,4 +619,19 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
 - Lessons: (1) at d1 a 'chunk' of a segment is ~1.5 rows of each of ~22 CTAs: row ORDER inside a CTA cannot make a chunk
   early when CTA streams are unfair; (2) inter-CTA publish = ~1.9 us fence under the stream, each one; more publishes
   only pay off if they are off the consumers' path AND the data they release is early; (3) the remaining d1
-  transition bound is ~1 us total on the H100 (O2 / ob); nothing order-based gets it.
+  transition bound is ~1 us total on the H100 (O2 / ob).
+- CORRECTION (same session): the 'unfair streams' reading was WRONG. %smid stamps on the base: gemm13 us/row per SM 3.54..3.70
+  (sl), 3.44..3.60 (full), split-half correlation 0.15-0.22 = uniform. The v1 permutation (logical 16 u + v -> 16 v + u)
+  assumed ~16 rows per CTA (nact 8); at d1 sl nact = 3 -> 5.8 rows/CTA cover 1-2 chunks only, so chunks finished with
+  whole CTAs. v2: physical = (i & 3) * 64 + i / 4 inside the segment (any 4 consecutive logical rows hit all 4 chunks),
+  CTA order (chunk, l). Chunk completion now 26.1 / 31.8 / 35.2 / 36.3 us (seg 0; others alike). v3 = v2 + gemm2 waits
+  only chunk 0 at a segment start, then polls the next pending chunk before each stage and blocks only on the chunk that
+  stage needs (compile-time xf indices: unrolled j = 1..3 with pend == j).
+- v3 = branch fresh (tools/fresh/cw/cw3.patch on v174): bitwise vs base in tools/fresh/cw/stress.py 1500 eager + 1500
+  replay routings; bench test 13/13; tools/replay_test.py d1/d16 seeds 11,12 x 40: 0 fails; files_eq d1 x 6 seeds: same
+  as base-vs-base nondeterminism (pre-existing atomics elsewhere).
+- H100 timing (tools/fresh/cw/ab_seeds.py = ab_files over seeds; SEEDS=99,7,123,5, 8 rounds, base,cw3,cw2,cw3,base):
+  d1 sl base 74.24/74.72, cw3 73.99/73.93 (-0.5), cw2 74.50; d1 full base 90.02/90.11, cw3 88.42/88.62 (-1.55), cw2 89.30.
+  Seed 99 runs (ab_files, 12 rounds): cw2 sl -0.6/-0.8/-0.1, full -1.7/-2.0/-1.4; cw3 sl -0.1, full -1.4 (shared GPU).
+- Scope: T = 1 only (cfg 184294; cnt[64 + seg * 4 + c] needs seg < 8; TORCH_CHECK nr == 8). v1 (T=8, up to 64 segments)
+  would need a bigger counter area (n2u zeroes cnt[0..127]) and its own permutation check; d16/d32 use BAL / tk2h.

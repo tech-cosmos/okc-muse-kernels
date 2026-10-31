@@ -3594,7 +3594,23 @@ int64_t moe_twq_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 // once earlier kernels free their SMs. cnt lives in the state, zero between calls: moe_norm2 (after this kernel) zeroes it again (a memset node cost ~2.5 us).
 // layer s68 (moe n14 TK2F_SQ, r-moe 01326b4): SQ = Wq is the single-copy repack (prepare _sq_pack: [E][RPE][NQ][SB bytes]
 // = {tile lr chunks, tile lr + RPE chunks, scales}, exactly the stage's smem image): ONE bulk copy per stage instead of 3.
-template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false, bool ORN = false>
+// fresh x12 CW (PF & 8192, T = 1 only: <= 8 gemm13 segments): CHUNK-WAIT. gemm2 stage q of a row needs only inter
+// columns [1024 q, +1024) = gemm13 rows 64q..64q+63 of its segment. gemm13 rows are interleaved inside each 256-row
+// segment (logical i -> physical (i & 3) * 64 + i / 4: any 4 consecutive logical rows hit all 4 chunks), and every CTA
+// takes its logical range [r0, r1) chunk by chunk (c = 0..3, then l ascending), so its first rows complete chunk 0 of
+// their segments, its last ones chunk 3. Each CTA publishes per (segment, chunk) run into cnt[64 + seg * 4 + c] (64 rows
+// = done); gemm2 waits chunks 0..2 at a segment start and chunk 3 only before its stage 3 (polled at stages 1..2).
+// Iteration state (c, l); init with l = cw_first(r0, 0) - 4 and one cw_next.
+__device__ __forceinline__ int cw_first(int r0, int c) { return r0 + ((c - r0) & 3); }
+__device__ __forceinline__ void cw_next(int r0, int r1, int& c, int& l) {
+  l += 4;
+  while (c < 4 && l >= r1) {
+    if (++c < 4) l = cw_first(r0, c);
+  }
+}
+__device__ __forceinline__ int cw_row(int l) { return (l & ~255) | ((l & 3) << 6) | ((l & 255) >> 2); }
+
+template <int NRT, int NC, int NSTG, int KPS, bool SQ = false, bool S6 = false, bool ORN = false, bool CW = false>
 __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const uint32_t* __restrict__ S2, int r0,
                                              int r1, const int* s_rs, const int* s_e, uint4* smem, uint64_t* full,
                                              uint64_t* empty, int& st, int& ph, int& i) {
@@ -3608,7 +3624,11 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
   asm volatile("createpolicy.fractional.L2::evict_last.b64 %0, 1.0;" : "=l"(pol_last));
   asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol_first));
 #endif
-  for (int R = r0; R < r1; ++R) {
+  int cc = 0, cl = cw_first(r0, 0) - 4;  // CW: the consumers' row order
+  if (CW && r0 < r1) cw_next(r0, r1, cc, cl);
+  for (int R_ = r0; R_ < r1; ++R_) {
+    int R = R_;
+    if constexpr (CW) { R = cw_row(cl); cw_next(r0, r1, cc, cl); a = 0; }
     while (s_rs[a + 1] <= R) ++a;
     const int e = s_e[a];
     const int lr = (R - s_rs[a]) & (RPE - 1);
@@ -3657,10 +3677,30 @@ __device__ __forceinline__ void tk2f_produce(const uint4* __restrict__ Wq, const
 __shared__ __align__(8) uint64_t g_tkrel[8];
 template <int NC, int DYN, int FN, int GS, int MRG, int PF>
 __host__ __device__ constexpr bool tk2f_rel_on() {
-  return TK2F_REL && (TK2F_REL != 2 || MRG != 0) && NC == 8 && !DYN && !FN && !(PF & 16) && !(PF & 524288) && !(PF & 65536) && !(PF & 256) &&
+  return ((PF & 8192) && NC == 8) ||  // fresh x12 CW: the per-(segment, chunk) publishes always by the helper
+         TK2F_REL && (TK2F_REL != 2 || MRG != 0) && NC == 8 && !DYN && !FN && !(PF & 16) && !(PF & 524288) && !(PF & 65536) && !(PF & 256) &&
          (MRG == 1 || MRG == 2 || (GS == 8 && MRG == 0));
 }
 __device__ __forceinline__ void tk2f_rel_arrive(int seg_start, int r0) { mbar_arrive(&g_tkrel[((seg_start >> 8) - (r0 >> 8)) & 7]); }
+// fresh x12 CW helper: walks the consumers' row order (cw_row) and publishes each (segment, chunk) run of rows into
+// cnt[64 + (R >> 6)] once the consumers' k-th arrive (<= 8 runs per CTA at T = 1: one ring pass, no parity reuse).
+__device__ __forceinline__ void tk2f_cw_helper(int* cnt, int r0, int r1) {
+  if (r0 >= r1) return;
+  int cc = 0, cl = cw_first(r0, 0) - 4, k = 0, np = 0;
+  cw_next(r0, r1, cc, cl);
+  for (int R_ = r0; R_ < r1; ++R_) {
+    const int R = cw_row(cl);
+    cw_next(r0, r1, cc, cl);
+    ++np;
+    if (cc >= 4 || (cw_row(cl) >> 6) != (R >> 6)) {
+      mbar_wait(&g_tkrel[k & 7], (k >> 3) & 1);
+      __threadfence();
+      atomicAdd(cnt + 64 + (R >> 6), np);
+      np = 0;
+      ++k;
+    }
+  }
+}
 template <bool SEGC>
 __device__ __forceinline__ void tk2f_rel_helper(int* cnt, int a0, int a1) {
   if (a0 >= a1) return;
@@ -3684,11 +3724,26 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
   constexpr bool BAL = (PF & 32) != 0;  // moe n8 BAL: per-segment counters cnt[64 + j]
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
   uint4 xf[NQ][2];
+  const uint4* xr3 = nullptr;  // CW gemm2: x row of the deferred chunk loads
+  bool v3 = false;
   int a = 0, seg_end = -1, seg_start = 0, off = 0, n = 0, ci = 0;
   float gsc = 0.f;
   const uint4* wsm = smem + warp * 32 + lane;
-  for (int R = r0; R < r1; ++R) {
-    if (R >= seg_end) {
+  constexpr bool CW = (PF & 8192) != 0;  // fresh x12 chunk-wait (see cw_row)
+  static_assert(!CW || (NQ == 8 && KPS == 2 && !BAL && !(PF & 3)), "CW: NC 8, KPS 2, no BAL / PF 1 / 2");
+  int cc = 0, cl = cw_first(r0, 0) - 4, kpub = 0, xrow = -2;
+  int pend = 4;  // CW gemm2: the next chunk whose x fragments (qq 2 pend, 2 pend + 1) are still to load
+  const int* cp3 = cnt;
+  if (CW && GATED && r0 < r1) cw_next(r0, r1, cc, cl);
+  for (int R_ = r0; R_ < r1; ++R_) {
+    int R = R_, nR = -1;
+    if constexpr (CW && GATED) {
+      R = cw_row(cl);
+      cw_next(r0, r1, cc, cl);
+      if (cc < 4) nR = cw_row(cl);
+    }
+    if (CW && GATED ? (R < seg_start || R >= seg_end) : R >= seg_end) {
+      if (CW && GATED) a = 0;
       while (s_rs[a + 1] <= R) ++a;
       const int gi = (R - s_rs[a]) / RPE;
       seg_start = s_rs[a] + gi * RPE;
@@ -3698,7 +3753,15 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       off = s_off[e] + gi * 8;
       n = min(8, s_off[e + 1] - off);
       ci = a * 4 + gi;
-      if (BAL && !GATED) {
+      if (CW && !GATED) {  // chunk 0 now; chunks 1..3 polled before each stage, waited for before the stage that needs them
+        const int* cp = cnt + 64 + (seg_start / RPE) * 4;
+        int c;
+        do {
+          asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cp) : "memory");
+        } while (c < 64);
+        cp3 = cp;
+        pend = 1;
+      } else if (BAL && !GATED) {
         const int* cp = cnt + 64 + seg_start / RPE;
         int c;
         do {
@@ -3714,8 +3777,18 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       int row = 0;
       if (v) row = GATED ? (s_srt[off + g] >> 3) : (off + g);
       const uint4* xr = reinterpret_cast<const uint4*>(X + (size_t)row * KD + 16 * t);
+      if constexpr (CW) {
+        xr3 = xr;
+        v3 = v;
+      }
+      bool ld = true;
+      if constexpr (CW && GATED) {  // T = 1: every segment's x is the same token row: keep the fragments
+        ld = __any_sync(0xffffffffu, (v ? row : -1) != xrow);
+        xrow = v ? row : -1;
+      }
 #pragma unroll
       for (int qq = 0; qq < NQ; ++qq) {
+        if (!ld || (CW && !GATED && qq >= 2)) continue;
         const int kc = qq * NC + warp;
         if (GATED) {
           xf[qq][0] = v ? __ldg(xr + kc * 8) : make_uint4(0, 0, 0, 0);
@@ -3744,6 +3817,26 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
       for (int r = 0; r < 4; ++r) acc[i][r] = acc2[i][r] = 0.f;
 #pragma unroll
     for (int q = 0; q < NS; ++q) {
+      if (CW && !GATED && pend < 4) {  // chunks pend..3: load what is ready; block only on chunk q (stage q needs it)
+#pragma unroll
+        for (int j = 1; j < 4; ++j) {
+          if (j >= q && pend == j) {
+            int c;
+            asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cp3 + j) : "memory");
+            if (j == q)
+              while (c < 64) asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(c) : "l"(cp3 + j) : "memory");
+            if (c >= 64) {
+#pragma unroll
+              for (int qq = 2 * j; qq < 2 * j + 2; ++qq) {
+                const int kc = qq * NC + warp;
+                xf[qq][0] = v3 ? __ldg(xr3 + kc * 8) : make_uint4(0, 0, 0, 0);
+                xf[qq][1] = v3 ? __ldg(xr3 + kc * 8 + 1) : make_uint4(0, 0, 0, 0);
+              }
+              pend = j + 1;
+            }
+          }
+        }
+      }
       mbar_wait(&full[st], ph);
       const uint4* sw4 = wsm + st * (SB / 16);
       uint4 wv0[KPS], wv1[KPS];
@@ -3824,8 +3917,11 @@ __device__ __forceinline__ void tk2f_consume(const uint32_t* slut, const float* 
               __float2bfloat16(__fdividef(v, 1.0f + __expf(-v)) * u);
         }
       }
-      if (R + 1 == seg_end || R + 1 == r1) {  // publish this CTA's rows of the segment
-        if constexpr (REL) {
+      if (CW ? (nR < 0 || (nR >> 6) != (R >> 6)) : (R + 1 == seg_end || R + 1 == r1)) {  // publish this CTA's rows of the segment
+        if constexpr (CW) {  // CW: of the (segment, chunk) = R >> 6, by the helper warp (tk2f_cw_helper)
+          mbar_arrive(&g_tkrel[kpub & 7]);
+          ++kpub;
+        } else if constexpr (REL) {
           tk2f_rel_arrive(seg_start, r0);
         } else {
         asm volatile("bar.sync 2, %0;" ::"n"(NC * 32) : "memory");
@@ -4630,7 +4726,10 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
   constexpr bool REL = tk2f_rel_on<NC, DYN, FN, GS, MRG, PF>();
   if constexpr (REL) {
     if (warp == NC + 1) {  // n6s6 TK2F_REL helper
-      if (lane == 0) tk2f_rel_helper<MRG ? MRG == 2 : (PF & 32) != 0>(cnt, a0, a1);
+      if (lane == 0) {
+        if constexpr ((PF & 8192) != 0) tk2f_cw_helper(cnt, a0, a1);
+        else tk2f_rel_helper<MRG ? MRG == 2 : (PF & 32) != 0>(cnt, a0, a1);
+      }
       return;
     }
   }
@@ -4640,7 +4739,7 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
       int i = 0;
       constexpr bool SQ = (PF & 512) != 0;  // layer s68 (moe n14): single-copy stages (Wq13 / Wq2 = the _sq_pack buffers)
       constexpr bool S6 = (PF & 1024) != 0;  // layer s73 (moe n20): 6-bit scale codes (the _s6_pack buffers)
-      tk2f_produce<512, NC, NSTG, KPS, SQ, S6, (PF & 2048) != 0>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i);
+      tk2f_produce<512, NC, NSTG, KPS, SQ, S6, (PF & 2048) != 0, (PF & 8192) != 0>(Wq13, S13, a0, a1, s_rs13, s_e, smem, full, empty, st, ph, i);
       tk2f_produce<256, NC, NSTG, KPS, SQ, S6, (PF & 2048) != 0>(Wq2, S2, b0, b1, s_rs2, s_e, smem, full, empty, st, ph, i);
     }
     return;

@@ -1,12 +1,13 @@
 # STATE-fresh (newest first)
-## x12 (2026-10-31 13:58Z-14:20Z): lead 13:58Z BUILD CW: built, bitwise (300 eager + 300 replay), H100 NEUTRAL -> DEAD. 0 judge, 0 Modal.
-- d1 us vs base sl/full: cw 0.0/-0.2, cw+helper +0.4/-0.35; oracles: no waits -0.5/-0.9, no waits+no publishes -0.9/-1.1.
-- Stamps: per-CTA stream rates differ ~25% (5.8 rows/CTA at d1 sl), so each segment's chunk 0 completes with its slowest
-  CTA (32-34 us vs chunk 3 at 37-39); each publish fence ~1.9 us. Patch tools/fresh/cw/cw_helper_dead.patch; FRESH.md x12.
-- Source reverted: branch fresh submission.py = v174 bit-for-bit.
-## Next (x13): read Human decisions IN FULL; take the lead's next item. Own list is thin: the d1 tk2f stream runs ~2.6 TB/s
-  on the H100 with ~25% per-CTA unfairness (row ends 30-38 us); the H200 may differ (moe: ~4.33 TB/s marginal). If
-  Modal is available (after 00:00Z), a stamp run of v174 d1 on the H200 would tell whether the unfairness exists there.
+## x12 (2026-10-31 13:58Z-14:30Z): lead 13:58Z BUILD CW: DONE, WIN on the H100 (d1 sl -0.5, full -1.55 us, 4 seeds). 0 judge, 0 Modal.
+- Branch fresh = v174 + CW v3 (layer TK2F_CW = True, cfg 184294 = tk2f PF 4 | 8192, T=1 only; patch tools/fresh/cw/cw3.patch).
+  gemm13 rows interleaved per segment (i & 3) * 64 + i / 4, CTA order chunk-major; per-(segment, chunk) counters cnt[64 +
+  seg * 4 + c] published by a helper warp (tk2f_cw_helper); gemm2 blocks on chunk 0 only, polls later chunks per stage.
+- Bitwise 1500 eager + 1500 replay routings; test 13/13; replay_test 0 fails. Handoff posted (layer: bundle + check; moe:
+  bs1 port). First permutation (v1, 16 v + u) was neutral: wrong for 5.8 rows/CTA (FRESH.md x12, correction).
+## Next (x13): read Human decisions IN FULL. If asked: (a) H200 A/B of CW vs v174 on d1 (Modal after 00:00Z, ~3 min),
+  (b) CW at T=8 (v1: up to 64 segments -> counter area + zeroing; nu8 PF 16 path), (c) help moe port CW to the moe board's
+  M=1 tk2f (bs1 fixed cost: x11 O2 bound 1.4 us). Stamp tools: tools/fresh/cw/{stamp,strun}.py.
 ## x11 (2026-10-31 13:34Z-13:56Z): lead 12:25Z MOE BS1 GAP, cont. H100 stamps + oracles, 0 judge, 0 Modal. FRESH.md x11.
 - bs1 fixed ~9.5 us = pre-data 4.3 (routing 1.5, TMA issue 0.5, first data 2.3) + w13->w2 transition 1.4 (O2) + norm
   2.4 (O1) + launch/PDL ~1. In-layer: transition bound ~1.1 us d1 / ~0.5-0.8 d16/d32 (O2); n2u work 3.5/4.4 d1 (O3,

@@ -1941,6 +1941,10 @@ _MOE_TK2F_PRUNED = """
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 512>(0, TK2F_ARGS0);
   }
   if (!bal && cfg == 100001) return tk2f_go<8, 4, 2, false, false, true>(0, TK2F_ARGS0);  // tk2f_stress.py (moe TK2F = 1)
+  if (!bal && cfg == 184294) {  // fresh x12 CW (T = 1 only: cnt[64 + seg * 4 + chunk], seg < 8)
+    TORCH_CHECK(nr == 8, "tk2f CW: T = 1 only");
+    return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 8192>(0, TK2F_ARGS0);
+  }
   TORCH_CHECK(!bal && cfg == 184204, "layer MOE_PRUNE: tk2f cfg ", cfg, " not built");
   return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4>(0, TK2F_ARGS0);
 #undef TK2F_ARGS0
@@ -3727,6 +3731,7 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
 
 
 TK2F_SQ_T1 = False
+TK2F_CW = True  # fresh x12: T = 1 tk2f chunk-wait (PF & 8192): gemm2 waits per (segment, K chunk), not all of gemm13
 
 
 def _experts_n2u(x, topk_weights, local_ids, state, bnd=(), idf=False):
@@ -3742,6 +3747,8 @@ def _experts_n2u(x, topk_weights, local_ids, state, bnd=(), idf=False):
     ids = local_ids.contiguous()
     slot = N2U_SLOT and _moe_TK2F == 204 and N2U_CFG[0] == 8
     c = (84204 if slot else _moe_TK2F) + (100000 if _moe_TK2SA and st["sa"] else 0)
+    if TK2F_CW and c == 184204:
+        c = 184294  # fresh x12 CW: chunk-wait gemm13 -> gemm2 (see cw_row in the moe source)
     # s68: moe n14 SQ off here (H100 ab_flag 4 rounds x 3 seeds d1 +0.4..0.9 us; H200 moe diag d1 0)
     c, w13_, w2_ = _moe__tk2f_w(c, st) if TK2F_SQ_T1 else (c, st["w13q"], st["w2q"])
     if _opt(state, 1, "tk2x", 0) >= 7:  # n5s25 DIAG oracle probes (wrong output, tuner timing only, never selected)
