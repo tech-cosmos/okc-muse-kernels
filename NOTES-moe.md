@@ -3685,3 +3685,33 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   (activations FP8 = illegal, n11a) or promotion (o3: dead). No tile shape or pipe mix escapes it -> nothing to oracle.
 - Remaining sub-gate leftovers (not built per lead gate): tk2f last-wave K-split d16/d32 ~0.8/1.1 us, twm overhead instr <1 us,
   HOT128 no-hot 0.9 us v16. The only lever on record of gate size is fresh x8's routing slack (x1.096), pending the organizers.
+
+## o5 (2026-10-31 10:34Z - ~11:30Z): lead 10:25Z ROUTING-SLACK BUILD prepared on branch moe/slack; 0 judge runs, 0 Modal
+- Build (branch moe/slack, worktree /tmp/slack/wt off origin/main 588a578): muse_decode_layer/slack_src.cu (own small
+  load_inline lib, prebuilt), layer.py `_slack()` after the routing at all 4 sites (_route, FR, pr1/pr8), gated by
+  SLACK / SLACK_TOKENS (128, 256). build.py embeds it; PR32 source dropped from the embed (dead, PR32_TOKENS = ()) to stay
+  under 1 MB (975 KB). Kernel: grid T/8 x 8 warps, warp = token (keys, v8/v9, masks L/K/R/N/need to global); last CTA
+  (self-resetting ticket in state["slack_scratch"]) = greedy S (most deficit tokens, then top-8 routes) + redundancy pass,
+  re-picks only tokens whose top-8 local experts left S (keep the rest; replacement = best local candidate in S, else best
+  non-local), floors checked (fallback = routing unchanged). Deterministic, plain launch (no PDL trigger) so every later
+  kernel sees the final routing.
+- Algorithm quality (tools/slack/tst_standalone.py, reference logits, margins 0): greedy == fresh x8's exact minimum on all
+  12 loads (8 seeds): saved d1 .62/.75, d16 2.38/2.25, d32 2.50/1.88, v1 2.12/1.50, v16 3.12/2.38, v32 4.00/4.00 (sl/fu).
+- THE CATCH (tools/slack/keyerr.py, leaderr.py): the layer's router logits differ from the FP32 reference's by 2.5-3 %
+  (max |dkey| 0.02-0.04); on the droppable experts (local, in our top 8, lead <= 0.03) the keep-rule lead error has std
+  ~0.0048, max 0.019 (n ~1.7k) - the same as the reference with E4M3 queries vs FP32 (0.0045). It is FP8-query noise that
+  any legal FP8-query layer has, not a routing bug. Ours vs the E4M3-query reference: std 0.0025 (the non-query part).
+  With 0.005 margins the first judge-like run failed 3/60 inputs (keep 0.0327 > 0.03; distinct 9 vs 13 from a flip).
+- Safe margins (~4.5-5 std): picks within 0.027 of the 8th (not 0.05), drop only local top-8 experts with our lead <= 0.008
+  (not 0.03), floors with +2 distinct / +8 routes. Real layer (tools/slack/slack_judge.py, graph replay, routers 11/23,
+  24 inputs per shape): 0 fails / 192 slack-on inputs; worst pick gap 0.032 (limit .05), worst dropped lead 0.018 (limit .03).
+  Saved distinct: v16 0.6-1.5, v32 0.7-1.0, d32 0.25-0.7, v1 0.1-0.4, d1/d16 ~0 (rs 11 all-T run). = ~1/4 of fresh's oracle.
+- Cost: kernel alone 4.4 us (T=128) / 8.7 us (T=256) in a graph (first one-CTA version 25-69 us: one SM's issue rate; small
+  T still 7-16 us, unexplained, slack off there). H100 A/B vs main (tools/slack/ab_seeds.py, seeds 801-803, 3 rounds):
+  v16 sl +6.4 us, v16 fu +1.6 (seed spread -6.6..+15.8); v32 sl +4.8, fu +8.9. => NET LOSS as built.
+  Branch moe/slack 894de97 has SLACK_TOKENS = () (off; = main behaviour); set (128, 256) to test.
+- What would make it pay: (1) fuse phase A into _routing (keys are already there) and B/C into its last program: saves the
+  launch + keeps the PDL chain (~4-6 us) -> v16 ~+3-5 us, v32 ~0..+2 (~0.1-0.2 %); (2) less noise: halving the std
+  (BF16 queries would remove at most the E4M3 part) -> clean-score estimate at 0.012 margins v16 1.3-1.9, v32 1.9-2.8,
+  still ~0 at d1/d16/v1 (small T: the distinct floor + flip margin binds). The x1.096 of fresh x8 assumes the reference's
+  exact scores; for an FP8-query layer the safely usable slack is ~0.1-0.3 % of score, not ~9 %.
