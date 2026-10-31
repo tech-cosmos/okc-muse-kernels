@@ -540,3 +540,30 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   +0.8 (routing-block SM) and one at +2.8-3.0 (most likely the SM of the 1-block _rmsnorm_gain: tk2f cannot co-reside).
   The late CTA's ph1end is only ~0.5-1.5 past the median (it gets bandwidth when others finish), so the bound is <= ~1 us.
   Oracle: tk2f grid nsm-1 / nsm-2 at GS 8 (bitwise eager, files_eq d1 0): result below.
+  RESULT: grid nsm-1 is bitwise in EAGER mode (files_eq d1 0) but HANGS under CUDA-graph replay (stamped run_ent and
+  ab_files both stalled at 100% GPU, killed after 10-25 min). Some graph-replayed sync assumes one tk2f CTA per SM (not
+  found; candidates: TK2F_LATE_TRIG / IDF reset ordering). Not pursued: bound <= ~1 us and needs that invariant found first.
+
+## x10 (2026-10-31 13:12Z-, lead 12:25Z MOE-BOARD BS1 GAP): standalone muse_moe_w4a16 bs1, H100, 0 judge, 0 Modal
+- bs1 = moe_tk2f (132 CTAs, cfg 204 = PF 512) + moe_norm2<0> (1 block; NOT a PDL secondary: NORM2_PDL 0).
+- Fit over seeds (tools/fresh/bs1/fit.py, graph replay cold L2 minus empty graph): t = 9.5 + 10.0 x E us
+  (E = distinct local experts; seeds 100..123: E 2/3/4 = 29.6/39.3/49.8). Per-expert ~10 us = near H100 stream rate;
+  the FIXED 9.5 us is the bs1 gap (layer d1 in-layer fixed ~5.7 on the H200).
+- norm2<0> after its wait: ids/tw trip (ids/tw are the CALL INPUTS: legal before the wait), then inv (tk2f output) ->
+  Y = 2 more dependent trips. The slot path (cfg 84204 = PF 4 -> moe_norm3 = norm2<true>) drops inv. moe's comment
+  "M = 1 stays 204 because the layer's n2u reads the old y32 order" is stale: the layer runs 84204 + n2u SLOT at T=1.
+- Variants (/tmp/fx10/<v>/submission.py, bench test 15/15 each), E=2 / E=3 medians, fit fixed:
+    base 29.58 / 39.28 (9.50) | slot (TK2F 84204) 29.28 / 39.41 (9.29) | pdl (NORM2_PDL 1) 29.17 / 39.44 (9.17)
+    both 28.51 / 38.72 (8.57) | late = both + tk2f trigger at its gemm2 rows instead of entry (layer TK2F_LATE_TRIG 3)
+    28.58 / 38.51 (8.79) | late2 = late + norm3 reads ids/tw/w1 BEFORE the wait (pinned by asm) 28.45 / 38.30 (9.03)
+    | latens (pdl + late, no slot) 29.14 / 39.25.
+  => slot + PDL tail: ~-1.0..-1.1 us at bs1 on the H100. CAVEAT: moe n5s19 measured NORM2_PDL LOSING on the H200
+  (+3.4 us d1) with the entry trigger; my reading: the 1-block norm2 lands on an SM before the 132-CTA tk2f grid is
+  resident and one tk2f CTA starts late (same pattern as the layer's rmsnorm-SM CTA, x9). 'late' moves the trigger to
+  the gemm2 rows, so norm2 can only land after a tk2f CTA leaves. Needs the H200. Patches: tools/fresh/bs1/late*.patch.
+- Full bench (bench.py bench, H100, seeds 7/8/9), base -> late (-> late2): bs1 39.20 -> 38.21 (38.75), bs16 107.14 ->
+  105.23, bs32 152.98 -> 152.58, bs8 86.14 -> 85.04, bs128 227.82 -> 226.27, bs256 265.73 -> 264.45; geomean vs
+  SGLang-H200 1.846 -> 1.868 (+1.2%), late2 1.859. 'late' = TK2F 84204 (M=1 slot y32 + norm3) + NORM2_PDL 1 + tk2f
+  launch_dependents moved from entry to just before its gemm2 rows. Not in submission.py of moe (moe's dir): Handoff
+  posted; the deciding test is the H200 (moe check or Modal), given n5s19's H200 loss with the entry trigger.
+- Layer: already has all three at T=1 (84204 + n2u SLOT, PDL n2u, TK2F_LATE_TRIG 3): no layer item from this.

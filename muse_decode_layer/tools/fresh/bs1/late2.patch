@@ -1,0 +1,59 @@
+--- /tmp/fx10/base/submission.py	2026-10-31 13:15:05.332665993 +0000
++++ /tmp/fx10/late2/submission.py	2026-10-31 13:26:07.789440364 +0000
+@@ -927,15 +927,18 @@
+     float4 a = wp[0], b = wp[1];
+     wv[0] = a.x; wv[1] = a.y; wv[2] = a.z; wv[3] = a.w; wv[4] = b.x; wv[5] = b.y; wv[6] = b.z; wv[7] = b.w;
+   }
+-  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
+-  if (tok == 0 && tid < 128) zc[tid] = 0;  // moe_tk2f's segment counters: zero again for the next call
+   float v[8][8], ss[8], twv[8];
+   bool loc[8];
+   int eid[8];
+-  // n5s24: all ids and tw of the token in one batch (tw was loaded per local slot after the barrier: serial trips)
++  // fresh x10: ids / tw are the call's inputs and w1 a weight (none written in the call): read them BEFORE the wait and
++  // pin them there (ptxas otherwise sinks plain loads below griddepcontrol.wait): one dependent trip less after it
+ #pragma unroll
+   for (int s = 0; s < 8; ++s) { eid[s] = ids[tok * 8 + s]; twv[s] = tw[tok * 8 + s]; }
+ #pragma unroll
++  for (int s = 0; s < 8; ++s) asm volatile("" :: "r"(eid[s]), "f"(twv[s]), "f"(wv[s]));
++  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
++  if (tok == 0 && tid < 128) zc[tid] = 0;  // moe_tk2f's segment counters: zero again for the next call
++#pragma unroll
+   for (int s = 0; s < 8; ++s) {
+     const int e = eid[s] - start;
+     loc[s] = e >= 0 && e < count;
+@@ -5041,7 +5044,7 @@
+       return;
+     }
+   }
+-  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
++  if (false) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // fresh x10: late trigger
+   {  // routing, as moe_tk2 GATED
+     int e = -1, rank = 0;
+     if (warp < 8) {
+@@ -5324,6 +5327,7 @@
+   if (FP && a0 >= a1) mbar_arrive(&xrdy);  // no gemm13 rows here: release the producer's gate at once
+   tk2f_consume<512, NC, NSTG, true, KPS, SA, PF, REL>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
+                                     empty, st, ph, rb, &xrdy);
++  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // fresh x10: at the gemm2 rows
+   tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
+                                      empty, st, ph, rb);
+   if constexpr ((PF & 262144) != 0) {  // n5s17 ROLE probe P2: the dead TWO branch AFTER the main path
+@@ -6032,7 +6036,7 @@
+ 
+ 
+ PLAN_OVERRIDE = None
+-NORM2_PDL = 0  # n5s19: 1 = moe_norm2/3 launched as a PDL secondary of moe_tk2f (tk2f triggers at entry)
++NORM2_PDL = 1  # n5s19: 1 = moe_norm2/3 launched as a PDL secondary of moe_tk2f (tk2f triggers at entry)
+ # PDL / row order are set once in the library (g_pdl = 4: big-M kernels only, g_blk = 0); moe_set_pdl / moe_set_blk
+ # change them for experiments. Judge s5: decode PDL (gemm2 or norm2) and tk2_map blk 2 at bs32 lose on the H200.
+ TB_RT = 0  # big-M moe_tb on (1) or off (0: old moe_big path)
+@@ -6092,7 +6096,7 @@
+ TK2F_S6_ON = True  # n20: run tk2f / tk2h on them (DIAG A/B: False = the 8-bit SQ stages)
+ TK2F_SQ = 1  # n14: tk2f single-copy 18 KB stages (prepare _sq_pack; cfg + 10000000; bitwise = off)
+ TK2F_PFL2 = 0  # n5s27: DIAG only: tk2f L2 prefetch of whole 72 KB SQ rows, distance 1..3 rows; 4 = 18 KB stages one row ahead (0 = off)
+-TK2F = 204  # s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
++TK2F = 84204  # s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
+ TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
+ SK_ZERO = 64  # CTAs zeroing Acc13 in route2
+ 
