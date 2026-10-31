@@ -1,0 +1,11 @@
+seed 3 maxnt 167 n>64 1 bitwise True chk True: base  222.83 sl  220.45 d  -2.38
+seed 9 maxnt 149 n>64 1 bitwise True chk True: base  269.01 sl  267.00 d  -2.01
+seed 15 maxnt 130 n>64 2 bitwise True chk True: base  296.34 sl  294.60 d  -1.74
+seed 26 maxnt 152 n>64 1 bitwise True chk True: base  267.16 sl  267.85 d  +0.69
+seed 37 maxnt 130 n>64 1 bitwise True chk True: base  277.70 sl  274.70 d  -3.00
+seed 0 maxnt 225 n>64 2 bitwise True chk True: base  243.22 sl  244.50 d  +1.28
+seed 23 maxnt 220 n>64 1 bitwise True chk True: base  249.04 sl  249.54 d  +0.50
+seed 33 maxnt 219 n>64 1 bitwise True chk True: base  242.93 sl  242.82 d  -0.11
+seed 10 maxnt 223 n>64 3 bitwise True chk True: base  258.25 sl  258.33 d  +0.08
+seed 30 maxnt 256 n>64 3 bitwise True chk True: base  259.59 sl  259.86 d  +0.26
+bs 256 maxnt>128 n=10 base  258.61 sl  257.96 d  -0.64 us

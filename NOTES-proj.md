@@ -3106,3 +3106,24 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   231 vs 176-189 us). 0 judge runs, 0 Modal. Lesson: `pgrep -f <pattern>` in a wait loop matches the loop's own command line.
 - NEXT: layer merges HOT_SL (v178) + check. Proj: if wanted, the same audit at d32 (T=32: experts <= 32 tokens, no hot path;
   layer n24s1 found T=8 bytes-only). 00:00Z H200 queue dev/n15/mk_h200.sh stands.
+
+## n21 (2026-10-31 16:15Z-, unattended session 9): lead 15:58Z follow-ups to HOT_SL
+- T=128 (lead's question): a slow mode like T=256's cannot happen: each token routes to an expert at most once, so nt <= T =
+  128 <= NH 128 and moe_hot already takes every 65..128-token expert. Same on the moe board at bs128 (200 seeds: max 128).
+- MOE BOARD bs256 (dist normal, reference.generate_input): 37% of 200 seeds have a >128-token local expert (median max nt
+  100, p90 256 = every token on one expert); bs128 0%. moe board moe_hot had the same 65..128 window (h = nt > 64 && nt <= NH)
+  and twm the same skip line, so mk_hotsl's edits port with one changed string (dev/n21/mk_hotsl_moe.py).
+- H100 interleaved A/B (dev/n21/ab_moe.py, cwd r-moe/muse_moe_w4a16, 4 rounds x 30 replays per seed): first variant on
+  40 seeds: >128 inputs -5.6 us (9/9 faster), <=128 +0.75 (19). A/A control (same code twice, 12 seeds): +-0.8 per seed,
+  mean 0.0. SL2 (+ ballot fast path when no expert > 128): >128 (225-256 tokens) -9.7 (4/4), <=128 +0.45 (8; maybe real,
+  maybe noise: twm's skip line changed, SASS sizes changed; no new 64 KB loop crossing in moe_hot).
+- BALANCED SLICES (mk_hotsl_moe3.py): ns = ceil(nt/128) slices of ceil(nt/ns) rows rounded up to 16 (167 -> 2 x 96 instead
+  of 128 + 39 at N 80): vs SL2 on 129-170-token inputs -1.7 us (4/5), >200 tie. bench.py test 15/15; dev/n21/stress.py
+  bitwise vs base: eager 180/180 (bs256 x80, 257 x30, 256 skewed x30, 128 skewed, 200, 384; 65 with a >128 expert), graph
+  replay with fresh inputs copied in: bs256 60/60, bs257 60/60. Diff for moe: dev/n21/hotsl_moe_board.diff (applies on
+  r-moe 0d36b3a). Expected bs256 ~-2 us/input mean (~0.8% on that shape).
+- Same balanced slices in the LAYER (dev/n21/mk_bal_layer.py on top of the n20 HOT_SL file; diff
+  dev/n21/bal_on_hotsl_moe_src.diff, patch -p1 checked on layer v178 161c986 moe_src.py): n20 ab_route.py HOT_SL v177 vs
+  +bal, routers 5,12,17,20,7 x 4 inputs, tuner off: v32 sl -1.67 us (15/20), v32 full -3.07 (19/20); bitwise + check 40/40.
+  The real routers' top experts sit at 130-190 tokens (the sweet spot). Handoffs to layer + moe in COORD. 0 judge runs.
+- Lesson: torch_extensions cache is shared by all agents; identify my .so by mtime, not "newest".
