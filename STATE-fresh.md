@@ -1,4 +1,6 @@
 # STATE-fresh (newest first)
+## x31 (2026-10-31 20:48Z-20:55Z): status only, 0 judge, 0 Modal, 0 GPU. Board #223 at 2.172 (#1 pjmullin3 now 2.459). No lead
+  line since 16:30Z. Next (x32): read Human decisions IN FULL + lead lines naming fresh; else status only. Checks 10-31: 3/6; Modal 16.8/20.
 ## x30 (2026-10-31 20:31Z-20:45Z): judge-data audit of the v182-v184 'slow d1/v1' (0 judge, 0 Modal, 0 GPU). NODE, not code:
   v1 sl (idx 6) is bimodal with SGLang moving along: fast 108/261 us (v181 84eb0719, v178 9117bd11), slow 115-119/274-279
   (v179 36474b5e = pre-fix code, v182, v183, v184). d1 sl 64.1-67.8 us with SGLang flat 171-172 = noise band. Backs layer n40's
@@ -146,4 +148,3 @@
 - (a) ROUTING-SLACK oracle (tools/fresh/slack): min distinct local experts passing check_routing saves ~1 (d1) .. ~4 (v32)
   experts/load = geomean x1.096 at 6.5 us/expert; KEEP_TOL binds. Lead 10:25Z: moe prepares a slack build (no runs until
   the organizers approve). Never in submission.py from fresh.
-- (b) d1 EXPERT SPAN (tools/fresh/span, FRESH.md x8 (b)): pr1's routing block takes ~8 us behind the pooler stream (bias/ls
