@@ -3715,3 +3715,30 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   (BF16 queries would remove at most the E4M3 part) -> clean-score estimate at 0.012 margins v16 1.3-1.9, v32 1.9-2.8,
   still ~0 at d1/d16/v1 (small T: the distinct floor + flip margin binds). The x1.096 of fresh x8 assumes the reference's
   exact scores; for an FP8-query layer the safely usable slack is ~0.1-0.3 % of score, not ~9 %.
+
+## o6 (2026-10-31 11:20Z - ): moe/slack made to PAY on the H100 (still OFF, 0 judge runs, 0 Modal)
+- Oracle first (tools in /tmp/slack/o6, files built from /tmp/slack/wt, TUNE pinned to ({},) in all arms so the tuner
+  can't confound): 3 arms, ab_seeds.py "verify " 3 rounds x seeds 801-804. dry = slack kernel runs, result discarded
+  (SLACK_RM = 1e9 -> floor_r unreachable -> early return before the writes; same work otherwise).
+  o5 kernel: dry/on/off v16 sl 334.5/322.8/318.9, fu 463.6/446.6/443.2, v32 sl 362.8/353.7/347.6, fu 609.1/600.0/593.7.
+  => expert saving (on-dry) -11.7/-17.0/-9.1/-9.1 us (bimodal per seed: 0..-2 or -17..-28: a dropped expert either
+  removes a twm pass/tail or not); kernel overhead (dry-off) +15.6/+20.4/+15.2/+15.4 us = the whole o5 loss.
+- PDL secondary (griddepcontrol.wait, trigger iff the routing's TRIG at that site, cudaLaunchKernelEx): dry-off only
+  13.4/18.6/14.2/16.0 -> the cost is NOT lost overlap. nsys v16 sl seed 801: slack ends 7.8 us after _routing (4.4 us
+  standalone o5), twm +8.3 us later; routegathern does launch early (PDL edge fine).
+- globaltimer stamps in the last CTA: phase C = ~10 us as soon as ONE token changes (0.7 with none); inside it
+  token_keys 4.5 us + reload of the pick's logit 1.0 us: serialized dependent global loads (the `for q < ks` loop kept
+  each key's load next to its expf; ~0.5-1 us per trip on the contended H100). SASS 4096 instr but NOT i-fetch: a
+  compact no-unroll build (1616 instr, 560 B stack) was slower.
+- FIX (slack_src.cu): token_keys issues all loads (ids, 8 x part[q0], 8 x part[q1], 8 x bias) before any use; ks > 2
+  (split-K routers at small T) loops one trip per partial, same summation order; it also returns the sigmoid scores
+  sg[k] (expf, as before) so phase C takes the pick's score by shuffle instead of reloading the logit. Bitwise = the o5
+  kernel on 75 cases (5 loads x 5 seeds x ks 1/2/8, margins 0, 267 re-routed tokens; /tmp/slack/o6/kt/cmp.py).
+  Standalone (kt.py, warm): v16 9.0 -> 5.7 us, v32 19.1 -> 8.3, d16/v1 20 -> 10.
+- In-layer A/B (same protocol) ndry/non/off: v16 sl 323.2/313.6/317.4, fu 449.4/431.9/442.4, v32 sl 354.4/346.1/348.2,
+  fu 600.3/591.3/593.5 -> on-off = -3.9 / -10.5 / -2.1 / -2.2 us = NET WIN (o5: +3.9/+3.4/+6.1/+6.3); overhead now
+  +5.8/+7.0/+6.2/+6.9 us. v1 control -0.6/-0.5 (noise, slack off at T=8).
+- Correctness: slack_judge 24 inputs x routers 11/23 x verify: 0 fails / 288 (192 slack-on), worst pick gap 0.032
+  (limit .05), dropped lead 0.018 (limit .03), saved distinct v16 0.6-1.5, v32 0.7-1.0 (= o5). bench test 13/13 with
+  slack at (128,256) + real tuner, at ALL T, and off. Branch moe/slack: 9704a5d, bcdba50, be3ab28, merge of main
+  (v174 c62cdb0) a9242fb (13/13 again). SLACK_TOKENS = () on the branch.

@@ -1,3 +1,7 @@
+## o6 11:50Z 10-31: moe/slack now a NET WIN on the H100 (still OFF, 0 judge runs): o5's loss was the kernel's serialized
+## global loads (phase C 10 us per changed token), not PDL. Loads-first token_keys + score by shuffle (bitwise = o5) + PDL:
+## in-layer on-off v16 sl/fu -3.9/-10.5, v32 -2.1/-2.2 us; 0 fails/288 slack_judge; 13/13. Branch moe/slack a9242fb (on v174).
+## Remaining overhead +5.8..+7.0 us (expert saving -9..-17): next = cut it (fuse phase A into _routing / fewer trips).
 ## o5 11:30Z 10-31: lead 10:25Z ROUTING-SLACK BUILD PREPARED: branch moe/slack 894de97 (slack_src.cu + _slack at all routing sites,
 ## OFF by default). Greedy = fresh's exact min on 12/12 loads with reference scores, BUT the layer's keys carry FP8-query noise
 ## (keep-lead std 0.0048, max 0.019 = E4M3-ref vs FP32) -> safe margins leave ~1 expert v16/v32, ~0 d1/d16/v1. H100: 0 fails/192
