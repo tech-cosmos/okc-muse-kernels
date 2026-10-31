@@ -3264,3 +3264,22 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Outside check: teams with 2-3 attempts sit at 2.23-2.26x on the layer board (rank 42: 3 attempts, rank 69: 2), 180 of the
   teams ahead submitted 10-30/31: looks like shared know-how. Web search found no public solution; vLLM's MuseSpark MegaMoE
   uses DeepGEMM fp4_fp4_mega_moe (FP4 activations: illegal here). muse_prefill_layer exists (no row; not counted on the overall board).
+
+## n13s3 2026-10-31 10:05Z-10:40Z: lead 09:55Z 2nd item (v1 boundary/o hops) MEASURED; free-boundary ceiling; no build, 0 judge runs, 0 Modal.
+- Budget 10-31: all boards 20 checks / 10 submits unused. Board unchanged: #212 at 2.158; value = us, so SGLang total = 10482 x
+  2.158 = 22620 = #1's 9356 x 2.418: the baseline did NOT move; the 180 teams that passed us are just faster (11% at #1).
+- Oracle (tools/n13/orc_nobnd.py: skip the first _boundary at T in ORC_NOBND; pr1/pr8 read a stale h, so only the o end ->
+  pr1/pr8 end interval is valid; tools/n13/tlmed.py = median per-kernel timeline of 25 cold replays), H100, main v173, seed 99:
+  ```
+  d1 sl  base: o end 21.2, bnd end 24.4, pr1 end 43.5 (o->pr1 end 22.3) | no bnd: o end 21.8, pr1 end 43.1 (21.3)  => -1.0 us
+  v1 sl  base: o(g30) end 29.6, bnd end 32.8, pr8 end 55.2 (25.6)    | no bnd: o end 25.8, pr8 end 47.9 (22.1) => -3.5 us
+  ```
+  (GPU shared with 3 agents: absolute times high; intervals are what count.) d1: the boundary is already hidden behind pr1's
+  pre-wait W ramp (ceiling 1.0 < 1.5 gate). v1: 3.5 us ceiling (= proj's T=8 -4.2 oracle), but every form that removes it is
+  on record dead: OB8 o-side grid barrier (s86: pr8 = 1024 thr x 64 regs + ~140 KB smem can't co-reside with o blocks, so its
+  ramp gets exposed), pr8-side prologue (needs s + b + 4 FP32 vectors per block = ~5x the x bytes; PR1_BND form). Checked a new
+  form: DEFERRED boundary in pr8 (pooler(h) = r_s [W((1+w)alpha s) + r_b W((1+w)beta b)], scalars applied in the epilogue / the
+  scale-invariant pre-expert rmsnorm): needs two 8-col activation sets staged per block (256 KB smem, or 32 more regs/thread
+  for s) -> does not fit pr8's ~140 KB + 64-reg budget; and the router would then run on non-SGLang-rounded h (route-check
+  risk, lead 10-26). Not built. v1 hop lane CLOSED with a number.
+- Both lead 09:55Z layer items are closed (n13s1 d32 qkv ~0.6 buildable; n13s3 v1 bnd ceiling 3.5 but no fitting form).
