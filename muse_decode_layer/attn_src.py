@@ -3253,7 +3253,7 @@ if HAVE_GLUON:
             it += ntiles
 
     @gluon.jit
-    def _gw_consumer_bal(qkv_ptr, q_s, ql_s, k_ring, vh, ready, empty, seq_ptr, pid, h, scale, pacc_ptr, pml_ptr,
+    def _gw_consumer_bal(qkv_ptr, q_s, k_ring, vh, ready, empty, seq_ptr, pid, h, scale, pacc_ptr, pml_ptr,
                          HEAD: gl.constexpr, HQ: gl.constexpr, HKV: gl.constexpr, G: gl.constexpr, L: gl.constexpr,
                          B: gl.constexpr, B_PAD: gl.constexpr, P: gl.constexpr, NID: gl.constexpr, M: gl.constexpr,
                          D: gl.constexpr, BN: gl.constexpr, NS: gl.constexpr, LZ: gl.constexpr = 0,
@@ -3277,10 +3277,7 @@ if HAVE_GLUON:
             lo, hi, ntiles = _gw_seg(idx, seqv, tiles, start, end, b, BN)
             x = gl.load(qkv_ptr + (b * L + r // G)[:, None] * QKV_W + ((h + HEAD) * G + r % G)[:, None] * D
                         + cq[None, :]).to(gl.float32)
-            xn = x * gl.rsqrt(gl.sum(x * x, 1) / D + 1e-5)[:, None]
-            x8 = xn.to(gl.float8e4nv)
-            q_s.store(x8)
-            ql_s.store((xn - x8.to(gl.float32)).to(gl.float8e4nv))  # x16 QLO: q = hi + lo, two E4M3 terms (router-score error /5)
+            q_s.store((x * gl.rsqrt(gl.sum(x * x, 1) / D + 1e-5)[:, None]).to(gl.float8e4nv))
             fence_async_shared()
             gl.barrier()
             m_i = gl.full([M], -1.0e30, gl.float32, layout=gl.SliceLayout(1, S_L))
@@ -3293,7 +3290,6 @@ if HAVE_GLUON:
                     mbarrier.wait(ready.index(s), ((it + i) // NS) & 1)
                     s_tok = warpgroup_mma(q_s, k_ring.index(s).slice(HEAD * D, D, 1).permute((1, 0)),
                                           gl.zeros([M, BN], gl.float32, S_L), use_acc=False, is_async=True)
-                    s_tok = warpgroup_mma(ql_s, k_ring.index(s).slice(HEAD * D, D, 1).permute((1, 0)), s_tok, is_async=True)
                     sc = warpgroup_mma_wait(0, deps=[s_tok])
                     if lo + (i + 1) * BN > hi:
                         sc = gl.where((lo + i * BN + n_s < hi)[None, :], sc, float("-inf"))
@@ -3313,7 +3309,6 @@ if HAVE_GLUON:
                     mbarrier.wait(ready.index(s), ((it + i) // NS) & 1)
                     s_tok = warpgroup_mma(q_s, k_ring.index(s).slice(HEAD * D, D, 1).permute((1, 0)),
                                           gl.zeros([M, BN], gl.float32, S_L), use_acc=False, is_async=True)
-                    s_tok = warpgroup_mma(ql_s, k_ring.index(s).slice(HEAD * D, D, 1).permute((1, 0)), s_tok, is_async=True)
                     sc = warpgroup_mma_wait(0, deps=[s_tok])
                     if lo + (i + 1) * BN > hi:
                         sc = gl.where((lo + i * BN + n_s < hi)[None, :], sc, float("-inf"))
@@ -3337,7 +3332,6 @@ if HAVE_GLUON:
                     mbarrier.wait(ready.index(s), ((it + i) // NS) & 1)
                     s_tok = warpgroup_mma(q_s, k_ring.index(s).slice(HEAD * D, D, 1).permute((1, 0)),
                                           gl.zeros([M, BN], gl.float32, S_L), use_acc=False, is_async=True)
-                    s_tok = warpgroup_mma(ql_s, k_ring.index(s).slice(HEAD * D, D, 1).permute((1, 0)), s_tok, is_async=True)
                     sc = warpgroup_mma_wait(0, deps=[s_tok])
                     if lo + (i + 1) * BN > hi:
                         sc = gl.where((lo + i * BN + n_s < hi)[None, :], sc, float("-inf"))
@@ -3767,8 +3761,6 @@ if HAVE_GLUON:
             # (Each consumer loads its segments' queries.)
             q0 = gl.allocate_shared_memory(gl.float8e4nv, [M, D], SQ)
             q1 = gl.allocate_shared_memory(gl.float8e4nv, [M, D], SQ)
-            q0l = gl.allocate_shared_memory(gl.float8e4nv, [M, D], SQ)
-            q1l = gl.allocate_shared_memory(gl.float8e4nv, [M, D], SQ)
         else:
             x0 = gl.load(qkv_ptr + q_off).to(gl.float32)
             x0 = (x0 * gl.rsqrt(gl.sum(x0 * x0, 1) / D + 1e-5)[:, None]).to(gl.float8e4nv)
@@ -3781,9 +3773,9 @@ if HAVE_GLUON:
         gl.barrier()
         if BAL:
             gl.warp_specialize([
-                (_gw_consumer_bal, (qkv_ptr, q0, q0l, k_ring, vh0, ready, empty, seq_ptr, split, h, scale, pacc_ptr,
+                (_gw_consumer_bal, (qkv_ptr, q0, k_ring, vh0, ready, empty, seq_ptr, split, h, scale, pacc_ptr,
                                     pml_ptr, 0, HQ, HKV, G, L, B, B_PAD, NP, NID, M, D, BN, NS, LZ, GX)),
-                (_gw_consumer_bal, (qkv_ptr, q1, q1l, k_ring, vh1, ready, empty, seq_ptr, split, h, scale, pacc_ptr,
+                (_gw_consumer_bal, (qkv_ptr, q1, k_ring, vh1, ready, empty, seq_ptr, split, h, scale, pacc_ptr,
                                     pml_ptr, 1, HQ, HKV, G, L, B, B_PAD, NP, NID, M, D, BN, NS, LZ, GX)),
                 (_gw_producer_bal, (seq_ptr, pt_ptr, kc_ptr + h * D, vc_ptr + h * D, k_ring, v_ring, vh0, vh1, ready,
                                     empty, split, B, B_PAD, NP, MAX_PAGES, PAGE, ROW_W, BN, C, D, NS, PW,
