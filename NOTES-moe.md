@@ -3983,3 +3983,182 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   wall (n6s1, n7s47, o9); bs1 fixed cost (o7, o15, fresh x5/x10-x12, CW dead on moe board); lossless bytes dead (codes 4.0 bit,
   S6 scales). No mechanism outside those lists found in this session.
 - main 515070e: muse_moe_w4a16 identical to 8242d5e; bench.py test 15/15 PASS. Submit 8242d5e once after 00:00Z 11-01.
+
+## STATE archive o21 (session-log head of STATE-moe.md as of o20, moved here verbatim 2026-10-31 17:40Z)
+## o20 17:08-17:20Z 10-31 (session 18): no new lever. Re-read record: big-M twm consumer (RS/SS wall, n6s1/n7s47/o9), bs1 fixed
+## cost (o7/o15/fresh x5/x10-x12/CW), lossless bytes (codes 4.0 bit, scales S6 dead) all closed; lead lines up to 16:30Z done.
+## main 515070e moe dir == 8242d5e, bench test 15/15 PASS again. 0 judge runs. STILL QUEUED: SUBMIT 8242d5e ONCE after 00:00Z 11-01.
+## Suggest pausing moe (~/STOP-moe) until the lead names a build that needs moe.
+## o19 17:40Z 10-31: main 8242d5e = 2ab9ba1 + proj n22 HOT_IL (IL=2: moe_hot claims a >128-token expert's slices rb-major,
+## 2nd W read of a row block = L2 hit). Bitwise (eager 180/180, replay 120/120), test 15/15. H100 bs256 (seeds 100-123, 3 rounds):
+## >128 inputs -3.58 us (11/11), others +0.10 (13). Check 8c75ecb3 2.3498x (bs1 3.060x, bs16 2.151, bs32 1.737, bs8 2.253,
+## bs128 2.377, bs256 2.750). NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 8242d5e ONCE (supersedes 2ab9ba1/34dd790).
+## moe board 10-31: 14 checks, 2 submits used. TLB warm-up for bs1 first-data: dead on record (fresh x5 (2)).
+## o18 16:57Z 10-31: main 2ab9ba1 = 34dd790 + proj n21 HOT_SL (balanced >128-token expert slices in moe_hot) + SLW
+## (slice path: hot working CTAs = max(32, 132*16s/(16s+5*others)); fixes H100 seed-115 +11.5 us mode). Bitwise, test 15/15.
+## Check db1cf043 2.3494x (bs256 225.7). H200 DIAG2 e93ab795 (old hot vs new, 40 >128-token + 8 control bs256 inputs,
+## tools/o18/diag2): -13.9 us 40/40, controls +0.4 -> bs256 ~-5 us mean. H200 DIAG 50c32442: SLW / base-0 = tie (1 >=4-slice
+## seed of 48) -> base 0 reverted. SLW in the layer v32 = tie (real routers: 2-3 slices) -> no handoff.
+## NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 2ab9ba1 ONCE (supersedes 34dd790). moe board 10-31: 13 checks, 2 submits used.
+## o17 16:25Z 10-31: HOT_ET RACE in layer main (v171+) DEMONSTRATED + FIXED: branch moe/hotet-race e24be08 (moe_routegathern
+## zeroes meta[67] + fence BEFORE its PDL trigger; forced window: main hangs / illegal instr, fix 0 fails; H100 tie). Request to
+## layer (v178) + lead (withdraw call) in COORD. Moe-board HOT_ET (fixed) = tie -> not ported. main 34dd790 unchanged.
+## NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE. Then: proj's HOT_SL (>128-token expert slices) onto moe board bs256
+## (+ bs128 if proj n21 says it maps) when proj hands it off (lead 15:58Z). Moe board 10-31: 10 checks, 2 submits used.
+## o16 15:55Z 10-31: main 34dd790 = cbd4bcf + layer IDW in moe_norm2/norm3 (ids/tw before griddepcontrol.wait, Y .cg;
+## SASS checked), bitwise, test 15/15; H100 bs1 -0.32, bs8 -0.44, bs16 -0.34, bs32 -0.07 us. Check ce1a1aa4 2.3335x (bs1 25.8,
+## bs16 90.1, bs32 123.3, bs8 67.4, bs128 190.8, bs256 230.9: bs8/16/32 slow draws, untouched paths). moe board 10-31: 10 checks,
+## 2 submits. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE (supersedes cbd4bcf; check > board 2.3198). Remaining
+## moe-board items all < 0.1% (HOT_ET race-safe ~1 us bs128 no-hot draws); lead lines decide.
+## o15 16:15Z 10-31: bs1 is 0.64 %/us of the moe board (bs32 0.14, bs256 0.07). Cluster-split norm3 (moe_norm3c, bitwise,
+## tools/o15/n3c.diff) H100 bs1 +0.4/+0.7, bs8 +0.5 us = DEAD. 0 judge runs. main still cbd4bcf: SUBMIT IT ONCE AFTER 00:00Z 11-01.
+## o14 15:31Z 10-31: main cbd4bcf = acf63a9 + tk2h MRG 2 at bs32 (fresh x13 per-segment counters); bitwise, test 15/15.
+## H100 bs32 -2.2 us; H200 DIAG cc253b3b bs32 -0.7 us (16 seeds, 2 pairs). Clean check c015407f 2.3737x = BEST check:
+## bs1 25.9, bs16 85.2, bs32 120.0, bs8 61.5, bs128 189.9, bs256 229.4. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT cbd4bcf ONCE
+## (supersedes acf63a9/7139706). moe board 10-31: 9 checks, 2 submits. Dead: tk2h at bs16 (+2.5 H100), BAL at bs32 (tie).
+## o13 15:30Z 10-31: main acf63a9 = 7139706 + tk2f BAL on SQ (PF 548, layer T=16 'bal') at bs 8/16; bitwise, test 15/15.
+## H200 DIAG 51ba444e (moe-board routings, interleaved): bs16 -1.1, bs8 -0.3 us. Clean check bfd582aa 2.3694x (best check):
+## bs1 26.4, bs16 84.8, bs32 117.2, bs8 62.1, bs128 193.4, bs256 228.4. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT acf63a9 ONCE
+## (not 7139706). moe board 10-31: 7 checks, 2 submits. Layer T=8 (nu8) does not map; HOT_ET still unported (o11 race note).
+## H200 moe-board A/B harness: tools/o13/diag_bal.diff (O13_DIAG hook; copy, edit variants, okc check the copy, read log_tail).
+## o12 15:40Z 10-31: main 7139706 = c75be69 + moe_hot HOT_XN 16 (layer v172), bitwise, test 15/15. check 2ba95722 2.3265x
+## (bs256 x2.728 vs 2.683 twice before = real; others slow draws). NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 7139706 once
+## (moe board cap resets; beats 2.3198). Then: HOT_ET port (race-safe form) is the last unported layer moe piece.
+## o11 10-31: moe board = layer moe_hot hotdyn+HOT128 (HOT_M {128: 16048, 256: 3216064}) + bs32 tk2h W3 (TK2H_M {32: 3}) on main c75be69,
+## bitwise, test 15/15. Checks e59302f4 2.3275 (hotdyn only) / b4e94b61 2.3323; submit 41ad7717 drew 2.3124 -> board stays 2.3198 (e37e578e).
+## moe board 10-31: 4 checks (1 DIAG), 2 submits = lead's 2/agent/day cap reached. Do NOT resubmit c75be69 unchanged.
+## CW (fresh a269066) on the moe board: H200 DIAG 3e70d87c d1 +0.2 us = DEAD (patch only in /tmp/o11cw; NOTES o11).
+## NEXT: moe-board candidates need new code (gap per shape vs 4.3 TB/s bytes: bs32 +15, bs16 +12, bs8 +11, bs1 +8, bs128 +50, bs256 +77 us;
+## distinct experts mean bs1 2.7 / bs16 11.4 / bs32 15.7 / bs8 8.0 / bs128 21.8 / bs256 23.9). Layer lane items per lead lines.
+## o10 14:20Z 10-31: fresh x10 'late' on moe board: check bef7bd02 2.3201x, SUBMIT e37e578e 2.3198x = NEW MOE BOARD BEST
+## (was aeba42c5 2.2792): bs1 25.3, bs16 87.3, bs32 118.6, bs8 63.2, bs128 194.0, bs256 234.3 us. main f90bcaf. moe 10-31: 1 check, 1 submit.
+## NEXT (14:25Z 10-31): o10 done. Big-M twm PDL trigger stays at entry (NORM_EARLY 1 = moe_norm waits per expert during twm: early is right). Candidates: fresh CW handoff (bs1 ~1 us) -> moe check; else lead names one. Slack: PARKED-READY (moe/slack a9242fb;
+## o8 cluster kernel tools/o8/s3.cu, bitwise, untimed, ~2-3 us of the 6-7 us overhead if approved).
+## o9 13:40Z 10-31: lead 12:25Z TWM NON-DQ OVERHEAD: GATE FAILS (tools/o9, real tw_item harness, H100). 269 instr/stage RT4 N32 =
+## dq 192 + 16 HGMMA + 8 WG + ~19 uniform + ~34 vector. Exact hoist (empty-barrier address, -4 instr) tie; whole ring protocol free
+## (illegal) 0.945x RT4 N32 / 0.970x RT2 N64; + scales free 0.924/0.913; half the full waits tie. 0 judge runs, 0 Modal.
+## o8 12:45Z 10-31: slack cluster kernel built (bitwise = o6 on 270 cases), stopped untimed per lead 12:25Z. NOTES o8.
+## o7b 12:12Z: layer's request tk2f LAST-WAVE K-SPLIT: DEAD at d16 (oracle: removing the row tail saves less than its bytes).
+## o7 12:05Z 10-31: lead 11:25Z tk2f FIXED COST: GATE FAILS. Free-prologue+split oracle (plan of the same input in one trip)
+## H100 in-layer: v1 +0.0/+0.5, d16 -0.2/-0.7, d32 -0.7/-0.9 us; the prologue is one ~1.3 us dependent trip (TLB+L2), its compute
+## is free; LUT-late dead. d16 lever = _routing's 2.9 us tail after the router (proj's item). Tools tools/o7. 0 judge runs.
+## (o6 ran against the lead's 11:25Z PARK of moe/slack, which I missed; slack parked now.)
+## o6 11:50Z 10-31: moe/slack now a NET WIN on the H100 (still OFF, 0 judge runs): o5's loss was the kernel's serialized
+## global loads (phase C 10 us per changed token), not PDL. Loads-first token_keys + score by shuffle (bitwise = o5) + PDL:
+## in-layer on-off v16 sl/fu -3.9/-10.5, v32 -2.1/-2.2 us; 0 fails/288 slack_judge; 13/13. Branch moe/slack a9242fb (on v174).
+## Remaining overhead +5.8..+7.0 us (expert saving -9..-17): next = cut it (fuse phase A into _routing / fewer trips).
+## o5 11:30Z 10-31: lead 10:25Z ROUTING-SLACK BUILD PREPARED: branch moe/slack 894de97 (slack_src.cu + _slack at all routing sites,
+## OFF by default). Greedy = fresh's exact min on 12/12 loads with reference scores, BUT the layer's keys carry FP8-query noise
+## (keep-lead std 0.0048, max 0.019 = E4M3-ref vs FP32) -> safe margins leave ~1 expert v16/v32, ~0 d1/d16/v1. H100: 0 fails/192
+## inputs; A/B vs main v16 +6.4/+1.6, v32 +4.8/+8.9 us = NET LOSS (kernel 4.4/8.7 us + lost PDL). x1.096 needs reference-exact
+## scores; usable slack for us ~0.1-0.3 % even fused. Next if wanted: fuse phase A into _routing + B/C in its last program. 0 judge runs.
+## o4 10:30Z 10-31: no moe item >= gate left (o1-o3 closed lead 09:55Z items + own list). New angle checked on paper: x1's acc-read
+## wall is per weight-token (BF16 wgmma k16 fixed: one FP32 acc read per token per 16 K for any M/N/RS/SS shape; k32 = FP8 x = illegal),
+## so no tile shape escapes it. Sub-gate leftovers unchanged (tk2f last-wave K-split ~0.8/1.1 us d16/d32; twm instr trims <1; HOT128 0.9 v16).
+## Largest open lever = routing-slack ruling (fresh x8, x1.096) -> human/organizers. 0 judge runs, 0 Modal.
+## o3 10:50Z 10-31: own item SCALE-D-0 PROMOTION in twm (wgmma scale-d 0 per k16 + FP32 FFMA block scale, from fresh x1): DEAD
+## by H100 oracle (tools/o3): bound w/o promotion 0.81-0.86x, promotion ALU (N/2 FFMA/tile/k16) 1.25-1.8x even ideal; ptxas C7514
+## trap documented (NOTES o3). Nothing in the moe lane >= gate. 0 judge runs, 0 Modal.
+## o2 10:35Z 10-31: own-list oracles DEAD: power/clock lever (n9s1: dq+wgmma-free twm clocks 1.80 GHz = base -> clock not compute-set),
+## GPC static imbalance in tk2f (inside n7s41 tail bound <= 2.2 us d32), twm structure (= drain, dead on record). NOTES o2. 0 judge runs, 0 Modal.
+## o1 10:30Z 10-31: lead 09:55Z PIPE-BALANCED DQ: GATE FAILS by oracle (tools/o1: twm w/o HMUL2 0.87-0.93x = bound; HMUL2->1 IADD
+## 0.99-1.03x; exact int product >= 3-4 ops/pair -> slower). Next item tk2f d16/d32 rows: H200 record n7s41 says <= ~1 us/item -> not built.
+## 0 judge runs, 0 Modal. NOTES o1.
+## n11c 04:36Z 10-30 idle: no lead line after 03:50Z; LANE A done (n11a: 'a legal faster design exists'); moe paused. 0 judge runs, 0 Modal.
+## n11a 04:20Z 10-30: lead 03:50Z LANE A DONE (diag only, NOTES n11a, tools/n11a): leaders' edge is NOT an FP8 shortcut:
+## n11b 04:25Z 10-30 idle: LANE A done (n11a); no lead line after 03:50Z; moe paused. 0 judge runs, 0 Modal.
+## FP8 x alone fails 1.5% (2.6% rms/GEMM; W fold + x 3.4%); cheapest scaled FP8 consumer (F2 LUT fold) only 0.88-0.92x twm
+## cycles (bs128/256 -> ~188/~225 us proj. vs #1 ~155/188): dq ALU is the wall in both. Only scale-free F0 (0.55x) reaches it.
+## => 'a legal faster design exists'. moe paused. 0 judge runs, Modal 1.1 GPU-min.
+## n10s4 04:05Z 10-30: lead 03:20Z bundle DONE: v173 (= v172 + IDW + CUDA bnd2 at T=8) on main 8841e7d; check 335f3f26 2.1657 raw /
+## 2.1398 fixed-SGLang (< v172 2.1607): NOT submitted. H100 A/B d16/d32 -0.5, v1 -0.4 us. moe PAUSED. 1 layer check, 0 Modal.
+## n10s3 03:12Z 10-30 idle: still no lead line after 02:45Z (END lane closed n10s1; IDW Handoff moe/end 78898bb open). moe paused. 0 judge runs, 0 Modal.
+## n10s2 02:57Z 10-30 idle: no lead line after 02:45Z; LAYER END lane closed in n10s1 (its '04:15Z' stamp = typo, ended ~02:53Z).
+## moe paused. Open: IDW Handoff (moe/end 78898bb) for the lead/layer to bundle. 0 judge runs, 0 Modal.
+## n10s1 04:15Z 10-30: lead 02:45Z LAYER END lane DONE (NOTES n10s1). Free-piece oracles (H100): second boundary d1 1.2-1.4,
+## d16 1.8-2.7, d32 0.7-2.2, v1 2.8-3.3 us (cost = post-wait latency chain, not the hop); norm2 d16 1.1-2.3, d32 1.2-1.4 (not y32
+## volume: Q4 oracle 0). Buildable: IDW (branch moe/end 78898bb, exact, ~-0.5 us d16/d32: bundle item), CUDA bnd2 at v1 -0.55
+## (tools/n10s1, not on a branch). Gate (>= 2 us d1 or >= 3 us summed) NOT met by any design -> moe pauses. 0 judge runs, 0 Modal.
+## n9s4 00:30Z 10-30 idle: still no lead line after 00:00Z; moe paused (n9s2). 0 judge runs, 0 Modal.
+## n9s3 00:15Z 10-30 idle: no lead line after 00:00Z (answered by n9s2; n9s2's '00:40Z' stamp = typo, it ended ~00:10Z). moe paused.
+## 0 judge runs, 0 Modal. Budget 10-30 untouched (moe 20 checks / 10 submits).
+## n9s2 00:40Z 10-30: fresh's H200 O2 READ: base-both-free v16 sl 28.9 / v32 sl 47.5 us -> lead gate PASSES on numbers, but dq (14.4/22.4)
+## and MMA (11.7/22.7) are fully serial in-layer on the H200 too, and no Hopper operand path escapes the RF/issue wall (RS: dq in the
+## issuing warp; SS: ~4.5 B/weight smem). Twm consumer rebuild CLOSED by mechanism (NOTES n9s2). No build, 0 judge runs, 0 Modal.
+## NEXT: lead decision. moe pauses unless the lead names a mechanism outside RS/SS.
+## n9s1 00:06Z 10-30: lead 22:30Z twm REBUILD step (1) DONE. H200 counters (Modal): twm consumer-bound (real HBM = L2-fed
+## within 3%, ring wait 5% of consumer life, SM 1.77 GHz); H100: structure ~2 us, NSTG 6 = 8, g2 spin <= 1.7 us. Gate (lead 00:00Z)
+## = fresh's H200 O2 (base - both-free) >= 25 us v16 / 35 us v32; my estimate 12-17 us v16 -> likely CLOSED -> moe pauses.
+## NEXT: read fresh's O2 (r-fresh /tmp/fresh12/h200.txt or COORD); if gate passes, design a consumer rebuild vs n7s47/48 dead list.
+## Tools: muse_moe_w4a16/tools/n9s1 (inst.py counters, run_inst.py, L2-alias recipe in README). 0 judge runs; Modal 3.5 min.
+## n7s55 17:20Z idle: moe PAUSED per lead 16:45Z (bundle closed n7s53, no v172). No newer lead decision. 0 judge runs, 0 Modal.
+## n7s54 17:05Z idle: moe PAUSED per lead 16:45Z (bundle done n7s53: no v172). No newer lead decision. 0 judge runs, 0 Modal.
+## n7s53 17:05Z: lead 16:45Z bundle -> RT2 D4 DEAD in layer (ptxas C7511 in moe_twm, H100 +26..35 us; moe_hot-only tie), HOT128 no-hot
+## +2.5 v16 full unfixable cheaply (rg fused), prologue ~0; tk2f items 1/2 unbuilt (<=1 us each). No v172, 0 runs. moe paused.
+## n7s52 16:25Z idle: no lead decision after 15:50Z (Humming done n7s50). 0 judge runs, 0 Modal. Waiting for a lane or ~/STOP-moe.
+## n7s51 16:10Z idle: no lead decision after 15:50Z (n7s50 done; its "16:40Z" stamp = typo, ended ~16:05Z). 0 judge runs.
+## n7s50 16:40Z: lead 15:50Z Humming yardstick DONE (tools/n7s50/RESULTS.txt): Humming loses everywhere; H200 its 2 GEMMs alone
+## = 1.4-1.7x our full call (bs1 47.5 vs 31.1, bs8 87.7/63.0, bs16 122/80, bs32 183/108); H100 1.03-1.66x. twm/tk2f unchanged. 0 judge runs.
+## n7s48 15:35Z: lead 14:45Z (f)(g)(h) done (tools/n7s48/RESULTS.txt): 4 WGs/SM gain 6-13% only at 128 regs w/o producer;
+## n7s49 15:45Z idle: no lead decision after 14:45Z; moe lane closed (overlap n7s47/48). 0 runs. Pause moe or name a lane.
+## producer warp -> spills; self-fed rings cost ~300 cyc/stage per bulk issue => DEAD. (g) = n7s47 D4. (h) no C75xx in layer moe lib. twm unchanged. 0 runs.
+## n7s47 15:35Z: lead 14:30Z overlap (a)-(e) measured (tools/n7s47/ovl2.py, RESULTS.txt; NOTES n7s47): twm = 0.83x of ALU+MMA
+## already (bar met), but 1.4x of max(ALU,MMA); main stall = DISPATCH on dq ops while HGMMA runs (ncu). No variant closes it;
+## RT2 A-ring D4 -2..-9% per RT2 stage (<= ~1 us/v16 call): bundle item, not built. 0 judge runs.
+## Session n7s44 (12:52Z): v171 layer check 46362a70 2.1556x (fixed-SGLang 2.1348), not submitted; moe PAUSED (lead 12:45Z). Bundle list in COORD Requests.
+## n7s35 10:33Z idle (no lead decision since 09:35Z; Handoff moe/layer-hotdyn 130a692 pending layer). 0 runs.
+## n7s40 11:45Z idle (no lead decision after 11:30Z). Layer board #55 2.158x. HOT_ET branch still a bundle item. 0 runs.
+# STATE-moe
+## n7s43 12:26Z idle: still no lead decision after 12:00Z. 0 runs.
+## n7s42 12:12Z idle: no lead decision after 12:00Z (answered in n7s41). Remaining moe items each <= ~1 us/call. 0 runs.
+## n7s41 12:15Z: lead 12:00Z (1) DONE: HOT_ET merged into r-layer main d9553b2 = v171 (build reproduces, test 13/13; no check alone).
+## (2) d16/d32 stream lane CLOSED on existing H200 data (DIAG 81391142 re-fit, tools/n7s41): marginal 6.54 us/expert = 4.33 TB/s
+## (~96% of stream asymptote); lead's 7.8 us was an H100 layer slope. Left: ph2 extra rows (~1 us/extra group), quant tail
+## (<= 1.5/2.2 us d16/d32 upper bound, ~half reachable). Nothing >= 4 us/call. 0 runs. Waiting on the lead for a lane.
+## n7s39 ~12:25Z: self-picked HOT_ET (moe_hot triggers twm before its wait; twm polls a flag): r-layer branch moe/layer-hotet 4a9f62d,
+## bitwise, test 13/13; H100 pinned A/B v16 sl +1 / full -4, v32 -1.4/-1 us (~-0.05%): BUNDLE item, not on main. 0 runs. NOTES n7s39.
+## n7s38 11:55Z: lead 11:30Z v1/d16 regression = NONE (H100 ab_files v168 vs v170 tie on v1/d16; judge picks identical; v169/v170 ratios inside
+## the 19-run range, SGLang drew slow too). v170 stays on r-layer main. 0 runs. Nothing queued.
+## n7s37 11:10Z idle: no lead decision after 10:40Z (all done). d16 variance closed on paper (= d32 pure bytes, <= 16 tok/expert). 0 runs.
+## n7s36 11:06Z: lead 10:40Z (1)-(4) DONE. r-layer main = v170: v169 (hotdyn, T=256 moe_hot device-side CTAs) + v170 (moe_hot at
+## T=128, HOT128 32064 = 32 CTAs per 65..128-token expert, <= 64, 0 without). Both bitwise, validate ALL OK. Checks 8b3f8e57 2.1287
+## (v169) / 8cea7492 2.1250 (v170, router w/o T=128 hot expert): < board 2.158, not submitted. v16 = bytes + 12 us per hot expert
+## (fixed by v170); d32 = pure bytes. Budget 10-29: layer checks 8/20, submits 3/10; moe checks 9/20. Nothing queued.
+
+## n7s34 10:20Z idle (no new lane). NOW (n7s33 ~10:15Z): task 2 (tk2f d1/v1 prologue) DROPPED without a check: in-layer, TK2FX already puts routing + W ring
+## fill before tk2f's only griddepcontrol.wait; layer n7s8 IDF oracle (prologue fully hidden) = tk2f end - pr1 end 34.8 vs 35.0
+## us (bound ~0); standalone s15 FP = -0.2/-0.4 us H100 (< 0.5 line). Open: Handoff moe/layer-hotdyn 130a692 for layer to integrate.
+## Nothing else queued in the moe lane; budget 10-29 moe checks 9/20.
+## WAS (n7s32 ~10:05Z): lead 09:35Z task 1 (layer variance) DONE -> Handoff branch moe/layer-hotdyn 130a692 (T=256 moe_hot
+## max(32, 16 x hot experts) CTAs, device-side; bitwise; H100 v32 nh3/nh4 -40/-95 us sl, -22/-83 full; else tie). NEXT = task 2:
+## tk2f d1/v1 prologue (everything not depending on ids above griddepcontrol.wait; one warp reads ids + issues the first TMA),
+## H200 DIAG A/B, drop if < 0.5 us. Variance verdict + numbers: NOTES n7s32. Worktree /tmp/n7s32/wt = branch moe/layer-hotdyn.
+## n7s23 2026-10-29 ~09:25Z: lead 08:50Z tk2f d1/v1 lane CLOSED on the H200 (2 DIAG checks); main unchanged (0006dff kernels)
+- XPF (L2 prefetch of the CTA's later gemm2 rows at its phase-1 end) DIAG 798fd574: +0.7 d1/v1, +1.0 d16/d32 us.
+- WAVE (two-wave row order, gemm2 of wave 1 before wave 2's barrier) DIAG 87ee0bc0: +1.6 d1, +2.7 v1, +3.1 d16, +5.9 d32.
+- => the transition is not HBM idle; tk2f d1/v1 = DRAM latency prologue + bytes at ~4.1-4.2 TB/s. Diff: tools/n7s23/wave_xpf_dead.diff.
+- Nothing queued in the moe lane. Asked the lead for a lane (COORD Results n7s23). Budget 10-29: moe checks 9/20, 0 Modal.
+
+## (WAS-n7s22 .. WAS-n6s4 blocks of 10-29 trimmed in o18; see NOTES-moe.md)
+## LANE since 2026-10-27 09:45Z (lead LANE DECISION 2): muse_attention_decode as a problem (dir muse_attention_decode/)
+Own budget: 20 checks + 10 scored/day on muse_attention_decode. Targets: batch-1 sliding (csl d1, vtk v1) and verify sliding
+first; layer owns the full kernels (_gd_full d16/d32, _gw_verify v16/v32): don't work on those. Winners -> COORD Handoffs
+(layer ports into r-layer attn_src.py). Precision: FP8 KV, Q >= E4M3, FP32 partials. ~/attn STATE.md dead-ends index = 126
+sessions of history: read it before any idea. Board: 2.5962x (1450.7 us, submit 957cabd7 s33; was 2.566x); #1 pjmullin3 3.032x (1242.3 us).
+Per-us value (overall attention score): d1 sl 1.94 %/us, v1 sl 1.48, d1 full 0.67, v1 full 0.51, d16 sl 0.44, v16 sl 0.35,
+d32 sl 0.24, v32 sl 0.2. (Score = geomean over 6 loads; load = 46 x sliding + 16 x full.)
+H200 per shape (us), 06456b7e (= seed 410dcb6 code, 2.570x): d1 4.34/12.25, d16 7.68/87.03, d32 12.29/167.67,
+v1 5.49/16.60, v16 11.45/104.89, v32 15.51/194.99 (sliding/full). Judge records: median_ns = raw - ~4.28 us replay cost.
+Tools (run from muse_attention_decode/): tools/bench.py test|bench; tools/jsum.py A.json B.json (per-shape deltas of okc
+--json outputs); tools/s31/chk_sc.py (scored sliding shapes vs reference, 3 seeds); tools/s31/csl_ab.py A.py B.py (paired
+H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-CTA clock64 timeline of csl, VAR=... variants).
+
+
+## o21 (2026-10-31 17:25Z - 17:45Z, session 19): housekeeping; 0 judge runs, 0 Modal, no GPU
+- No lead line after 16:30Z; none names a moe item. moe board: 14/20 checks, 2 submits used today (lead cap 2/agent/day).
+  Board 17:30Z: ours e37e578e 2.3198x #285; #1 dolanzhao 2.758x, #10 2.590x.
+- Paper re-check of one dq idea: a bit-permuted repack so pairs land in bf16 position with a LOP3 alone. Only one 4-bit field
+  per 16-bit half can sit at bits 15/8..6 (linear in the e2m1 value only at the exponent's lowest bits), so 1 of 4 pairs per
+  word skips its shift: 7 int + 4 HMUL2 per 8 weights = what twm already has (n9s2). Nothing new.
+- STATE-moe.md rewritten to 127 lines (NOW block on top); its old session log was appended above as "STATE archive o21".
+- Queued, unchanged: SUBMIT 8242d5e ONCE after 00:00Z 11-01.
