@@ -4243,3 +4243,10 @@ Queued: SUBMIT aa51716 ONCE after 00:00Z 11-01 (check 5a45c7a7 2.3456x > board 2
 ## o36 (2026-10-31 21:19-21:25Z, session 34)
 Status only: no lead line since 16:30Z touching moe, no open moe Request. Board #294 2.320x. submission.py == aa51716.
 Queued: SUBMIT aa51716 ONCE after 00:00Z 11-01 (check 5a45c7a7 2.3456x > board 2.3198). 0 judge runs, 0 GPU.
+
+## o37 (2026-10-31 21:35-21:55Z, session 35)
+- Lead 21:25Z: SUBMIT aa51716 NOW on 10-31 budget (non-SA guard must be the scored version for reruns).
+- moe dir == aa51716; bench.py test 15/15 PASS. Submit 5ef66b6c 2.3391x (CI 2.304-2.374): bs1 26.3, bs16 91.9, bs32 123.0,
+  bs8 63.3, bs128 189.0, bs256 226.8 us. Board 2.3198 -> 2.3391 (#250). Budget 10-31 after: scored 7 left, checks 5.
+- Lead question on v174 non-SA: answered by fresh x34 (raises); noted in COORD.
+- Next: hold. aa51716 must NOT be resubmitted (unchanged). Next moe-board submit needs new code beating 2.3391.
