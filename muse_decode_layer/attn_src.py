@@ -806,6 +806,9 @@ _NVS_SRC = r'''// agent2 nvs: native verify-SLIDING attention (L 8, G 8, D 64, H
 // the online softmax and P@V with P in E4M3 (FA3's FP8 path), QK(i) overlapping PV(i-1). Partials in
 // _attn_split's layout [B, HKV, S, 64, 64] FP32 for _combine_hb. NVS_NEW: split S-1 also attends the 8 new tokens.
 #define NV_NS 5
+#ifndef NVS_PW
+#define NVS_PW 1  // as NDS_PW
+#endif
 #define NV_LAG 2
 #define NV_PFD 4
 #define NV_TR 1
@@ -1154,6 +1157,10 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const QT* __restri
     const bool isnew = NV_HALF ? (split == S - 1 && h == 1) : split == S - 1;
     const uint32_t qa = smem_u32(&sm.q[h][0]);
     const int n = rg.n, lo = rg.lo, hi = rg.hi, b = rg.b;
+#if NVS_PW
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
     {   // Queries: row r = token r / 8, head h * 8 + r % 8; 2 threads per row (32 d each); RMS-norm, RoPE, FP8.
         const int r = tid >> 1, half = tid & 1;
         const int pos = rg.seq + (r >> 3);
@@ -1368,7 +1375,9 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const QT* __restrict__ qkv, 
                                               int qkv_w, int win, const uint8_t* __restrict__ pf, long long pfb, int qss) {
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
+#if !NVS_PW
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
     const int tid = threadIdx.x, wg = tid >> 7;
     if (tid == 0) {
         for (int i = 0; i < NS; ++i) { mb_init(&sm.ready[i], 4); mb_init(&sm.empty[i], 8); }
@@ -1423,7 +1432,14 @@ void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
         auto f = nv::nvs<NV_NS, NV_LAG, QT_>; \
         static bool once = false; \
         if (!once) { cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; } \
-        f<<<dim3((unsigned)(S * B * (1 + NV_HALF))), 384, smem, c10::cuda::getCurrentCUDAStream()>>>( \
+        cudaLaunchConfig_t cfg = {}; \
+        cfg.gridDim = dim3((unsigned)(S * B * (1 + NV_HALF))); cfg.blockDim = dim3(384); cfg.dynamicSmemBytes = smem; \
+        cfg.stream = c10::cuda::getCurrentCUDAStream(); \
+        cudaLaunchAttribute at[1]; \
+        at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; \
+        at[0].val.programmaticStreamSerializationAllowed = 1; \
+        cfg.attrs = at; cfg.numAttrs = NVS_PW ? 1 : 0; \
+        cudaLaunchKernelEx(&cfg, f, \
             (const QT_*)qkv.data_ptr(), (const float*)cs.data_ptr(), (uint8_t*)kc.data_ptr(), \
             (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(), \
             (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(), \
@@ -2194,14 +2210,13 @@ NVS_MIN_BATCH = 16  # verify sliding from this batch on nvs (verify 32: H100 pai
 # verify 16 with 8 splits: H100 paired -0.38 us in s9 (6/7), but the H200 tied 12.63 vs 12.63 in check baea7057)
 
 _NDS_SRC = r'''#define NV_NS 3
+// (fresh x14: line comments dropped for the 1 MB cap; nvs's source above has the same code commented)
+#ifndef NDS_PW
+#define NDS_PW 1  // fresh x14: PDL secondary of qkv
+#endif
 #define NV_MAXR 96
 #define NV_PREGS 40
 #define NV_CREGS 152
-// agent2 nds (decode sliding, both KV heads in one consumer warpgroup) built on nvs: native verify-SLIDING attention (L 8, G 8, D 64, HKV 2, page 1), from tools/s71/nverify.cu.
-// One CTA per (split, request): warpgroup 0 gathers both KV heads' K/V rows (128-B lines) with cp.async and
-// transposes V to FP8 V^T; warpgroups 1/2 (KV head 0/1) normalize + RoPE their queries, run QK^T (FP8 wgmma),
-// the online softmax and P@V with P in E4M3 (FA3's FP8 path), QK(i) overlapping PV(i-1). Partials in
-// _attn_split's layout [B, HKV, S, 64, 64] FP32 for _combine_hb. NVS_NEW: split S-1 also attends the 8 new tokens.
 #include <torch/extension.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
@@ -2304,8 +2319,6 @@ template <int NS> struct Smem {
     alignas(1024) uint8_t knew[BN * 128];      // last split: the 8 new keys as a K tile (rows 0-7; rows 8-63 zero)
     alignas(1024) uint8_t vtnew[2][HD * BN];   // and their V^T (key slots 0-7 of group 0; the rest zero)
 };
-// Staging swizzle: SW128 (r & 7) for the ldmatrix transpose (8 consecutive rows per phase), else conflict-free for
-// the 4-row register transpose.
 __device__ __forceinline__ uint32_t vsw(int r) { return NV_TR ? (r & 7) : (((r >> 1) & 3) | (((r >> 4) & 1) << 2)); }
 
 
@@ -2330,8 +2343,6 @@ __device__ __forceinline__ void producer(Smem<NS>& sm, const uint8_t* __restrict
     const int tid = threadIdx.x;  // 0..127
     const int total = rg.n;
     const int* ptr = pt + (long long)rg.b * maxp;
-    // Warp 0 stages each tile's page-table entries NV_PFD tiles ahead in sm.ptr (2 x 4-byte cp.async per lane: the
-    // window start is not 16-byte aligned).
     auto stage = [&](int j) {
         const int kb = rg.lo + j * BN;
         if (kb + tid < rg.hi) cp4ca(smem_u32(&sm.ptr[j & 7][tid]), ptr + kb + tid);
@@ -2449,8 +2460,6 @@ __device__ __forceinline__ void issue_pv(float (&o)[32], const uint32_t (&p)[8],
     pv8_k32(o, p[4], p[5], p[6], p[7], mdesc(va + 32, 512, 2));
     wg_commit();
 }
-// Score masks: key column col (of this tile) is out if col >= nvalid (past the split's end) or col < thr0 / thr1
-// (rows of token 2w / 2w + 1: before the sliding window's start).
 __device__ __forceinline__ void mask(float (&s)[32], int lane, int nvalid, int thr0) {
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
@@ -2474,14 +2483,12 @@ __device__ __forceinline__ void pv16_k32(float (&o)[64], uint32_t a0, uint32_t a
     asm volatile("wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3 " R64 ", {%64,%65,%66,%67}, %68, 1, 1, 1;\n"
                  : D64(o) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db));
 }
-// QK over the whole 128-B K row (both heads; each query row is zero in the other head's 64 d).
 __device__ __forceinline__ void issue_qk2(float (&s)[32], uint32_t qa, uint32_t ka) {
     wg_fence();
 #pragma unroll
     for (int k = 0; k < 4; ++k) qk_k32(s, mdesc(qa + 32 * k, 1024, 1), mdesc(ka + 32 * k, 1024, 1), k);
     wg_commit();
 }
-// P@V into both heads' 128 output columns (V^T of head 0 then head 1: 128 SW64 rows).
 __device__ __forceinline__ void issue_pv2(float (&o)[64], const uint32_t (&p)[8], uint32_t va) {
     wg_fence();
     pv16_k32(o, p[0], p[1], p[2], p[3], mdesc(va, 512, 2));
@@ -2496,7 +2503,6 @@ __device__ __forceinline__ void dmask(float (&s)[32], int lane, int nvalid, int 
         if (col + 1 >= nvalid || col + 1 < thr) { s[j * 4 + 1] = -INFINITY; s[j * 4 + 3] = -INFINITY; }
     }
 }
-// Row lane / 4 is head 0 (output columns 0-63), row lane / 4 + 8 head 1 (columns 64-127).
 __device__ __forceinline__ void drescale(float (&o)[64], const float (&alpha)[2]) {
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
@@ -2505,11 +2511,6 @@ __device__ __forceinline__ void drescale(float (&o)[64], const float (&alpha)[2]
     }
 }
 
-// Decode (L 1, G 8): one consumer warpgroup for both KV heads. m64 rows 0-7 = head 0's 8 query heads (d 0-63 of the
-// K row; 64-127 zero), rows 8-15 = head 1's (d 64-127), rows 16-63 zero: only warp 0 has live rows and runs the
-// softmax; warps 1-3 just take part in the wgmmas (P = 0).
-// layer s29 (QF32 at T=32): qkv may be the FP32 output of the qkv GEMM; each element is rounded to BF16 (RN, as the
-// torch cast / GEMM output it replaces) at its load: everything downstream is bit-identical to the BF16 input.
 __device__ __forceinline__ unsigned qpk(float lo, float hi) {
     __nv_bfloat162 t = __floats2bfloat162_rn(lo, hi);
     return *(unsigned*)&t;
@@ -2524,8 +2525,6 @@ __device__ __forceinline__ uint2 qld4(const float* p) {
     const float4 a = *reinterpret_cast<const float4*>(p);
     return make_uint2(qpk(a.x, a.y), qpk(a.z, a.w));
 }
-// proj s22 (QSS): qkv as 2 FP32 split-K slabs qss elements apart (one batched GEMM, no split-K reduce kernel): the
-// two partials are added in FP32 and rounded to BF16 (RN) at the load, as cuBLAS's splitKreduce + BF16 output does.
 struct qs2 { float v; };
 __device__ __forceinline__ uint4 qld8(const __nv_bfloat16* p, int) { return qld8(p); }
 __device__ __forceinline__ uint4 qld8(const float* p, int) { return qld8(p); }
@@ -2567,6 +2566,11 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
         }
         asm volatile("bar.sync 2, 128;" ::: "memory");
     }
+#if NDS_PW
+    // KV producer (inputs only) ran pre-wait; trigger after the wait (_combine_hb reads qkv pre-wait)
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
     if (w == 0) {   // Queries: row r = query head r (KV head r / 8); 2 lanes per row (32 d each).
         const int r = lane >> 1, half = lane & 1, h = r >> 3;
         const int pos = rg.seq;
@@ -2608,8 +2612,6 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
         *reinterpret_cast<uint4*>(qd + r * 128 + ((z0 ^ (r & 7)) << 4)) = make_uint4(0, 0, 0, 0);
         *reinterpret_cast<uint4*>(qd + r * 128 + (((z0 + 1) ^ (r & 7)) << 4)) = make_uint4(0, 0, 0, 0);
         if (last_split) {
-            // The step's new token: lane = KV head (lane / 16), d 4 (lane % 16) + 0..3: RMS-norm + RoPE, E4M3 (as
-            // _new), stored into the cache and into the new-token K row 0 / V^T key slot 0.
             const int hh = lane >> 4, d0 = (lane & 15) * 4, npos = rg.seq;
             const QT* kp = qkv + (long long)b * qkv_w + (16 + hh) * HD + d0;
             const uint2 kr = qld4(kp, qss), vr = qld4(kp + 2 * HD, qss);
@@ -2645,7 +2647,6 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
 #pragma unroll
     for (int i = 0; i < 8; ++i) { pa[i] = 0u; pb[i] = 0u; }
     const bool live = w == 0;
-    // Window start relative to key lo: keys t < seq - (win - 1) are out.
     const int thr = win > 0 ? rg.seq - (win - 1) - lo : -(1 << 30);
     bool newdone = false;
     if (last_split) {
@@ -2744,7 +2745,9 @@ const QT* __restrict__ qkv, const float* __restrict__ cs,
                                               const uint8_t* __restrict__ pf, long long pfb) {
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
+#if !NDS_PW
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
     const int tid = threadIdx.x, wg = tid >> 7;
     if (tid == 0) {
         for (int i = 0; i < NS; ++i) { mb_init(&sm.ready[i], 4); mb_init(&sm.empty[i], 4); }
@@ -2778,8 +2781,14 @@ void nds(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
     auto f = nv::nds<NV_NS, QT>; \
     static bool once = false; \
     if (!once) { cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; } \
-    f<<<dim3((unsigned)(S * B)), 256, smem, c10::cuda::getCurrentCUDAStream()>>>( \
-        (const QT*)qkv.data_ptr(), NDS_ARGS); }
+    cudaLaunchConfig_t cfg = {}; \
+    cfg.gridDim = dim3((unsigned)(S * B)); cfg.blockDim = dim3(256); cfg.dynamicSmemBytes = smem; \
+    cfg.stream = c10::cuda::getCurrentCUDAStream(); \
+    cudaLaunchAttribute at[1]; \
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; \
+    at[0].val.programmaticStreamSerializationAllowed = 1; \
+    cfg.attrs = at; cfg.numAttrs = NDS_PW ? 1 : 0; \
+    cudaLaunchKernelEx(&cfg, f, (const QT*)qkv.data_ptr(), NDS_ARGS); }
 #define NDS_ARGS (const float*)cs.data_ptr(), (uint8_t*)kc.data_ptr(), \
         (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(), \
         (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(), \
@@ -2821,8 +2830,9 @@ DOT_DTYPE = tl.float16
 # Programmatic dependent launch of the merge kernel (off in the CPU interpreter).
 USE_PDL = True
 LZ = 10  # _gw_verify softmax: 10 = fixed reference after LZ_PK exact tiles + REDO (s105), 3 = exact per-warp lazy max (s79), 0 = per-tile row max + rescale
-CB_HB_TRIG = False  # layer n5s4: _combine_hb triggers its PDL dependents at start (the o GEMM waits on it)
+CB_HB_TRIG = True  # layer n5s4: _combine_hb triggers its PDL dependents at start (the o GEMM waits on it); fresh x14: on (with NDS_PW, H100 d32 sl -1.4/-1.6 us)
 MERGE1 = True  # one-pass merges issue the accumulator loads before the max reduction
+GD_PW = True  # fresh x14: batched _gd_full as qkv's PDL secondary (H100 d16 full -2.3 us; d1 full tie, keeps QF)
 USE_GDEC = True  # decode full layers at batch * hkv > 2 on the Gluon kernel (_gd_full)
 USE_GSLIDE = False  # batched sliding decode on _gd_full too (H100 win, H200 loss)
 # s103: plan red (in-grid FP32 atomic merge, s95) on batched decode full too, with BNR replicas per request (H100
@@ -3388,7 +3398,7 @@ if HAVE_GLUON:
                  BAL: gl.constexpr = False, B: gl.constexpr = 1, B_PAD: gl.constexpr = 32, NP: gl.constexpr = 1,
                  NID: gl.constexpr = 1, RED: gl.constexpr = False, red_ptr=None, rcnt_ptr=None, out_ptr=None,
                  NR: gl.constexpr = 4, epi=True, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0, DX: gl.constexpr = 0,
-                 QF: gl.constexpr = False):
+                 QF: gl.constexpr = False, PW: gl.constexpr = False):
         # DX (layer s84 DIAG probes, wrong results, tuner timing only): 1 = no math after tile 0 (gathers only),
         # 2 = every tile re-gathers the same rows (all-L2).
         h = gl.program_id(2) * 2
@@ -3415,9 +3425,9 @@ if HAVE_GLUON:
             split = gl.program_id(0)
             b = gl.program_id(1)
             nsp = S
-        # Let the merge kernel launch now (programmatic dependent launch); it waits for this grid.
-        gl.inline_asm_elementwise("griddepcontrol.launch_dependents;", "=r", [], dtype=gl.int32, is_pure=False,
-                                  pack=1)
+        if not PW:  # PW (fresh x14): we are qkv's PDL secondary; trigger after the wait (_red_fin reads qkv pre-wait)
+            gl.inline_asm_elementwise("griddepcontrol.launch_dependents;", "=r", [], dtype=gl.int32, is_pure=False,
+                                      pack=1)
         C: gl.constexpr = 2 * D
         M: gl.constexpr = 2 * G
         QKV_W: gl.constexpr = (2 * HQ + 2 * HKV) * D
@@ -3457,7 +3467,7 @@ if HAVE_GLUON:
         r = gl.arange(0, M, layout=gl.SliceLayout(1, BL))
         hp = r // G
         q_ok = (c_g // D)[None, :] == hp[:, None]
-        if QF:
+        if QF and not PW:
             # moe s35 qf: the query rows before the first copies (a load issued behind the gathers waits for them).
             xq = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], q_ok, QSS)
         # The first NS - 1 tiles in flight (cp.async zero-fills rows past hi instead of reading them).
@@ -3478,7 +3488,10 @@ if HAVE_GLUON:
 
         # Block-diagonal queries: row r is query head (h + r // G) * G + r % G, nonzero only in its own KV head's
         # D columns. RMSNorm, then E4M3.
-        if QF:
+        if PW:
+            gl.inline_asm_elementwise("griddepcontrol.wait;", "=r", [], dtype=gl.int32, is_pure=False, pack=1)
+            gl.inline_asm_elementwise("griddepcontrol.launch_dependents;", "=r", [], dtype=gl.int32, is_pure=False, pack=1)
+        if QF and not PW:
             x = xq.to(gl.bfloat16).to(gl.float32)
         else:
             x = _gqldm(qkv_ptr + b * QKV_W + ((h + hp) * G + r % G)[:, None] * D + (c_g % D)[None, :], q_ok,
@@ -3693,16 +3706,16 @@ if HAVE_GLUON:
                  BAL: gl.constexpr = False, B: gl.constexpr = 1, B_PAD: gl.constexpr = 32, NP: gl.constexpr = 1,
                  NID: gl.constexpr = 1, SPEC: gl.constexpr = 0, RED: gl.constexpr = False, red_ptr=None,
                  rcnt_ptr=None, out_ptr=None, NR: gl.constexpr = 4, RCW: gl.constexpr = 0, QSS: gl.constexpr = 0,
-                 DX: gl.constexpr = 0, QF: gl.constexpr = False):
+                 DX: gl.constexpr = 0, QF: gl.constexpr = False, PW: gl.constexpr = False):
         # SPEC > 0 (batch 1, page 1): seq = table width - 1 known from the shape (SGLang slices the page table to the
         # batch's longest length); start on it, redo with the real length if it differs (as in _attn_split).
         if SPEC > 0:
             real = gl.load(seq_ptr + gl.program_id(1))
-            _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW, QSS, DX, QF)
+            _gd_full_body(SPEC, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, real == SPEC, RCW, QSS, DX, QF, PW)
             if real != SPEC:
-                _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF)
+                _gd_full_redo(real, True, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF, PW)
         else:
-            _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF)
+            _gd_full_body(0, False, qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale, cs_ptr, HQ, HKV, G, D, PAGE, MAX_PAGES, S, BN, NS, TPV, WINDOW, ROPE, SEP, Q16, KST, BAL, B, B_PAD, NP, NID, RED, red_ptr, rcnt_ptr, out_ptr, NR, True, RCW, QSS, DX, QF, PW)
 
     @gluon.jit
     def _gw_verify(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr, loc_ptr, pacc_ptr, pml_ptr, qk_scale,
@@ -5025,7 +5038,7 @@ def _decode_gluon(data, cfg, plan):
             HQ=hq, HKV=hkv, G=group, D=d, PAGE=cfg["page_size"], MAX_PAGES=page_table.shape[1], S=splits,
             BN=plan["block_n"], NS=plan["stages"], WINDOW=cfg["window"], ROPE=bool(cfg["rope_theta"]),
             Q16=plan.get("q16", True), KST=plan.get("kst", True), BAL=True, B=batch, B_PAD=b_pad, NP=progs, NID=nid,
-            **(_red_args(batch, group, d, nid, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, QF=plan.get("qf", False), num_warps=1)
+            **(_red_args(batch, group, d, nid, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, QF=plan.get("qf", False), PW=GD_PW and batch > 1, launch_pdl=GD_PW and batch > 1, num_warps=1)
         if red:
             _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, nid, True)
             return out
@@ -5049,7 +5062,7 @@ def _decode_gluon(data, cfg, plan):
         ROPE=bool(cfg["rope_theta"]), SEP=sep, Q16=plan.get("q16", True),
         KST=plan.get("kst", True),
         SPEC=page_table.shape[1] - 1 if plan.get("spec") and batch == 1 and cfg["page_size"] == 1 else 0,
-        **(_red_args(batch, group, d, s, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, QF=plan.get("qf", False), num_warps=1)
+        **(_red_args(batch, group, d, s, device, out) if red else {}), QSS=qss, DX=ATT_DIAG - 10 if ATT_DIAG in (11, 12) else 0, QF=plan.get("qf", False), PW=GD_PW and batch > 1, launch_pdl=GD_PW and batch > 1, num_warps=1)
     if red:
         _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, s, False)
         return out
