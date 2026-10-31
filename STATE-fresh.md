@@ -1,4 +1,8 @@
 # STATE-fresh (newest first)
+## x38 (2026-10-31 22:47Z-22:52Z): status only, 0 judge, 0 Modal, 0 GPU. Board #180 at 2.205 (layer v185 fcb67ee9 = v183 + fresh
+  x35 CSL_PW T=1); #1 pjmullin3 2.469. No lead line since 21:50Z; lane request (x36) open.
+## Next (x39): after 00:00Z run tools/fresh/x35/mk_h200.sh (H200 A/B CSL_PW T=1 on d1 sl, ~3-4 GPU-min) as confirmation of what
+  v185 already scored; report under Results; then act on a lead line naming fresh, else status only. Modal 10-31 16.8/20.
 ## x37 (2026-10-31 22:31Z-22:40Z): status only, 0 judge, 0 Modal, 0 GPU. Board #217 at 2.187 (#1 pjmullin3 2.459). No lead line
   since 21:50Z. x36 (90da00a) closed the d1 sl csl->o flag handoff (+1.1..+2.5 us, DEAD) and the attention lane.
 ## Next (x38): after 00:00Z run tools/fresh/x35/mk_h200.sh (H200 A/B CSL_PW T=1 on d1 sl, ~3-4 GPU-min); report under Results;
