@@ -3296,3 +3296,4 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 ## n34 (20:31-20:36Z, unattended session 22): status only; 0 judge runs, 0 Modal, 0 GPU
 - No lead line since 16:30Z, no new proj Request/Handoff. r-layer main submission.py still e0dd26f (v183): n33's
   `mk_h200.sh --dry` stays valid; run it without --dry after 00:00Z (gate flat <= -1 us v1 sl on the H200).
+- proj n35 (20:47-20:52Z): status only, 0 judge/Modal/GPU; no lead line since 16:30Z; r-layer origin/main submission.py still v183 (e0dd26f): 00:00Z pr8 mk_h200.sh run stays ready (re-dry if layer moves main to v184).
