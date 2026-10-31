@@ -10292,6 +10292,9 @@ TOP_K = 8
 LOCAL_EXPERTS = 32
 ROUTER_MULTIPLIER = 0.1767766952966369
 ROUTE_EPS = 1e-15
+ROUTE_TOL = 5e-2
+KEEP_TOL = (0.03, 0.04)
+KEEP_TOKENS = 256
 ROUTER_FP32_MAX_TOKENS = 8
 SLICED_UNPOOL_MAX_TOKENS = 8
 UNPOOL_SLICE = HIDDEN // 8
@@ -10577,6 +10580,7 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     _routing[(tokens,)](part, state["router_bias"], local_start, ids, lids, wts, tokens, E=N_EXPERTS, KS=ks,
                         TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, PDL=rpdl,
                         num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4, launch_pdl=rpdl)
+    _slack(part, ks, tokens * N_EXPERTS, N_EXPERTS, state, local_start, ids, lids, wts, tokens)
     return ids, lids, wts
 @triton.jit
 def _post_expert_wsum(y_ptr, wts_ptr, lids_ptr, nw_ptr, out_ptr, D: tl.constexpr, TOPK: tl.constexpr,
@@ -13769,608 +13773,7 @@ G30_PDL = 1
 PR32_TOKENS = ()
 PR32_DEFAULT = False
 PR32_CFG = {16: (8, 16), 32: (8, 16)}
-_GPR32_SRC = r'''#include <cuda.h>
-#include <cuda_runtime.h>
-#include <cudaTypedefs.h>
-#include <cuda_bf16.h>
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <stdint.h>
-
-#ifndef G30_NS
-#define G30_NS 10
-#endif
-#ifndef G30_NW
-#define G30_NW 10
-#endif
-#ifndef G30_PRE
-#define G30_PRE 1  // proj s94: consumers read + sort the escape header before griddepcontrol.wait
-#endif
-#ifndef G30_ESC
-#define G30_ESC 8
-#endif
-#ifndef G30_MTOK
-#define G30_MTOK 32
-#endif
-#define G30_ND (G30_MTOK / 2)
-#ifndef G30_S
-#define G30_S 2
-#endif
-#define G30_XBOX (G30_MTOK * 128)
-#define G30_WST 6144
-
-namespace pr32 {
-__device__ __forceinline__ uint32_t smem_u32(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }
-__device__ __forceinline__ void mbar_init(uint64_t* b, int c) {
-  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(smem_u32(b)), "r"(c));
-}
-__device__ __forceinline__ void mbar_expect_tx(uint64_t* b, uint32_t tx) {
-  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" :: "r"(smem_u32(b)), "r"(tx) : "memory");
-}
-__device__ __forceinline__ void mbar_arrive(uint64_t* b) {
-  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];" :: "r"(smem_u32(b)) : "memory");
-}
-__device__ __forceinline__ void mbar_wait(uint64_t* b, uint32_t ph) {
-  asm volatile(
-      "{\n .reg .pred p;\n PR32_WAIT:\n"
-      " mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
-      " @!p bra PR32_WAIT;\n}\n" :: "r"(smem_u32(b)), "r"(ph) : "memory");
-}
-__device__ __forceinline__ void tma2d(void* dst, const CUtensorMap* m, int c0, int c1, uint64_t* b) {
-  asm volatile(
-      "cp.async.bulk.tensor.2d.shared::cluster.global.tile.mbarrier::complete_tx::bytes [%0], [%1, {%2, %3}], [%4];"
-      :: "r"(smem_u32(dst)), "l"(m), "r"(c0), "r"(c1), "r"(smem_u32(b)) : "memory");
-}
-__device__ __forceinline__ void bulk1d(void* dst, const void* src, uint32_t n, uint64_t* b) {
-  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
-               :: "r"(smem_u32(dst)), "l"(src), "r"(n), "r"(smem_u32(b)) : "memory");
-}
-__device__ __forceinline__ uint64_t dsw128(uint32_t a) {
-  return (uint64_t)((a & 0x3FFFF) >> 4) | ((uint64_t)1 << 16) | ((uint64_t)64 << 32) | ((uint64_t)1 << 62);
-}
-__device__ __forceinline__ unsigned lop_aob(unsigned a, unsigned b, unsigned c) {
-  unsigned r;
-  asm("lop3.b32 %0, %1, %2, %3, 0xEA;" : "=r"(r) : "r"(a), "r"(b), "r"(c));
-  return r;
-}
-// patch the half (kh, rr, h) of j's A fragment with BF16 bits vb: a[4 j + 2 kh + rr] (m16n8k16 A layout), h = high half
-__device__ __forceinline__ void esc_patch(unsigned (&a)[16], unsigned key) {
-  const int kk = (key >> 18) & 63, idx = 4 * (kk >> 4) + 2 * ((kk >> 3) & 1) + ((key >> 16) & 1);
-  const unsigned vb = key & 0xFFFFu, sel = (kk & 1) ? 0x5410u : 0x3254u;
-#pragma unroll
-  for (int u = 0; u < 16; u++)
-    if (u == idx) a[u] = __byte_perm(a[u], vb, sel);
-}
-template <int P>
-__device__ __forceinline__ unsigned decw(unsigned sw, unsigned nw, unsigned sel3) {
-  const unsigned sh = P == 0 ? nw : P == 1 ? nw << 4 : P == 2 ? nw << 8 : __funnelshift_r(nw, nw, 4);
-  const unsigned k38 = 0x38383838u >> (gridDim.y >> 16);
-  unsigned p;
-  asm("prmt.b32 %0, %1, %2, %3;" : "=r"(p) : "r"(sw), "r"(k38), "r"(sel3));
-  return lop_aob(sh, 0x87008700u, p);
-}
-#define G30_D8(i) "+f"(d[i]), "+f"(d[i + 1]), "+f"(d[i + 2]), "+f"(d[i + 3]), "+f"(d[i + 4]), "+f"(d[i + 5]), "+f"(d[i + 6]), "+f"(d[i + 7])
-__device__ __forceinline__ void wg_mma_rs(float* d, unsigned a0, unsigned a1, unsigned a2, unsigned a3, uint64_t db) {
-#if G30_MTOK == 128
-  asm volatile(
-      "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 "
-      "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,"
-      "%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63},"
-      " {%64,%65,%66,%67}, %68, 1, 1, 1, 0;\n"
-      : G30_D8(0), G30_D8(8), G30_D8(16), G30_D8(24), G30_D8(32), G30_D8(40), G30_D8(48), G30_D8(56)
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db));
-#elif G30_MTOK == 32
-  asm volatile(
-      "wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 "
-      "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15},"
-      " {%16,%17,%18,%19}, %20, 1, 1, 1, 0;\n"
-      : G30_D8(0), G30_D8(8)
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db));
-#elif G30_MTOK == 16
-  asm volatile(
-      "wgmma.mma_async.sync.aligned.m64n16k16.f32.bf16.bf16 "
-      "{%0,%1,%2,%3,%4,%5,%6,%7},"
-      " {%8,%9,%10,%11}, %12, 1, 1, 1, 0;\n"
-      : G30_D8(0)
-      : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db));
-#else
-#error G30_MTOK
-#endif
-}
-
-#define PR_RST 8192                 // router stage: 64 rows x 64 k raw BF16 in A-fragment order [4 j][128 thr][16 B]
-#define PR_SLOT (PR_RST > G30_WST ? PR_RST : G30_WST)
-#define PR_RKS (8 * G30_S)          // router K slices per 64-row group (8 groups x RKS = 64 S CTAs)
-#ifndef PR_ROUTE
-#define PR_ROUTE 1
-#endif
-#ifndef PR_TICKET
-#define PR_TICKET 1
-#endif
-#ifndef PR_ROUTER
-#define PR_ROUTER 1
-#endif
-#ifndef PR_SA
-#define PR_SA 1  // n5s3: pair handoffs by st.async + mbarrier complete_tx (rank 1 fires and exits; no fence/bar.sync)
-#endif
-#define PR_RBS (PR_SA ? 3 : G30_S - 1)  // pooler partial slots in rbuf (SA: rank 1 wg0, rank 1 wg1, rank 0 wg1)
-#define PR_NR (PR_ROUTER ? 128 / PR_RKS : 0)  // router stages per CTA
-constexpr int E = 256, TOPK = 8;
-
-struct RArgs {
-  const uint8_t* rw; float* part; float* logits; int* cnt; const float* bias; const int* ls;
-  int* ids; int* lids; float* wts; float mult, reps; int local; unsigned long long* tl;
-};
-__device__ __forceinline__ void st_async4(uint32_t a, float x, float y, float z, float w, uint32_t mb) {
-  asm volatile("st.async.shared::cluster.mbarrier::complete_tx::bytes.v4.f32 [%0], {%1, %2, %3, %4}, [%5];"
-               :: "r"(a), "f"(x), "f"(y), "f"(z), "f"(w), "r"(mb) : "memory");
-}
-__device__ __forceinline__ unsigned long long gtime() { unsigned long long v; asm volatile("mov.u64 %0, %globaltimer;" : "=l"(v)); return v; }
-#ifdef PR_TL
-#define TLX(a_, k) a_.tl[(blockIdx.x * G30_S + blockIdx.y) * 12 + (k)] = gtime();
-#define TLM(k) if (t == 0) TLX(ra, k)
-#else
-#define TLX(a_, k) {}
-#define TLM(k) {}
-#endif
-
-// one token per warp: scores = sigmoid(MULT logit), top-8 of score + bias (lowest index on ties: same picks as the
-// layer's _routing), weights = picked / (sum + REPS) (sum in pick order). Keys as order-preserving u32 (+0.0f folds -0
-// into +0, like the float compare): one redux max + one redux min (index among the tied lanes) per pick.
-__device__ __forceinline__ void route_token(const RArgs& a, const float* lg, const float* bs_, int tok, int lane, int ls) {
-  float sc[E / 32];
-  unsigned key[E / 32];
-#pragma unroll
-  for (int i = 0; i < E / 32; ++i) {
-    const int e = lane + 32 * i;
-    const float l = lg[e] + lg[E + e];  // hi + lo
-    sc[i] = 1.f / (1.f + expf(-l * a.mult));
-    const unsigned u = __float_as_uint(sc[i] + bs_[e] + 0.0f);
-    key[i] = u ^ ((unsigned)((int)u >> 31) | 0x80000000u);
-  }
-  int myid = 0; float mysc = 0.f, sum = 0.f;
-#pragma unroll
-  for (int k = 0; k < TOPK; ++k) {
-    unsigned bk = key[0]; int bi = 0;
-#pragma unroll
-    for (int i = 1; i < E / 32; ++i)
-      if (key[i] > bk) { bk = key[i]; bi = i; }
-    const unsigned m = __reduce_max_sync(0xffffffffu, bk);
-    const unsigned w = __reduce_min_sync(0xffffffffu, bk == m ? (unsigned)(lane + 32 * bi) : 0xffffffffu);
-    float bs = 0.f;
-#pragma unroll
-    for (int i = 0; i < E / 32; ++i) if (i == bi) bs = sc[i];
-    bs = __shfl_sync(0xffffffffu, bs, w & 31);
-    if (lane == (int)(w & 31)) {
-#pragma unroll
-      for (int i = 0; i < E / 32; ++i) if (i == (int)(w >> 5)) key[i] = 0u;
-    }
-    if (lane == k) { myid = (int)w; mysc = bs; }
-    sum += bs;
-  }
-  if (lane < TOPK) {
-    a.ids[tok * TOPK + lane] = myid;
-    const int loc = (myid - ls + E) % E;
-    a.lids[tok * TOPK + lane] = loc < a.local ? loc : -1;
-    a.wts[tok * TOPK + lane] = mysc / (sum + a.reps);
-  }
-}
-
-// finishers (clusters x = 0, 1: 4 CTAs on the 4 SMs the 128 streaming CTAs leave free): f = 2 x + y routes tokens
-// 8 f .. 8 f + 7. Waits for the 64 pair partials, pulls its 8-token chunks of all of them (64 x 2 KB) in one bulk shot,
-// sums them in pair-slice order (deterministic), routes one token per warp.
-__device__ __forceinline__ void finisher(const RArgs& a, uint8_t* sm, uint64_t* fb, float* bs_, float* lgb) {
-  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, f = 2 * blockIdx.x + blockIdx.y;
-  constexpr int TPF = G30_MTOK / 4, CH = TPF * 64 * 4, NP = 8;  // tokens per finisher, chunk bytes, pair slices per rg
-  asm volatile("griddepcontrol.wait;" ::: "memory");
-  if (tid < E) bs_[tid] = __ldg(a.bias + tid);
-  const int ls = __ldg(a.ls);
-  if (tid == 0) {
-    int v;
-    do {
-      asm volatile("ld.acquire.gpu.global.s32 %0, [%1];" : "=r"(v) : "l"(a.cnt) : "memory");
-      if (v < 64) __nanosleep(32);
-    } while (v < 64);
-    TLX(a, 6)
-    int o;
-    asm volatile("atom.add.gpu.global.s32 %0, [%1], 1;" : "=r"(o) : "l"(a.cnt + 1) : "memory");
-    if (o == 3) { a.cnt[0] = 0; a.cnt[1] = 0; }  // all 4 finishers are past their poll
-    asm volatile("fence.proxy.async.global;" ::: "memory");
-    mbar_expect_tx(fb, 64 * CH);
-    for (int i = 0; i < 64; i++)
-      bulk1d(sm + i * CH, (const uint8_t*)a.part + ((size_t)i * G30_MTOK + TPF * f) * 64 * 4, CH, fb);
-  }
-  __syncthreads();
-  mbar_wait(fb, 0);
-  if (tid == 0) TLX(a, 2)
-  if (warp < TPF) {
-    const float* c = (const float*)sm;
-    float* lg = lgb + warp * 2 * E;  // this warp's token: [512] logits
-#pragma unroll
-    for (int i = 0; i < 2 * E / 32; i++) {
-      const int row = lane + 32 * i, rg = row >> 6, r = row & 63;
-      float s = 0.f;
-#pragma unroll
-      for (int p = 0; p < NP; p++) s += c[((rg * NP + p) * TPF + warp) * 64 + r];
-      lg[row] = s;
-    }
-    __syncwarp();
-    if (tid == 0) TLX(a, 3)
-    route_token(a, lg, bs_, TPF * f + warp, lane, ls);
-#pragma unroll
-    for (int i = 0; i < 2 * E / 32; i++) __stcg(a.logits + (TPF * f + warp) * 2 * E + lane + 32 * i, lg[lane + 32 * i]);
-    if (tid == 0) TLX(a, 7)
-  }
-}
-
-// grid (64, S) in (1, S, 1) clusters: CTA (g, y) = pooler rows 64 g.., K part y (S = 2: halves, DSMEM sum into rank 0)
-// FIRST does router item r = S g + y: router rows (hi 0..255 | lo 256..511) 64 (r / RKS).., K slice r % RKS (NR stages).
-__global__ void __launch_bounds__(352, 1)
-pr32_kernel(const __grid_constant__ CUtensorMap tmX, const uint8_t* __restrict__ wp, __nv_bfloat16* __restrict__ out,
-            const float2* __restrict__ hdr, int N, int KS, float scale, const RArgs ra) {
-  extern __shared__ __align__(1024) uint8_t smraw[];
-  uint8_t* sm = (uint8_t*)(((uintptr_t)smraw + 1023) & ~(uintptr_t)1023);
-  uint8_t* xs = sm;                                  // NS x XBOX
-  uint8_t* ws = sm + G30_NS * G30_XBOX;              // NW x SLOT
-  uint64_t* full = (uint64_t*)(ws + G30_NW * PR_SLOT);
-  uint64_t* empty = full + G30_NS;
-  uint64_t* wfull = empty + G30_NS;
-  uint64_t* wempty = wfull + G30_NW;
-  uint64_t* rbar = wempty + G30_NW;
-  uint64_t* pbar = rbar + 1;  // router pair partial from rank 1
-  uint64_t* fbar = rbar + 2;  // finisher bulk ingest
-  float* rred = (float*)(ws + G30_NW * PR_SLOT + 1024);            // [2 WG][T][64] router partials
-  float* rpair = rred + 2 * G30_MTOK * 64;   // [T][64] rank 1 router partial (DSMEM)
-  float* rbuf = rpair + G30_MTOK * 64;                               // [S - 1][ND][128] pooler partials (DSMEM)
-  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int g = (int)blockIdx.x - 2;  // x = 0, 1: the finishers
-  const int i0 = 2 * ((int)blockIdx.y * (KS / 2) / G30_S), i1 = 2 * (((int)blockIdx.y + 1) * (KS / 2) / G30_S);
-  const int r = G30_S * g + (int)blockIdx.y, rg = r / PR_RKS, rks = r % PR_RKS;
-#ifdef PR_NOPOOL
-  const int nst = PR_NR;
-#else
-  const int nst = PR_NR + (i1 - i0);
-#endif
-  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
-  if (tid == 0) TLX(ra, 8)
-  if (tid == 0) {
-    for (int i = 0; i < G30_NS; i++) { mbar_init(&full[i], 1); mbar_init(&empty[i], 1); }
-    for (int i = 0; i < G30_NW; i++) { mbar_init(&wfull[i], 1); mbar_init(&wempty[i], 1); }
-    mbar_init(rbar, G30_S > 1 ? G30_S - 1 : 1);
-    mbar_init(pbar, 1);
-    mbar_init(fbar, 1);
-#if PR_SA
-    if (blockIdx.y == 0 && blockIdx.x >= 2) {  // bytes the pushes will complete (may land before or after this)
-      mbar_expect_tx(rbar, 3 * G30_ND * 128 * 4);
-      mbar_expect_tx(pbar, G30_MTOK * 64 * 4);
-    }
-#endif
-    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
-  }
-#if G30_S > 1
-  asm volatile("barrier.cluster.arrive.release.aligned;\nbarrier.cluster.wait.acquire.aligned;" ::: "memory");
-#else
-  __syncthreads();
-#endif
-  if (g < 0) { finisher(ra, sm, fbar, rbuf + G30_ND * 128 * PR_RBS, rred); return; }
-  if (warp == 10) {  // router partial: (WG0 + WG1) [+ rank 1's via DSMEM] -> part[rg][pair slice], then count it
-    asm volatile("bar.sync 3, 288;" ::: "memory");
-    if (blockIdx.y == 1) {
-      uint32_t rb, rm;
-      asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rb) : "r"(smem_u32(rpair)));
-      asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rm) : "r"(smem_u32(pbar)));
-      for (int idx = lane * 4; idx < G30_MTOK * 64; idx += 128) {
-        const float4 u = *(const float4*)(rred + idx), v = *(const float4*)(rred + G30_MTOK * 64 + idx);
-#if PR_SA
-        st_async4(rb + idx * 4, u.x + v.x, u.y + v.y, u.z + v.z, u.w + v.w, rm);
-#else
-        asm volatile("st.shared::cluster.v4.f32 [%0], {%1, %2, %3, %4};" :: "r"(rb + idx * 4), "f"(u.x + v.x), "f"(u.y + v.y),
-                     "f"(u.z + v.z), "f"(u.w + v.w) : "memory");
-#endif
-      }
-#if !PR_SA
-      __syncwarp();
-      if (lane == 0) asm volatile("fence.acq_rel.cluster;\nmbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];" :: "r"(rm) : "memory");
-#endif
-      return;
-    }
-    asm volatile(
-        "{\n .reg .pred p;\n PR32_PW:\n"
-        " mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], 0;\n"
-        " @!p bra PR32_PW;\n}\n" :: "r"(smem_u32(pbar)) : "memory");
-    float* pp = ra.part + (size_t)(rg * 8 + (g & 7)) * G30_MTOK * 64;
-    if (lane == 0) TLX(ra, 0)
-    for (int idx = lane * 4; idx < G30_MTOK * 64; idx += 128) {
-      const float4 u = *(const float4*)(rred + idx), v = *(const float4*)(rred + G30_MTOK * 64 + idx);
-      const float4 w = *(const float4*)(rpair + idx);
-      __stcg((float4*)(pp + idx), make_float4(u.x + v.x + w.x, u.y + v.y + w.y, u.z + v.z + w.z, u.w + v.w + w.w));
-    }
-    __threadfence();
-    __syncwarp();
-    if (lane == 0) asm volatile("red.release.gpu.global.add.s32 [%0], 1;" :: "l"(ra.cnt) : "memory");
-    if (lane == 0) TLX(ra, 1)
-    return;
-  }
-  if (warp == 8) {  // W: router stages then pooler stages (weights only: before griddepcontrol.wait)
-    if (lane == 0) {
-#ifdef PR_L2W  // H200 proxy: every CTA streams group (g & 3)'s weights (~3 MB, L2-resident) = consumer-bound floor
-      const uint8_t* rsrc = ra.rw + ((size_t)(rg & 0) * 128 + (size_t)rks * PR_NR) * PR_RST;
-      const uint8_t* src = wp + ((size_t)(g & 3) * KS + i0) * G30_WST;
-#else
-      const uint8_t* rsrc = ra.rw + ((size_t)rg * 128 + (size_t)rks * PR_NR) * PR_RST;
-      const uint8_t* src = wp + ((size_t)g * KS + i0) * G30_WST;
-#endif
-      for (int i = 0; i < nst; i++) {
-        const int st = i % G30_NW, ph = (i / G30_NW) & 1;
-        mbar_wait(&wempty[st], ph ^ 1);
-        if (i < PR_NR) {
-          mbar_expect_tx(&wfull[st], PR_RST);
-          bulk1d(ws + st * PR_SLOT, rsrc + (size_t)i * PR_RST, PR_RST, &wfull[st]);
-        } else {
-          mbar_expect_tx(&wfull[st], G30_WST);
-          bulk1d(ws + st * PR_SLOT, src + (size_t)(i - PR_NR) * G30_WST, G30_WST, &wfull[st]);
-        }
-      }
-    }
-    return;
-  }
-  if (warp == 9) {
-    asm volatile("griddepcontrol.wait;" ::: "memory");  // x belongs to the previous kernels
-    if (lane == 0) {
-      for (int i = 0; i < nst; i++) {
-        const int st = i % G30_NS, ph = (i / G30_NS) & 1;
-        mbar_wait(&empty[st], ph ^ 1);
-        mbar_expect_tx(&full[st], G30_XBOX);
-        const int kx = i < PR_NR ? rks * PR_NR + i : i0 + i - PR_NR;
-        tma2d(xs + st * G30_XBOX, &tmX, kx * 64, 0, &full[st]);
-      }
-    }
-    return;
-  }
-  const int wg = warp >> 2, t = tid & 127;
-  float d[G30_ND], dr[G30_ND];
-#pragma unroll
-  for (int j = 0; j < G30_ND; j++) { d[j] = 0.f; dr[j] = 0.f; }
-#if G30_ESC
-  unsigned cand[2 * G30_ESC], nxt;
-#define G30_POP { nxt = cand[0]; _Pragma("unroll") for (int e = 0; e < 2 * G30_ESC - 1; e++) cand[e] = cand[e + 1]; cand[2 * G30_ESC - 1] = ~0u; }
-  {
-    const int q = t & 3;
-#pragma unroll
-    for (int rr = 0; rr < 2; rr++)
-#pragma unroll
-      for (int e = 0; e < G30_ESC; e++) {
-        const float2 hv = __ldg(hdr + (size_t)(g * 64 + (t >> 5) * 16 + 8 * rr + ((t & 31) >> 2)) * G30_ESC + e);
-        const int col = __float_as_int(hv.x);
-        const bool mine = hv.y != 0x1p-15f && ((col >> 1) & 3) == q && ((col >> 6) & 1) == wg;
-        cand[rr * G30_ESC + e] = mine ? ((unsigned)col << 18) | ((unsigned)rr << 16) | (__float_as_uint(hv.y) >> 16) : ~0u;
-      }
-#pragma unroll
-    for (int a_ = 0; a_ < 2 * G30_ESC; a_++)
-#pragma unroll
-      for (int b_ = 2 * G30_ESC - 1; b_ > a_; b_--) {
-        const unsigned lo = min(cand[b_ - 1], cand[b_]), hi = max(cand[b_ - 1], cand[b_]);
-        cand[b_ - 1] = lo; cand[b_] = hi;
-      }
-    G30_POP;
-    while ((nxt >> 18) < (unsigned)i0 * 64u) G30_POP
-  }
-#define G30_FIX(a) { const unsigned kend = (unsigned)(ka + 1) * 64u; while ((nxt >> 18) < kend) { esc_patch(a, nxt); G30_POP } }
-#else
-#define G30_FIX(a)
-#endif
-  asm volatile("griddepcontrol.wait;" ::: "memory");
-  if (tid == 0) TLX(ra, 9)
-  unsigned A0[16], A1[16];
-  int prev = -1;
-#define PR_WAIT_ST                                                                                          \
-    const int st = ir % G30_NS, ph = (ir / G30_NS) & 1, sw = ir % G30_NW, pw = (ir / G30_NW) & 1;           \
-    mbar_wait(&wfull[sw], pw);                                                                              \
-    mbar_wait(&full[st], ph);                                                                               \
-    const uint8_t* wst = ws + sw * PR_SLOT;
-#define PR_MMA(acc, a, pa)                                                                                  \
-    asm volatile("wgmma.fence.sync.aligned;" ::: "memory");                                                 \
-    { const uint32_t b = smem_u32(xs + st * G30_XBOX);                                                      \
-    _Pragma("unroll") for (int j = 0; j < 4; j++) wg_mma_rs(acc, a[4 * j], a[4 * j + 1], a[4 * j + 2], a[4 * j + 3], dsw128(b + j * 32)); } \
-    asm volatile("wgmma.commit_group.sync.aligned;" ::: "memory");                                          \
-    asm volatile("wgmma.wait_group.sync.aligned 1;" ::: "memory");                                          \
-    _Pragma("unroll") for (int j = 0; j < 16; j++) asm volatile("" : "+r"(pa[j]));                          \
-    if (prev >= 0 && t == 0) { mbar_arrive(&empty[prev % G30_NS]); mbar_arrive(&wempty[prev % G30_NW]); }   \
-    prev = ir;                                                                                              \
-    ir += 2;
-#define PR_RSTEP(a, pa)                                                                                     \
-  {                                                                                                         \
-    PR_WAIT_ST                                                                                              \
-    _Pragma("unroll") for (int j = 0; j < 4; j++) {                                                         \
-      const uint4 v = *(const uint4*)(wst + j * 2048 + t * 16);                                             \
-      a[4 * j] = v.x; a[4 * j + 1] = v.y; a[4 * j + 2] = v.z; a[4 * j + 3] = v.w; }                         \
-    PR_MMA(dr, a, pa)                                                                                       \
-  }
-#define G30_DEC(a, j, S0, S1, NW)                            \
-    a[4 * j + 0] = decw<0>(S0, NW, 0x4140u);                 \
-    a[4 * j + 1] = decw<1>(S0, NW, 0x4342u);                 \
-    a[4 * j + 2] = decw<2>(S1, NW, 0x4140u);                 \
-    a[4 * j + 3] = decw<3>(S1, NW, 0x4342u);
-#define PR_PSTEP(a, pa)                                                                                     \
-  {                                                                                                         \
-    PR_WAIT_ST                                                                                              \
-    const int ka = i0 + ir - PR_NR;                                                                         \
-    const uint4 s01 = *(const uint4*)(wst + t * 16), s23 = *(const uint4*)(wst + 2048 + t * 16);            \
-    const uint4 nw = *(const uint4*)(wst + 4096 + t * 16);                                                  \
-    G30_DEC(a, 0, s01.x, s01.y, nw.x) G30_DEC(a, 1, s01.z, s01.w, nw.y) G30_DEC(a, 2, s23.x, s23.y, nw.z)   \
-    G30_DEC(a, 3, s23.z, s23.w, nw.w) G30_FIX(a)                                                            \
-    PR_MMA(d, a, pa)                                                                                        \
-  }
-  // ---- router stages (PR_NR even: each WG takes PR_NR / 2) ----
-  int ir = wg;
-#pragma unroll 1
-  while (ir < PR_NR) {
-    PR_RSTEP(A0, A1)
-    PR_RSTEP(A1, A0)
-  }
-#if PR_ROUTER
-  asm volatile("wgmma.wait_group.sync.aligned 0;" ::: "memory");
-#pragma unroll
-  for (int j = 0; j < 16; j++) asm volatile("" : "+r"(A0[j]), "+r"(A1[j]));
-#pragma unroll
-  for (int j = 0; j < G30_ND; j++) asm volatile("" : "+f"(dr[j]));
-  // router partial (accumulator layout -> [tok][64 rows]) to rred[wg]; warp 10 sums + stores + counts it
-  {
-    const int r0 = (warp & 3) * 16 + (lane >> 2), tk0 = 2 * (lane & 3);
-    float* rr_ = rred + wg * G30_MTOK * 64;
-#pragma unroll
-    for (int jn = 0; jn < G30_MTOK / 8; jn++)
-#pragma unroll
-      for (int h = 0; h < 2; h++)
-#pragma unroll
-        for (int q = 0; q < 2; q++) rr_[(8 * jn + tk0 + q) * 64 + r0 + 8 * h] = dr[4 * jn + 2 * h + q];
-    asm volatile("bar.arrive 3, 288;" ::: "memory");
-  }
-  prev = -1;  // all router stages are complete (wait_group 0): release the last one now
-  if (t == 0) {
-    const int lr = PR_NR - 2 + wg;
-    mbar_arrive(&empty[lr % G30_NS]); mbar_arrive(&wempty[lr % G30_NW]);
-  }
-#endif
-  if (wg == 0) TLM(4)
-  // ---- pooler stages ----
-#pragma unroll 1
-  while (ir < nst) {
-    PR_PSTEP(A0, A1)
-    if (ir >= nst) break;
-    PR_PSTEP(A1, A0)
-  }
-  asm volatile("wgmma.wait_group.sync.aligned 0;" ::: "memory");
-#pragma unroll
-  for (int j = 0; j < 16; j++) asm volatile("" : "+r"(A0[j]), "+r"(A1[j]));
-#pragma unroll
-  for (int j = 0; j < G30_ND; j++) asm volatile("" : "+f"(d[j]));
-  if (prev >= 0 && t == 0) { mbar_arrive(&empty[prev % G30_NS]); mbar_arrive(&wempty[prev % G30_NW]); }
-  if (wg == 0) TLM(5)
-#if PR_SA
-  // rank 1 (both WGs) and rank 0's WG1 push their accumulators into rank 0's rbuf slots; rank 0's WG0 sums
-  if (blockIdx.y == 1 || wg == 1) {
-    const int slot = blockIdx.y == 1 ? wg : 2;
-    uint32_t rb, rm;
-    asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rb) : "r"(smem_u32(rbuf + slot * G30_ND * 128)));
-    asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rm) : "r"(smem_u32(rbar)));
-#pragma unroll
-    for (int j = 0; j < G30_ND; j += 4) st_async4(rb + ((j >> 2) * 128 + t) * 16, d[j], d[j + 1], d[j + 2], d[j + 3], rm);
-    return;
-  }
-  asm volatile(
-      "{\n .reg .pred p;\n PR32_RW:\n"
-      " mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], 0;\n"
-      " @!p bra PR32_RW;\n}\n" :: "r"(smem_u32(rbar)) : "memory");
-#pragma unroll
-  for (int y = 0; y < 3; y++)
-#pragma unroll
-    for (int j = 0; j < G30_ND; j += 4) {
-      const float4 v = *(const float4*)(rbuf + y * G30_ND * 128 + ((j >> 2) * 128 + t) * 4);
-      d[j] += v.x; d[j + 1] += v.y; d[j + 2] += v.z; d[j + 3] += v.w;
-    }
-#else
-  float* red = (float*)xs;
-  asm volatile("bar.sync 1, 256;" ::: "memory");
-  if (wg == 1) {
-#pragma unroll
-    for (int j = 0; j < G30_ND; j++) red[j * 128 + t] = d[j];
-  }
-  asm volatile("bar.sync 1, 256;" ::: "memory");
-  if (wg == 1) return;
-#pragma unroll
-  for (int j = 0; j < G30_ND; j++) d[j] += red[j * 128 + t];
-#if G30_S > 1
-  if (blockIdx.y > 0) {
-    uint32_t rb, rm;
-    asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rb) : "r"(smem_u32(rbuf + (blockIdx.y - 1) * G30_ND * 128)));
-    asm volatile("mapa.shared::cluster.u32 %0, %1, 0;" : "=r"(rm) : "r"(smem_u32(rbar)));
-#pragma unroll
-    for (int j = 0; j < G30_ND; j++) asm volatile("st.shared::cluster.f32 [%0], %1;" :: "r"(rb + (j * 128 + t) * 4), "f"(d[j]) : "memory");
-    asm volatile("bar.sync 2, 128;" ::: "memory");
-    if (t == 0) asm volatile("fence.acq_rel.cluster;\nmbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];" :: "r"(rm) : "memory");
-    return;
-  }
-  {
-    asm volatile(
-        "{\n .reg .pred p;\n PR32_RW:\n"
-        " mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], 0;\n"
-        " @!p bra PR32_RW;\n}\n" :: "r"(smem_u32(rbar)) : "memory");
-#pragma unroll
-    for (int y = 0; y < G30_S - 1; y++)
-#pragma unroll
-      for (int j = 0; j < G30_ND; j++) d[j] += rbuf[(y * G30_ND + j) * 128 + t];
-  }
-#endif
-#endif  // PR_SA
-  const int r0 = (warp & 3) * 16 + (lane >> 2);
-  const int tok = 2 * (lane & 3);
-  __nv_bfloat16* stg = (__nv_bfloat16*)(xs + G30_MTOK * 256);
-#pragma unroll
-  for (int jn = 0; jn < G30_MTOK / 8; jn++)
-#pragma unroll
-    for (int h = 0; h < 2; h++)
-#pragma unroll
-      for (int q = 0; q < 2; q++) stg[(8 * jn + tok + q) * 72 + r0 + 8 * h] = __float2bfloat16(d[4 * jn + 2 * h + q] * scale);
-  asm volatile("bar.sync 2, 128;" ::: "memory");
-#pragma unroll
-  for (int q = 0; q < G30_MTOK / 16; q++) {
-    const int idx = q * 128 + t, tk = idx >> 3, c = idx & 7;
-    *(uint4*)(out + (size_t)tk * N + g * 64 + c * 8) = *(const uint4*)(stg + tk * 72 + c * 8);
-  }
-  if (t == 0) TLX(ra, 10)
-}
-
-static PFN_cuTensorMapEncodeTiled_v12000 g_enc = nullptr;
-static void mk(CUtensorMap* m, const void* p, uint64_t inner, uint64_t outer, uint32_t b0, uint32_t b1) {
-  if (!g_enc) {
-    cudaDriverEntryPointQueryResult q;
-    cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled", (void**)&g_enc, 12000, cudaEnableDefault, &q);
-  }
-  cuuint64_t dims[2] = {inner, outer}, strides[1] = {inner * 2};
-  cuuint32_t box[2] = {b0, b1}, es[2] = {1, 1};
-  CUresult r = g_enc(m, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, (void*)p, dims, strides, box, es,
-                     CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B, CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
-                     CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
-  TORCH_CHECK(r == CUDA_SUCCESS, "pr32 tensor map encode failed ", (int)r);
-}
-}  // namespace pr32
-
-// pooled [T][N] BF16 = x [T][K] @ Wp^T (pack30 stages wp, hdr [N][ESC] float2, scale) and the T > 8 router
-// (x @ [hi; lo]^T, rw = pack_router stages [8][128][8192]) + routing in one launch. part fp32 [8 RKS T 64] and
-// logits fp32 [T][512] scratch; cnt int32 [16] zeros (self-resetting). pdl: launch as a PDL secondary.
-void pr32_launch(torch::Tensor x, torch::Tensor wp, torch::Tensor hdr, torch::Tensor out, double scale,
-                 torch::Tensor rw, torch::Tensor part, torch::Tensor logits, torch::Tensor cnt, torch::Tensor bias,
-                 torch::Tensor ls, torch::Tensor ids, torch::Tensor lids, torch::Tensor wts, double mult, double reps,
-                 int64_t local, int64_t pdl, torch::Tensor tl) {
-  const int K = x.size(1), N = out.size(1);
-  TORCH_CHECK(x.size(0) == G30_MTOK && x.is_contiguous() && K == 8192 && N == 4096 && out.size(0) == G30_MTOK);
-  CUtensorMap tx;
-  pr32::mk(&tx, x.data_ptr(), K, G30_MTOK, 64, G30_MTOK);
-  static_assert(G30_S == 2, "pr32: pair router reduce needs S = 2");
-  const int smem = G30_NS * G30_XBOX + G30_NW * PR_SLOT + 1024 + 3 * G30_MTOK * 64 * 4 + G30_ND * 128 * 4 * PR_RBS + 1024 + 1024;
-  // finisher: 64 chunks + 8 x [512] logits below the barriers
-  TORCH_CHECK(64 * (G30_MTOK / 4) * 256 <= G30_NS * G30_XBOX + G30_NW * PR_SLOT, "pr32: finisher smem");
-  static bool once = false;
-  if (!once) { cudaFuncSetAttribute(pr32::pr32_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; }
-  pr32::RArgs ra{(const uint8_t*)rw.data_ptr(), part.data_ptr<float>(), logits.data_ptr<float>(), cnt.data_ptr<int>(),
-                 bias.data_ptr<float>(), ls.data_ptr<int>(), ids.data_ptr<int>(), lids.data_ptr<int>(),
-                 wts.data_ptr<float>(), (float)mult, (float)reps, (int)local, (unsigned long long*)tl.data_ptr()};
-  cudaLaunchConfig_t cfg = {};
-  cfg.gridDim = dim3(N / 64 + 2, G30_S);
-  cfg.blockDim = dim3(352);
-  cfg.dynamicSmemBytes = smem;
-  cfg.stream = at::cuda::getCurrentCUDAStream();
-  cudaLaunchAttribute at[2];
-  at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  at[0].val.programmaticStreamSerializationAllowed = pdl ? 1 : 0;
-  at[1].id = cudaLaunchAttributeClusterDimension;
-  at[1].val.clusterDim.x = 1; at[1].val.clusterDim.y = G30_S; at[1].val.clusterDim.z = 1;
-  cfg.attrs = at; cfg.numAttrs = G30_S > 1 ? 2 : 1;
-  TORCH_CHECK(cudaLaunchKernelEx(&cfg, pr32::pr32_kernel, tx, (const uint8_t*)wp.data_ptr(), (__nv_bfloat16*)out.data_ptr(),
-                                 (const float2*)hdr.data_ptr(), N, K / 64, (float)scale, ra) == cudaSuccess, "pr32 launch failed");
-}
-'''
+_GPR32_SRC = None
 _PR32 = {}
 def _pr32_build(c):
     """c = (MTOK, NW, NS) -> the pr32 lib (moe n5s1, pr32_src.cu) or None."""
@@ -15428,6 +14831,310 @@ void bnd2_launch(torch::Tensor br, torch::Tensor s1, torch::Tensor alpha, torch:
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 '''
+_GSLACK_SRC = r'''// moe/slack (moe s5 2026-10-31): ROUTING-SLACK selection step. NOT for submission until the organizers approve it.
+// After the normal routing (ids = biased top 8, lowest index on ties), choose a smaller set S of this GPU's experts and
+// re-route each token inside TASK.md's routing tolerance (reference.check_routing), so fewer local experts are read:
+//   - every pick scores (sigmoid + bias) >= its 8th best - RT (RT = ROUTE_TOL minus a margin)
+//   - every local top-8 expert beating the 9th best by > KT (KEEP_TOL minus a margin) is kept (S starts as their union)
+//   - S grows greedily (most deficit tokens covered, then most top-8 routes; lowest index on ties) until every token can
+//     fill 8 picks from its local candidates in S plus its non-local candidates, and |S| >= the distinct floor; then
+//     greedy additions that became redundant are dropped again (= fresh x8's exact minimum on 11/12 scored loads)
+//   - a token keeps its top 8 where allowed; a dropped local expert is replaced by its best local candidate in S, else
+//     its best non-local candidate (key order, lowest index on ties)
+//   - if the local routes or distinct experts fall below the floors (with margins), the routing is left unchanged.
+// Grid ceil(T / 8) CTAs x 8 warps, warp = token (phase A: per-token masks to global); the last CTA (self-resetting
+// ticket) runs the greedy (B) and re-picks the changed tokens only (C). Deterministic (integer/bitmask decisions from
+// the same FP32 keys), no host sync: CUDA-graph safe.
+// logits[t][e] = sum_k part[k * SKS + t * ST + e]; ids/lids/wts [T][8] are read and overwritten in place.
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime.h>
+#include <stdint.h>
+
+namespace slk {
+constexpr int E = 256, TOPK = 8, LOC = 32, NW = 8, MAXT = 256;
+
+struct Args {
+  const float* part; int ks, sks, st;
+  const float* bias; const int* ls;
+  int* ids; int* lids; float* wts;
+  uint32_t* msk;  // [5][MAXT]: L, K, R, N, need
+  int* cnt;       // ticket (zero, self-resetting)
+  int T; float mult, reps, rt, kt, tie, dmarg, rmarg;
+};
+
+__device__ __forceinline__ uint32_t okey(float k) {  // order-preserving bits
+  uint32_t b = __float_as_uint(k);
+  return (b & 0x80000000u) ? ~b : (b | 0x80000000u);
+}
+
+// lane j holds experts (ls + j + 32 k) mod 256; k = 0 is local expert j. Returns v8 (the 8th best key).
+__device__ __forceinline__ float token_keys(const Args& a, int t, int ls, int lane, float (&key)[8], uint32_t& in8m) {
+  const int myid = lane < TOPK ? a.ids[t * TOPK + lane] : 0;
+#pragma unroll
+  for (int k = 0; k < 8; k++) {
+    const int e = (ls + lane + 32 * k) & (E - 1);
+    float lg = __ldcg(a.part + (size_t)t * a.st + e);
+    for (int q = 1; q < a.ks; q++) lg += __ldcg(a.part + (size_t)q * a.sks + (size_t)t * a.st + e);
+    key[k] = 1.f / (1.f + __expf(-lg * a.mult)) + __ldg(a.bias + e);
+  }
+  // in8m bit k: expert k of this lane is in the top 8. id's lane = (id - ls) & 31, its k = ((id - ls) & 255) >> 5
+  const int rel = (myid - ls) & (E - 1);
+  in8m = 0;
+#pragma unroll
+  for (int s = 0; s < TOPK; s++) {
+    const int r = __shfl_sync(0xffffffffu, rel, s);
+    if ((r & 31) == lane) in8m |= 1u << (r >> 5);
+  }
+  float v8 = 3.4e38f;
+#pragma unroll
+  for (int k = 0; k < 8; k++) if ((in8m >> k) & 1u) v8 = fminf(v8, key[k]);
+#pragma unroll
+  for (int o = 16; o; o >>= 1) v8 = fminf(v8, __shfl_xor_sync(0xffffffffu, v8, o));
+  return v8;
+}
+
+__global__ void __launch_bounds__(NW * 32) slack_kernel(Args a) {
+  __shared__ uint32_t sL[MAXT], sR[MAXT];
+  __shared__ int sNeed[MAXT], sList[MAXT];
+  __shared__ int cnt[LOC];
+  __shared__ uint32_t gM, gU, gN, gS, gUse;
+  __shared__ int gRef, gNr, gRoutes, gAny, gDone, gLast, gNc;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, T = a.T;
+  const int ls = *a.ls;
+  // ---- A: one token per warp
+  {
+    const int t = blockIdx.x * NW + warp;
+    if (t < T) {
+      float key[8]; uint32_t in8m;
+      const float v8 = token_keys(a, t, ls, lane, key, in8m);
+      float v9 = -3.4e38f;
+#pragma unroll
+      for (int k = 0; k < 8; k++) if (!((in8m >> k) & 1u)) v9 = fmaxf(v9, key[k]);
+#pragma unroll
+      for (int o = 16; o; o >>= 1) v9 = fmaxf(v9, __shfl_xor_sync(0xffffffffu, v9, o));
+      const float thr = v8 - a.rt;
+      const bool in0 = in8m & 1u;
+      const uint32_t L = __ballot_sync(0xffffffffu, key[0] >= thr);
+      const uint32_t K = __ballot_sync(0xffffffffu, in0 && key[0] - v9 > a.kt);
+      const uint32_t R = __ballot_sync(0xffffffffu, in0);
+      // local experts just outside the top 8 (within TIE of the 8th): the reference's top 8 may hold them instead
+      const uint32_t N = __ballot_sync(0xffffffffu, !in0 && key[0] >= v8 - a.tie);
+      int nl = 0;
+#pragma unroll
+      for (int k = 1; k < 8; k++) nl += key[k] >= thr;
+#pragma unroll
+      for (int o = 16; o; o >>= 1) nl += __shfl_xor_sync(0xffffffffu, nl, o);
+      if (lane < 5) {
+        const uint32_t v = lane == 0 ? L : lane == 1 ? K : lane == 2 ? R : lane == 3 ? N : (uint32_t)max(0, TOPK - nl);
+        __stcg(a.msk + lane * MAXT + t, v);
+      }
+    }
+  }
+  __threadfence();
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const int prev = atomicAdd(a.cnt, 1);
+    gLast = prev == (int)gridDim.x - 1;
+    if (gLast) *a.cnt = 0;  // self-reset for the next launch / replay
+  }
+  __syncthreads();
+  if (!gLast) return;
+  __threadfence();
+  if (threadIdx.x == 0) { gM = 0; gU = 0; gN = 0; gUse = 0; gRef = 0; gNr = 0; gRoutes = 0; gNc = 0; }
+  if (threadIdx.x < LOC) cnt[threadIdx.x] = 0;
+  __syncthreads();
+  {
+    uint32_t m = 0, u = 0, n = 0; int r = 0, nr = 0;
+    for (int t = threadIdx.x; t < T; t += blockDim.x) {
+      const uint32_t L = __ldcg(a.msk + t), K = __ldcg(a.msk + MAXT + t), R = __ldcg(a.msk + 2 * MAXT + t),
+                     N = __ldcg(a.msk + 3 * MAXT + t);
+      sL[t] = L; sR[t] = R; sNeed[t] = (int)__ldcg(a.msk + 4 * MAXT + t);
+      m |= K; u |= R; n |= N; r += __popc(R); nr += __popc(N);
+    }
+#pragma unroll
+    for (int o = 16; o; o >>= 1) {
+      m |= __shfl_xor_sync(0xffffffffu, m, o); u |= __shfl_xor_sync(0xffffffffu, u, o);
+      n |= __shfl_xor_sync(0xffffffffu, n, o); r += __shfl_xor_sync(0xffffffffu, r, o);
+      nr += __shfl_xor_sync(0xffffffffu, nr, o);
+    }
+    if (lane == 0) { atomicOr(&gM, m); atomicOr(&gU, u); atomicOr(&gN, n); atomicAdd(&gRef, r); atomicAdd(&gNr, nr); }
+  }
+  __syncthreads();
+  // ---- B: greedy S. Floors from the reference's counts, at their largest over near-tie flips (+ fixed margins)
+  const float floor_d = (float)(__popc(gU | gN) + a.dmarg) * 0.85f - 2.f;
+  const float floor_r = (float)(gRef + gNr + a.rmarg) * 0.92f - 4.f;
+  if (threadIdx.x == 0) gS = gM;
+  __syncthreads();
+  for (int it = 0; it <= LOC; it++) {
+    const uint32_t S = gS;
+    if (threadIdx.x == 0) gAny = 0;
+    __syncthreads();
+    for (int t = threadIdx.x; t < T; t += blockDim.x) {
+      const bool def = __popc(sL[t] & S) < sNeed[t];
+      uint32_t b = def ? (sL[t] & ~S) : 0u;
+      if (def) gAny = 1;
+      while (b) { const int e = __ffs(b) - 1; b &= b - 1; atomicAdd(&cnt[e], 1024); }
+      b = sR[t] & ~S;
+      while (b) { const int e = __ffs(b) - 1; b &= b - 1; atomicAdd(&cnt[e], 1); }
+    }
+    __syncthreads();
+    if (warp == 0) {  // argmax over the 32 counters (lowest index on ties)
+      const int c = cnt[lane];
+      int bv = c * 64 + (63 - lane);
+#pragma unroll
+      for (int o = 16; o; o >>= 1) bv = max(bv, __shfl_xor_sync(0xffffffffu, bv, o));
+      cnt[lane] = 0;
+      if (lane == 0) {
+        gDone = !(gAny || (float)__popc(S) < floor_d);
+        if (!gDone) { if (bv < 64) gDone = 1; else gS = S | (1u << (63 - (bv & 63))); }
+      }
+    }
+    __syncthreads();
+    if (gDone) break;
+  }
+  // ---- B2: drop greedy additions that turned out redundant (highest index first)
+  {
+    uint32_t add = gS & ~gM;
+    while (add) {
+      const int e = 31 - __clz(add); add &= ~(1u << e);
+      const uint32_t S1 = gS & ~(1u << e);
+      if (threadIdx.x == 0) gAny = (float)__popc(S1) < floor_d;
+      __syncthreads();
+      for (int t = threadIdx.x; t < T; t += blockDim.x)
+        if (__popc(sL[t] & S1) < sNeed[t]) gAny = 1;
+      __syncthreads();
+      if (threadIdx.x == 0 && !gAny) gS = S1;
+      __syncthreads();
+    }
+  }
+  // ---- C: changed tokens (a top-8 local expert outside S) re-pick; the others keep their routes
+  const uint32_t S = gS;
+  {
+    int r = 0; uint32_t use = 0;
+    for (int t = threadIdx.x; t < T; t += blockDim.x) {
+      const uint32_t R = sR[t];
+      if (R & ~S) sList[atomicAdd(&gNc, 1)] = t;
+      else { r += __popc(R); use |= R; }
+    }
+#pragma unroll
+    for (int o = 16; o; o >>= 1) { r += __shfl_xor_sync(0xffffffffu, r, o); use |= __shfl_xor_sync(0xffffffffu, use, o); }
+    if (lane == 0) { atomicAdd(&gRoutes, r); atomicOr(&gUse, use); }
+  }
+  __syncthreads();
+  const int nc = gNc;
+  // new picks in registers of lanes < 8 (slot = lane), at most MAXT / NW tokens per warp
+  constexpr int PER = MAXT / NW;
+  int nid[PER]; float nw[PER];
+  int nmine = 0;
+  for (int i = warp; i < nc; i += NW, nmine++) {
+    const int t = sList[i];
+    float key[8]; uint32_t in8m;
+    const float v8 = token_keys(a, t, ls, lane, key, in8m);
+    const float thr = v8 - a.rt;
+    uint64_t pk[8];
+#pragma unroll
+    for (int k = 0; k < 8; k++) {
+      const bool ok = !((in8m >> k) & 1u) && key[k] >= thr && (k > 0 || ((S >> lane) & 1u));
+      const int e = (ls + lane + 32 * k) & (E - 1);
+      pk[k] = ok ? ((uint64_t)(k == 0) << 41) | ((uint64_t)okey(key[k]) << 8) | (uint64_t)(E - 1 - e) : 0ull;
+    }
+    // slot s (lane s < 8) dropped if its id is local and outside S; the r-th dropped slot gets the r-th best candidate
+    const int myid = lane < TOPK ? a.ids[t * TOPK + lane] : 0;
+    const int rel = (myid - ls) & (E - 1);
+    const bool dropped = lane < TOPK && rel < LOC && !((S >> rel) & 1u);
+    const uint32_t dm = __ballot_sync(0xffffffffu, dropped);
+    const int myrank = __popc(dm & ((1u << lane) - 1));
+    int id = myid;
+    for (int r = 0; r < __popc(dm); r++) {
+      uint64_t b = 0; int bk = 0;
+#pragma unroll
+      for (int k = 0; k < 8; k++) if (pk[k] > b) { b = pk[k]; bk = k; }
+      uint64_t w = b;
+#pragma unroll
+      for (int o = 16; o; o >>= 1) { const uint64_t x = __shfl_xor_sync(0xffffffffu, w, o); w = x > w ? x : w; }
+      if (b == w) {  // the owner removes it (ids unique in the low byte, so one owner)
+#pragma unroll
+        for (int k = 0; k < 8; k++) if (k == bk) pk[k] = 0ull;
+      }
+      if (dropped && myrank == r) id = E - 1 - (int)(w & 0xFF);
+    }
+    float lg = 0.f;
+    if (lane < TOPK)
+      for (int q = 0; q < a.ks; q++) lg += __ldcg(a.part + (size_t)q * a.sks + (size_t)t * a.st + id);
+    const float sc = lane < TOPK ? 1.f / (1.f + expf(-lg * a.mult)) : 0.f;
+    float sum = sc;
+#pragma unroll
+    for (int o = 4; o; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);  // lanes 0..7
+    const int l2 = (id - ls) & (E - 1);
+    const uint32_t lm = __ballot_sync(0xffffffffu, lane < TOPK && l2 < LOC);
+    uint32_t um = 0;
+#pragma unroll
+    for (int s = 0; s < TOPK; s++) { const int x = __shfl_sync(0xffffffffu, l2, s); if (x < LOC) um |= 1u << x; }
+    if (lane == 0) { atomicAdd(&gRoutes, __popc(lm)); atomicOr(&gUse, um); }
+#pragma unroll
+    for (int j = 0; j < PER; j++) if (j == nmine) { nid[j] = id; nw[j] = sc / (sum + a.reps); }
+  }
+  __syncthreads();
+  if ((float)gRoutes < floor_r || (float)__popc(gUse) < floor_d) return;  // floors missed: routing unchanged
+  int j = 0;
+  for (int i = warp; i < nc; i += NW, j++) {
+    if (lane >= TOPK) continue;
+    const int t = sList[i];
+    int id = 0; float w = 0.f;
+#pragma unroll
+    for (int q = 0; q < PER; q++) if (q == j) { id = nid[q]; w = nw[q]; }
+    const int l = (id - ls) & (E - 1);
+    a.ids[t * TOPK + lane] = id; a.lids[t * TOPK + lane] = l < LOC ? l : -1; a.wts[t * TOPK + lane] = w;
+  }
+}
+}  // namespace slk
+
+void slack_launch(torch::Tensor part, int64_t ks, int64_t sks, int64_t st, torch::Tensor bias, torch::Tensor ls,
+                  torch::Tensor ids, torch::Tensor lids, torch::Tensor wts, torch::Tensor scratch, int64_t T,
+                  double mult, double reps, double rt, double kt, double tie, double dmarg, double rmarg) {
+  TORCH_CHECK(T >= 1 && T <= slk::MAXT, "slack: T out of range");
+  // scratch int32 [>= 5 * 256 + 1]: masks, then the ticket (zero at first use; the kernel resets it)
+  slk::Args a{part.data_ptr<float>(), (int)ks, (int)sks, (int)st, bias.data_ptr<float>(), ls.data_ptr<int>(),
+              ids.data_ptr<int>(), lids.data_ptr<int>(), wts.data_ptr<float>(), (uint32_t*)scratch.data_ptr<int>(),
+              scratch.data_ptr<int>() + 5 * slk::MAXT, (int)T, (float)mult, (float)reps, (float)rt, (float)kt,
+              (float)tie, (float)dmarg, (float)rmarg};
+  slk::slack_kernel<<<(T + slk::NW - 1) / slk::NW, slk::NW * 32, 0, at::cuda::getCurrentCUDAStream()>>>(a);
+}
+'''
+SLACK = True
+SLACK_TOKENS = ()
+SLACK_MR, SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM = 0.023, 0.022, 0.0, 2.0, 8.0
+_GSLACK = {}
+_SLACK_DBG = None
+def _slack_build():
+    if not SLACK or not SLACK_TOKENS or _GSLACK_SRC is None or "lib" in _GSLACK:
+        return
+    try:
+        import hashlib
+        from torch.utils.cpp_extension import load_inline
+        _GSLACK["lib"] = load_inline(
+            name="layer_slack_" + hashlib.sha256(_GSLACK_SRC.encode()).hexdigest()[:12],
+            cpp_sources="void slack_launch(torch::Tensor, int64_t, int64_t, int64_t, torch::Tensor, torch::Tensor, "
+                        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, double, double, double, double, double, double);",
+            cuda_sources=_GSLACK_SRC, functions=["slack_launch"],
+            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+    except Exception as e:
+        print("layer slack build failed:", e)
+        _GSLACK["lib"] = None
+def _slack(part, ks, sks, st, state, local_start, ids, lids, wts, tokens):
+    """Overwrite ids/lids/wts [T, 8] in place with the slack routing (one CTA; reads logits = sum of ks partials
+    part[k * sks + t * st + e]). A plain launch (no PDL, no trigger): every later kernel sees the final routing."""
+    if _SLACK_DBG is not None:
+        _SLACK_DBG.append(sum(part.as_strided((tokens, N_EXPERTS), (st, 1), part.storage_offset() + k * sks).float()
+                              for k in range(ks)).clone())
+    lib = _GSLACK.get("lib") if SLACK and tokens in SLACK_TOKENS else None
+    if lib is None:
+        return
+    keep = KEEP_TOL[0] if tokens <= KEEP_TOKENS else KEEP_TOL[1]
+    lib.slack_launch(part, ks, sks, st, state["router_bias"], local_start, ids, lids, wts, state["slack_scratch"], tokens,
+                     ROUTER_MULTIPLIER,
+                     ROUTE_EPS, ROUTE_TOL - SLACK_MR, keep - SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM)
 G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2),
            ("pooler", 32): (32, 1024, 8, 2, 2, 1), ("unpool", 32): (32, 1024, 8, 2, 2, 1),
            ("qkv_gate", 16): (16, 1024, 4, 4, 4, 2),
@@ -18044,6 +17751,7 @@ def _g12_prepare(state):
     state["ob8_part"] = torch.empty(G12_CFG["o"][3] * 32, dtype=torch.float32, device=dev)
     state["ob8_bar"] = torch.zeros(1, dtype=torch.int32, device=dev)
     state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)
+    state["slack_scratch"] = torch.zeros(5 * 256 + 32, dtype=torch.int32, device=dev)
     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)
     state["idf"] = torch.zeros(1, dtype=torch.int32, device=dev)
     state["g13"] = {key: pk for key in list(G13_CFG) + (["o"] if G13_O else []) if (pk := _pack13(w[key])) is not None}
@@ -18374,6 +18082,7 @@ def _kernel_fn(data, state):
         _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
                             E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
                             SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, TRIG=rpdl, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4)
+        _slack(pr[:, D_EXPERT:], 2, N_EXPERTS, D_EXPERT + 2 * N_EXPERTS, state, data["local_start"], ids, lids, wts, tokens)
         bucket = _moe_bucket(state, lids, rpdl) if bkt else None
         if gnorm:
             p = pr[:, :D_EXPERT]
@@ -18407,6 +18116,7 @@ def _kernel_fn(data, state):
             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
                                    ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)
+        _slack(logits, 1, 0, N_EXPERTS, state, data["local_start"], topk_ids, local_ids, topk_weights, tokens)
     elif (pr32 := (tokens in PR32_TOKENS and state.get("pr32", {}).get(tokens) is not None
                    and _opt(state, tokens, "pr32", PR32_DEFAULT))):
         side_stream.wait_stream(main_stream)
@@ -18512,4 +18222,4 @@ def _kernel_fn(data, state):
     else:
         moe = (_experts_marlin if HAVE_SGL else _experts_local)(p, topk_weights, local_ids, state)
     return _tail(moe, stream1, h, tokens, state, pdl, nos=nos) + (topk_ids,)
-_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]
+_PREBUILD = [_BUILD_POOL.submit(f) for f in (_slack_build, _moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]
