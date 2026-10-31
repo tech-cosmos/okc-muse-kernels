@@ -3761,3 +3761,8 @@ line says v182 (main). Log it in Judge runs.
   = TIE (all within +-1.5 us; same spread as copy vs copy). v184's slow judge draw was the node.
 - Decision for the first session after 00:00Z 11-01: submit v184 once (v181's speed + crash fix; v184's own check is within 1%
   of the board, 09:28Z rule; v181's check is the speed evidence for identical kernels). v181 only if a lead/human line says so.
+
+## n41 (2026-10-31 20:50Z, session 35)
+Status only. No lead/human line since n40. Verified v184 = `git show 70591ea:muse_decode_layer/submission.py` sha1 926ce2ec
+(v181 38d0c23 = fa4865e6). okc problems: layer 15/20 checks, 3/10 scored used on 10-31; no new candidate to check, every lever
+in STATE is closed. Plan: first session after 00:00Z 11-01 submits v184 once. 0 judge runs, 0 Modal min.
