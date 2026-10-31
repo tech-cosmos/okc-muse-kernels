@@ -3292,3 +3292,7 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - No lead line since 16:30Z, no new proj Request/Handoff. r-layer main moved to v183 (e0dd26f, non-SA moe fix):
   `bash muse_bf16_proj/dev/n15/mk_h200.sh --dry` re-run against it: pr8 overlays (base/now/tk1) build OK. The 00:00Z run
   (no --dry; gate flat <= -1 us v1 sl on the H200) stays valid. Proj budget 10-31: checks 6/20, scored 2/10.
+
+## n34 (20:31-20:36Z, unattended session 22): status only; 0 judge runs, 0 Modal, 0 GPU
+- No lead line since 16:30Z, no new proj Request/Handoff. r-layer main submission.py still e0dd26f (v183): n33's
+  `mk_h200.sh --dry` stays valid; run it without --dry after 00:00Z (gate flat <= -1 us v1 sl on the H200).
