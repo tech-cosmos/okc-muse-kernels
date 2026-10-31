@@ -568,7 +568,7 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   posted; the deciding test is the H200 (moe check or Modal), given n5s19's H200 loss with the entry trigger.
 - Layer: already has all three at T=1 (84204 + n2u SLOT, PDL n2u, TK2F_LATE_TRIG 3): no layer item from this.
 
-## x11 (2026-10-31 13:34Z-~14:40Z, lead 12:25Z MOE BS1 GAP, cont.): stamps + oracles, H100, 0 judge, 0 Modal
+## x11 (2026-10-31 13:34Z-13:56Z, lead 12:25Z MOE BS1 GAP, cont.): stamps + oracles, H100, 0 judge, 0 Modal
 - Tools: tools/fresh/bs1/stamp.py (per-CTA %globaltimer in standalone moe_tk2f + norm block), strun.py (reader),
   ab.py (interleaved cold-L2 graph A/B of standalone variant dirs, run from muse_moe_w4a16/).
 - Standalone bs1 E=2 timeline (us from the first tk2f CTA entry; stamped copy ~+2.5 us; 'late' variant):
