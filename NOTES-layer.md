@@ -3620,3 +3620,21 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   (~26 GB/s/SM effective) are nowhere near; only a hand-written CUTLASS/CuTe-class kernel (fresh x20's lockstep-x, 12-bit W,
   >= 16 KB stages, cluster reduce) could get it: a multi-day build, lead's call (fresh x20 Request). Not built by layer.
 - Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
+
+## n31 (session 25, 2026-10-31 17:52-18:25Z real UTC): T=128/256 qkv TileLang + CUTLASS sm90 oracles DEAD; 0 judge runs, 0 Modal.
+- Follow-up of n30 (Triton lost) on fresh x20's dense-GEMM question, with the two remaining library-class generators. Both run
+  from the SYSTEM python3.14 (/usr/local/bin/python3.14 has tilelang 0.1.9 + nvidia-cutlass-dsl 4.4.2 + torch 2.11; ~/okc has
+  neither); CUTLASS 4.1 C++ headers come with that tilelang wheel (.../tilelang/3rdparty/cutlass). Speed oracles only.
+  * tools/n31/tl_splitk.py (TileLang T.Pipelined wgmma/TMA split-K, FP32 slabs, NO reduce, CUPTI, cold L2): m128 cuBLAS 24.8-25.2
+    | best S4 128x128x128 st3 72 CTAs 23.0, S8 128x256x64 72 CTAs 24.8; >= 128 CTAs worse (28-32). m256 cuBLAS 29.9 | best
+    S4 128x256x64 34.7, S8 128x128x128 35.4. Effective ingest ~45 GB/s/SM (72 CTAs x 1 MB / 23 us) = the record's wall.
+  * tools/n31/cl_gemm.cu + build.sh (CUTLASS sm90 TMA warp-specialized cooperative, stream-K scheduler with Deterministic
+    reduction, split-K/stream-K/DP modes, clusters 1x2 / 2x1 multicast, swapped A=W, tiles 128x128x64/128x64x64/128x128x128)
+    vs tools/n31/cb_cal.cu (cuBLAS GemmEx in the same cudaEvent harness, which reads ~+5 us over CUPTI): m128 cuBLAS 29.8 |
+    CUTLASS best 36.1 (swap 128x64 clu 2x1 stream-K) / 36.5 (split 4), DP 64.4; m256 cuBLAS 34.7 | CUTLASS 42.9-43.0.
+  * GOTCHA: CUTLASS stream-K/split-K Deterministic needs its workspace re-initialized (g.initialize) before EVERY run; a bare
+    g.run() repeat hangs the GPU. My first hung binary held /tmp/okc-gpu.lock ~10 min (killed; sorry). cl_gemm.cu now calls
+    initialize per run and alarm(20)s after taking the lock.
+- Verdict: Triton (n30), TileLang and CUTLASS's own sm90 kernels all lose to nvjet at T=128/256 qkv. Only a hand-written
+  lockstep-x / 12-bit-W / cluster-reduce kernel (fresh x20) could take the ~2x byte headroom; still the lead's call. 0 runs.
+- Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.

@@ -3,6 +3,8 @@
 BOARD BEST = submit 50534b24 = v174 (c62cdb0), **2.1717x**, #198 (n13s5, 10-31; d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7, v32 313.9/486.9; check 2d1f9256 2.1514 / fixed-SGLang 2.1650).
 Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n31 (10-31 18:25Z): T=128/256 qkv TileLang split-K (m128 23.0 w/o reduce vs cuBLAS 25) + CUTLASS sm90 stream-K/multicast (m128 36
+  vs cuBLAS 29.8, m256 43 vs 34.7, event harness) oracles DEAD; tools/n31 (system python3.14 has tilelang+CUTLASS hdrs). 0 runs.
 n30 (10-31 17:52Z): T=128/256 qkv Triton split-K (plain + TMA/warp-spec) oracle DEAD: H100 m128 best 27.1 vs cuBLAS 24.9, m256 36.6 vs 29.5 us; tools/n30. 0 runs.
 n29 (10-31 17:50Z): T=256/128 bnd2 L2-warm oracle DEAD (H100 warm -1.0/-0.6 us, ~0.04%); tools/n29/bnd_warm.py. 0 runs.
 n28 (10-31 17:45Z): v181 HOT_IL stress tools/n28/il_stress.py: replay vs eager bitwise 0/360 + check 0/360 (routers 5/12/17, v16/v32 sl/full). 0 runs.
