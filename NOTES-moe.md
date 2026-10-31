@@ -3909,7 +3909,7 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
 - NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE (= cbd4bcf + IDW, strictly fewer trips; check > board 2.3198).
 
 
-## o17 (2026-10-31 15:50Z - ): HOT_ET RACE (layer main v171+ carries it) DEMONSTRATED + FIX; moe-board HOT_ET port
+## o17 (2026-10-31 15:50Z - 16:25Z): HOT_ET RACE (layer main v171+ carries it) DEMONSTRATED + FIX; moe-board HOT_ET port
 - HOT_ET (layer v171, moe n7s39): moe_hot (per > 0) triggers moe_twm BEFORE its own griddepcontrol.wait; twm (hx) polls
   meta[67] bit 30, set by moe_hot CTA 0 after that wait. meta is a per-call torch.empty: at entry meta[67] holds the
   previous replay's word (bit 30 SET) or pool garbage, and moe_routegather(n) zeroes it only AFTER its own PDL trigger

@@ -1,4 +1,4 @@
-## o17 16:55Z 10-31: HOT_ET RACE in layer main (v171+) DEMONSTRATED + FIXED: branch moe/hotet-race e24be08 (moe_routegathern
+## o17 16:25Z 10-31: HOT_ET RACE in layer main (v171+) DEMONSTRATED + FIXED: branch moe/hotet-race e24be08 (moe_routegathern
 ## zeroes meta[67] + fence BEFORE its PDL trigger; forced window: main hangs / illegal instr, fix 0 fails; H100 tie). Request to
 ## layer (v178) + lead (withdraw call) in COORD. Moe-board HOT_ET (fixed) = tie -> not ported. main 34dd790 unchanged.
 ## NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE. Then: proj's HOT_SL (>128-token expert slices) onto moe board bs256
