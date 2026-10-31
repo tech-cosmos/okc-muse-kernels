@@ -74,6 +74,7 @@ struct Args {
     int n, nrg_all, bk;
     const float4* rw; const float* x32; float* part; float* logits; int* cnt; const float* bias; const int* ls;
     int* ids; int* lids; float* wts; float mult, reps; int local, npf;
+    int* rel;  // layer n15 IDF8: != nullptr: the finisher st.release's *rel = 1 once ids/lids/wts are written
 };
 
 __device__ __forceinline__ void route_token(const Args& a, const float* lgs, const float* bs_, int ls, int tok, int lane) {
@@ -139,6 +140,11 @@ __device__ __forceinline__ void finish(const Args& a) {
     }
     __syncthreads();
     if (wp < MT) route_token(a, lgs, bs_, ls_, wp, lane);
+    if (a.rel) {  // layer n15 IDF8: every routing store, then thread 0's release (cumulative after the barrier)
+        __threadfence();
+        __syncthreads();
+        if (t == 0) asm volatile("st.release.gpu.global.s32 [%0], 1;" :: "l"(a.rel) : "memory");
+    }
     if (t == 0) a.cnt[0] = 0;
 }
 
@@ -373,7 +379,7 @@ void pr8_launch(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double sca
                 torch::Tensor rw, torch::Tensor x32, torch::Tensor part, torch::Tensor logits, torch::Tensor cnt,
                 torch::Tensor bias, torch::Tensor ls, torch::Tensor ids, torch::Tensor lids, torch::Tensor wts,
                 double mult, double reps, int64_t local, int64_t kcu, int64_t wg, int64_t pf, int64_t bk, int64_t xp,
-                int64_t npf, int64_t pdl) {
+                int64_t npf, int64_t pdl, int64_t rel) {
     const int m = x.size(0), k = x.size(1), n = out.size(1);
     const int ng = n / 8 / bk, threads = ng * wg * 32;
     const int xp_ = xp & 15, xr_ = (xp >> 4) ? (xp >> 4) : xp_;  // s88: xp = XP | XR << 4 (XR 0 = all pieces staged)
@@ -384,7 +390,7 @@ void pr8_launch(torch::Tensor ws_, torch::Tensor wn, torch::Tensor h, double sca
                 (const __nv_bfloat16*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, n / 8, (int)bk,
                 (const float4*)rw.data_ptr(), x32.data_ptr<float>(), part.data_ptr<float>(), logits.data_ptr<float>(),
                 cnt.data_ptr<int>(), bias.data_ptr<float>(), ls.data_ptr<int>(), ids.data_ptr<int>(), lids.data_ptr<int>(),
-                wts.data_ptr<float>(), (float)mult, (float)reps, (int)local, (int)npf};
+                wts.data_ptr<float>(), (float)mult, (float)reps, (int)local, (int)npf, (int*)rel};
     cudaLaunchConfig_t lc = {}; lc.gridDim = bk + 1; lc.blockDim = threads; lc.dynamicSmemBytes = sm;
     lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
     la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;

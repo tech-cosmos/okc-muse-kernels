@@ -1304,14 +1304,14 @@ def _g10_lib():
                             "void n2u_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                             "int64_t, int64_t, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, std::vector<torch::Tensor>, double, double);\n"
                             "void nu8_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, double, "
-                            "torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t);\n"
+                            "torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t);\n"
                             "void g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\n"
                             "void pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, "
                             "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                             "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double);\n"
                             + ("void pr8_launch(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
                                "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
-                               "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else "")
+                               "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else "")
                             + "void bnd2_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
                             "torch::Tensor, std::vector<torch::Tensor>, int64_t, double, double, double, int64_t, int64_t);\n"
                             + "void ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t);\n",
@@ -2236,11 +2236,13 @@ namespace nu8 {
 // operand (slots as N), its FP32 partials red.add into out[slot][1024] (local slots' rows zeroed by the pre-expert rmsnorm), blocks of row
 // group 0 red.add their chunk's per-slot sums of squares to Y row 64 [slot]; the T=8 boundary (SC) forms
 // sum_i f_i rsqrt(ss_i / K + eps) P_i over the token's local slots (masked loads) and rounds it to BF16.
-template <int KB, bool X = false, bool D = false>
+// I (layer n15 IDF8): moe_tk2f ran early on pr8's release flag (rel): the routing is read after griddepcontrol.wait
+// (moe_tk2f complete: its own wait came after the rmsnorm's, which came after pr8's), and block 0 resets *rel there.
+template <int KB, bool X = false, bool D = false, bool I = false>
 __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const int* __restrict__ ids,
                                            const float* __restrict__ tw, const float* __restrict__ w1, int start,
                                            int count, float eps, const __nv_bfloat16* __restrict__ w,
-                                           float* __restrict__ out, int* zc) {
+                                           float* __restrict__ out, int* zc, int* rel) {
     static_assert(KB == 512, "thread = k");
     constexpr int K = 4096, RB = 64, CPR = KB / 8, NKC = K / KB, LD = KB + 8;  // LD: padded smem row (bf16)
     constexpr int YS = D ? KB + 8 : KB;  // ys row stride (floats; D: padded for the B fragment loads)
@@ -2264,6 +2266,7 @@ __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const in
         const int b2 = blockIdx.x + gridDim.x / 2, kc2 = b2 % NKC, rg2 = b2 / NKC;
         asm volatile("{ .reg .b64 pl; createpolicy.fractional.L2::evict_last.b64 pl, 1.0; cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], %1, pl; }" :: "l"(w + (size_t)(rg2 * RB + tid - 64) * K + kc2 * KB), "r"(KB * 2) : "memory");
     }
+    auto routing = [&]() {
     if (tid < 64) {  // the routing (pr8's, complete before moe_tk2f passed its own griddepcontrol.wait)
         const int e = ids[tid] - start;
         const bool loc = e >= 0 && e < count;
@@ -2277,8 +2280,16 @@ __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const in
     if (tid < 64 && ((m64 >> tid) & 1)) s_list[__popcll(m64 & ((1ull << tid) - 1))] = tid;  // local slots, ascending
     if (tid <= 8) s_tb[tid] = tid == 8 ? __popcll(m64) : __popcll(m64 & ((1ull << (tid * 8)) - 1));  // token t: s_tb[t]..
     __syncthreads();
-    const int nl = __popcll(m64);
+    return m64;
+    };
+    unsigned long long m64 = 0;
+    if (!I) m64 = routing();
     asm volatile("griddepcontrol.wait;" ::: "memory");
+    if (I) {
+        m64 = routing();
+        if (blockIdx.x == 0 && tid == 0) *rel = 0;  // every spinner (moe_tk2f) has completed
+    }
+    const int nl = __popcll(m64);
     if (blockIdx.x == 0 && tid < 128) zc[tid] = 0;  // moe_tk2f's segment counters (moe_norm3's other job)
     constexpr int CPS = KB / 4;  // 16-byte chunks per slot chunk
     for (int c = tid; c < nl * CPS; c += 512) {
@@ -2427,7 +2438,7 @@ __global__ void __launch_bounds__(512) nu8(const float* __restrict__ Y, const in
 }
 }  // namespace nu8
 void nu8_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw, torch::Tensor w1, int64_t start, int64_t count,
-                double eps, torch::Tensor w, torch::Tensor out, torch::Tensor zc, int64_t kb, int64_t pdl) {
+                double eps, torch::Tensor w, torch::Tensor out, torch::Tensor zc, int64_t kb, int64_t pdl, int64_t rel) {
     TORCH_CHECK(y32.size(0) >= 65 && ids.numel() == 64 && w.size(0) >= 1024 && w.size(1) == 4096 &&
                 out.numel() == (kb >= 2000 ? 64 : (4096 / (kb % 1000)) * 8) * 1024, "nu8: shape");
     const int kb_ = (int)(kb % 1000);  // + 1000: X, + 2000: D
@@ -2438,15 +2449,23 @@ void nu8_launch(torch::Tensor y32, torch::Tensor ids, torch::Tensor tw, torch::T
     la[0].val.programmaticStreamSerializationAllowed = 1; lc.attrs = la; lc.numAttrs = pdl ? 1 : 0;
 #define NU8_ARGS (const float*)y32.data_ptr(), (const int*)ids.data_ptr(), (const float*)tw.data_ptr(), \
         (const float*)w1.data_ptr(), (int)start, (int)count, (float)eps, (const __nv_bfloat16*)w.data_ptr(), \
-        (float*)out.data_ptr(), (int*)zc.data_ptr()
+        (float*)out.data_ptr(), (int*)zc.data_ptr(), (int*)rel
     static bool init = false;
     if (!init) {
         cudaFuncSetAttribute(nu8::nu8<512>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 512 * 4);
         cudaFuncSetAttribute(nu8::nu8<512, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 512 * 4);
         cudaFuncSetAttribute(nu8::nu8<512, false, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 520 * 4);
+        cudaFuncSetAttribute(nu8::nu8<512, false, false, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 512 * 4);
+        cudaFuncSetAttribute(nu8::nu8<512, true, false, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 512 * 4);
+        cudaFuncSetAttribute(nu8::nu8<512, false, true, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, 72 * 520 * 2 + 64 * 520 * 4);
         init = true;
     }
-    if (kb == 512) cudaLaunchKernelEx(&lc, nu8::nu8<512>, NU8_ARGS);
+    if (rel) {  // layer n15 IDF8
+        if (kb == 512) cudaLaunchKernelEx(&lc, nu8::nu8<512, false, false, true>, NU8_ARGS);
+        else if (kb == 1512) cudaLaunchKernelEx(&lc, nu8::nu8<512, true, false, true>, NU8_ARGS);
+        else if (kb == 2512) cudaLaunchKernelEx(&lc, nu8::nu8<512, false, true, true>, NU8_ARGS);
+        else TORCH_CHECK(false, "nu8: kb");
+    } else if (kb == 512) cudaLaunchKernelEx(&lc, nu8::nu8<512>, NU8_ARGS);
     else if (kb == 1512) cudaLaunchKernelEx(&lc, nu8::nu8<512, true>, NU8_ARGS);
     else if (kb == 2512) cudaLaunchKernelEx(&lc, nu8::nu8<512, false, true>, NU8_ARGS);
     else TORCH_CHECK(false, "nu8: kb");
@@ -3782,6 +3801,7 @@ RF_TRIG_DEFAULT = True  # s27 (attn_src RF_TRIG): H100 ab_files d1 full 113.0 ->
 TK2FX_TOKENS = (1, 8)  # s27 TK2FX: moe_tk2f PDL secondary of the pre-expert rmsnorm (pr1 paths only). TUNE option "tk2fx"
 TK2FJ_TOKENS = (16, 32)  # s27: the same at T = 16/32 after joining the router's side stream before the rmsnorm
 TK2FJ_DEFAULT = True  # H100 ab_files 5 rounds: d16 212.4/313.3 -> 209.9/313.8, d32 205.7/433.8 -> 203.7/432.0 us
+IDF8_DEFAULT = True  # layer n15 IDF8 (T = 8): IDF on pr8's routing release flag (see idf8 in _kernel_fn). TUNE option "idf8"
 IDF_DEFAULT = True  # n7s7 IDF (T = 1): early moe_tk2f on pr1's routing release flag (see the moe_set_idf patch). TUNE option "idf"
 # fresh x8: ON. Both n7s8 reasons were fixable: pr1's routing came ~1.5 us before pr1's end (bias/ls DRAM trips behind the
 # pooler stream; now hoisted: ~10 us), and n2u's IDF routing loads were LDG.STRONG.GPU (+~3 us; now plain, after the wait).
@@ -3813,7 +3833,7 @@ def _nu8_d(state, tokens):
     return _opt(state, tokens, "nu8d", NU8_D)
 
 
-def _experts_nu8(x, topk_weights, local_ids, state, y32):
+def _experts_nu8(x, topk_weights, local_ids, state, y32, idf8=False):
     """T = 8: moe_tk2f (PF 20) -> nu8: the unpool slice as FP32 split-K slabs [D_EXPERT / NU8_KB, 8, 1024]. y32 [65, 4096]:
     row 64 (the slots' sums of squares) was zeroed by the pre-expert _rmsnorm_gain."""
     st = state["moe"]
@@ -3830,6 +3850,8 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
     tw = topk_weights.float().contiguous()
     d = y32.shape[0] == 81  # NU8D (kernel_fn allocated the per-slot rows)
     lib.moe_set_ss(0 if d else st["w1"].data_ptr())
+    if idf8:
+        lib.moe_set_idf(state["idf"].data_ptr())  # layer n15 IDF8: this tk2f launch spins on pr8's flag before its routing
     lib.moe_tk2f_launch(st["w13q"], st["w13s2"], st["w2q"], st["w2s2"], st["lut"], st["gs13"], st["gs2"],
                         x.contiguous(), ids, 0, LOCAL_EXPERTS, meta, sroutes, inv, inter, y32, st["cnt"],
                         _moe__tk2f_cfg(8, st) + (0 if d or _nu8_x(state, 8) else 1000)
@@ -3837,7 +3859,7 @@ def _experts_nu8(x, topk_weights, local_ids, state, y32):
     lib.moe_set_ss(0)
     f = y32[65:81].view(8 * TOP_K, UNPOOL_SLICE) if d else torch.empty((D_EXPERT // NU8_KB, 8, UNPOOL_SLICE), dtype=torch.float32, device=dev)
     _G10["lib"].nu8_launch(y32, ids, tw, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, state["unpool_slice"], f, st["cnt"],
-                           NU8_KB + (2000 if d else 1000 * _nu8_x(state, 8)), 1)
+                           NU8_KB + (2000 if d else 1000 * _nu8_x(state, 8)), 1, state["idf"].data_ptr() if idf8 else 0)
     return f, ((y32[64], ids, tw) if d else None)
 
 
@@ -3987,6 +4009,10 @@ def _kernel_fn(data, state):
     idf = (pr1 and tokens == 1 and _opt(state, 1, "idf", IDF_DEFAULT) and not N2U_BOUNDARY and not TK2_PDL13
            and 1 in TK2FX_TOKENS and _opt(state, 1, "tk2fx", TK2FX_DEFAULT) and 1 in N2U_TOKENS and _use_moe(1)
            and bool(_moe_TK2F) and _G10.get("lib") is not None and 1 <= SLICED_UNPOOL_MAX_TOKENS)
+    # layer n15 IDF8 (T = 8, pr8 + nu8 path): pr8's finisher st.release's state["idf"] after the routing; the rmsnorm
+    # triggers at start, moe_tk2f spins on the flag before its routing, nu8 reads the routing after its wait and resets it
+    idf8 = (pr1 and tokens == 8 and _opt(state, 8, "idf8", IDF8_DEFAULT) and not TK2_PDL13 and 8 in TK2FX_TOKENS
+            and _opt(state, 8, "tk2fx", TK2FX_DEFAULT) and _nu8_on(state, 8))
     # s86 OB8: the T=8 o GEMM writes the boundary's stream1 / h / h32 itself (pr8 = its PDL secondary)
     ob8 = (pr1 and tokens == 8 and _GOB8_SRC is not None and _opt(state, tokens, "ob8", OB8) and "g12" in state
            and not (("o", 8) in state.get("g19", {}) and "o" in G19_ON and _opt(state, 8, "g19:o", ("o", 8) not in G19_DEFAULT_OFF))
@@ -4092,7 +4118,8 @@ def _kernel_fn(data, state):
             part = torch.empty(8 * tokens * N_EXPERTS, dtype=torch.float32, device=dev)
             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
-                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)
+                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1,
+                                   state["idf"].data_ptr() if idf8 else 0)
     elif (pr32 := (tokens in PR32_TOKENS and state.get("pr32", {}).get(tokens) is not None
                    and _opt(state, tokens, "pr32", PR32_DEFAULT))):
         side_stream.wait_stream(main_stream)  # nothing runs there, but the later joins need it forked in the capture
@@ -4150,7 +4177,7 @@ def _kernel_fn(data, state):
     nu8 = _nu8_on(state, tokens)
     tk2fx = (pr1 and pdl and not tk2_pdl and tokens in TK2FX_TOKENS and _use_moe(tokens) and _moe_TK2F
              and _opt(state, tokens, "tk2fx", TK2FX_DEFAULT))
-    assert not idf or tk2fx
+    assert not (idf or idf8) or tk2fx
     tk2fj = (not pr1 and not tk2_pdl and tokens in TK2FJ_TOKENS and tokens <= TK2_MAX_TOKENS and _use_moe(tokens)
              and _moe_TK2F and _opt(state, tokens, "tk2fj", TK2FJ_DEFAULT))
     if tk2fj:  # s27: join the side stream (routing) first: the rmsnorm loses its PDL, moe_tk2f becomes its PDL secondary
@@ -4173,8 +4200,8 @@ def _kernel_fn(data, state):
         p = pooled  # s27 GNORM: the rmsnorm runs inside the experts' gather
     else:
       _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=rpdl,
-                             TRIG=tk2_pdl or idf, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
-                             launch_pdl=rpdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 and not nu8d else 0, TRIG2=(tk2fx or tk2fj) and not idf,
+                             TRIG=tk2_pdl or idf or idf8, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
+                             launch_pdl=rpdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 and not nu8d else 0, TRIG2=(tk2fx or tk2fj) and not idf and not idf8,
                              zl_ptr=y32[65] if nu8d else None, ids_ptr=local_ids if nu8d else None, ZL=LOCAL_EXPERTS if nu8d else 0,
                              zr_ptr=zr, ZR=zr.shape[1] if zr is not None else 0,
                              ZRP=triton.next_power_of_2(zr.shape[1]) if zr is not None else 1)
@@ -4200,7 +4227,7 @@ def _kernel_fn(data, state):
         f = _experts_n2u(p, topk_weights, local_ids, state, idf=idf)
         return _tail(None, stream1, h, tokens, state, pdl, nos=nos, f=f, rst=state["idf"] if idf else None) + (topk_ids,)
     if nu8:
-        f, sc = _experts_nu8(p, topk_weights, local_ids, state, y32)
+        f, sc = _experts_nu8(p, topk_weights, local_ids, state, y32, idf8)
         return _tail(None, stream1, h, tokens, state, pdl, nos=nos, f=f, sc=sc) + (topk_ids,)
     if _use_moe(tokens):
         moe = _experts_moe(p, topk_weights, local_ids, state, bucket, gnorm)  # all-reduce: identity
