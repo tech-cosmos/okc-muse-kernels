@@ -3884,3 +3884,15 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
 - Dead (H100 ab.py): tk2h MRG 2 at bs16 instead of BAL (TK2H_M {16: 3}) +2.45 us every seed; BAL at bs32 instead of tk2h
   MRG 2 = tie (+0.05). Neither checked.
 - NEXT SESSION AFTER 00:00Z 11-01: SUBMIT cbd4bcf (supersedes acf63a9 / 7139706) ONCE; beats board 2.3198.
+
+## o15 (2026-10-31 15:32Z - 16:15Z): moe board bs1 lever: cluster-split norm3 = DEAD on the H100; 0 judge runs
+- Geomean leverage per us (c015407f times): bs1 0.64 %/us, bs8 0.27, bs16 0.20, bs32 0.14, bs128 0.09, bs256 0.07 ->
+  bs1 fixed cost (fresh x11: ~8.8 us = pre-data 4.3 + transition 1.4 + norm 2.4 + launch ~1) is the best-paid target.
+- nsys (tools/o15/nsys_bs.py, graph node trace, H100 shared): bs1 = tk2f + norm3 only; norm3 ends ~3 us after tk2f.
+- Hypothesis: norm3 at M = 1 is ONE 512-thread CTA reading every local route's 16 KB FP32 row (one SM's L2 rate).
+  Built moe_norm3c<CS> (tools/o15/n3c.diff): grid M * CS as a CS-CTA cluster, columns split, per-warp sums of squares
+  published to every peer by st.shared::cluster, summed in norm3's warp order -> bitwise = main (eq1 bs1 200 eager +
+  400 replay, bs8/bs16 100 + 200: 0 differ).
+- H100 ab.py (8 seeds x 4 rounds): CS 8 at bs1 +0.43 us (7/8 seeds slower); CS 2 bs1 +0.69, bs8 +0.47. DEAD: a cluster
+  PDL secondary costs more than the single-SM read (it is not the norm's bottleneck). Not checked.
+- main unchanged (cbd4bcf). NEXT SESSION AFTER 00:00Z 11-01: SUBMIT cbd4bcf ONCE (best check c015407f 2.3737x).
