@@ -567,3 +567,33 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   launch_dependents moved from entry to just before its gemm2 rows. Not in submission.py of moe (moe's dir): Handoff
   posted; the deciding test is the H200 (moe check or Modal), given n5s19's H200 loss with the entry trigger.
 - Layer: already has all three at T=1 (84204 + n2u SLOT, PDL n2u, TK2F_LATE_TRIG 3): no layer item from this.
+
+## x11 (2026-10-31 13:34Z-~14:40Z, lead 12:25Z MOE BS1 GAP, cont.): stamps + oracles, H100, 0 judge, 0 Modal
+- Tools: tools/fresh/bs1/stamp.py (per-CTA %globaltimer in standalone moe_tk2f + norm block), strun.py (reader),
+  ab.py (interleaved cold-L2 graph A/B of standalone variant dirs, run from muse_moe_w4a16/).
+- Standalone bs1 E=2 timeline (us from the first tk2f CTA entry; stamped copy ~+2.5 us; 'late' variant):
+  routed 1.54 | first TMA 2.05 | first stage full 4.35 med (3.6-5.4) | ph1 end 20.2 med (min 16.4 = the 3-row CTAs,
+  max 20.7) | cnt ok 21.25-21.75 | ph2 data 22.0 | end 26.6 med / 26.9 max | norm3 pastwait 27.65 | Y loaded 28.9 |
+  end 29.7. Base (norm2 not PDL) has the norm entering at 27.9 and ending at 30.5.
+- Oracles (ab.py, 6 seeds x 10 rounds, bs1, GPU shared so absolute numbers run ~+5 us; means):
+    base 38.81 | late 37.70 | O1 = late + norm3 does nothing after its wait (wrong output) 35.26 (-2.4)
+    O2 = late without the gemm13 -> gemm2 cnt wait (timing only) 36.22 (-1.4)
+  => bs1 fixed ~9.5 us = pre-data ~4.3 (routing 1.5 + TMA issue 0.5 + first data 2.3) + transition 1.4 + norm 2.4 +
+  launch/PDL ~1. Record: fused norm in tk2f (s9 TK2FN, n5s28) = same latency chain, dead; R2 column-stationary never
+  built (est. <= 1 us); in the LAYER the norm's successor n2u needs the full vector in every block anyway (no gain).
+- In-layer (tools/ab_files.py, H100, v174 = branch fresh = main):
+    O2 (tk2f_consume cnt + BAL waits removed), 2 runs: d1 sl -0.6/-1.7, d1 full -0.8/-1.4, d16 sl -0.9/-0.8,
+    d16 full +0.2/-0.6, d32 sl -1.6, d32 full 0.0 us  => transition bound ~1.1 us d1, ~0.5-0.8 d16/d32.
+    O3 (n2u returns right after its wait + counter zeroing): d1 sl/full -3.5/-4.4.  O3b (n2u without the last-block
+    boundary): 0.0/-0.2. n2u = latency chain (PDL release ~0.9 + L2 trips); record: redundant-read fix, flag spin,
+    unconditional Y, fused boundary all dead (NOTES-layer s14/s57/v94, fresh x8). Not reopened.
+- CANDIDATE CW (chunk-wait; NOT built): gemm2 stage q needs only inter[q*1024, +1024) = gemm13 row-blocks 64q..64q+63
+  of its expert (stage q <-> kc 16q..16q+15, warps interleave K). Today every gemm13 chunk completes at the END of ph1
+  (each CTA's rows are contiguous and every chunk spans ~16 CTAs). CW: (1) gemm13 rows strided (CTA b: L = b + jG) and
+  mapped q-major (L -> q = L / (64 nact), a, rb = 64q + L % 64) so position j of every CTA lands in chunk ~j;
+  (2) per-(expert, chunk) publish counters (REL helper warp, off the consumer path); (3) gemm2: at the first row of a
+  segment wait chunks 0..2 + load xf qq 0..5, poll chunk 3 + load xf qq 6..7 during stage 2. Hides the barrier +
+  imbalance behind ~3 stages (~1.9 us). Pitfalls: at T=1 gemm13's x is the same token for every segment (skip the
+  per-segment xf reload or strided rows reload it every row); producer must walk the same permuted order; inter-CTA
+  flags need the t16c-style many-routing stress test (moe s7 lesson). Estimate: ~0.6 us d1, ~0.3-0.5 d16/d32, ~1 us
+  standalone bs1 (bound 1.4). Lead's 11:25Z bar is 0.5 us at d1 sl: marginal; asked the lead before building.
