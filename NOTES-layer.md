@@ -3304,3 +3304,8 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   ae6c4bd3; profiles copied from r-fresh). d1 66.7/74.3 (v172 67.8/75.1).
 - submit 50534b24: **2.1717x** [2.139, 2.204] (d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7,
   v32 313.9/486.9). Board best (was 3e3b9fd3 2.1580). Submits today: 1 of the lead's 2/agent.
+- v1 sanity (judge v1 sl 111.6-112.1 vs v172 108.4): pr8 is separate code (pr1_src.cu's router<> serves T=1 only); H100
+  ab_files 4 rounds "verify 1": sl 142.2 -> 141.1, full 155.6 -> 156.0 = tie -> judge noise.
+- Next for layer: no open layer item >= gate (n13s1-s4). Bundle candidates on record, all < gate: proj n13s1 BAL (H200 -0.4/-0.6
+  d1 sl but H100 +1.6), moe tk2f last-wave K-split (~0.8/1.1 us d16/d32, not built). The routing-slack ruling (fresh x8, moe/slack
+  branch) is the biggest open item; moe/slack should rebase onto v174 (c62cdb0) before any check.
