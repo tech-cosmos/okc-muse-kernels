@@ -1,0 +1,14 @@
+decode 1 sliding s11: m0 76.58  m1 76.38  m2 76.80  bitwise
+decode 1 sliding s17: m0 69.40  m1 69.06  m2 69.60  bitwise
+decode 1 sliding s7: m0 61.16  m1 60.79  m2 60.94  bitwise
+decode 1 sliding s99: m0 76.39  m1 76.38  m2 76.97  bitwise
+== decode 1 sliding median over seeds x rounds: m0 69.61 (+0.00)  m1 69.45 (-0.16)  m2 70.02 (+0.42)
+decode 1 full s13: m0 80.36  m1 80.59  m2 81.07  bitwise
+decode 1 full s11: m0 87.35  m1 87.93  m2 88.06  bitwise
+decode 1 full s17: m0 80.82  m1 80.61  m2 81.46  NOT BITWISE [1]
+decode 1 full s7: m0 81.01  m1 81.20  m2 81.86  NOT BITWISE [1]
+decode 1 full s99: m0 95.98  m1 96.49  m2 96.50  bitwise
+== decode 1 full median over seeds x rounds: m0 81.34 (+0.00)  m1 81.22 (-0.12)  m2 82.26 (+0.92)
+
+
+h200: charged 2.7 GPU-min; 32 of 60 used today

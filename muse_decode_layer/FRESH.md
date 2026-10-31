@@ -480,3 +480,13 @@ ids written -1.54 | pooler blocks end -4.1 / -3.1 med / -1.54 max | tk2f entry 0
   pre-wait n2u read).
 - Tried, worse on H100 (not kept): V2 n2u flag spin + __ldcg pre-wait (+1.8/+0.7 vs base); V3 every slot's Y loaded
   unconditionally to overlap the post-wait routing trip (+1.1/+0.3 vs V1).
+- Follow-up on the IDF build (h200_idf.txt; mkstamp.py now skips the pre-x8 oracle anchors): d1 sl E2, us from the first
+  (early, router-SM) tk2f CTA: pooler blocks end 7.4 med / 8.7 max; routing written 6.1 (the score loads still take ~4-6 us:
+  logits __ldcg are L2 hits queued behind the pooler's DRAM traffic, so the hoist alone does not make routing early; it is
+  off the critical path now); tk2f CTAs enter 7.7 med / 10.2 max; first TMA 9.5; x ready (past wait) 10.75; first data 11.5.
+  * Oracle nowait (tk2f consumers skip the rmsnorm wait, stale x): H100 ab_files +0.4 / 0.0 = x-ready hop is NOT binding
+    (DEFNORM-type fusion would not pay at d1 under IDF either).
+  * Oracle PFX (CTAs 0..31, landing first on the router SMs, L2-prefetch the first 1/2/4 w13 rows of CTAs 32..131 after
+    their routing): H100 +1.0/+1.1/+1.5 sl; H200 (h200_pfx.txt, 5 seeds x 6 rounds) -0.16/+0.42 sl, -0.12/+0.92 full = DEAD.
+  * What is left of the d1 tk2f fixed cost: per-CTA routing at entry (~1.3-1.8 us) + first-data DRAM latency (~1.8) +
+    transition ~1.3 + tail. Item (b) closed with the Handoff ceb86cf.

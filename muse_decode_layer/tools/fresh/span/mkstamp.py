@@ -66,8 +66,10 @@ print("ok", out, n)
 s = open(out).read()
 a = s.index("_GPR1_SRC = r'''"); b = s.index("'''", a + 20)
 k = s[a:b]
-def kr(o, n):
+def kr(o, n, opt=False):
     global k
+    if opt and k.count(o) != 1:
+        print("skip (anchor not in this source):", o.strip()[:50]); return
     assert k.count(o) == 1, o[:50]; k = k.replace(o, n)
 kr("namespace pr1 {\n", "namespace pr1 {\n__device__ unsigned long long g_pt[4096];\n__device__ __forceinline__ unsigned long long ptime() { unsigned long long t; asm volatile(\"mov.u64 %0, %%globaltimer;\" : \"=l\"(t)); return t; }\n")
 kr("    if (lane == 0) *a.cnt = 0;\n", "    if (lane == 0) { *a.cnt = 0; g_pt[4000] = ptime(); }\n")
@@ -112,14 +114,14 @@ kr("""    if (g < NG) load(g);
         if (t == E) sls = __ldg(a.ls);
     }
     asm volatile("griddepcontrol.wait;" ::: "memory");
-""")
-kr("        key[i] = sc[i] + __ldg(a.bias + e);\n", "        key[i] = sc[i] + ((pfm & 1) ? sbias[e] : __ldg(a.bias + e));\n")
-kr("        int loc = (myid - __ldg(a.ls) + E) % E;\n", "        int loc = (myid - ((pfm & 1) ? sls : __ldg(a.ls)) + E) % E;\n")
+""", opt=True)
+kr("        key[i] = sc[i] + __ldg(a.bias + e);\n", "        key[i] = sc[i] + ((pfm & 1) ? sbias[e] : __ldg(a.bias + e));\n", opt=True)
+kr("        int loc = (myid - __ldg(a.ls) + E) % E;\n", "        int loc = (myid - ((pfm & 1) ? sls : __ldg(a.ls)) + E) % E;\n", opt=True)
 kr("    if (lane == 0) { *a.cnt = 0; g_pt[4000] = ptime(); }\n", """    if (lane == 0) { *a.cnt = 0; g_pt[4000] = ptime(); }
-    if (pfm >> 1) {
-        const int P = pfm >> 1;
+    if (g_pfm >> 1) {
+        const int P = g_pfm >> 1;
         int loc = -1;
-        if (lane < TOPK) { const int l = (myid - ((pfm & 1) ? sls : __ldg(a.ls)) + E) % E; loc = l < a.local ? l : -1; }
+        if (lane < TOPK) { const int l = (myid - sls + E) % E; loc = l < a.local ? l : -1; }
         const unsigned vm = __ballot_sync(0xffffffffu, loc >= 0);
         const int ne = __popc(vm);
         int rank = 0;
@@ -159,6 +161,7 @@ s = open(out).read()
 o = 'list(bnd) + ([state["idf"]] if idf else [])'
 assert s.count(o) == 1
 s = s.replace(o, 'list(bnd) + ([state["idf"]] if idf and not N2U_NOIDF else [])')
-s = s.replace("\nIDF_DEFAULT = False\n", "\nIDF_DEFAULT = False\nN2U_NOIDF = False\n", 1)
+import re as _re
+s = _re.sub(r"\nIDF_DEFAULT = (True|False)", lambda m: "\nN2U_NOIDF = False" + m.group(0), s, count=1)
 open(out, "w").write(s)
 print("n2u diag ok")

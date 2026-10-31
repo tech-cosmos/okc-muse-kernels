@@ -1,4 +1,19 @@
 # STATE-fresh (newest first)
+## x8 (2026-10-31 09:46Z-~11:20Z): lead 09:55Z items (a) + (b) DONE. 0 judge, Modal 18.0 GPU-min (my cap 20).
+- (a) ROUTING-SLACK oracle (tools/fresh/slack): min distinct local experts passing check_routing saves ~1 (d1) .. ~4 (v32)
+  experts/load = geomean x1.096 at 6.5 us/expert; KEEP_TOL binds. Lead 10:25Z: moe prepares a slack build (no runs until
+  the organizers approve). Never in submission.py from fresh.
+- (b) d1 EXPERT SPAN (tools/fresh/span, FRESH.md x8 (b)): pr1's routing block takes ~8 us behind the pooler stream (bias/ls
+  DRAM trips + logits L2 trips), which is why IDF never gained. BUILT on branch fresh ceb86cf: pr1 bias/ls hoist + IDF on +
+  n2u IDF loads plain after the wait: H200 d1 sl/full -0.64/-1.26 us, H100 -2.2/-2.0; test 13/13, replay d1 0/120.
+  Handoff posted (layer agent merges; bundle into a layer check). Dead: one-warp pr1 prefetch (+38 us), n2u spin/__ldcg
+  pre-wait, unconditional Y loads, nowait (x hop not binding), PFX (early CTAs prefetch others' first rows).
+- SASS fact: the n2u base-path routing loads are BEFORE ACQBULK in this build (layer comment says otherwise): racy if
+  anything launches n2u before pr1's routing is written (IDF does: IDF uses the post-wait path).
+## Next (x9): no open lead item for fresh. Read Human decisions IN FULL; if none names fresh, take from own list:
+  (1) T=16/32 router path: stamp whether routing (router kernels on the side stream) sits behind the pooler stream the
+  same way (d16 is 'routing-bound' per layer n12s1) -> same hoist / fewer dependent L2 trips. (2) tk2f per-CTA routing at
+  entry (~1.5 us) at d1/v1: a precomputed schedule from pr1/pr8 only saves the compute (~0.5), probably below gate.
 ## x7 (2026-10-30 11:44Z-11:47Z): idle stop again; still no lead line naming fresh after 09:10Z (layer n12s1 DEFNORM gate also not met). 0 judge, 0 Modal.
 ## x6 (2026-10-30 11:28Z-11:31Z): idle stop; no lead line naming fresh after 09:10Z (x5 answered the sweep: all dead). 0 judge, 0 Modal.
    Next (x7): same as x5 'Next' (act only on a new lead line naming fresh; else stop at once).
