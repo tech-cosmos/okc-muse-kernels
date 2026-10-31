@@ -3833,3 +3833,15 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   CW = PF 8192 && GS 8; cfg 84294; python TK2F_CW, M = 1 only). Copy /tmp/o11cw: test 15/15, bitwise vs main 0/500 eager +
   0/1000 replay (tools/o11/eq1.py). H100 A/B (tools/o11/ab.py, 8 seeds x 4 rounds): mean +0.07 us = TIE (2-expert routings
   +0.3..0.6, 3-4 experts -0.6..0).
+- CW H200 DIAG 3e70d87c (layer routings, 2 interleaved copies each, maxdiff 0): d1 base 29.3/29.4, cw 29.5/29.6 (+0.2:
+  2-expert seeds +0.4..0.5, 3-expert -0.3..0); controls d16/d32/v1 tie (v1 -0.3 = noise, CW is M=1 only). DEAD on the moe
+  board as ported (SQ stages, standalone: no PDL primary in front, so the gemm13 -> gemm2 hop it hides is shorter than
+  in-layer). Patch kept in /tmp/o11cw only (not committed): re-port from r-layer a269066 + notes above if ever wanted.
+- bs32 tk2h GS16 W3 + PF4 (layer TUNE_BASE T=32 "tk2h": 4): TK2H_P4 1 always (was DIAG-only), TK2H_M {32: 3}; main c75be69.
+  Bitwise vs tk2f (tools/o11/eq1.py 300 eager + 300 replay), test 15/15, H100 bs32 -0.4 (tie, DRAM-bound).
+- check b4e94b61 (c75be69) 2.3323x (CI 2.297-2.367): bs1 25.6, bs16 88.5, bs32 118.4 (x1.744), bs8 67.6, bs128 196.3
+  (x2.416), bs256 235.2. bs32 vs hotdyn-only check e59302f4 117.7 (x1.756): tk2h = tie on the board too.
+- SUBMIT 41ad7717 (same code) 2.3124x (CI 2.278-2.347): bs1 26.4, bs16 94.2 (slow draw), bs32 119.8, bs8 64.1, bs128 193.0,
+  bs256 230.3. Board keeps 2.3198 (e37e578e); no resubmit. Moe board 10-31: 4 checks, 2 submits (cap reached for today).
+- Takeaway: hotdyn+HOT128 at bs128 is the real gain (+1.2..2.4% on that shape in both checks); the ~0.5% overall win is inside
+  the run-to-run noise of the other shapes (bs16 swings 87-94 us between runs of untouched code).

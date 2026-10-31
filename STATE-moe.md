@@ -1,3 +1,9 @@
+## o11 10-31: moe board = layer moe_hot hotdyn+HOT128 (HOT_M {128: 16048, 256: 3216064}) + bs32 tk2h W3 (TK2H_M {32: 3}) on main c75be69,
+## bitwise, test 15/15. Checks e59302f4 2.3275 (hotdyn only) / b4e94b61 2.3323; submit 41ad7717 drew 2.3124 -> board stays 2.3198 (e37e578e).
+## moe board 10-31: 4 checks (1 DIAG), 2 submits = lead's 2/agent/day cap reached. Do NOT resubmit c75be69 unchanged.
+## CW (fresh a269066) on the moe board: H200 DIAG 3e70d87c d1 +0.2 us = DEAD (patch only in /tmp/o11cw; NOTES o11).
+## NEXT: moe-board candidates need new code (gap per shape vs 4.3 TB/s bytes: bs32 +15, bs16 +12, bs8 +11, bs1 +8, bs128 +50, bs256 +77 us;
+## distinct experts mean bs1 2.7 / bs16 11.4 / bs32 15.7 / bs8 8.0 / bs128 21.8 / bs256 23.9). Layer lane items per lead lines.
 ## o10 14:20Z 10-31: fresh x10 'late' on moe board: check bef7bd02 2.3201x, SUBMIT e37e578e 2.3198x = NEW MOE BOARD BEST
 ## (was aeba42c5 2.2792): bs1 25.3, bs16 87.3, bs32 118.6, bs8 63.2, bs128 194.0, bs256 234.3 us. main f90bcaf. moe 10-31: 1 check, 1 submit.
 ## NEXT (14:25Z 10-31): o10 done. Big-M twm PDL trigger stays at entry (NORM_EARLY 1 = moe_norm waits per expert during twm: early is right). Candidates: fresh CW handoff (bs1 ~1 us) -> moe check; else lead names one. Slack: PARKED-READY (moe/slack a9242fb;
