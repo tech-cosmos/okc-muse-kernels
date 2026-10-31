@@ -1,4 +1,11 @@
 # STATE-fresh (newest first)
+## x20 (2026-10-31 17:21Z-17:40Z): own pick: re-measured the record's "per-SM ingest wall" (H100 + H200 microbench, 0.2 Modal min, 0 judge).
+  It is the chip's DISTINCT-LINE L2 rate (7.5 TB/s H100 / 8.6 H200 = 57-66 GB/s/SM); SAME lines read concurrently by all SMs: 16.5 TB/s
+  (125-159 GB/s/SM). One TMA producer thread: ~105 ns/stage floor (6 KB stages <= 60 GB/s/SM). Paper bounds built on the wall (proj s90,
+  FRESH f1s2/f1s3) are invalid; measured kernels stand. Dense T=128/256 bound = HBM+tensor (~15-25 us/load over nvjet at v16/v32, ~1.5-2%)
+  but needs a kernel that beats nvjet with x read in K-lockstep. FRESH.md x20, tools/fresh/x20. Modal share 16.8/20.
+## Next (x21): read Human decisions IN FULL. If the lead wants the dense lane: an own T=256 qkv GEMM prototype (lockstep x, 12-bit W,
+  16 KB+ stages) vs nvjet on the H100; else after 00:00Z the remaining v16 sl / v32 A/B if layer still wants it.
 ## x19 (2026-10-31 17:20Z-17:55Z): the planned H200 A/B run early (ledger had room; my share 16.6 of 20 used). 0 judge.
   v176 vs v177, tuner pinned off: d32 sl -4.3 us, d32 full -3.4 (ABBA, +-0.4), d16 sl tie, d16 full -0.9, v16 full tie.
   -> x14 (NDS_PW/NVS_PW/GD_PW/CB_HB_TRIG) + MRG 2 all KEEP on the H200 (already in main v177..v181). Not run: v16 sl, v32.
@@ -136,35 +143,4 @@
   Posted Results + `fresh -> lead` in COORD. Per the lead's rule: gate fails -> fresh pauses itself.
 ## Next (x2): paused. Act only on a new lead line naming fresh. If the lead wants more on this lane, the cheapest open test is
    ncu RF-bank/dispatch metrics on conc.py roles (1,3) vs (8,3) to confirm the acc-read reading on hardware counters.
-## f1s19 (2026-10-30 01:59Z-02:01Z): idle stop; no lead line after 01:55Z, proj's table not posted yet. 0 judge, 0 Modal.
-   Next (f1s20): same as f1s18 'Next'.
-## f1s18 (2026-10-30 01:52Z-02:05Z): lead 01:55Z: merged a412f50 into main as v172 (e80d4c3; build.py reproduces
-   submission.py bit-for-bit) and SUBMITTED once: ae6c4bd3 2.1453 raw (CI 2.113-2.177), fixed-SGLang 2.1175 (same code's
-   check 8b4e6cf7 = 2.1608): slow draw on our side; board keeps 2.158. No resubmit of the same code (lead rule).
-   Fixed-score: copy profiles/submission.<job>.* into muse_decode_layer/profiles, run tools/fixed_sglang_score.py with the
-   path pointed at r-fresh and the job added (see /tmp/fx.py pattern). Budget 10-30: layer checks 1/6, submits 1, Modal 7.8/20.
-## Next (f1s19): fresh PAUSED per lead 01:55Z unless proj's table hands fresh a build. Read Human decisions IN FULL; act
-   only on a new lead line naming fresh; else stop at once.
-## f1s17 (2026-10-30 01:36Z-01:40Z): idle stop; no lead line after 01:00Z. Bundle a412f50 fails the lead's own submit rule
-   (raw 2.1539 < 2.158), so no submit; re-checking the same code for a lucky draw is not allowed. 0 judge, 0 Modal.
-   Next (f1s18): act only on a new lead line naming fresh (merge/submit/new lane); else stop at once.
-## f1s16 (2026-10-30 01:21Z-01:24Z): idle stop; no lead answer yet to the f1s15 Handoff (Human decisions newest = 01:00Z).
-   0 judge, 0 Modal. Next (f1s17): same as f1s15 'Next' (submit a412f50 only on a lead OK; else stop quickly).
-## f1s15 (2026-10-30 01:03Z-01:30Z): lead 01:00Z FRESH = BUNDLE: built, checked, Handoff posted; 1 judge check, 0 Modal
-- Bundle = branch fresh a412f50 = main v171 + HOT_XN 16 (T=256 HOT_XOFF TUNE option dropped). Searched the record: every
-  proj/moe Handoff is already on main; moe n7s53 closed its leftovers; so HOT_XN is the only exact item left.
-- v16 sliding last-CTA merge (LCM: the last nvs CTA per (request, KV head) merges the S=4 splits, no _combine_hb): built,
-  correct (1 bf16 ulp vs combine, scored-shape checks pass), DEAD after 3 forms: runtime-S loops nvs +18 us; compile-time
-  S, 128 thr +6.6; 256 thr one L2 trip +3.5 us nvs / in-layer attn (tools/n8/attn_orc.py) 14.5 -> 15.5 us. The chain
-  store-ack fence -> atomic -> L2 loads on one SM is as long as the combine's. Patch tools/fresh/lcm_dead.patch.
-- bench test 13/13; H100 ab_files verify neutral. Check 8b4e6cf7 2.1539 (CI 2.122-2.186), fixed-SGLang 2.1607 (best on
-  record; main v171 2.1337) but shapes HOT_XN can't touch drew fast too (v1 full 120.2, v16 sl 254.9) = mostly draw.
-  Raw < 2.158 -> not submitted; Handoff in COORD asks the lead to merge / decide.
-- Budget 10-30: layer checks 1/6, Modal 7.8/20 (incl. f1s12).
-## Next (f1s16): read Human decisions IN FULL for the lead's answer to the f1s15 Handoff. If the lead OKs a submit of
-   a412f50, submit it (okc submit muse_decode_layer submission.py in muse_decode_layer/) and log it. Otherwise no lane is
-   open for fresh: stop quickly unless a new lead line names one.
-## f1s14 (2026-10-30 00:26Z-00:28Z): idle stop, still PAUSED per lead 00:00Z (no new lead line). 0 judge, 0 Modal.
-## f1s13 (2026-10-30 00:10Z-00:12Z): idle stop, still PAUSED (no new lead line after 00:00Z; moe n9s2 closed the consumer
-   rebuild by mechanism). 0 judge, 0 Modal. Next: act only on a new lead line naming fresh; else stop at once.
-## f1s1..f1s12 + f1s20 (2026-10-29/30): trimmed; see git history of this file and FRESH.md (O1, O2, f1s*).
+## f1s1..f1s20 (2026-10-29/30): trimmed; see git history of this file and FRESH.md (O1, O2, f1s*).

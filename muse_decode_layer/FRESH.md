@@ -744,3 +744,37 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   verify 16 (partial, the first script's tail -12): full 345.76 (base, last round) vs 346.85 (cand) = tie.
 - Verdict: everything v177 added (MRG 2, NDS_PW, CB_HB_TRIG, GD_PW, NVS_PW) is neutral-or-better on the H200; d32 gains match
   the H100 (-4.6/-3.1). ~ +0.35% score from d32 alone. Modal 16.6 GPU-min (ledger 49/60 on 10-31).
+
+## x20 (2026-10-31 17:21Z-17:40Z): own pick. The record's "per-SM ingest wall" re-measured: it is the chip's DISTINCT-LINE L2 rate
+Why: every own T=128/256 dense GEMM design was closed on paper by "per-SM L2->smem ingest ~47-60 GB/s/SM" (proj s16/s28/s90,
+FRESH f1s2/f1s3), but cuBLAS's own v32 qkv pick (nvjet 72x64 tiles, 128 CTAs) ingests ~285 MB in 19.1 us (H100) = ~117 GB/s/SM.
+Also: H100 timeline of main v181 (tools/fresh/x20/tl.py = tlmed.py that keeps cuBLAS reduce kernels), seed 99:
+  v32 sl 362.5: qkv nvjet 19.1 | nvs 14.1 | o 9.7 | bnd 7.2 | pooler+router nvjet 36.2 | routing 3.5 | rgather 6.5 | moe_hot 157 ||
+  twm 220 (96-316) | moe_norm -318 | unpool nvjet 32.6 | bnd 11.2.   v16 sl 301.7: qkv 18.1 | nvs+cb 11.6 | o 7.1 | bnd 5.5 |
+  pooler 33.6 | routing/rg -84 | twm 188 (84-272) | moe_norm -275 | g30 unpool -297 | bnd -301.7.
+Microbenches (tools/fresh/x20; one CTA per SM, 8 MB L2-resident region unless noted; H100 unless noted):
+- ldg.cu (ld.global.cg v4, 256-1024 thr): every CTA reading DISTINCT lines: chip 7.5-8.2 TB/s (H100), 8.6-8.7 (H200) = 57-66
+  GB/s/SM. Every CTA reading the SAME lines at the same time: 16.1 TB/s at 1024 thr (H100 and H200 alike), 21 TB/s with 2 CTAs/SM
+  = 122-159 GB/s/SM. (The 1 GB rows of ldg.cu overlap windows: ignore them.)
+- ingest*.cu / ring6.cu (cp.async.bulk ring): per-SM rate is NOT capped near 50: 33 SMs alone pull 115 GB/s/SM from distinct
+  lines; all 132 SMs on shared lines 125-150 GB/s/SM. The chip cap on distinct lines binds at ~57 GB/s/SM.
+- pc.cu (g30-like: producer lane waits EMPTY, expect_tx, bulk; consumer warp waits FULL, arrives EMPTY): one producer thread has a
+  ~100-110 ns floor per stage (H100 = H200): 6 KB stages <= ~60 GB/s/SM (2 producer threads 92), 16 KB stages 150. HBM-streamed
+  (1 GB) rows: H100 23.4 GB/s/SM = 3.09 TB/s, H200 34.6 = 4.57 TB/s, for any stage size/producer count.
+  (A ring where one thread waits FULL then re-issues, with a 64-bit % per stage, showed a fake ~450 ns/stage cap: ingest.cu/ring5.cu.)
+- H200 (Modal, 0.2 GPU-min): same table (pc + ldg) ran in the judge image: numbers above.
+Reading:
+- The "wall" the record measured (g22: W 12 KB + x 16 KB per stage at 47-50 GB/s/SM; moe s16 bare ring ~60) is the chip's
+  distinct-line L2 rate (~7.5 TB/s H100 / ~8.6 H200 over 132 SMs), NOT a per-SM port. Re-reads of the SAME x lines by many CTAs
+  at the same moment cost ~2x less of it (L2 merges concurrent same-line requests; multicast was not needed, consistent with
+  proj's "multicast halves L2 reads, no gain").
+- So x re-reads in a GEMM are ~free IF the CTAs walk K in lockstep (all CTAs issue the same x box within a few stages), and cost
+  distinct-line L2 bandwidth if they drift (dynamic tickets, staggered starts, split-K slices at different K).
+- Paper bounds that closed designs on "ingest <= ~50 GB/s/SM" are invalid as written (proj s90 'own m128 GEMM dead', FRESH f1s2/f1s3
+  '~+1.2% at best'). MEASURED verdicts stand (g22, CUTLASS f1s6, DeepGEMM, g30 split-K s101, n9s3 DSMEM).
+  The real bound for T=128/256 dense GEMMs is HBM + tensor: v32 qkv ~max(8.8 bf16 / 6.6 12-bit, 9.8 us) vs nvjet 19 (H200);
+  pooler+router / unpool ~17-20 vs ~30-33; qkv/o/pooler/unpool sum at v32 sl H100 97.6 us vs ~72 ideal; ~15-20 at v16 sl.
+  Ceiling ~1.5-2% score if a kernel reached it; nobody has a kernel within 20% of nvjet there yet.
+- twm (v16/v32): x boxes are re-read by CTAs on dynamic tickets (out of lockstep): W 4.6 + x ~2.3 TB/s at RT4 N32 = ~80% of the H200
+  distinct-line cap. Not a proven limiter (in-layer oracle (iii) stream+skeleton runs fast), but an x-in-lockstep schedule (all
+  CTAs of one expert take its row tiles in the same K order at the same time) is the cheap form if the consumer ever gets faster.
