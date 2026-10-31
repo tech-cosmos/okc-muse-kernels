@@ -3224,3 +3224,24 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   '__global__ void pred(' (inside namespace pr8). Dry run OK; H100 smoke of the base overlay (R=1, v1): flat vs base
   K end +1.4 sl / +0.9 full (base2 -0.4/-0.5): flat ~= pr8 on the H100 as in n13s1d. Ready for the 00:00Z run (~15 Modal min).
 - NEXT: 00:00Z: dev/n15/mk_h200.sh (build a pr8 change only if flat <= -1 us v1 sl on the H200). No other open proj item.
+
+## n26 (2026-10-31 18:27Z-19:20Z, unattended session 14): HELD-OUT WEIGHTS audit of layer v181 + 12-bit escape-base rule, 0 judge runs
+- Why: TASK.md says the judge runs 'steps of its own (the weights, routing fields, fresh inputs)'; nobody had run the layer on a
+  WEIGHTS_SEED other than 5353. /tmp copies of r-layer main (v181) with reference.WEIGHTS_SEED patched.
+- validate --quick (skip fuzz/prep) on WEIGHTS_SEED 1 and 777: ALL OK both (test 13/13, scored 0/12, opt 0/40, tk2f 0/300,
+  replay 0/240, route 0/240, worst gap 0.0240 / 0.0225). Log dev/n26/validate_seeds.log.
+- 12-bit fallback risk: _compress returns None (weight runs uncompressed BF16) if any row has > 8 escapes. Escape rate per
+  weight seed is set by the max exponent: pooler/qkv_gate emax is 122 or 123 (~50/50; 123 = a single > 5.66 sigma weight),
+  and emax 123 doubles every row's escapes (seed 5353: pooler mean 1.14/row, max 7 of 8!; qkv 1.11, max 5). MC of
+  randn/sqrt(k) weights (dev/n26/esc_mc.py, 1000 draws): fallback pooler 5/1000, qkv 1/1000, unpool/o 0.
+- Forced fallback (FORCE_NOCOMP shape env in a /tmp copy): bench test 13/13 PASS for pooler, qkv, and all four -> the fallback
+  paths are correct; cost (H100 tuner lines): pooler d1 sl 83.7 -> 95.3 us, qkv 83.7 -> 87.1, all four +16 (d1) / +20 (d32 sl).
+- FIX (n26 rule, dev/n26/esc_base_layer_submission.diff, one function): _compress tries base = emax-15 and emax-16 (the
+  lone top outlier(s) then become escapes too: code 0, header value w / scale, exact; no kernel change) and keeps the one with
+  fewest escapes whose rows fit 8. Seed 5353: pooler escapes 4676 -> 2375 (max row 7 -> 5), qkv 2561 -> 1268 (5 -> 4);
+  unpool/o keep emax-15. MC fallback: pooler 5/1000 -> 0/1000, qkv 1/1000 -> 0/1000.
+  validate --quick ALL OK (13/13, 0/12, 0/40, 0/300, 0/240, 0/240 worst gap 0.0256). Pinned-tuner A/B all 12 scored shapes
+  (tools/ab_files.py 6 rounds, GPU shared at 100% util by another agent): every shape within +-0.7 us = TIE (escapes are cheap
+  in these W-bound kernels). Value = robustness only (~0.6% of weight draws would lose 3-12 us at d1 without it).
+- Handoff to layer (sub-gate, robustness): apply to layer.py _compress; not bitwise vs main (summation order of the halved
+  escapes changes), within test bounds. Also fine for the proj board (not applied; board does not count).
