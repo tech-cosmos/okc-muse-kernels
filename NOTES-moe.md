@@ -4205,3 +4205,8 @@ H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-
 - tools/o26/rep.py <bs> <seeds>: 4-round repeats; spreads <= 3.5 us; residuals above are stable.
 - Verdict: no routing-triggered slow mode >= 5% on the moe board (H100; big-M H100 is not a strict H200 proxy). Nothing to fix.
 - Queued, unchanged: SUBMIT aa51716 ONCE after 00:00Z 11-01 (check 5a45c7a7 2.3456x).
+
+## o27 (session 25, 2026-10-31 18:58-19:05Z): status check only; 0 judge runs, 0 GPU
+- No lead line after 16:30Z; no moe Request open; all lanes (layer n33, fresh x22, proj n28) report empty lists.
+- submission.py == aa51716 (only tools/o26 added since). Moe board today: checks 5/20 left, scored 8 left (agent cap 2/day used).
+- Queued unchanged: SUBMIT aa51716 ONCE after 00:00Z 11-01 (check 5a45c7a7 2.3456x > board 2.3198). No new lever (see STATE CLOSED list).
