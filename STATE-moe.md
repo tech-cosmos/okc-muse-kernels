@@ -1,3 +1,8 @@
+## o13 15:30Z 10-31: main acf63a9 = 7139706 + tk2f BAL on SQ (PF 548, layer T=16 'bal') at bs 8/16; bitwise, test 15/15.
+## H200 DIAG 51ba444e (moe-board routings, interleaved): bs16 -1.1, bs8 -0.3 us. Clean check bfd582aa 2.3694x (best check):
+## bs1 26.4, bs16 84.8, bs32 117.2, bs8 62.1, bs128 193.4, bs256 228.4. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT acf63a9 ONCE
+## (not 7139706). moe board 10-31: 7 checks, 2 submits. Layer T=8 (nu8) does not map; HOT_ET still unported (o11 race note).
+## H200 moe-board A/B harness: tools/o13/diag_bal.diff (O13_DIAG hook; copy, edit variants, okc check the copy, read log_tail).
 ## o12 15:40Z 10-31: main 7139706 = c75be69 + moe_hot HOT_XN 16 (layer v172), bitwise, test 15/15. check 2ba95722 2.3265x
 ## (bs256 x2.728 vs 2.683 twice before = real; others slow draws). NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 7139706 once
 ## (moe board cap resets; beats 2.3198). Then: HOT_ET port (race-safe form) is the last unported layer moe piece.

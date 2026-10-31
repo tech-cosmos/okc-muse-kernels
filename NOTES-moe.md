@@ -3856,3 +3856,16 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   bs256 234.8 (x2.728 vs x2.683 in both e59302f4 and b4e94b61 = +1.7% on the shape, matches H200 exact-N n5s21 -2.3 us).
   Untouched shapes drew slow (bs8 x2.204 vs 2.225). SUBMIT CANDIDATE for 11-01 after 00:00Z (beats board 2.3198 already).
 - HOT_ET (layer v171, ~1 us no-hot cost at bs128) still NOT ported: o11's theoretical meta[67] race note.
+
+## o13 (2026-10-31 15:00Z - 15:30Z): lead 15:00Z moe-board bs8/bs16 vs layer T=8/T=16: BAL ported; 2 checks, 0 submits (cap)
+- Layer T=16 moe = tk2f SQ + BAL + slot y32 (PF 548, TUNE_BASE (16,*) "bal"); the moe board ran SQ without BAL (PF 516).
+  Layer T=8 = nu8 (router-fused PF 5 on w13q): does not map (no router on the moe board). Nothing else at T=8/16 differs.
+- Port (main acf63a9): SQ launcher cfg 98204 -> tk2f_go<8,4,2,..,8,0,548>; python TK2F_BAL_M = {8, 16} -> sa + 98204
+  (-> 10198204 SQ, moe_norm3). Bitwise vs main (tools/o11/eq1.py, 200 eager + 400 replay at bs 16 and 8: 0 differ), test 15/15.
+- H100 (tools/o11/ab.py 8 seeds x 4 rounds): bs16 -1.17, bs8 -0.92 us.
+- H200 DIAG 51ba444e (/tmp copy + tools/o13/diag_bal.diff: O13_DIAG in prepare, moe-board routings = inline clone of
+  reference.generate_input, seeds 500..511, sq/bal/sqb/balb interleaved, 40 cold-L2 replays): bs16 sq 87.62/87.54 -> bal
+  86.50/86.50 (11/12 seeds faster), bs8 68.18/68.08 -> 67.79/67.83 (mixed per seed: 2-4-expert seeds +0.5..1.2, others
+  -1..-1.6), maxdiff 0. Its own timed run: 2.3429x. REUSABLE: the diff is a moe-board-routing H200 A/B harness.
+- Clean check bfd582aa (acf63a9) 2.3694x (CI 2.334-2.405) = best moe check: bs1 26.4, bs16 84.8, bs32 117.2, bs8 62.1,
+  bs128 193.4, bs256 228.4 us. SUBMIT acf63a9 after 00:00Z 11-01 (supersedes o12's 7139706; beats board 2.3198).
