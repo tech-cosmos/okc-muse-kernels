@@ -3072,3 +3072,26 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Budget 10-31: proj checks 5/20, scored 1/10. 0 Modal.
 - NEXT: nothing >= 1 us with a new design on the proj board (DSMEM split-K now closed for clusters 2-16 too). Standing: 00:00Z
   H200 queue dev/n15/mk_h200.sh (pr8 v1 flat/NOW/TK1); stack small wins; lead's call for a lane.
+
+## n20 (2026-10-31 15:41Z-, unattended session 8): lead 15:25Z VARIANCE AUDIT of the layer -> HOT_SL fix
+- Judge data: 36 layer profile JSONs in r-layer/muse_decode_layer/profiles (benchmarks[].runs_ns / baseline_runs_ns / ratios
+  per rep + one-replay kernel tables). Table: dev/n20/table.txt. v170-v176 (13 runs) run-to-run our/SGLang ratio cv per
+  shape 0.7-2.1% (v32 sl 2.1% worst; d1 1.8-2.1% is mostly version drift; d32 ours-vs-SGLang corr only 0.3 = independent
+  noise both sides). Within a run each rep is a fresh input: our time and SGLang's move together with the input's distinct
+  experts, so the per-rep paired ratios are tight. v16 sl reps show modes ~227 / ~255 / ~290 us = D and hot count (bytes).
+- The one outlier: v176 submit e0f2159f v32 sl 345.5 (ratio 0.471) / full 518 (0.474) vs 0.438-0.457 in the other runs;
+  every rep ~6% worse vs SGLang, the other 10 shapes normal. Its v32 sl profile: moe_hot 2.8 us (empty) + moe_twm 231 us;
+  other runs moe_hot 105-140 + moe_twm 176-189 (dev/n20/kdiff.py <idx> <jobs..> diffs kernel tables).
+- H100 sweep (dev/n20/route_var.py, v177 = r-layer 51eaeff, tuner off; 20 router seeds x 6 inputs x v16/v32 sl/full;
+  log dev/n20/sweep1.log, fit dev/n20/analyze.py): time = a + 8.8 us x D (+~0.09 us x R), R2 0.86-0.90. 65..128-token
+  experts cost nothing extra now (nh coef -1..+1: hotdyn/HOT128 did their job). Router-level residual sd 2.8-5 us (<1%):
+  no tuner / near-tie bimodality. ONE structural mode: T=256 inputs whose top local expert has > 128 tokens: +10.5 us v32
+  sl / +11.8 us v32 full at equal D/R (fit on the routers that never have one). It is a ROUTER property: 7/20 routers
+  have it on >= 75% of inputs, 9/20 never (so it is a per-run slow mode, the e0f2159f signature).
+- Cause: moe_hot only takes 65..128-token experts (`h = nt > NH/2 && nt <= NH`), moe_twm runs a >128 expert as
+  ceil(nt/64) = 3 serial 64-token passes on one item chain.
+- FIX HOT_SL (dev/n20/mk_hotsl.py patches a built layer submission.py, 7 string edits in moe_src): NH 128 moe_hot takes
+  every > 64-token expert as ceil(nt/128) slices (smem slice table s_e/s_so/s_ns[64] built by a warp scan; producer and
+  consumer use off = s_off[e] + slice offset, nv = min(128, ...); gemm2 waits for HG::NRB * slices gemm13 items of the
+  expert; NORM_EARLY finish flag at HN::NRB * slices - 1); moe_twm skips nt > 64 when hot is on (was 65..128). NH 64
+  (moe_twq) unchanged. Output bitwise = v177 (same tw_item math, 128-row slices are disjoint token ranges).
