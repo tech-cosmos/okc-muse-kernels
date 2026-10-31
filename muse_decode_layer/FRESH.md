@@ -635,3 +635,26 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   Seed 99 runs (ab_files, 12 rounds): cw2 sl -0.6/-0.8/-0.1, full -1.7/-2.0/-1.4; cw3 sl -0.1, full -1.4 (shared GPU).
 - Scope: T = 1 only (cfg 184294; cnt[64 + seg * 4 + c] needs seg < 8; TORCH_CHECK nr == 8). v1 (T=8, up to 64 segments)
   would need a bigger counter area (n2u zeroes cnt[0..127]) and its own permutation check; d16/d32 use BAL / tk2h.
+
+## x13 (2026-10-31 14:27Z-, lead 14:30Z: CW for T=8 and T=16/32): T=8 CW NEUTRAL; d32 tk2h per-segment counters WIN (H100 -2.7/-2.2 us)
+- CW at T=8 (v1, nu8 path, cfg 184294 non-SQ; cnt grown to 256, nu8 zeroes [0, 192); producer/consumer rescan from the
+  CTA's first segment instead of 0): bitwise y32 rows 0..63 vs base (tools/fresh/cw/stress8.py 300 eager + 300 replay;
+  y32 rows 64..80 = nu8 atomics, differ even base vs base). H100 v1 (ab_seeds 4 seeds x 10): sl +1.4, full +1.7 us.
+  Stamps (stamp8.py/strun8.py, stamps at cnt + 256): gemm2 wait-ok median 54.8 vs 58.7 base (earlier) but the slowest
+  gemm13 CTA +3 us (g2 entry max 61.1 vs 58.2): the T=1 chunk-major order switches segments 8x per CTA and at T=8 every
+  switch reloads other tokens' x fragments. Segment-major CwIt (chunk-major inside each segment, smaller part first;
+  g_cwsm = nroutes > 8): max 59.5, end max 84.7 vs 83.9 base; v1 A/B +0.3 sl / -0.3 full = neutral.
+  ORACLE closes it: gemm2 never waiting at all (wrong output) = v1 sl +1.0 / full -0.5 us. At T=8 (~60 rows/CTA) the
+  producer streams gemm2 weights without waiting, so the transition hides behind the stream. Patch cw8_sm_neutral.patch.
+- d16 (BAL tk2f, already per-segment counters): no-wait oracle -0.3 / 0.0 us: nothing left.
+- d32 (tk2h, MRG 1 = ONE global counter: every gemm2 row waits for ALL gemm13 rows): no-wait oracle -2.9 sl / -1.9 full.
+  The per-segment variant already exists in moe_src (MRG 2: tk2f_rel_helper<SEGC> publishes cnt[64 + seg], tk2h_consume
+  PSC waits on its own segment); the layer only built MRG 1. MRG 2: H100 d32 sl -2.8 / full -1.9 (4 seeds x 8), final
+  file vs HEAD -2.7 / -2.2; d1/d16/v1 unchanged code. test 13/13, replay d1/d16/d32 0/120 each, files_eq d32 sl bitwise
+  (full differs as base vs base), cnt[] all zero after every d32 call. Record: moe n6 measured PSC on tk2f (h8p) on the
+  H200 = 0 (balanced CTAs); tk2h's GS16 weighted split (2-group rows) is less balanced, so the H200 may keep some.
+- CHECK 9eeab096 (branch fresh 9325413 = main v176 + MRG 2): raw 2.1736, fixed-SGLang 2.1460 (v176 check 0ac4a2f0: 2.1930).
+  Slow draw on unchanged shapes (v16 sl 267.1 vs 250.0, v32 sl 330.6 vs 303.7); d32 sl 157.8 vs 154.6, full 306.8 vs
+  306.3. In-run tuner T=32 sl default 157.7 (v176 check 148.5, v175 164.1): too noisy to resolve 2-3 us. NOT confirmed
+  on the H200; with moe's H200 PSC = 0 on record, treat as unproven. Decisive next: Modal H200 A/B after 00:00Z,
+  `tools/h200.py muse_decode_layer base=<main v176 submission.py> cand=<fresh submission.py> --cmd 'python bench.py bench submission.py decode 32'` (~3 GPU-min).

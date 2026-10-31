@@ -1,4 +1,12 @@
 # STATE-fresh (newest first)
+## x13 (2026-10-31 14:27Z-15:10Z): lead 14:30Z CW for T=8 / T=16/32. 1 judge check (9eeab096), 0 Modal. FRESH.md x13.
+- T=8 CW built (segment-major CwIt, bitwise 300+300) but H100 v1 NEUTRAL; no-wait oracle v1 <= 0.5 us, d16 BAL no-wait
+  -0.3/0: CW closed at T=8/16 (stream hides the transition). Patch tools/fresh/cw/cw8_sm_neutral.patch (not kept).
+- d32 tk2h waits on ONE global gemm13 counter (MRG 1). MRG 2 (existing per-segment counters, one-line layer change):
+  H100 d32 sl -2.7 / full -2.2 us (= no-wait oracle), test 13/13, replay 0/120, sl bitwise. Branch fresh 9325413 =
+  main v176 + MRG 2. Check 9eeab096: raw 2.1736 / fixed 2.1460 (slow draw; d32 sl 157.8 vs v176 154.6): UNRESOLVED.
+## Next (x14): read Human decisions IN FULL. After 00:00Z: Modal H200 A/B d32 sl+full, v176 vs v176+MRG 2 (~3 GPU-min,
+  command in FRESH.md x13). Win >= 1.5 us sl -> Handoff to layer; else close MRG 2 (H200 balanced, as moe's PSC).
 ## x12 (2026-10-31 13:58Z-14:30Z): lead 13:58Z BUILD CW: DONE, WIN on the H100 (d1 sl -0.5, full -1.55 us, 4 seeds). 0 judge, 0 Modal.
 - Branch fresh = v174 + CW v3 (layer TK2F_CW = True, cfg 184294 = tk2f PF 4 | 8192, T=1 only; patch tools/fresh/cw/cw3.patch).
   gemm13 rows interleaved per segment (i & 3) * 64 + i / 4, CTA order chunk-major; per-(segment, chunk) counters cnt[64 +
