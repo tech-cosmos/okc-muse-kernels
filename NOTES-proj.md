@@ -2935,3 +2935,79 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
     (~2.3 GPU-min). Build only if flat <= -1 us at v1 sl there.
   * Clock note: COORD lines n13s1b/c say 11:25Z/11:45Z; the real times were ~10:40Z/10:55Z (clock read at 11:02Z).
 - Session totals: 0 judge runs; Modal 14.1 GPU-min (6 runs; ledger 36/60 shared). Nothing handed off.
+
+## n14 (2026-10-31 11:04-13:35Z, unattended session 2): lead 11:25Z hoist port (T=8/16/32) + IDF8 measured; 0 judge runs, 0 Modal
+- Hoist port, paper (no build): T=8 pr8's finisher already loads router_bias into smem BEFORE griddepcontrol.wait; its only
+  post-wait small load (local_start, 1 scalar by t 0) is issued before the acquire spin on the router-item counter, so it
+  overlaps that wait: bound 0. T=16/32 `_routing`: layer n14s3 timeline shows routing off the critical path (d16 ends 0.7 us
+  before the rmsnorm hop, d32 before the pooler): bound ~0. Not built.
+- IDF8 (early moe_tk2f at T=8 on a pr8 routing release flag), BUILT in a /tmp copy of r-layer main v174
+  (patch dev/n14/idf8_layer.patch; TUNE option "idf8", env IDF8 default for tests): pr8 finisher resets the flag before the
+  grid triggers, st.release's 1 after the 8 routing warps (__threadfence + __syncthreads); rmsnorm TRIG at start (not TRIG2);
+  moe_set_idf(flag) before the T=8 tk2f launch (tk2f's existing IDF acquire spin + __ldcg ids).
+  * FIRST TRY (flag = constant 1, racy oracle) HUNG THE GPU in a replay (twice): tk2f routed on not-yet-written ids, its
+    counters never completed. A flagless IDF oracle is not usable at T=8 (fresh x8c saw the same).
+  * Correct: tools/replay_test.py IDF8=1, 30 fresh inputs x router seeds 11,7: verify 1 sl/full 0/120 fails.
+  * H100 (tl13b, same process, R 11, cold L2, GPU shared/100% util): graph end vs base: sl idf8 -0.48 / +0.13 (base2 -0.71),
+    full -0.12 / -0.16 (base2 +0.19) = TIE (noise ~0.7). Reason: pr8 = 1024 thr x 64 regs + ~140 KB smem on 129 of 132 SMs,
+    so early tk2f CTAs have no SM until pr8 blocks exit; tk2fx already reads routing pre-wait after pr8 completes.
+  * Below layer's 0.7 us gate (lead 12:25Z gave IDF8 to layer; this is my data point + a ready flag patch for them).
+- Lesson: in tl13b-style A/Bs a hung variant stalls inside the lock forever: run with `timeout -s ABRT` + `python -X faulthandler`.
+
+## n15 (2026-10-31 13:31-14:10Z, unattended session 3): no open proj item -> own picks: icache audit + pr8 skeleton (v1); 0 judge runs, 0 Modal
+- ICACHE AUDIT (fresh x9 mechanism: first-run straight-line SASS ~0.8 us/16 KB, worse under a DRAM stream; > ~32 KB thrashes)
+  of proj kernels in layer v174 (cuobjdump of the cached builds): g24 d16/d32 forms 25-41 KB total but the first W load is
+  ~2.3 KB in; g30n/g30k 25-38 KB (TMA kernels, same picture); g13 14 KB (fresh: clean). pr1<2,4,1,4> 46 KB: hot pooler loops
+  4.4 + 3.4 KB, the 33 KB outer loop = role loop incl. the ~18 KB unrolled top-8 (fresh fixed it, layer-neutral). pr8 63 KB:
+  pooler loops 2.0 + 1.7 KB, the 22 KB loop = finisher top-8 (8 warps, WARPSYNC.COLLECTIVE shuffles). => no proj hot loop
+  near the i-cache limit; no lever. CLOSED.
+- pr8 SKELETON (v1, quiet H100 0% util, tl13b same process, R 11, us post-boundary sl/full): base 20.54/20.83, flat 20.99/
+  19.58 (= n13s1d: pr8 at a flat reader on the H100); separate builds: NOW (pooler W re-read from L2) 16.06/17.31, NOW+NOMATH
+  15.58/16.16, NOMATH alone 24.61/25.73 (slower than base: build/scheduling effect, not understood). => with no pooler W
+  from HBM pr8 still takes ~16 us: on the H200 (flat ~12.9 if like pr1's) the skeleton, not bytes, is what limits pr8.
+- Clean per-block stamps (st15.py, PR8_TRACE + finisher stamps; us from pr8's first block; base / NOW):
+  wait returns 0.8 | x32 landed med 9.2 / 9.5 (8.4 us after the wait: queued behind the pre-wait router W 8 MB + PF atoms
+  6 MB) | router stored 12.8 / 12.8 | released 15.1 / 14.6 (~2.3 us of syncthreads + red.release fence under the stream) |
+  pooler loop end med 25.1 (max 26.9) / 22.3 (23.3) | epilogue max 27.6 / 24.1 | finisher: counter seen 20.5 / 17.2 (~4 us
+  after the last release in base), sums +3.1 / +1.7, top-8 +3.8 / +3.9 -> end 27.4 / 22.8. Pooler and finisher chains end
+  together in base.
+- Candidates (dev/n15/pr8_n15.diff defines, all exact; replay_test verify 1 sl/full seeds 11+7: 0/60 each):
+  * TK1 (`#pragma unroll 1` on pr8's top-8 k loop): finisher -0.3..0.8; graph end clean H100 tie (140.3/156.4 vs 140.3/156.3).
+  * RMID 4/8/16 (router item mid-loop; s36 H100 tie) in the NOW proxy: pooler end +1.8/+3.9/+5.3. DEAD again.
+  * DP (no counter/fence: partials st.relaxed.gpu, finisher polls them against a 0xFFFFFFFF sentinel and re-arms; persistent
+    state['pr8_part']): released phase gone but pooler loop end -0.7 med / max tie (NOW tie), finisher still sees the last
+    partial ~4 us after its store; non-trace graph end +3.2 sl / +2.2 full (143.5/158.5). DEAD.
+- QUEUED for 00:00Z (proj Modal share; ~7 GPU-min): `muse_bf16_proj/dev/n15/mk_h200.sh` (regenerates from r-layer main:
+  base + separate flat8, NOW, TK1; `--dry` builds only). Reading: flat <= -1 us -> the v1 lever exists on the H200; NOW vs
+  base -> how much of it is the pooler W stream vs the skeleton (x32 queue / router item / finisher). Supersedes the n13s1d
+  queue line (same base/flat plus two bounds).
+- Tools: dev/n15/st15.py (stamps incl. finisher; zeroes only the trace region), dp_patch.py (DP + persistent part), diffs.
+
+## n16 (2026-10-31 14:02-14:58Z, unattended session 4): lead 13:58Z PROJ BOARD (port layer pieces, check+submit on proj budget)
+- Per-shape gap table (eb166fc0 vs 'bytes(12-bit)/4.3 + 2.5 us' fit, n9s1 model): v16 m128 qkv +6.3 pool +6.8 unp +5.6 router +4.3
+  (load 72.1 vs 47.4); d16/d32 qkv +3.6/+3.9, pool +2.1/+2.4, router m32 +2.0; v32 router +6.0; v1 qkv +2.6 pool +2.3.
+  NB n9s1's 'm16/m32 stale (uncompressed lt)' was wrong: the judge tuner already picks 12-bit g30 at m16/m32 for qkv/pool/unp.
+- H100 router3 bounds (dev/n16/r3b.py + r3v.cu, DEFS R3_NOZERO/R3_NORED): zero kernel costs 0.7-1.2 us at EVERY m
+  (m8 6.91->6.14, m16 6.94->6.27, m32 8.16->7.07, m128 10.50->9.47, m256 13.82->12.61); atomics ~0 at m<=32, ~1 us at m128/256.
+- BUILT (on main): router m128/m256 = ONE strided-batched cuBLAS GEMM over S K-slices (torch.bmm on x.view(m,S,K/S).transpose,
+  router_hl_t.view(S,K/S,512), out_dtype fp32) + pj_rsum (dev/router3.cu tail: out = sum_s ws[s][:, :256] + ws[s][:, 256:]).
+  Replaces torch.mm(stacked) + splitKreduce + torch add (3 kernels -> 2). H100 dev/n16/bmm.py: m256 S4 11.1-11.4 vs 13.5-13.6,
+  m128 S4/S8 10.2-10.3 vs router3 10.4. _tune_router now times cublas / router3 / ("bmm", 4|8) at m128 and m256 (ROUTER_BMM_TUNE);
+  rpick is consulted FIRST in _router. H200 tune: m256 bmm4 12.35-12.67 vs cublas 14.75-14.88; m128 bmm8 11.84-12.06 vs r3 12.38.
+- Dropped lt cfg (66,124,35,1,0,0,0,3) for qkv m256: bimodal on the H200 (tunes 27.26 / 21.15; judge 20.18 vs 17.5-18.3 for ..0,2).
+- Judge: check a93d1734 (52c9490) 1.3640 (router m256 11.38 -> 8.98; qkv m256 +1.9 from the bad cfg); check 8494e76f (e3eedb0)
+  1.3754; SUBMIT dba12fb4 (e3eedb0) 1.3847 [1.364, 1.405] = NEW PROJ BEST (was eb166fc0 1.3574). H200 router m256 9.1-9.5, m128 8.4.
+- DEAD: (a) R3_FA 'first arriver stores, later arrivers wait on its flag then add' (no zero kernel; ticket after the math):
+  H100 +2-3 us at every m (ticket RT + store + fence + flag poll chain, as the s11 round-trip rule says).
+  (b) R3_CL cluster = all S K-splits of a tile, DSMEM sum, plain stores: correct, but S=16 needs NT 32 / 2-4 warps per CTA
+  (config alone +1.8 us) and cluster-16 sync/scheduling +2.2 us more: m16 10.3, m32 10.8 vs 6.9/7.2.
+- Tuner pick noise across 4 judge runs (eb166/a93d/8494/dba1): o m16 picked F.linear once (7.10 vs lt394 6.4-6.75), o m8 None vs
+  lt393 (6.74 vs 6.34-6.56); rest within ~0.3-0.5 us noise. Candidate: pin o m16 lt (66,394,..,7,4) and o m8 lt (66,393,..,3,4) (~0.3-0.5 us).
+- Budget 10-31: proj checks 2/20, scored 1/10. 0 Modal.
+- 14:40-14:55Z: _tune re-times near-ties (<= 4% of best, top 4) with 4x reps (19bf538). check 5b420410 1.3761 [1.355, 1.397]:
+  noise vs dba12fb4 (per shape +-0.3..0.7 us both ways, sum +0.56 us; o m16 now lt394 6.36 vs F 7.10). Not submitted; kept on main
+  for robustness in the final reruns. Board after dba12fb4: proj #474 (was #503). Budget 10-31 end: checks 3/20, scored 1/10.
+- NEXT (ranked): (1) v16 m128 gap (~25 us vs fit) is the only big proj-board item; every own design on record lost to nvjet
+  (ingest wall ~50 GB/s/SM, split-K red); flashinfer in the judge image lists tinygemm_bf16 / trtllm_low_latency_gemm / mm_bf16
+  (diagext line): untested at m128 -> a one-check diag (print only) of those vs the lt pick is cheap. (2) router m16/m32 zero kernel
+  (0.7-1.1 us) needs an intra-CTA K split + small cluster (clusters of 16 dead). (3) layer lane per lead.

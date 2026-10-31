@@ -1,0 +1,51 @@
+diff --git a/muse_decode_layer/g30_src.cu b/muse_decode_layer/g30_src.cu
+index 84f489c..6f5eabf 100644
+--- a/muse_decode_layer/g30_src.cu
++++ b/muse_decode_layer/g30_src.cu
+@@ -56,6 +56,9 @@
+ #define G30_PL 0
+ #endif
+ #define G30_ND (G30_MTOK / 2)
++#ifndef G30_SPL
++#define G30_SPL 0
++#endif
+ #ifndef G30_S
+ #define G30_S 1  // proj s95: K split over a (1, S, 1) cluster, rank 1 sums into rank 0 via DSMEM (S <= 2)
+ #endif
+@@ -171,7 +174,13 @@ g30_kernel(const __grid_constant__ CUtensorMap tmX, const __grid_constant__ CUte
+   uint64_t* wempty = wfull + G30_NW;
+   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+   const int g = blockIdx.x;
++#if G30_SPL
++  // layer n14s2: rank 0 (it sums the cluster's partials) takes G30_SPL more stage pairs than the even split; the others share the rest
++  const int p0 = (KS / 2) / G30_S + G30_SPL, pr = (KS / 2 - p0);
++  const int i0 = blockIdx.y == 0 ? 0 : 2 * (p0 + ((int)blockIdx.y - 1) * pr / (G30_S - 1)), i1 = 2 * (blockIdx.y == 0 ? p0 : p0 + (int)blockIdx.y * pr / (G30_S - 1));
++#else
+   const int i0 = 2 * ((int)blockIdx.y * (KS / 2) / G30_S), i1 = 2 * (((int)blockIdx.y + 1) * (KS / 2) / G30_S);  // even: WG parity
++#endif
+ #if G30_S > 1
+   uint64_t* rbar = wempty + G30_NW;
+   float* rbuf = (float*)(ws + G30_NW * G30_WST + 1024);  // [S - 1][ND][128] partials from ranks 1..S-1
+diff --git a/muse_decode_layer/layer.py b/muse_decode_layer/layer.py
+index b9ff8f4..9d5af4f 100644
+--- a/muse_decode_layer/layer.py
++++ b/muse_decode_layer/layer.py
+@@ -884,6 +884,9 @@ G30N_CFG = {("unpool", 32): (1, 16, 16), ("qkv_gate", 32): (3, 16, 16),  # n5s11
+             ("o", 32): (1, 16, 16), ("o", 16): (1, 16, 16),  # (S, NW, NS); n5s4: o (K 1024: each CTA's W share ~ its ring)
+             ("o", 8): (1, 8, 8)}  # n5s5: G30_MTOK 8 (m64n8k16), T=8 o (v1); NW 8 (half the W ring) so CTAs co-reside with vtk
+ G30N_DEFAULT_ON = set()  # (key, T) on without TUNE; otherwise TUNE option "g30n:<key>"
++# n14s2: uneven cluster K split, S -> extra stage pairs for rank 0 (it sums the partials, so it should finish its loop last:
++# the even split gave it the FEWEST stages, qkv K 8192 = 42/42/44). Not bitwise vs the even split (other K ranges; FP32 sums).
++G30N_SPL = {}
+ # proj n5s6 G30_GX (g30_src.cu -DG30_GX=1): g30n escapes OUT of the main loop: prepare() records per (64-row tile, K split)
+ # (_g30_gx_tables), 4 escape warps TMA x boxes at the escape cols + an FP32 corr tile, WG1 writes d + corr. One-hot exact.
+ # H200 (proj check 53639fe3, m32 after a 3 us PDL pred): qkv 12.0->10.9, pooler 15.6->14.5, unpool 14.7->13.1..14.1 us;
+@@ -2917,6 +2920,8 @@ def _g30n_build(c):
+             import hashlib
+             from torch.utils.cpp_extension import load_inline
+             dfs = [f"-DG30_MTOK={c[0]}", f"-DG30_S={c[1]}", f"-DG30_NW={c[2]}", f"-DG30_NS={c[3]}"]
++            if G30N_SPL.get(c[1]):
++                dfs.append(f"-DG30_SPL={G30N_SPL[c[1]]}")
+             _G30N[c] = _g30_load("layer_g30n_" + hashlib.sha256((_G30_SRC + " ".join(dfs)).encode()).hexdigest()[:10], dfs, False)
+         except Exception as ex:  # noqa: BLE001
+             print("layer g30n build failed:", c, ex)

@@ -1,0 +1,16 @@
+RES verify 1 sliding base     K post-bnd  24.74  K end  +0.00  graph end   143.8 ( +0.00)  R 11
+RES verify 1 sliding idf8     K post-bnd  24.99  K end  +0.00  graph end   143.4 ( -0.48)  R 11
+RES verify 1 sliding base2    K post-bnd  24.03  K end  -0.42  graph end   143.1 ( -0.71)  R 11
+RES verify 1 sliding idf8b    K post-bnd  24.80  K end  -0.16  graph end   144.0 ( +0.13)  R 11
+RES verify 1 full    base     K post-bnd  24.83  K end  +0.00  graph end   157.5 ( +0.00)  R 11
+RES verify 1 full    idf8     K post-bnd  25.50  K end  +1.02  graph end   157.3 ( -0.12)  R 11
+RES verify 1 full    base2    K post-bnd  24.83  K end  +0.06  graph end   157.7 ( +0.19)  R 11
+RES verify 1 full    idf8b    K post-bnd  25.38  K end  +0.61  graph end   157.3 ( -0.16)  R 11
+rs 11 verify 1 sliding fails 0/30
+rs 11 verify 1 full    fails 0/30
+rs 11 verify 16 sliding fails 0/30
+rs 11 verify 16 full   fails 0/30
+rs 7 verify 1 sliding fails 0/30
+rs 7 verify 1 full    fails 0/30
+rs 7 verify 16 sliding fails 0/30
+rs 7 verify 16 full   fails 0/30

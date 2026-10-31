@@ -4375,7 +4375,7 @@ def _plan(cfg, max_pages, device):
 @triton.jit
 def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ: tl.constexpr, HKV: tl.constexpr,
              G: tl.constexpr, D: tl.constexpr, M: tl.constexpr, S: tl.constexpr, NR: tl.constexpr,
-             SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False, TRIG: tl.constexpr = False,
+             SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False, TRIG: tl.constexpr = 0,
              QSS: tl.constexpr = 0):
     """plan red's merge (one KV head pair, M = 2 G rows = query heads; program b = request b): the NR replicas of
     the sums at reference max 0, merged exactly with any listed out-of-range partials (slot ids in rcnt[2:]); then
@@ -4393,8 +4393,10 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
     col = r[:, None] * D + d[None, :]
     gate = _qld(qkv_ptr + (HQ + 2 * HKV) * D + col, QSS).to(tl.bfloat16).to(tl.float32)
     vs = tl.load(vs_ptr)
+    if TRIG == 2:
+        gdc_launch_dependents()
     gdc_wait()
-    if TRIG:
+    if TRIG == 1:
         gdc_launch_dependents()
     a = tl.zeros([M, D], tl.float32)
     l = tl.zeros([M], tl.float32)
@@ -4677,12 +4679,13 @@ RF_NW1 = 16
 RF_TRIG = True
 RF_NW = 4
 RF_TRIG_ALL = True
+RF_EARLY_ALL = True
 CB_TRIG = True
 def _red_launch(qkv, pacc, pml, data, out, batch, hq, hkv, group, d, splits, sl, bal):
     red, rcnt, rcw = _red_bufs(batch, group, d, sl, qkv.device)
     _red_fin[(batch,)](qkv, red, rcnt, pacc, pml, data["v_scale"], out, HQ=hq, HKV=hkv, G=group, D=d, M=2 * group,
                        S=splits, NR=4 if batch == 1 else BNR, SL=0 if batch == 1 else sl, RCW=rcw, BAL=bal, num_warps=RF_NW1 if batch == 1 else RF_NW, launch_pdl=True,
-                       TRIG=RF_TRIG and (batch == 1 or RF_TRIG_ALL), QSS=data.get("qkv_ss", 0))
+                       TRIG=(2 if batch > 1 and RF_EARLY_ALL else 1) if RF_TRIG and (batch == 1 or RF_TRIG_ALL) else 0, QSS=data.get("qkv_ss", 0))
 def _decode_gluon(data, cfg, plan):
     batch, hq, hkv, d = cfg["batch"], cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     group = hq // hkv
@@ -16632,9 +16635,10 @@ __global__ void __launch_bounds__(512) n2u(const float* __restrict__ Y, const in
     float twv[8];
     if (SLOT) {
         if (!idf) {  // n7s7 IDF: with an early moe_tk2f, read the routing after griddepcontrol.wait (below); a flag spin
-                     // here (+__ldcg loads) cost ~4 us H100 d1 tail. These plain loads are safe only because ptxas
-                     // sinks them below griddepcontrol.wait: forced pre-wait (__ldcg) they read stale routing
-                     // (replay_test d1 3/10 + 5/10 fails)
+                     // here (+__ldcg loads) cost ~4 us H100 d1 tail. n16s1: the routing itself is complete before n2u
+                     // launches; the n7s7 replay fails with these loads forced pre-wait were ptxas hoisting the .nc Y
+                     // loads (moe_tk2f's output) above griddepcontrol.wait once loc[] is known (SASS). Branch
+                     // layer/n2upre: routing pre-wait + weak Y loads is correct but an H100 tie.
 #pragma unroll
             for (int s = 0; s < 8; ++s) {
                 const int e = ids[s] - start;

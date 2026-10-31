@@ -112,7 +112,7 @@ int64_t moe_set_hot(int64_t v) { g_hot = (int)v; return 0; }
 #define TK2G_PAR 1       // n4s5: GS16 weighted split bounds by warp 0 (tk2g_bound) instead of every thread (tk2g_split)
 #endif
 #define TK2F_S6K 0       // n20: build the S6 (6-bit scale code) tk2f kernels (_lib sets it when TK2F_S6 or DIAG)
-#define TK2H_P4 0        // n6: build only the SA tk2h PF4 kernels (cfg 1x3x004 GS8 / 1x4w004 GS16) without TK2_EXP: layer tuner use
+#define TK2H_P4 1        // o11: on (moe board bs32 runs tk2h W3 as the layer's H200 tuner picks at T=32); n6: build only the SA tk2h PF4 kernels (cfg 1x3x004 GS8 / 1x4w004 GS16) without TK2_EXP: layer tuner use
 #define TK2H_REG 1       // n18: tk2h keeps each phase's X/Out/gs pointers in registers (H100: one LDC stall per segment start)
 #define TK2F_SQRT 0      // n18: run-time L2 hint modes (per phase) on SQ stages (PF 576/580; DIAG builds)
 #define TK2_EXP 0        // s12: tk2h (TK2H/PSC) and weighted-split (TK2W) instantiations: H200 diags, no gain (off: compile time)
@@ -3113,7 +3113,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const char* __restrict__ W2, const char* __restrict__ S2, const float* __restrict__ gs2,
     const uint32_t* __restrict__ lut, const __grid_constant__ TMaps maps13, const __grid_constant__ TMaps maps2,
     int* __restrict__ meta, const int* __restrict__ sroutes, __nv_bfloat16* __restrict__ Inter,
-    __nv_bfloat16* __restrict__ Y) {
+    __nv_bfloat16* __restrict__ Y, int per = 0) {
   using HG = TWC<2, true, 8>;
   using HN = TWC<2, false, 8>;
   constexpr int NX = NH > 64 ? 128 : NH;  // n5s21: x box rows (exact-N classes 72..120 load the 128-row box)
@@ -3146,6 +3146,9 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   }
   __syncthreads();
   const int nh = s_nh, n13 = nh * HG::NRB, nitems = n13 + nh * HN::NRB;
+  // n7s32 HOT_PER (layer v169 hotdyn, o11 here): per > 0 = only max(per >> 8, (per & 255) * nh) CTAs work (<= the grid);
+  // the others exit at once, so their SMs go to moe_twm (the PDL secondary)
+  if (per > 0 && (int)blockIdx.x >= max(per >> 8, (per & 255) * nh)) return;
   if (warp >= 8) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
     if (warp > 8 || lane != 0) return;
@@ -3234,6 +3237,8 @@ template <bool SA, int NH>
 static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                       torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
                       torch::Tensor inter_, torch::Tensor y_, int grid) {
+  const int per = (grid / 100000) << 8 | (grid / 1000) % 100;  // n7s32 HOT_PER: grid = base * 1e5 + per * 1e3 + CTAs
+  grid %= 1000;
   constexpr int NSTG = 8;
   constexpr int SMEM = NSTG * ((NH > 64 ? 128 : NH) * 128 + TWC<2, true, 8>::WB + TWC<2, true, 8>::SB) + 1024 + (TWM_EPI ? 8192 : 0);
   static bool init = false;
@@ -3247,7 +3252,7 @@ static int64_t hot_go(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13
   return launch_k(moe_hot<NSTG, SA, NH>, grid, 384, SMEM, at::cuda::getCurrentCUDAStream(), (g_pdl & 4) != 0,
       (const char*)PTR(w13_), (const char*)PTR(s13_), (const float*)PTR(gs13_), (const char*)PTR(w2_),
       (const char*)PTR(s2_), (const float*)PTR(gs2_), (const uint32_t*)PTR(lut_), m13, m2, (int*)meta_.data_ptr(),
-      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr());
+      (const int*)PTR(sr_), (__nv_bfloat16*)inter_.data_ptr(), (__nv_bfloat16*)y_.data_ptr(), per);
 }
 int64_t moe_hot_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs13_, torch::Tensor w2_, torch::Tensor s2_,
                        torch::Tensor gs2_, torch::Tensor lut_, torch::Tensor xg_, torch::Tensor meta_, torch::Tensor sr_,
@@ -5041,7 +5046,7 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
       return;
     }
   }
-  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  if (false) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // fresh x10: late trigger
   {  // routing, as moe_tk2 GATED
     int e = -1, rank = 0;
     if (warp < 8) {
@@ -5324,6 +5329,7 @@ __global__ void __launch_bounds__((NC + 1 + tk2f_rel_on<NC, DYN, FN, GS, MRG, PF
   if (FP && a0 >= a1) mbar_arrive(&xrdy);  // no gemm13 rows here: release the producer's gate at once
   tk2f_consume<512, NC, NSTG, true, KPS, SA, PF, REL>(slut, gs13, X, inter, cnt, n13, a0, a1, s_rs13, s_e, s_off, s_srt, s_red, smem, full,
                                     empty, st, ph, rb, &xrdy);
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");  // fresh x10: at the gemm2 rows
   tk2f_consume<256, NC, NSTG, false, KPS, SA, PF>(slut, gs2, inter, Y, cnt, n13, b0, b1, s_rs2, s_e, s_off, s_srt, s_red, smem, full,
                                      empty, st, ph, rb);
   if constexpr ((PF & 262144) != 0) {  // n5s17 ROLE probe P2: the dead TWO branch AFTER the main path
@@ -6032,7 +6038,7 @@ def _plan(M):
 
 
 PLAN_OVERRIDE = None
-NORM2_PDL = 0  # n5s19: 1 = moe_norm2/3 launched as a PDL secondary of moe_tk2f (tk2f triggers at entry)
+NORM2_PDL = 1  # n5s19: 1 = moe_norm2/3 launched as a PDL secondary of moe_tk2f; fresh x10: tk2f triggers before its gemm2 rows (late)
 # PDL / row order are set once in the library (g_pdl = 4: big-M kernels only, g_blk = 0); moe_set_pdl / moe_set_blk
 # change them for experiments. Judge s5: decode PDL (gemm2 or norm2) and tk2_map blk 2 at bs32 lose on the H200.
 TB_RT = 0  # big-M moe_tb on (1) or off (0: old moe_big path)
@@ -6053,7 +6059,7 @@ RG = 1  # s33: moe_routegather (route + gather fused, one CTA per token) for M >
 TWM_PB_M = {}  # n12: {M: 48}: moe_twm's > 32-token experts run 48-token passes at wgmma N48 (s18 mb: 632 vs 737 cyc/stage at N64)
 HOT_TWG = {}  # n15: {M: k}: with moe_hot on, moe_twm runs on SMs - k CTAs (k = hot grid: no late-starting twm CTAs)
 HOT_NXB = 0  # n5s21: probe bits (16: NH 104, 32: NH 80; HOT_NX builds only)
-HOT_M = {256: 32}  # s29: {M: grid}: moe_hot (65..128-token experts, one N 128 pass) on that many CTAs before moe_twm
+HOT_M = {128: 16048, 256: 3216064}  # s29: {M: grid}: moe_hot (65..128-token experts, one N 128 pass) on that many CTAs before moe_twm; o11: hotdyn base*1e5 + per*1e3 + grid (max(base, per*nh) CTAs work), at bs128 too (H100 -7 us mean)
 TWM_HOT = 0  # s17: moe_twm hot class (experts with 65..96 tokens: one pass, 1 tile per warp, N <= 96)
 TWM_HOT_M = {}  # s17: per-M override
 TWQ = 0  # s17: big-M on moe_twq (16 consumer warps x RT 2, 32-token passes) if nonzero (value = flags; bit 1 = timeline,
@@ -6092,7 +6098,7 @@ TK2F_S6P_DIAG = True  # n20: build the S6P images in DIAG builds
 TK2F_S6_ON = True  # n20: run tk2f / tk2h on them (DIAG A/B: False = the 8-bit SQ stages)
 TK2F_SQ = 1  # n14: tk2f single-copy 18 KB stages (prepare _sq_pack; cfg + 10000000; bitwise = off)
 TK2F_PFL2 = 0  # n5s27: DIAG only: tk2f L2 prefetch of whole 72 KB SQ rows, distance 1..3 rows; 4 = 18 KB stages one row ahead (0 = off)
-TK2F = 204  # s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
+TK2F = 84204  # fresh x10: 84204 = slot-ordered y32 + moe_norm3 at M=1 too. s15: 96204 = 204 + FP (off, see TK2F_DYN). decode: gemm13 + gemm2 in one launch (moe_tk2f, cfg KPS*100+NSTG); 0 = 3-launch moe_tk2 path
 TK2_NSTG = 8  # decode path: moe_tk2 stages (0: the 5-launch SK_CFG path)
 SK_ZERO = 64  # CTAs zeroing Acc13 in route2
 
@@ -6408,7 +6414,7 @@ TK2H_MIN16 = 1
 TK2H_MIN = 1  # n4s5: TK2H applies from this M (below: the main tk2f cfg); 9 = only calls that can have 2-group rows
 TK2W = 0  # s12: weighted static row split for M > 1 (extra-group rows weigh TK2W / 8; 0 = by count), cfg + 70000
 TK2H_PSC = 0  # s12: 1 = per-segment gemm13 -> gemm2 counters (cnt[64 + seg]) instead of the global one
-TK2H_M = {}  # n6: per-M GS16 tk2h PF4 weight W (overrides TK2H/TK2W); layer TUNE option "tk2h" = W + 1
+TK2H_M = {32: 3}  # o11: layer TUNE_BASE T=32 tk2h 4 (= W 3).  # n6: per-M GS16 tk2h PF4 weight W (overrides TK2H/TK2W); layer TUNE option "tk2h" = W + 1
 TK2H_PF4 = 0  # n6: 1 = tk2h writes y32 like tk2f PF 4 (slot order, pre-scaled) -> moe_norm3 (cfg + 4; kinds 3/4 only)
 TK2F_SQ4_DIAG = False  # n5s15: k44/k45 lost on the H200 (ddfc1353);
 TK2F_SQ8_DIAG = False  # n5s15: KPS 1 SQ images for the k14/k16 DIAG variants (lost: 14ddda06)

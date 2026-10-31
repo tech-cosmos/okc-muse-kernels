@@ -1,0 +1,17 @@
+o9 (2026-10-31 ~13:00-13:40Z, H100, lead 12:25Z TWM NON-DQ OVERHEAD): ovr.py = REAL tw_item from r-layer moe_src.py (v174 7c85647;
+twm config KG 1, DYN, SA, STRIDE CG::STG, KS false) in a 1-CTA harness: 2 consumer WGs, data-free producer warp (full arrive after
+empty wait, no TMA), epilogue skipped at run time (TWM_ORC 16, gsc from a kernel arg so ptxas keeps dq + HGMMA). cyc/stage, median of 15.
+SASS (loop_rt4n32_sass.txt, RT4 N32): 269 instr/stage = dq core 192 (LOP3 80, SHF 32, IMAD 16, HMUL2 64) + 16 HGMMA + 8 WARPGROUP +
+  ~19 uniform (UMOV/UIADD3/ULEA/ULOP3/USEL/S2UR: stage/desc math) + ~34 vector: LDS 5 (4 W + 1 scale), scale decode 8 (4 PRMT + 4 LEA =
+  scp), empty-barrier address 5 (S2R CgaCtaId + LEA + IMAD + VIADD + MOV, every stage), full-wait + arrive 2 SYNCS, loop/phase ~9
+  (ISETP 3, BRA 3, VIADD, LOP3, SHF), stage pointer 3 (IMAD.U32 x2, IMAD).
+V0 real         RT4 N8 866 | N16 957 | N24 963 | N32 1036 | RT2 N32 627 | RT2 N64 745
+V8 EXACT hoist of the empty-barrier address (volatile mov; -4 instr/stage, 269 -> 265): 1.000 / 1.010 / 1.000 / 0.992 / 1.000 / 1.000 = TIE
+V1 scale LDS + decode free (oracle, wrong values):        0.963 / 0.955 / 0.957 / 0.958 / 0.955 / 0.979 (vs first V0 run)
+V2 NO ring protocol (no full waits kc>0, no empty arrives): 0.920 / 0.906 / 0.938 / 0.945 / 0.845 / 0.970
+V3 = V1 + V2:                                             0.883 / 0.892 / 0.905 / 0.924 / 0.812 / 0.913
+V4 = V3 + fixed stage pointer: 0.95-1.06 (slower than V3: smem artifact, all warps on one stage; ignore)
+VERDICT: gate (<= 0.94x at bs128 AND bs256, exact) FAILS. The only exact hoist found ties; the whole ring protocol, which no correct
+kernel can drop, is worth 0.945x / 0.970x on the dominant v16/v32 shapes (RT4 N32 / RT2 N64), and halving its frequency (ring sync
+per 2 stages) bounds at ~half of that (~0.97 / ~0.985). Even protocol + scale decode free (illegal) is 0.924 / 0.913.
+V16 full waits on even stages only (oracle; arrives kept): 0.976 / 1.000 / 0.986 / 0.994 / 0.991 / 1.028 = tie -> coarser ring sync is dead too.

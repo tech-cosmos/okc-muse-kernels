@@ -1,3 +1,26 @@
+## o11 10-31: moe board = layer moe_hot hotdyn+HOT128 (HOT_M {128: 16048, 256: 3216064}) + bs32 tk2h W3 (TK2H_M {32: 3}) on main c75be69,
+## bitwise, test 15/15. Checks e59302f4 2.3275 (hotdyn only) / b4e94b61 2.3323; submit 41ad7717 drew 2.3124 -> board stays 2.3198 (e37e578e).
+## moe board 10-31: 4 checks (1 DIAG), 2 submits = lead's 2/agent/day cap reached. Do NOT resubmit c75be69 unchanged.
+## CW (fresh a269066) on the moe board: H200 DIAG 3e70d87c d1 +0.2 us = DEAD (patch only in /tmp/o11cw; NOTES o11).
+## NEXT: moe-board candidates need new code (gap per shape vs 4.3 TB/s bytes: bs32 +15, bs16 +12, bs8 +11, bs1 +8, bs128 +50, bs256 +77 us;
+## distinct experts mean bs1 2.7 / bs16 11.4 / bs32 15.7 / bs8 8.0 / bs128 21.8 / bs256 23.9). Layer lane items per lead lines.
+## o10 14:20Z 10-31: fresh x10 'late' on moe board: check bef7bd02 2.3201x, SUBMIT e37e578e 2.3198x = NEW MOE BOARD BEST
+## (was aeba42c5 2.2792): bs1 25.3, bs16 87.3, bs32 118.6, bs8 63.2, bs128 194.0, bs256 234.3 us. main f90bcaf. moe 10-31: 1 check, 1 submit.
+## NEXT (14:25Z 10-31): o10 done. Big-M twm PDL trigger stays at entry (NORM_EARLY 1 = moe_norm waits per expert during twm: early is right). Candidates: fresh CW handoff (bs1 ~1 us) -> moe check; else lead names one. Slack: PARKED-READY (moe/slack a9242fb;
+## o8 cluster kernel tools/o8/s3.cu, bitwise, untimed, ~2-3 us of the 6-7 us overhead if approved).
+## o9 13:40Z 10-31: lead 12:25Z TWM NON-DQ OVERHEAD: GATE FAILS (tools/o9, real tw_item harness, H100). 269 instr/stage RT4 N32 =
+## dq 192 + 16 HGMMA + 8 WG + ~19 uniform + ~34 vector. Exact hoist (empty-barrier address, -4 instr) tie; whole ring protocol free
+## (illegal) 0.945x RT4 N32 / 0.970x RT2 N64; + scales free 0.924/0.913; half the full waits tie. 0 judge runs, 0 Modal.
+## o8 12:45Z 10-31: slack cluster kernel built (bitwise = o6 on 270 cases), stopped untimed per lead 12:25Z. NOTES o8.
+## o7b 12:12Z: layer's request tk2f LAST-WAVE K-SPLIT: DEAD at d16 (oracle: removing the row tail saves less than its bytes).
+## o7 12:05Z 10-31: lead 11:25Z tk2f FIXED COST: GATE FAILS. Free-prologue+split oracle (plan of the same input in one trip)
+## H100 in-layer: v1 +0.0/+0.5, d16 -0.2/-0.7, d32 -0.7/-0.9 us; the prologue is one ~1.3 us dependent trip (TLB+L2), its compute
+## is free; LUT-late dead. d16 lever = _routing's 2.9 us tail after the router (proj's item). Tools tools/o7. 0 judge runs.
+## (o6 ran against the lead's 11:25Z PARK of moe/slack, which I missed; slack parked now.)
+## o6 11:50Z 10-31: moe/slack now a NET WIN on the H100 (still OFF, 0 judge runs): o5's loss was the kernel's serialized
+## global loads (phase C 10 us per changed token), not PDL. Loads-first token_keys + score by shuffle (bitwise = o5) + PDL:
+## in-layer on-off v16 sl/fu -3.9/-10.5, v32 -2.1/-2.2 us; 0 fails/288 slack_judge; 13/13. Branch moe/slack a9242fb (on v174).
+## Remaining overhead +5.8..+7.0 us (expert saving -9..-17): next = cut it (fuse phase A into _routing / fewer trips).
 ## o5 11:30Z 10-31: lead 10:25Z ROUTING-SLACK BUILD PREPARED: branch moe/slack 894de97 (slack_src.cu + _slack at all routing sites,
 ## OFF by default). Greedy = fresh's exact min on 12/12 loads with reference scores, BUT the layer's keys carry FP8-query noise
 ## (keep-lead std 0.0048, max 0.019 = E4M3-ref vs FP32) -> safe margins leave ~1 expert v16/v32, ~0 d1/d16/v1. H100: 0 fails/192

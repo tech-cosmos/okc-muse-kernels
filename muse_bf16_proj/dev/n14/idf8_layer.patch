@@ -1,0 +1,102 @@
+--- a/layer.py
++++ b/layer.py
+@@ -1311,7 +1311,7 @@
+                             "torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double);\n"
+                             + ("void pr8_launch(torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, "
+                                "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+-                               "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else "")
++                               "torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);" if _GPR1_SRC is not None and _GPR8_SRC is not None else "")
+                             + "void bnd2_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                             "torch::Tensor, std::vector<torch::Tensor>, int64_t, double, double, double, int64_t, int64_t);\n"
+                             + "void ob8_gemm(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, double, double, int64_t);\n",
+@@ -3987,6 +3987,8 @@
+     idf = (pr1 and tokens == 1 and _opt(state, 1, "idf", IDF_DEFAULT) and not N2U_BOUNDARY and not TK2_PDL13
+            and 1 in TK2FX_TOKENS and _opt(state, 1, "tk2fx", TK2FX_DEFAULT) and 1 in N2U_TOKENS and _use_moe(1)
+            and bool(_moe_TK2F) and _G10.get("lib") is not None and 1 <= SLICED_UNPOOL_MAX_TOKENS)
++    idf8 = pr1 and tokens == 8 and _opt(state, 8, "idf8", int(__import__("os").environ.get("IDF8", "0")))  # proj n14 IDF8: early tk2f at T=8 on pr8's routing flag
++    if idf8 and "idf8f" not in state: state["idf8f"] = torch.zeros(1, dtype=torch.int32, device=dev)
+     # s86 OB8: the T=8 o GEMM writes the boundary's stream1 / h / h32 itself (pr8 = its PDL secondary)
+     ob8 = (pr1 and tokens == 8 and _GOB8_SRC is not None and _opt(state, tokens, "ob8", OB8) and "g12" in state
+            and not (("o", 8) in state.get("g19", {}) and "o" in G19_ON and _opt(state, 8, "g19:o", ("o", 8) not in G19_DEFAULT_OFF))
+@@ -4092,7 +4094,8 @@
+             part = torch.empty(8 * tokens * N_EXPERTS, dtype=torch.float32, device=dev)
+             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
+                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
+-                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)
++                                   ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1,
++                                   state["idf8f"].data_ptr() if idf8 else 0)
+     elif (pr32 := (tokens in PR32_TOKENS and state.get("pr32", {}).get(tokens) is not None
+                    and _opt(state, tokens, "pr32", PR32_DEFAULT))):
+         side_stream.wait_stream(main_stream)  # nothing runs there, but the later joins need it forked in the capture
+@@ -4173,8 +4176,8 @@
+         p = pooled  # s27 GNORM: the rmsnorm runs inside the experts' gather
+     else:
+       _rmsnorm_gain[(tokens,)](pooled, state["pre_expert"], p, N=D_EXPERT, EPS=RMS_EPS, PDL=rpdl,
+-                             TRIG=tk2_pdl or idf, ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
+-                             launch_pdl=rpdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 and not nu8d else 0, TRIG2=(tk2fx or tk2fj) and not idf,
++                             TRIG=tk2_pdl or idf or bool(idf8), ROUND=pooled.dtype == torch.float32, NS=nsp, SS=tokens * D_EXPERT, num_warps=8,
++                             launch_pdl=rpdl, z_ptr=y32[64] if nu8 else None, ZN=256 if nu8 and not nu8d else 0, TRIG2=(tk2fx or tk2fj) and not idf and not idf8,
+                              zl_ptr=y32[65] if nu8d else None, ids_ptr=local_ids if nu8d else None, ZL=LOCAL_EXPERTS if nu8d else 0,
+                              zr_ptr=zr, ZR=zr.shape[1] if zr is not None else 0,
+                              ZRP=triton.next_power_of_2(zr.shape[1]) if zr is not None else 1)
+@@ -4200,6 +4203,8 @@
+         f = _experts_n2u(p, topk_weights, local_ids, state, idf=idf)
+         return _tail(None, stream1, h, tokens, state, pdl, nos=nos, f=f, rst=state["idf"] if idf else None) + (topk_ids,)
+     if nu8:
++        if idf8:
++            state["moe"]["lib"].moe_set_idf(state["idf8f"].data_ptr())
+         f, sc = _experts_nu8(p, topk_weights, local_ids, state, y32)
+         return _tail(None, stream1, h, tokens, state, pdl, nos=nos, f=f, sc=sc) + (topk_ids,)
+     if _use_moe(tokens):
+--- a/pr8_src.cu
++++ b/pr8_src.cu
+@@ -73,7 +73,7 @@
+     const uint2* WS; const unsigned* WN; const float2* H; float scale; const __nv_bfloat16* x; __nv_bfloat16* out;
+     int n, nrg_all, bk;
+     const float4* rw; const float* x32; float* part; float* logits; int* cnt; const float* bias; const int* ls;
+-    int* ids; int* lids; float* wts; float mult, reps; int local, npf;
++    int* ids; int* lids; float* wts; float mult, reps; int local, npf; int* rel;
+ };
+ 
+ __device__ __forceinline__ void route_token(const Args& a, const float* lgs, const float* bs_, int ls, int tok, int lane) {
+@@ -139,6 +139,11 @@
+     }
+     __syncthreads();
+     if (wp < MT) route_token(a, lgs, bs_, ls_, wp, lane);
++    if (a.rel) {  // proj n14 IDF8: every routing warp's stores, then thread 0's release
++        __threadfence();
++        __syncthreads();
++        if (t == 0) asm volatile("st.release.gpu.global.s32 [%0], 1;" :: "l"(a.rel) : "memory");
++    }
+     if (t == 0) a.cnt[0] = 0;
+ }
+ 
+@@ -159,6 +164,10 @@
+     float2* hs = (float2*)(smem + M * XS + blockDim.x / 32 * TT * 512);
+     __shared__ int flag;
+     __shared__ float rred[RROWS][2][MT];
++    if ((int)blockIdx.x == a.bk && a.rel) {  // proj n14 IDF8: reset before this grid triggers (block-uniform branch)
++        if (threadIdx.x == 0) { *(volatile int*)a.rel = 0; __threadfence(); }
++        __syncthreads();
++    }
+     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+     if ((int)blockIdx.x == a.bk) {
+         if (a.npf != -1 && a.npf != -2) finish(a);
+@@ -373,7 +382,7 @@
+                 torch::Tensor rw, torch::Tensor x32, torch::Tensor part, torch::Tensor logits, torch::Tensor cnt,
+                 torch::Tensor bias, torch::Tensor ls, torch::Tensor ids, torch::Tensor lids, torch::Tensor wts,
+                 double mult, double reps, int64_t local, int64_t kcu, int64_t wg, int64_t pf, int64_t bk, int64_t xp,
+-                int64_t npf, int64_t pdl) {
++                int64_t npf, int64_t pdl, int64_t rel) {
+     const int m = x.size(0), k = x.size(1), n = out.size(1);
+     const int ng = n / 8 / bk, threads = ng * wg * 32;
+     const int xp_ = xp & 15, xr_ = (xp >> 4) ? (xp >> 4) : xp_;  // s88: xp = XP | XR << 4 (XR 0 = all pieces staged)
+@@ -384,7 +393,7 @@
+                 (const __nv_bfloat16*)x.data_ptr(), (__nv_bfloat16*)out.data_ptr(), n, n / 8, (int)bk,
+                 (const float4*)rw.data_ptr(), x32.data_ptr<float>(), part.data_ptr<float>(), logits.data_ptr<float>(),
+                 cnt.data_ptr<int>(), bias.data_ptr<float>(), ls.data_ptr<int>(), ids.data_ptr<int>(), lids.data_ptr<int>(),
+-                wts.data_ptr<float>(), (float)mult, (float)reps, (int)local, (int)npf};
++                wts.data_ptr<float>(), (float)mult, (float)reps, (int)local, (int)npf, (int*)rel};
+     cudaLaunchConfig_t lc = {}; lc.gridDim = bk + 1; lc.blockDim = threads; lc.dynamicSmemBytes = sm;
+     lc.stream = c10::cuda::getCurrentCUDAStream(); cudaLaunchAttribute la[1];
+     la[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;

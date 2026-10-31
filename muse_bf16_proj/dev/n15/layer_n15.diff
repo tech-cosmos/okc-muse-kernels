@@ -1,0 +1,19 @@
+--- /tmp/pj15/layer_main.py	2026-10-31 14:00:41.292654680 +0000
++++ layer.py	2026-10-31 13:52:12.523644079 +0000
+@@ -3664,6 +3664,7 @@
+     state["ob8_part"] = torch.empty(G12_CFG["o"][3] * 32, dtype=torch.float32, device=dev)  # s86 OB8 per-block partials
+     state["ob8_bar"] = torch.zeros(1, dtype=torch.int32, device=dev)  # s86 OB8 grid barrier (epoch counter)
+     state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)  # pr1's router ticket (self-resetting)
++    state["pr8_part"] = torch.full((8 * 8 * N_EXPERTS + 129 * 16,), -1, dtype=torch.int32, device=dev).view(torch.float32)
+     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n2u's last-block counter (self-resetting)
+     state["idf"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n7s7 IDF: pr1's routing release flag (reset by the tail)
+     state["g13"] = {key: pk for key in list(G13_CFG) + (["o"] if G13_O else []) if (pk := _pack13(w[key])) is not None}
+@@ -4089,7 +4090,7 @@
+                                    + ([state["idf"]] if idf else []), POST_NORM_EPS, RMS_EPS)
+         else:
+             pk = state["g14"]["pooler"]
+-            part = torch.empty(8 * tokens * N_EXPERTS, dtype=torch.float32, device=dev)
++            part = state["pr8_part"]  # n15 DP: persistent, armed with the 0xFFFFFFFF sentinel (+ trace room)
+             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
+                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
+                                    ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)

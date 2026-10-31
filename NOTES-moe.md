@@ -3715,3 +3715,133 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   (BF16 queries would remove at most the E4M3 part) -> clean-score estimate at 0.012 margins v16 1.3-1.9, v32 1.9-2.8,
   still ~0 at d1/d16/v1 (small T: the distinct floor + flip margin binds). The x1.096 of fresh x8 assumes the reference's
   exact scores; for an FP8-query layer the safely usable slack is ~0.1-0.3 % of score, not ~9 %.
+
+## o6 (2026-10-31 11:20Z - ): moe/slack made to PAY on the H100 (still OFF, 0 judge runs, 0 Modal)
+- Oracle first (tools in /tmp/slack/o6, files built from /tmp/slack/wt, TUNE pinned to ({},) in all arms so the tuner
+  can't confound): 3 arms, ab_seeds.py "verify " 3 rounds x seeds 801-804. dry = slack kernel runs, result discarded
+  (SLACK_RM = 1e9 -> floor_r unreachable -> early return before the writes; same work otherwise).
+  o5 kernel: dry/on/off v16 sl 334.5/322.8/318.9, fu 463.6/446.6/443.2, v32 sl 362.8/353.7/347.6, fu 609.1/600.0/593.7.
+  => expert saving (on-dry) -11.7/-17.0/-9.1/-9.1 us (bimodal per seed: 0..-2 or -17..-28: a dropped expert either
+  removes a twm pass/tail or not); kernel overhead (dry-off) +15.6/+20.4/+15.2/+15.4 us = the whole o5 loss.
+- PDL secondary (griddepcontrol.wait, trigger iff the routing's TRIG at that site, cudaLaunchKernelEx): dry-off only
+  13.4/18.6/14.2/16.0 -> the cost is NOT lost overlap. nsys v16 sl seed 801: slack ends 7.8 us after _routing (4.4 us
+  standalone o5), twm +8.3 us later; routegathern does launch early (PDL edge fine).
+- globaltimer stamps in the last CTA: phase C = ~10 us as soon as ONE token changes (0.7 with none); inside it
+  token_keys 4.5 us + reload of the pick's logit 1.0 us: serialized dependent global loads (the `for q < ks` loop kept
+  each key's load next to its expf; ~0.5-1 us per trip on the contended H100). SASS 4096 instr but NOT i-fetch: a
+  compact no-unroll build (1616 instr, 560 B stack) was slower.
+- FIX (slack_src.cu): token_keys issues all loads (ids, 8 x part[q0], 8 x part[q1], 8 x bias) before any use; ks > 2
+  (split-K routers at small T) loops one trip per partial, same summation order; it also returns the sigmoid scores
+  sg[k] (expf, as before) so phase C takes the pick's score by shuffle instead of reloading the logit. Bitwise = the o5
+  kernel on 75 cases (5 loads x 5 seeds x ks 1/2/8, margins 0, 267 re-routed tokens; /tmp/slack/o6/kt/cmp.py).
+  Standalone (kt.py, warm): v16 9.0 -> 5.7 us, v32 19.1 -> 8.3, d16/v1 20 -> 10.
+- In-layer A/B (same protocol) ndry/non/off: v16 sl 323.2/313.6/317.4, fu 449.4/431.9/442.4, v32 sl 354.4/346.1/348.2,
+  fu 600.3/591.3/593.5 -> on-off = -3.9 / -10.5 / -2.1 / -2.2 us = NET WIN (o5: +3.9/+3.4/+6.1/+6.3); overhead now
+  +5.8/+7.0/+6.2/+6.9 us. v1 control -0.6/-0.5 (noise, slack off at T=8).
+- Correctness: slack_judge 24 inputs x routers 11/23 x verify: 0 fails / 288 (192 slack-on), worst pick gap 0.032
+  (limit .05), dropped lead 0.018 (limit .03), saved distinct v16 0.6-1.5, v32 0.7-1.0 (= o5). bench test 13/13 with
+  slack at (128,256) + real tuner, at ALL T, and off. Branch moe/slack: 9704a5d, bcdba50, be3ab28, merge of main
+  (v174 c62cdb0) a9242fb (13/13 again). SLACK_TOKENS = () on the branch.
+- (o6 addendum) I missed the lead's 11:25Z 'MOE: PARK moe/slack' line at session start (my grep of Human decisions cut
+  it); o6 ran against it. The branch work stands (moe/slack a9242fb, off); slack is parked from here.
+
+## o7 (2026-10-31 ~11:55-12:10Z): lead 11:25Z item tk2f FIXED COST at v1/d16/d32, in-layer on v174. GATE FAILS. 0 judge runs, 0 Modal
+- Tools muse_moe_w4a16/tools/o7 (run from muse_decode_layer/; stamps = fresh's tools/fresh/span/mkstamp.py on v174 submission.py;
+  run.py = fresh's run.py with the pr1 section skipped off T=1; TUNE pinned to ({},) in every A/B arm).
+- H100 stamps, us from the first tk2f CTA entry (globaltimer res 0.256 us), seeds 7/11/13:
+  v1 sl: routed 1.54 | first TMA 2.05-2.30 | first data 3.84 | ph1 end min/med/max e.g. 33.8/37.4/39.4 (E5) | cnt ok +1.0
+  after the max | ph2 data +0.26 | end med->max +1.3. rmsnorm done (WAITST) at 1.0-1.3.
+  d16 sl: routed 1.54 | TMA 1.79 | data 3.58; rmsnorm already done at entry (0-0.26). d32 sl: routed ~2.3 | TMA ~2.8-3.3
+  (tk2g_bound split ~0.5-1.0) ; rmsnorm done 1.54.
+- ORACLE (mkorc.py, mode via lib.moe_orset: 1 = compute + store plan, 2 = load the same input's plan): tk2f with a FREE
+  routing prologue + split bounds (plan + own bounds + mode in ONE trip). Output = base within the base's own
+  nondeterminism (chk.py: base vs base differs in output 2 by 4.7e-5 at v1). H100 ab_orc.py 4 seeds x 4 rounds, orc - base:
+  d1 +0.35/+0.43, d16 -0.21/-0.66, d32 -0.69/-0.85, v1 +0.04/+0.49 us (sl/fu). Stamps: mode 2 routed 1.54 = base: the
+  prologue is ONE dependent trip (~1.3 us after the flush: TLB + L2), its compute is free. A first version with 3 serial
+  trips (mode, plan, bounds) was slower: one trip ~0.7 us each.
+- LUTLATE (mklut.py: dequant LUT loaded to a register at entry, stored to smem at the post-scan barrier; bitwise): v1
+  stamps identical (routed 1.54) -> the LUT is not the gating trip. Dead.
+- d16 nsys (v174, seed 801): pooler g24 ends 62.1, router_split 61.9, _routing ends 64.8 (2.9 us later, KS=16 partials),
+  rmsnorm 62.1-64.8 in parallel, tk2f enters 65.0 (side stream) -> the d16 lever is _routing's tail, not tk2f (proj has
+  the _routing hoist/IDF item from lead 11:25Z).
+- Left in tk2f (each sub-gate or dead on record): first-data DRAM latency ~1.8 (PFX dead H200), ph1->ph2 grid sync ~1.0
+  (REL variants n6s6), ph1 end spread (static split; SM-weighted dead layer n13s2), last-wave K-split ~0.8/1.1 d16/d32 (o4).
+- o7b (layer n14s2 request 12:20Z): tk2f LAST-WAVE K-SPLIT d16 bound: DEAD. Oracles (tools/o7 mkskip.py / mkskipall.py,
+  v174, TUNE pinned, ab_seeds 4 seeds x 4 rounds, decode 16 sliding; d16 = moe_tk2f<8,4,2,0,0,1,8,0,548> = BAL split):
+  (A) every CTA with q+1 rows skips its last gemm13 + gemm2 row (row-quantization tail fully removed; skipped gemm13 row
+  still credited to its counter): -1.27/-1.71/-2.42/-1.97 us (mean -1.84). (B) every CTA skips one row of each phase
+  (264 rows, tail kept): -4.38 us = 0.0166 us/row (rows of both phases carry ~equal bytes). (A) removed 168/192/204/168
+  rows (rows.py: n13 % 132 + n2 % 132) = 2.8-3.4 us of bytes at (B)'s rate, but saved only 1.3-2.4 -> the tail itself is
+  worth <= 0: when the q+1 CTAs run their last row the rest are done and the stragglers get the freed bandwidth (as layer
+  n13s2 / moe o2 found for static splits). A K-split (half of the tail) has nothing to win. d32 (GS16 weighted split)
+  not measured; same mechanism.
+
+## o8 (2026-10-31 12:15Z - ~12:45Z): moe/slack kernel as one thread-block cluster; STOPPED (lead 12:25Z: no more slack work, read late); 0 judge runs, 0 Modal
+- Started because every non-slack moe item was closed (o1-o7b); the lead's 12:25Z line (slack PARKED-READY, new item twm
+  non-dq overhead) landed while this ran and I saw it at ~12:45Z -> stopped, nothing committed to moe/slack.
+- Stamps of the o6 kernel (tools/o8/st.cu + kts.py, standalone graph, H100, us from CTA 0 entry): v32 phase A done 1.8 |
+  ticket 2.9 | mask reload 3.9 | greedy B 4.4 | B2 4.5 | C list 4.9 | C pick (1 changed token) 7.6 (token_keys reload trip
+  1.1 + ~1.4 compute) | end 7.9. v16 (no change): end 4.7. => ticket + mask reload ~1.7 us, C reload ~1.1 us.
+- Built tools/o8/s3.cu: one cluster of min(8, T) CTAs x ceil(T / CN) warps (one token per warp), masks to the leader CTA by
+  DSMEM, leader runs B/B2 + unchanged-route counts, every warp re-picks its own token from the keys it still holds (no
+  reload), new routes/experts by DSMEM atomics, 5 cluster barriers. Bitwise = o6 kernel on 270 cases (6 loads x 5 seeds x
+  ks 1/2/8 x 3 margin sets, 318 re-routed tokens; tools/o8/cmp.py). PITFALL: split barrier.cluster.arrive.relaxed/wait at
+  entry/exit gave intermittent 'unspecified launch failure' (clean under compute-sanitizer); full arrive.release +
+  wait.acquire pairs fixed it. NOT timed (GPU lock held by another agent's stuck run), not on any branch.
+- If slack is approved: s3.cu should save ~2-3 us of the ~6-7 us overhead at v16/v32 (ticket + mask trip + C reload);
+  time it with /tmp/slack/o6/kt/kt.py <file> and the o6 in-layer A/B before using it.
+
+## o9 (2026-10-31 12:50Z - ~13:40Z): lead 12:25Z TWM NON-DQ OVERHEAD: GATE FAILS by oracle; 0 judge runs, 0 Modal
+- Tool tools/o9/ovr.py: the REAL tw_item (string-extracted from r-layer moe_src.py v174, twm config) in a 1-CTA harness with a
+  data-free mbarrier producer; variants by -DOVRV; table + SASS breakdown in tools/o9/RESULTS.txt, loop SASS loop_rt4n32_sass.txt.
+- SASS RT4 N32: 269 instr/stage (o1's 284 was the full kernel's count) = dq core 192 + 16 HGMMA + 8 WARPGROUP + ~19 uniform +
+  ~34 vector (LDS 5, scale decode 8, empty-barrier address 5 recomputed per stage, SYNCS 2, loop/phase ~9, stage pointer 3).
+- Exact hoist of the empty-barrier address (V8; needs a volatile mov or ptxas rematerializes it: plain hoist = same 269): -4
+  instr, cyc/stage 0.99-1.01x = tie. Oracles: whole ring protocol free 0.945x RT4 N32 / 0.970x RT2 N64 (0.85-0.94 on the rare
+  small-N / RT2 N32 items); + scale decode free 0.924 / 0.913. Nothing exact gets near 0.94x on the dominant v16/v32 shapes.
+- Coarser ring sync oracle (V16: full waits on even stages only, arrives kept): 0.98-1.03x = tie. Item CLOSED.
+- Harness pitfalls: (1) a literal gsc let ptxas fold the TWM_ORC 16 runtime skip and drop acc (228 cyc/stage for every N) -> pass
+  gsc as a kernel arg; (2) a data-free producer must arrive ONCE per stage before the first consumer wait (2 arrivals -> the
+  parity-0 wait waits for phase 2 = hang; my sweep held /tmp/okc-gpu.lock ~10 min hung before I killed it). Smoke-test unlocked first.
+
+## o10 (2026-10-31 14:07-14:20Z): lead 13:58Z: fresh x10 'late' onto the moe board
+- Applied r-fresh muse_decode_layer/tools/fresh/bs1/late.patch (b15f672) to muse_moe_w4a16/submission.py: TK2F 204 -> 84204
+  (slot-ordered y32 + moe_norm3 at M=1), NORM2_PDL 0 -> 1, tk2f griddepcontrol.launch_dependents moved from entry to just
+  before the gemm2 consume. Commit f90bcaf. bench test 15/15.
+- CHECK bef7bd02 2.3201x (CI 2.285-2.355), medians us bs1 25.5, bs16 89.6, bs32 118.7, bs8 63.6, bs128 197.9, bs256 232.3.
+- SUBMIT e37e578e (same content_hash c124dc40): 2.3198x (CI 2.285-2.355): bs1 25.3, bs16 87.3, bs32 118.6, bs8 63.2,
+  bs128 194.0, bs256 234.3 us. NEW MOE BOARD BEST (was aeba42c5 2.2792; vs it bs1 -0.9, bs16 -3.0, bs32 -1.0, bs8 -4.4,
+  bs128 -1.8, bs256 -3.1 us). Board #316 -> #282 (#1 dolanzhao 2.758x). So the H200 confirms fresh's reading: PDL norm with
+  the LATE trigger wins (n5s19's +3.4 us loss was the entry trigger). Layer may want the same late-trigger idea where a
+  PDL secondary follows tk2f.
+
+## o11 (2026-10-31 14:17Z - 14:52Z): moe board: layer's moe_hot hotdyn + HOT128 ported; check e59302f4 2.3275x; CW (lead 14:30Z) port
+- Found: the moe-board submission never got the layer's moe_hot work (v169 hotdyn `per`, v170 HOT128, v171 HOT_ET). Moe-board
+  routings (reference.generate_input, 200 seeds): bs128 has a 65..128-token expert in 37% (2 in 2%); bs256 nh>=3 ~5%.
+- Port (main 2f20f9f): moe_hot `per` arg (grid = base*1e5 + per*1e3 + CTAs; CTAs >= max(base, per*nh) exit at once) +
+  HOT_M {128: 16048, 256: 3216064}. Bitwise vs old on 32 seeds (tools/o11/hot.py), test 15/15, graph replay 0/400
+  (tools/o11/race.py). H100 bs128 16 seeds: off 247.2 / 16032 239.9 / 16048 240.0 / 32064 241.7 / 12032 255 (too few CTAs);
+  routings with a hot expert -16 us, without +1.1 (moe_hot launch in front of twm). bs256: all variants tie (no nh>=3 seed).
+- check e59302f4 = 2.3275x (CI 2.293-2.362) vs board 2.3198: bs128 193.2 us (x2.389 vs 2.360), bs256 234.2 (x2.683 vs 2.643);
+  bs1 26.5 / bs16 92.9 / bs8 68.1 drew slow (untouched code). Submit held: 1 submit left today (lead 2/agent/day), bundle with CW.
+- HOT_ET (layer v171) NOT ported: its gain is the ~1 us no-hot cost only. Protocol note for the layer: moe_routegather(n)
+  triggers PDL right after its wait and zeroes meta[67] later, and meta is a per-call buffer, so twm's poll of meta[67] bit 30
+  can in principle see the previous call's bit (or garbage). In a stress copy here (HOT_ET exactly as the layer, bs128, 400
+  graph replays with fresh inputs) 0 mismatches: the window (routegather's count pass ~1-2 us vs two PDL launches) seems
+  never hit on the H100. Posted as a Request to layer (low priority, theoretical).
+- CW (fresh a269066, lead 14:30Z): ported to the moe board's tk2f (SQ stages; PF 8192 is also the dead GS16 HYB bit here, so
+  CW = PF 8192 && GS 8; cfg 84294; python TK2F_CW, M = 1 only). Copy /tmp/o11cw: test 15/15, bitwise vs main 0/500 eager +
+  0/1000 replay (tools/o11/eq1.py). H100 A/B (tools/o11/ab.py, 8 seeds x 4 rounds): mean +0.07 us = TIE (2-expert routings
+  +0.3..0.6, 3-4 experts -0.6..0).
+- CW H200 DIAG 3e70d87c (layer routings, 2 interleaved copies each, maxdiff 0): d1 base 29.3/29.4, cw 29.5/29.6 (+0.2:
+  2-expert seeds +0.4..0.5, 3-expert -0.3..0); controls d16/d32/v1 tie (v1 -0.3 = noise, CW is M=1 only). DEAD on the moe
+  board as ported (SQ stages, standalone: no PDL primary in front, so the gemm13 -> gemm2 hop it hides is shorter than
+  in-layer). Patch kept in /tmp/o11cw only (not committed): re-port from r-layer a269066 + notes above if ever wanted.
+- bs32 tk2h GS16 W3 + PF4 (layer TUNE_BASE T=32 "tk2h": 4): TK2H_P4 1 always (was DIAG-only), TK2H_M {32: 3}; main c75be69.
+  Bitwise vs tk2f (tools/o11/eq1.py 300 eager + 300 replay), test 15/15, H100 bs32 -0.4 (tie, DRAM-bound).
+- check b4e94b61 (c75be69) 2.3323x (CI 2.297-2.367): bs1 25.6, bs16 88.5, bs32 118.4 (x1.744), bs8 67.6, bs128 196.3
+  (x2.416), bs256 235.2. bs32 vs hotdyn-only check e59302f4 117.7 (x1.756): tk2h = tie on the board too.
+- SUBMIT 41ad7717 (same code) 2.3124x (CI 2.278-2.347): bs1 26.4, bs16 94.2 (slow draw), bs32 119.8, bs8 64.1, bs128 193.0,
+  bs256 230.3. Board keeps 2.3198 (e37e578e); no resubmit. Moe board 10-31: 4 checks, 2 submits (cap reached for today).
+- Takeaway: hotdyn+HOT128 at bs128 is the real gain (+1.2..2.4% on that shape in both checks); the ~0.5% overall win is inside
+  the run-to-run noise of the other shapes (bs16 swings 87-94 us between runs of untouched code).
