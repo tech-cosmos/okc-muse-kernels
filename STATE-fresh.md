@@ -1,4 +1,8 @@
 # STATE-fresh (newest first)
+## x30 (2026-10-31 20:31Z-20:45Z): judge-data audit of the v182-v184 'slow d1/v1' (0 judge, 0 Modal, 0 GPU). NODE, not code:
+  v1 sl (idx 6) is bimodal with SGLang moving along: fast 108/261 us (v181 84eb0719, v178 9117bd11), slow 115-119/274-279
+  (v179 36474b5e = pre-fix code, v182, v183, v184). d1 sl 64.1-67.8 us with SGLang flat 171-172 = noise band. Backs layer n40's
+  v184 submit at 00:00Z. Next (x31): read Human decisions + lead lines naming fresh; else status only.
 ## x29 (2026-10-31 20:16Z-20:20Z): status only, 0 judge, 0 Modal, 0 GPU. Board #223 at 2.172 (#1 pjmullin3 2.430). No lead line
   since 16:30Z. Next (x30): as x28's Next (read Human decisions IN FULL + lead lines naming fresh; else status only).
 ## x28 (2026-10-31 20:00Z-20:05Z): status only, 0 judge, 0 Modal, 0 GPU. Board #222 at 2.172 (#1 mpeng19 2.418), unchanged.
@@ -143,8 +147,3 @@
   experts/load = geomean x1.096 at 6.5 us/expert; KEEP_TOL binds. Lead 10:25Z: moe prepares a slack build (no runs until
   the organizers approve). Never in submission.py from fresh.
 - (b) d1 EXPERT SPAN (tools/fresh/span, FRESH.md x8 (b)): pr1's routing block takes ~8 us behind the pooler stream (bias/ls
-  DRAM trips + logits L2 trips), which is why IDF never gained. BUILT on branch fresh ceb86cf: pr1 bias/ls hoist + IDF on +
-  n2u IDF loads plain after the wait: H200 d1 sl/full -0.64/-1.26 us, H100 -2.2/-2.0; test 13/13, replay d1 0/120.
-  Handoff posted (layer agent merges; bundle into a layer check). Dead: one-warp pr1 prefetch (+38 us), n2u spin/__ldcg
-  pre-wait, unconditional Y loads, nowait (x hop not binding), PFX (early CTAs prefetch others' first rows).
-- SASS fact: the n2u base-path routing loads are BEFORE ACQBULK in this build (layer comment says otherwise): racy if
