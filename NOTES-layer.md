@@ -3819,3 +3819,14 @@ Status only. Board: layer #211 at 2.1874 (bc16338a v183), #1 pjmullin3 2.459. No
   fuzz 0/58, prep 63.8 s).
 - Judge: fresh's check 4a3434a9 on this exact code: raw 2.1959, fixed 2.1629 (d1 sl 64.4 best recent; v32 sl 340.3 slow
   draw). Below bar 2.1913 -> no submit; no re-check of identical code. Bundle with next candidate after 00:00Z.
+
+## n48 (2026-10-31 22:35Z-22:58Z, session 42): SUBMIT v185; 1 scored run
+- v185 (main, submission.py sha1 d837bea5 = f064596) met the lead 09:28Z rule: its own check 4a3434a9 raw 2.1959 (> board
+  2.1874, so within 1%), the targeted shape d1 sl at 64.4 us (v181-v184 checks 65.2-67.8), the only slower shape v32 sl 340.3
+  untouched by the T=1-only change and within per-shape noise (up to 10%), validate --quick ALL OK (n47). No 09:28Z-rule
+  submit used on 10-31 before this (v183's was by lead order).
+- SUBMIT fcb67ee9 = **2.2048x** (CI 2.172-2.238, score 10259.4 us, H200 node n-a7mrue...), checks ok, 13/13 tests pass,
+  prepare 91.4 s. NEW LAYER BOARD BEST (was bc16338a 2.1874), #180 (#1 pjmullin3 2.459).
+  Per-shape speedup (sl / full): d1 2.708 / 2.437, d16 2.109 / 2.156, d32 1.753 / 2.123, v1 2.410 / 2.276,
+  v16 2.057 / 2.038, v32 2.241 / 2.175. d32 sl stays the weakest shape. Tuner picks: T=16 {g30n:unpool, g30n:qkv_gate}, rest default.
+- Layer budget 10-31 left: 4 checks / 5 scored. Do not resubmit v185. Next: new code only.
