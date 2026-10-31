@@ -5571,7 +5571,8 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
       return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 4096 | (3 << 28)>(0, TK2F_ARGS0);
     }
 #endif
-    TORCH_CHECK(sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0 && (cfg == 204 || cfg == 84204), "moe_tk2f SQ: cfg ", cfg);
+    TORCH_CHECK(sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0 && (cfg == 204 || cfg == 84204 || cfg == 98204), "moe_tk2f SQ: cfg ", cfg);
+    if (cfg == 98204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 548>(0, TK2F_ARGS0);  // o13: layer d16 = SQ + BAL + PF 4
     if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 512>(0, TK2F_ARGS0);
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516>(0, TK2F_ARGS0);
   }
@@ -6445,6 +6446,7 @@ TK2S_M = {}  # n5s16: TK2S one-body consumer (x in smem, rolled stage loop): {M:
 TK2X2_M = {}  # n5s16: HYB2 = HYB with the 2-group rows in a __noinline__ function (cfg 1005W004 SQ): {M: W}
 TK2DT_M = {}  # n5s18: per-M deferred-TWO tk2f (16-token pair rows in their own loop after the 1-group rows): {M: 1}
 TK2X_M = {}  # n5s16: per-M HYB GS16 (tk2x_consume, SQ + PF4 -> moe_norm3) 2-group row weight W: {M: W}
+TK2F_BAL_M = {8, 16}  # o13: layer TUNE_BASE T=16 "bal" (moe n8 BAL, SQ PF 548). H200 DIAG 51ba444e (moe-board routings, 12 seeds x 2 interleaved): bs16 87.6 -> 86.5, bs8 68.1 -> 67.8 us; bitwise
 TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
 
 
@@ -6477,6 +6479,8 @@ def _tk2f_cfg0(M, st):
         return sa + 50000 + TK2X2_M[M] * 1000 + 4
     if M in TK2X_M and sa:  # n5s16 HYB (W >= 10: probe without the TWO body, wrong output)
         return sa + 60000 + TK2X_M[M] * 1000 + 4
+    if M in TK2F_BAL_M and sa:  # o13: layer TUNE_BASE T=16 "bal" (moe n8 BAL on SQ stages, PF 548)
+        return sa + 98204
     if M in TK2H_M:  # n6: {M: W}: GS16 tk2h + PF4 (moe_norm3), 2-group row weight (8 + W) / 8; SA only in TK2H_P4 builds
         return sa + 40000 + TK2H_M[M] * 1000 + 4
     if TK2W and M > 1:
