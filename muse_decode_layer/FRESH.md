@@ -692,3 +692,22 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   can hit at T=256. The 11 timed shapes: d32 sl 152.1 (v176 check 154.6), d16 full 200.8 (206.0), d1 full 71.9 (73.5),
   v1 sl 104.7 (110.5), v16 sl 258.4 (250.0); fixed-SGLang with v32 sl/full imputed from v176 = 2.1962 (v176 2.1913).
 - Next: Modal H200 A/B after 00:00Z (v176 vs v176 + x14 attn_src.py; d32 sl, v16 sl, d16 full), then the layer merges.
+
+## x15 (2026-10-31 15:32Z-16:20Z): lead 15:25Z "FRESH/LAYER: continue"; layer is checking v177 (= v176 + MRG 2 + x14). 0 judge, 0 Modal.
+- CORRECTION to x14 ('the judge's exact input passes locally'): the judge failed on REPETITION 1 of v32 sl (okc status
+  05077ac2ccc34568 --json: "recheck failed on repetition 1"), and each run also draws its own router seed (reference.py
+  weights_fields); tools/fresh/x14/repro_v32.py uses the case seed + our fixed router, i.e. NOT the failing input. So the
+  failing input was never reproduced. Race check by reading the code: NVS_PW's pre-wait producer reads only seq_lens, the page
+  table and OLD KV slots; the new tokens' K/V come from the consumer (after griddepcontrol.wait) in registers (isnew), so no
+  pre-wait read of qkv output or of slots written this call. Record: 2 routing fails in ~100 layer judge runs (f5fdc570 d1 rep
+  44 before any PDL attention, 05077ac2 v32 sl) = ~1-2 % per run: a tail every FP8-query implementation carries. The v177
+  check (layer n22s1) is the H200 evidence; if v32 sl fails again there, suspect NVS_PW first (flag NVS_PW 0 in attn_src.py).
+- H100 timelines on branch fresh (v176 + MRG 2 + x14, tools/n13/tlmed.py, 25 cold replays, seed 99):
+  d16 sl total 189.9: qkv 0-14.1 | csl -25.2 | o -29.8 | bnd -33.9 | pooler 28.4-54.2 || router_split/_routing -56.2 |
+  rmsnorm -56.9 | tk2f 56.8-167.3 (10 distinct local experts = 283 MB, 2.57 TB/s) | norm2 -169.9 | unpool -187.5 | bnd -189.9.
+  v1 sl total 142.3: qkv -14.6 | vtk -19.6 | o -26.0 | bnd -29.6 | pr8 18.7-50.4 | tk2f 50.7-133.7 (8 experts) | nu8 -139.0 | bnd2 -142.3.
+  Nothing new vs the record: the front chain qkv->attn->o->bnd (first-op cold reader + hops) and the pooler window are the known
+  items (proj n7s4/s46/s17, layer n10s1, FRESH x5 (2)); o already streams its W pre-wait.
+- Next (x16, after 00:00Z): Modal H200 A/B (my 20 GPU-min share): v176 vs v177 (or v176 + x14 attn_src / + MRG 2 separately if
+  v177's check is ambiguous), d32 sl+full, v16 sl, d16 full, `tools/h200.py muse_decode_layer base=<v176> cand=<cand> --cmd
+  'python bench.py bench submission.py decode 32'` (~3 GPU-min per load pair; one load per call, R small: x? 11-min timeout).
