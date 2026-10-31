@@ -1,5 +1,5 @@
 import json,glob,math
-jobs={"3e3b9fd3":"v153 SUBMIT (board)","60f02748":"v153 check","4787d92e":"v165 check","b87bd6aa":"v165 submit","725fc518":"v163+twm submit","3e39a051":"v162 check","7693598b":"v163 submit","af87d466":"v157 check","93027e57":"v166 check","59013cf5":"v167 check","a5b4ddab":"v168 check","8b4e6cf7":"v172 check","ae6c4bd3":"v172 submit","2d1f9256":"v174 check"}
+jobs={"3e3b9fd3":"v153 SUBMIT (board)","60f02748":"v153 check","4787d92e":"v165 check","b87bd6aa":"v165 submit","725fc518":"v163+twm submit","3e39a051":"v162 check","7693598b":"v163 submit","af87d466":"v157 check","93027e57":"v166 check","59013cf5":"v167 check","a5b4ddab":"v168 check","8b4e6cf7":"v172 check","ae6c4bd3":"v172 submit","2d1f9256":"v174 check","d8fc46c5":"v175 check","68c3ba66":"v175 submit"}
 rows={}
 for j,n in jobs.items():
     fs=glob.glob("/home/daytona/r-layer/muse_decode_layer/profiles/submission.%s*.json"%j)

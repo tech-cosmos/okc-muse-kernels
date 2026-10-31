@@ -3410,3 +3410,21 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
     104.26 vs 103.97 = TIE (+0.3). The routing trip after the wait is not what costs; the Y trip is, and it must stay behind
     the wait (or a per-row flag: spins dead on record n7s7/V2). DEAD below the 0.5 us gate. Not merged.
 - main: n2u comment corrected (comment only; submission.py rebuilt, test 13/13). Tools: /tmp/n16/mk.py (variant maker).
+
+## n17s1 (2026-10-31 14:20Z-14:40Z): v175 = v174 + RF_EARLY_ALL; 1 check + 1 submit (no new board best). Modal 0.
+- No lead line after 13:58Z ('late' maps to nothing, CW dead per fresh x12). Own item: fresh H100 d1/v1 timelines of v174
+  (tools/n13/tlmed.py, 25 cold replays). d1 full: qkv end 12.5 -> _gd_full 11.3 -> _red_fin end 27.3 (2.8 after gd) -> o end 32.8 ->
+  bnd 36.4. Standalone random-gather floor kernel (tools/n7s3_floor.py kernel, profiler duration) 8.6 us at 8x132 U4.
+- d1 full oracles (H100 timeline, wrong-output where noted): gathers-only (attx 11) gd 10.7 (math ~0.6), red_fin end unchanged;
+  no merge atomics (n17_nored) gd 10.7, red_fin end unchanged. -> red_fin's tail is not the atomics; o end follows o's own
+  post-wait W stream (G13_O PF 1 preloads half of the 12.6 MB). G13_O PF 2 (all W preloaded): DEAD (d1 full o end +1.4,
+  d1 sliding csl 4.4 -> 7.3, o end +2.7). rf_trig off: bnd end +0.4 (keep). red_fin trigger after its loads (A) / before its
+  out store (B): o end +0.5/+1.0 (dead).
+- RF_EARLY (trigger at _red_fin entry, before its wait; variant n17_rfC): d1 full tie (gd +2 but o -0.3), but BATCHED full
+  wins: ab_files 'full' 4 rounds x 2 copies: d16 full 291.8/293.1 -> 290.1/290.2, d32 414.7/414.5 -> 412.7/412.3; repeat
+  6 rounds: d16 291.9/292.5 -> 290.3/290.2, d32 412.9/412.8 -> 411.0/410.3. v1/v16/v32 full noise (v16 full slot-2 +1.9 twice,
+  slot-1 tie). Built as attn_src RF_EARLY_ALL (TRIG constexpr 0/1/2; batch > 1 -> 2). Safe: _red_fin launches only after all
+  _gd_full programs started (gd triggers at entry), o's wait still covers _red_fin. test 13/13, replay_test decode 0/120.
+- CHECK d8fc46c5 v175 (da9b87c) 2.1705x, fixed-SGLang 2.1846 (best on record; v174 check 2.1641/2.1514). H200 d16 full 200.7,
+  d32 full 304.8 (v174 board 199.2/304.1: the H200 gain is not visible inside the noise). SUBMIT 68c3ba66 2.1641x (fixed
+  2.1677) < board 2.1717: board unchanged. Don't resubmit v175 unchanged. Layer 10-31: 2 checks, 2 submits used (cap 2 reached).
