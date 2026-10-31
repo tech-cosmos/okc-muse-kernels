@@ -3270,3 +3270,8 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   n27; layer n30/n31, fresh x21). Nothing to build without a lead call on fresh x20's hand-written lockstep T=128 GEMM.
 - NEXT: 00:00Z dev/n15/mk_h200.sh (pr8 v1 flat/NOW/TK1; build only if flat <= -1 us v1 sl on the H200). Asked lead (COORD
   Requests) to pause proj until then or name a lane.
+
+## n29 (2026-10-31 19:10-19:20Z, unattended session 17): status only; 0 judge runs, 0 Modal
+- No lead reply to n28's pause request; no new proj item in COORD. Board: proj #480, 1.386x (813c5e7a).
+- Pre-flight for 00:00Z: `bash muse_bf16_proj/dev/n15/mk_h200.sh --dry` against r-layer main v182 (856cc18): pr8_n15.diff applies,
+  build OK, base/now/tk1 overlays generated. Run it without --dry after 00:00Z (gate: flat <= -1 us v1 sl on the H200).
