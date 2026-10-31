@@ -106,6 +106,63 @@ def strip_comments(src):
 HEADER = "# okc: problem=muse_decode_layer\n"
 assert out.startswith(HEADER)
 out = HEADER + strip_comments(out[len(HEADER):])
+
+
+_CUDA_MARK = re.compile(r"__global__|__device__|#include")
+
+
+def strip_cuda_comments(src):
+    """n27 (session 21): the CUDA sources are triple-quoted Python strings; their // comments were ~90 KB of the 1 MB
+    cap. Drop whole-line // comments and trailing // comments inside triple-quoted (non-f) string tokens that hold CUDA
+    (__global__/__device__/#include). The sources the compiler sees are only comment-stripped: tools/n27/srccmp.py checks
+    this against the previous build (every load_inline source, after the runtime text patches)."""
+    lines = src.split("\n")
+    offs = [0]
+    for ln in lines:
+        offs.append(offs[-1] + len(ln) + 1)
+    toks = list(tokenize.generate_tokens(io.StringIO(src).readline))
+    frags = set()  # comment fragments named by other string literals (runtime text-patch anchors): those comments stay
+    for t in toks:
+        if t.type == tokenize.STRING and "//" in t.string and not _CUDA_MARK.search(t.string):
+            try:
+                v = ast.literal_eval(t.string)
+            except Exception:
+                v = t.string
+            if isinstance(v, str):
+                frags.update(f.split("\n")[0].strip() for f in v.split("//")[1:])
+    frags.discard("")
+    edits = []
+    for t in toks:
+        if t.type != tokenize.STRING:
+            continue
+        body = t.string
+        q = body.lstrip("rRbBuU")[:3]
+        if q not in ('"""', "'''") or not _CUDA_MARK.search(body):
+            continue
+        out_lines = []
+        for k, ln in enumerate(body.split("\n")):
+            i, inq = 0, False  # first // outside a "..." C string literal
+            while i < len(ln) and (inq or ln[i:i + 2] != "//"):
+                inq ^= ln[i] == '"' and (i == 0 or ln[i - 1] != "\\")
+                i += 1
+            i = -1 if i >= len(ln) else i
+            if k == 0 or i < 0 or any(ln[i + 2:].strip().startswith(f) or f.startswith(ln[i + 2:].strip()) for f in frags):
+                out_lines.append(ln)
+            elif ln[:i].strip() == "":
+                continue
+            else:
+                assert not ln.rstrip().endswith("\\"), ln
+                out_lines.append(ln[:i].rstrip())
+        a = offs[t.start[0] - 1] + t.start[1]
+        b = offs[t.end[0] - 1] + t.end[1]
+        assert src[a:b] == body
+        edits.append((a, b, "\n".join(out_lines)))
+    for a, b, rep in reversed(edits):
+        src = src[:a] + rep + src[b:]
+    return src
+
+
+out = strip_cuda_comments(out)
 assert len(out.encode()) < 1_000_000, f"submission.py is {len(out.encode())} bytes (judge limit 1,000,000)"
 (here / (sys.argv[1] if len(sys.argv) > 1 else "submission.py")).write_text(out)
 import ast as _ast
