@@ -3004,3 +3004,10 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Tuner pick noise across 4 judge runs (eb166/a93d/8494/dba1): o m16 picked F.linear once (7.10 vs lt394 6.4-6.75), o m8 None vs
   lt393 (6.74 vs 6.34-6.56); rest within ~0.3-0.5 us noise. Candidate: pin o m16 lt (66,394,..,7,4) and o m8 lt (66,393,..,3,4) (~0.3-0.5 us).
 - Budget 10-31: proj checks 2/20, scored 1/10. 0 Modal.
+- 14:40-14:55Z: _tune re-times near-ties (<= 4% of best, top 4) with 4x reps (19bf538). check 5b420410 1.3761 [1.355, 1.397]:
+  noise vs dba12fb4 (per shape +-0.3..0.7 us both ways, sum +0.56 us; o m16 now lt394 6.36 vs F 7.10). Not submitted; kept on main
+  for robustness in the final reruns. Board after dba12fb4: proj #474 (was #503). Budget 10-31 end: checks 3/20, scored 1/10.
+- NEXT (ranked): (1) v16 m128 gap (~25 us vs fit) is the only big proj-board item; every own design on record lost to nvjet
+  (ingest wall ~50 GB/s/SM, split-K red); flashinfer in the judge image lists tinygemm_bf16 / trtllm_low_latency_gemm / mm_bf16
+  (diagext line): untested at m128 -> a one-check diag (print only) of those vs the lt pick is cheap. (2) router m16/m32 zero kernel
+  (0.7-1.1 us) needs an intra-CTA K split + small cluster (clusters of 16 dead). (3) layer lane per lead.
