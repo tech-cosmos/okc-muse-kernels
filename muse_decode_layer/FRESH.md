@@ -910,3 +910,8 @@ o has x: 1.8 us); v1 = first loads after entry (1.8) and merge -> store (1.0) + 
 - BUILT on branch fresh: layer.py CSL_PW_TOKENS (16, 1); attn_src.py carveout only for the FP32-qkv (T=16) PW instance.
   d1 sl/full graph_eq vs v183 BITWISE (8 inputs); pw_race d1 20/20 split 0 (joint2 positive control 20); d16 differences
   1e-3 are base-vs-base noise (same).
+- Judge check 4a3434a9 (f064596): checks ok, raw 2.1959, fixed-SGLang 2.1629 (v183 662fa349 2.1576); d1 sl 64.4 vs v181-v184
+  checks 65.2-67.8 (consistent with -1.3, within noise); v32 sl 340.3 = slow draw on an untouched shape. Handoff posted.
+- Not built (under the 1 us gate): v1 vtk early start (16-CTA clusters wait for free GPCs beside g14; bound ~0.5 us: KV is
+  already in by ~1 us after the wait), flag-spin instead of the PDL waits (record: BND_SPIN lost, n5s14).
+- Next: H200 A/B after 00:00Z: tools/fresh/x35/mk_h200.sh (d1 sl only, ~3-4 GPU-min).

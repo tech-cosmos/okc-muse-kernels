@@ -1,4 +1,12 @@
 # STATE-fresh (newest first)
+## x35 (2026-10-31 21:47Z-): lead 21:50Z stamps of d1 sl / v1 sl attention in-layer (H100; FRESH.md x35, tools/fresh/x35/astamp.py).
+  d1 hops: qkv end -> csl q ready 2.7 us (launch 1.3 + first loads 1.2), KV 0.3, QK/PV 0.55, cluster 0.35, merge->store 0.9,
+  store -> o g13 has x 0.85. v1: vtk first loads 1.8, wait 1.2 after g14's last CTA, merge->store 1.0; vtk can't start early
+  (16-CTA clusters don't fit beside g14). BUILT (branch fresh f064596): CSL_PW_TOKENS (16, 1) + csl smem carveout 100 only for
+  the T=16 instance: s62's d1 loss WAS the carveout. H100 d1 sl -1.2..-1.4 us (ab_files mirrored, pinned), d1 bitwise vs
+  v183, pw_race d1 0/20, validate ALL OK (prep 60.8 s). d16 keeps the carveout (removing it +0.8 us). Judge check: see below.
+  Check 4a3434a9: ok, raw 2.1959 / fixed 2.1629 (v183 2.1576), d1 sl 64.4 (v181-184: 65.2-67.8). Handoff posted. 4/6 checks 10-31.
+## Next (x36): Human decisions + lead lines. After 00:00Z: tools/fresh/x35/mk_h200.sh (H200 A/B d1 sl, ~3-4 GPU-min of my 20).
 ## x34 (2026-10-31 21:31Z-21:55Z): lead 21:25Z question answered: v174 (c62cdb0 submission.py = 50534b24) CRASHES on non-SA
   weights (layer tools/n37/nonsa.py, H100: tuner skips all, first test raises 'MOE_PRUNE: tk2f cfg 84204 not built'). All v157..v182
   have it; generator weights are always SA. Posted under COORD Requests. 0 judge, 0 Modal. Next (x35): after 00:00Z, x24 H200
@@ -140,11 +148,3 @@
 ## x9 (2026-10-31 11:44Z-~13:15Z): lead 11:25Z items (tk2f re-stamp + DRAM-trip hunt d1/v1): NOTHING >= 0.5 us. 0 judge, 0 Modal.
 - FRESH.md x9 has the numbers. Found + fixed bitwise but NEUTRAL in the layer (not kept): pr1 routing's 8 logits loads
   serialized in SASS (8 L2 trips) and cold unrolled top-8 (~18 KB code, 6.5 us -> 1.6 us with unroll 1) = routing ~3 us
-  earlier, but under IDF it is off the critical path; tk2f entry 4x tk2w_bound rolled (-6 KB cold code): neutral.
-- New mechanism (microbench tools/fresh/icache): first execution of straight-line code ~0.8 us/16 KB extra, much worse
-  under a DRAM stream; slope oracles: n2u tail <= 0.35 us (dead), tk2f entry steep only above ~8 KB added.
-- SASS audit d1: g13 clean; n2u/nu8 w1 vector sunk after the wait by ptxas: L2-prefetch oracle -0.25 us (below gate).
-- v1 stamps: pr8 routing off the critical path by ~5 us; tk2f v1 prologue ~2 us + first data 1.8-4 us -> posted for moe.
-- Late tk2f CTA at d1 (+3 us, rmsnorm SM; bound <= ~1 us): grid nsm-1 oracle bitwise eager but HANGS in graph replay; dropped.
-- Pitfall: ab_files file [0] runs ~0.5-1.5 us fast (position bias); use base,c,c,base.
-## Next (x10): read Human decisions IN FULL. My d1/v1 latency list is exhausted at the 0.5 us gate on the H100. Open only
