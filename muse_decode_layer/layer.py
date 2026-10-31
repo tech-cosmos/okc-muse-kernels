@@ -729,6 +729,10 @@ def prepare(weights):
         "hi_stream": _own_stream(weights["qkv_gate"].device, priority=-1),
     }
     _join_builds()
+    global _MOE_NSA, _moe__LIB
+    if _MOE_NSA == _moe_weights_sa(weights):  # n37: non-SA weights crashed (MOE_PRUNE kept SA tk2f only): rebuild the lib
+        _MOE_NSA = not _MOE_NSA
+        _moe__LIB = None
     state["moe"] = _moe_prepare({"w13": weights["w13"], "w13_sf": weights["w13_sf"], "w13_gs": weights["w13_gs"],
                                  "w2": weights["w2"], "w2_sf": weights["w2_sf"], "w2_gs": weights["w2_gs"],
                                  "post_norm_w": weights["post_expert_norm"]})
@@ -1954,6 +1958,9 @@ _MOE_TK2F_PRUNED = """
     TORCH_CHECK(nr == 8, "tk2f CW: T = 1 only");
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4 | 8192>(0, TK2F_ARGS0);
   }
+#ifdef MOE_NSA
+  if (!bal && cfg == 84204) return tk2f_go<8, 4, 2, false, false, false, 8, 0, 4>(0, TK2F_ARGS0);  // n37: non-SA weights only
+#endif
   TORCH_CHECK(!bal && cfg == 184204, "layer MOE_PRUNE: tk2f cfg ", cfg, " not built");
   return tk2f_go<8, 4, 2, false, false, true, 8, 0, 4>(0, TK2F_ARGS0);
 #undef TK2F_ARGS0
@@ -1975,11 +1982,21 @@ def _moe_prune(src):
     return src[:a] + _MOE_TK2F_PRUNED.rsplit("}\n", 1)[0] + src[b:]
 
 
+_MOE_NSA = False  # n37: set by prepare() when a block scale is zero / subnormal / negative (moe st["sa"] False)
+
+
+def _moe_weights_sa(weights):  # = moe_src prepare()'s st["sa"] test
+    sfb = [weights[k][:LOCAL_EXPERTS].contiguous().view(torch.uint8) for k in ("w13_sf", "w2_sf")]
+    return all(bool((((b & 0x80) == 0) & ((b & 0x78) != 0) & (b != 0x7F)).all()) for b in sfb)
+
+
 def _moe__lib():  # = moe_src's _lib() + moe_set_upf
     global _moe__LIB
     if _moe__LIB is None:
         from torch.utils.cpp_extension import load_inline
         src = _moe_CUDA_SRC.replace("#define TK2F_DIAG 0", "#define TK2F_DIAG 1") if _moe_TK2F_DIAG else _moe_CUDA_SRC  # s81
+        if _MOE_NSA:  # n37: + the non-SA tk2f PF4 (84204) that MOE_PRUNE drops; held-out weights only (import builds SA)
+            src = "#define MOE_NSA 1\n" + src
         if _moe_TK2F_ORX:  # n5s25: oracle probes (pruned dispatch kept: tk2f_go adds the PF bits)
             src = src.replace("#define TK2F_ORX 0", "#define TK2F_ORX 1")
         if MOE_PRUNE and not _moe_TK2F_DIAG:
