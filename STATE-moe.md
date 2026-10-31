@@ -1,4 +1,4 @@
-## o18 17:05Z 10-31: main 2ab9ba1 = 34dd790 + proj n21 HOT_SL (balanced >128-token expert slices in moe_hot) + SLW
+## o18 16:57Z 10-31: main 2ab9ba1 = 34dd790 + proj n21 HOT_SL (balanced >128-token expert slices in moe_hot) + SLW
 ## (slice path: hot working CTAs = max(32, 132*16s/(16s+5*others)); fixes H100 seed-115 +11.5 us mode). Bitwise, test 15/15.
 ## Check db1cf043 2.3494x (bs256 225.7). H200 DIAG2 e93ab795 (old hot vs new, 40 >128-token + 8 control bs256 inputs,
 ## tools/o18/diag2): -13.9 us 40/40, controls +0.4 -> bs256 ~-5 us mean. H200 DIAG 50c32442: SLW / base-0 = tie (1 >=4-slice

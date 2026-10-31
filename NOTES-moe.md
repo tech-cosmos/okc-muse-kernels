@@ -3936,7 +3936,7 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   tools/o11/ab.py 8 seeds x 4 rounds: bs128 -0.12, bs256 -0.07 us = TIE (seed spread +-3) -> NOT ported. Moe main stays
   34dd790. Tools: tools/o17/mk.py (variant writer: fix, delay), printf_poll.py (eager poll printf driver). 0 judge runs.
 
-## o18 (2026-10-31 16:27Z - ): proj n21 HOT_SL onto the moe board bs256 + SLW (slice-aware moe_hot CTA count)
+## o18 (2026-10-31 16:27Z - 16:57Z): proj n21 HOT_SL onto the moe board bs256 + SLW (slice-aware moe_hot CTA count)
 - Applied r-proj dev/n21/hotsl_moe_board.diff (balanced >128-token slices in moe_hot, twm skips every >64 expert) on
   34dd790. Test 15/15, proj stress.py vs 34dd790: eager 180/180 bitwise, replay bs256/257 120/120.
 - H100 ab_moe.py (seeds 100-115, 3 rounds): >128 inputs -2.7 mean BUT seed 115 [256,192 + 26 others] +11.5 us
