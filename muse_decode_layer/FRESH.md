@@ -685,3 +685,10 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   pin TUNE (sed 's/^TUNE = {1: /TUNE = {} and {1: /') for A/B of whole files.
 - Correctness: test 13/13; graph_eq (pinned) d32 sl / v16 sl / v32 sl bitwise, d16/d32 full ids equal + diffs at the
   base-vs-base atomics level; replay_test 0 fails (sliding 0/360, verify 0/360, decode 0/360, all 12 loads 0/240).
+- CHECK 05077ac2 (main v176 + x14 attn_src.py, no MRG 2): FAIL at v32 sl recheck rep 1 (routing: token 129 dropped
+  expert 218, 3.05e-02 > 0.03). Not a race: x14 is bitwise vs off at v32 sl (graph_eq), the judge's exact input passes
+  locally on v176 and x14 with identical errors (tools/fresh/x14/repro_v32.py), and route_judge v32 sl worst margins are
+  identical for v176 and x14 (0.0202/0.0229, FP8 reference's own 0.0213/0.0233 over 80 inputs): a tail draw any run
+  can hit at T=256. The 11 timed shapes: d32 sl 152.1 (v176 check 154.6), d16 full 200.8 (206.0), d1 full 71.9 (73.5),
+  v1 sl 104.7 (110.5), v16 sl 258.4 (250.0); fixed-SGLang with v32 sl/full imputed from v176 = 2.1962 (v176 2.1913).
+- Next: Modal H200 A/B after 00:00Z (v176 vs v176 + x14 attn_src.py; d32 sl, v16 sl, d16 full), then the layer merges.

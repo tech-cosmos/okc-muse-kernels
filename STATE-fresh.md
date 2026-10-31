@@ -1,4 +1,15 @@
 # STATE-fresh (newest first)
+## x14 (2026-10-31 15:00Z-): lead 15:00Z early-trigger audit. FOUND: the attention kernels after qkv were not PDL. FRESH.md x14.
+- Built on branch fresh (attn_src.py only): NDS_PW (nds = qkv's PDL secondary, KV producer pre-wait, trigger after the
+  consumer's wait), NVS_PW (same for nvs), GD_PW (batched _gd_full), CB_HB_TRIG on. H100 pinned-tuner A/B: d32 sl -3.1
+  (ab_flag CB_HB_TRIG another -1.4/-1.6), v16 sl -0.7, GD_PW d16 full -2.2 (ab_flag) / tie (pinned); rest noise. Exact:
+  test 13/13, graph_eq bitwise on sliding, replay 0 fails everywhere.
+- Check 05077ac2 (main v176 + x14 attn_src.py) FAILED on a v32 sl routing tail draw (margin 0.0305 > 0.03; outputs
+  identical to v176, same local margins): no score. 11 shapes: d32 sl 152.1 vs 154.6; fixed-SGLang (v32 imputed) 2.1962.
+  Handoff posted (layer merges attn_src.py). Checks today: 2 of 6 used.
+## Next (x15): after 00:00Z Modal H200 A/B v176 vs v176+x14 attn_src (d32 sl, v16 sl, d16 full; ~3 GPU-min) and the
+  x13 MRG 2 A/B (d32). Untried same-pattern items: _attn_split (v1 full, ~0.6 us start gap, .033 %/us) - small.
+- Rule learned: whole-file A/Bs with the tuner on compare different tuner picks; pin TUNE for A/B and graph_eq.
 ## x13 (2026-10-31 14:27Z-15:10Z): lead 14:30Z CW for T=8 / T=16/32. 1 judge check (9eeab096), 0 Modal. FRESH.md x13.
 - T=8 CW built (segment-major CwIt, bitwise 300+300) but H100 v1 NEUTRAL; no-wait oracle v1 <= 0.5 us, d16 BAL no-wait
   -0.3/0: CW closed at T=8/16 (stream hides the transition). Patch tools/fresh/cw/cw8_sm_neutral.patch (not kept).
