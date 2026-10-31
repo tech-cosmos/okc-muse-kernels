@@ -658,3 +658,30 @@ tools/fresh/icache (i-cache microbenches). All numbers H100, d1 sl unless noted,
   306.3. In-run tuner T=32 sl default 157.7 (v176 check 148.5, v175 164.1): too noisy to resolve 2-3 us. NOT confirmed
   on the H200; with moe's H200 PSC = 0 on record, treat as unproven. Decisive next: Modal H200 A/B after 00:00Z,
   `tools/h200.py muse_decode_layer base=<main v176 submission.py> cand=<fresh submission.py> --cmd 'python bench.py bench submission.py decode 32'` (~3 GPU-min).
+
+## x14 (2026-10-31 15:00Z-, lead 15:00Z: where RF_EARLY's wins came from; does the early-trigger pattern apply elsewhere?)
+- RF_EARLY (layer n17s1) = the merge kernel triggers at entry, so o (a PDL secondary that fills its W ring pre-wait)
+  launches as soon as the merge's programs are resident instead of after the merge's wait. The general pattern: a kernel
+  whose pre-wait work is input-only (weights, KV of old tokens, page tables) should be a PDL secondary and launch early;
+  its trigger must stay AFTER its wait whenever its own secondary reads a predecessor's output pre-wait (_combine_hb and
+  _red_fin load the qkv gate before their gdc_wait).
+- Audit (H100 tools/n13/tlmed.py, v176, all 12 loads): o d1/v1, unpool, n2u/nu8, bnd2, pooler are already early-launched
+  (or set by resources: d32 g30k pooler waits for o's CTAs to leave; v1 front = pr8's stream, s88/n5s5). The gaps were
+  the ATTENTION kernels after qkv: nds (d32 sl), nvs (v16/v32 sl), _gd_full (d1/d16/d32 full), _attn_split (v1 full)
+  were launched with plain <<<>>> / no launch_pdl: they started only after qkv drained (d32 sl nds 15.8 vs qkv end 15.0).
+- Built (attn_src.py; submission 998 KB: nds's duplicate line comments dropped for the 1 MB cap):
+  * NDS_PW: nds via cudaLaunchKernelEx + ProgrammaticStreamSerialization; the KV producer warpgroup (seq_lens, page
+    table, old KV slots: inputs only) runs pre-wait; the consumer does griddepcontrol.wait, then launch_dependents, then
+    qkv. Timeline d32 sl: nds starts 1.5 us (during qkv), qkv +0.9, nds end 27.9 -> 24.9, o end 37.9 -> 33.8, pooler end -4.7.
+  * NVS_PW: the same for nvs (verify sliding T=16/32). nvjet qkv never triggers early, so only ~0.3 us of start.
+  * GD_PW (batch > 1 only; d1 full keeps QF and is bitwise unchanged): _gd_full launch_pdl + wait before the queries.
+    d1 full form measured tie (latency-bound gathers), so excluded.
+  * CB_HB_TRIG on: with NDS_PW, _combine_hb launches only after nds's wait, so its entry trigger lets o fill its ring under
+    the merge (n5s4 had measured it as noise without NDS_PW).
+- H100 (ab_files, TUNE pinned off, 4 rounds off,on,on,off; all x14 changes): d32 sl 182.7/182.5 -> 178.6/180.4 (-3.1),
+  v16 sl -0.7, v32 sl -0.2, d32 full -0.5, rest noise. ab_flag (one state): GD_PW d16 full 292.1/291.8 -> 289.6/289.9
+  (-2.2; pinned-tuner run: tie, so it depends on the qkv pick), CB_HB_TRIG d32 sl -1.4/-1.6 (seeds 99/7).
+  CAUTION: ab_files/graph_eq with the tuner ON compare different tuner picks per file (d16 full qkv g24 vs g30 seen);
+  pin TUNE (sed 's/^TUNE = {1: /TUNE = {} and {1: /') for A/B of whole files.
+- Correctness: test 13/13; graph_eq (pinned) d32 sl / v16 sl / v32 sl bitwise, d16/d32 full ids equal + diffs at the
+  base-vs-base atomics level; replay_test 0 fails (sliding 0/360, verify 0/360, decode 0/360, all 12 loads 0/240).
