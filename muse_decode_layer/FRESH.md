@@ -448,3 +448,35 @@ v32 fu    21.40         17.62        3.77     24.5
   1.096 v16, 1.077 v32; geomean x1.096 (2.14 -> ~2.35). Upper-ish bound: at v16/v32 the dropped experts' routes move
   to hot experts (more MMA), and 6.5 us/expert is the d1 bytes cost. Still: it is the size of the gap to #1 (2.42/2.14 =
   1.13), so top teams exploiting it would explain much of their lead. Item closed per lead (table, then stop).
+
+## x8 (b) d1 EXPERT SPAN (lead 09:55Z): per-CTA stamps in-layer -> pr1 routing latency -> IDF re-opened and built
+Tools tools/fresh/span/: mkstamp.py (stamped copy of a submission: tk2f per-CTA + pr1 block/routing stamps + oracle
+modes; anchors are the PRE-x8 pr1 source = branch fresh 3962180), run.py (stamps), ab.py / ab2.py (oracle A/B).
+H200 in-layer d1 sl, us from tk2f's first CTA entry (h200_d1sl.txt, h200_pr1.txt), E2 inputs:
+```
+pr1 entry -19.2 | router blocks end -12.0 (31 of 32) | routing block: ticket -11.8, scores loaded -3.84 (!), top8 -2.05,
+ids written -1.54 | pooler blocks end -4.1 / -3.1 med / -1.54 max | tk2f entry 0 (rmsnorm already done: 0.00-0.26)
+| routed 1.54 | first TMA 2.05-2.30 | first data 3.84 | ph1 end 14.08 med (max 14.6) | cnt ok 15.1 | ph2 data 15.4 | end 19.5-19.7
+```
+- tk2f span in-layer = 6.9 us/expert + ~5.7 fixed (first data 3.84 + transition ~1.3 + tail ~0.3). The lead's 26 us was a
+  wider timeline span (PDL early launch + n2u overlap); on these routings E2 = 19.7, E3 = 26.4.
+- rmsnorm is complete when tk2f enters (stamp: griddepcontrol.wait at entry returns at 0.0-0.26 us), so tk2f's 2.3 us
+  routing prologue is fully exposed (moe n7s33 assumed it overlaps the rmsnorm).
+- NEW: pr1's routing block spends ~8 us (H200; ~11 H100) loading 256 scores: `__ldg(router_bias)` + `__ldg(local_start)`
+  are DRAM trips queued behind the pooler's W stream. So routing is published only ~1.5 us before pr1 ends.
+  That is the flaw in the IDF record (layer n7s7/n7s8, moe n7s33 'bound = 0'): IDF's early tk2f spun on a flag that came
+  at -1.5 us, so it never had an early routing.
+- Single-warp L2 prefetch of the routed experts' first w13 rows from pr1's routing block: +38 us per row/CTA (bulk
+  prefetch issue from one SM is ~250 GB/s): dead as designed.
+- Oracle (ab2.py, interleaved graphs, 5 seeds, all bitwise): H200 d1 sl/full vs base: hoist 0/-0.1; hoist+IDF (n2u IDF
+  path, __ldcg) +1.3/+2.0; hoist+IDF+n2u base path -1.84/-1.54 (gate 1.5 PASS); IDF without hoist +3.0/+2.5.
+- BUT the n2u base path is racy under IDF: SASS (cuobjdump of the g10 lib) shows its ids/tw loads BEFORE ACQBULK (the
+  layer comment saying ptxas sinks them is not true for this build). n2u IDF path with plain loads after the wait (SASS:
+  LDG.E.CONSTANT after ACQBULK; __ldcg compiles to LDG.E.STRONG.GPU and costs ~3 us) = safe.
+- BUILT (branch fresh): pr1_src.cu bias/ls hoisted to smem before the wait (bitwise); layer.py n2u IDF loads plain after the
+  wait; IDF_DEFAULT True. bench test 13/13; replay_test d1 0/120 (3 routers x 20 x sl/full). H100 ab_files: d1 sl 85.6 ->
+  83.4 / 86.1 -> 84.1, full 106.1 -> 104.1 / 106.3 -> 103.8. H200 ab_files 8 rounds: sl 70.94 -> 70.30 (-0.64), full 86.30
+  -> 85.04 (-1.26) = ~+0.18% score. Below the gate at d1 sl on the H200 as built (the oracle's extra ~1 us was the racy
+  pre-wait n2u read).
+- Tried, worse on H100 (not kept): V2 n2u flag spin + __ldcg pre-wait (+1.8/+0.7 vs base); V3 every slot's Y loaded
+  unconditionally to overlap the post-wait routing trip (+1.1/+0.3 vs V1).

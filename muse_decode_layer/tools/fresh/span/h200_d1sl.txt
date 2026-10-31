@@ -1,0 +1,12 @@
+
+===== st (rc 0)
+decode 1 sliding s7 E1 CTAs 132 graph 63.9: entry 0.00/0.00/0.26  routed 1.54/1.54/1.79  prodTMA 2.05/2.30/2.30  pastwait 2.05/2.05/2.30  ph1data 3.33/3.84/4.10  ph1end 6.66/9.47/9.73  cntok -6019270.14/10.50/10.50  ph2data -6019269.89/10.75/10.75  end 6.91/12.80/12.80
+decode 1 sliding s11 E3 CTAs 132 graph 78.6: entry 0.00/0.00/0.26  routed 1.54/1.54/1.54  prodTMA 2.05/2.05/2.30  pastwait 2.05/2.05/2.30  ph1data 3.33/3.84/4.35  ph1end 16.90/18.43/18.69  cntok 19.71/19.71/19.97  ph2data 19.71/19.97/20.22  end 24.32/26.37/26.62
+decode 1 sliding s13 E2 CTAs 132 graph 70.9: entry 0.00/0.00/0.26  routed 1.54/1.54/1.79  prodTMA 2.05/2.30/2.30  pastwait 2.05/2.05/2.30  ph1data 3.33/3.84/4.35  ph1end 12.29/14.08/14.34  cntok 15.10/15.10/15.36  ph2data 15.36/15.36/15.62  end 17.41/19.46/19.71
+decode 1 sliding s17 E2 CTAs 132 graph 70.9: entry 0.00/0.26/0.26  routed 1.54/1.54/1.79  prodTMA 2.05/2.30/2.30  pastwait 2.05/2.30/2.30  ph1data 3.33/3.84/4.10  ph1end 12.29/14.08/14.59  cntok 15.10/15.36/15.36  ph2data 15.36/15.62/15.62  end 17.66/19.71/19.97
+decode 1 sliding s99 E3 CTAs 132 graph 78.7: entry 0.00/0.26/0.26  routed 1.54/1.54/1.79  prodTMA 2.05/2.30/2.30  pastwait 2.05/2.05/2.30  ph1data 3.33/3.84/4.35  ph1end 16.90/18.43/18.94  cntok 19.71/19.71/19.97  ph2data 19.97/19.97/20.22  end 24.32/26.37/26.88
+decode 1 sliding s23 E2 CTAs 132 graph 70.9: entry 0.00/0.26/0.26  routed 1.54/1.54/1.79  prodTMA 2.05/2.30/2.30  pastwait 2.05/2.30/2.30  ph1data 3.33/3.84/4.10  ph1end 12.29/14.08/14.34  cntok 15.10/15.10/15.36  ph2data 15.36/15.36/15.62  end 17.41/19.46/19.71
+decode 1 sliding s29 E3 CTAs 132 graph 78.0: entry 0.00/0.00/0.26  routed 1.54/1.54/1.79  prodTMA 2.05/2.05/2.30  pastwait 2.05/2.05/2.30  ph1data 3.33/3.58/4.10  ph1end 16.90/18.43/18.94  cntok 19.97/20.22/20.22  ph2data 20.22/20.22/20.48  end 24.58/26.62/27.14
+
+
+h200: charged 2.3 GPU-min; 12 of 60 used today

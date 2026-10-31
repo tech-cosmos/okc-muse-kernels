@@ -1,0 +1,14 @@
+   pr1 (us vs tk2f first entry): entry -19.20 | router blocks (32) end med -12.03 max -1.54 | routing written -1.54 | pooler blocks (100) end min -4.10 med -3.07 max -1.54 | routing: last pre-ticket -12.80 post-ticket -11.78 scores loaded -3.84 top8 -2.05
+decode 1 sliding s11 E3 CTAs 132 graph 78.4: entry 0.00/0.00/0.26  routed 1.54/1.54/1.79  prodTMA 2.05/2.30/2.30  pastwait 2.05/2.30/2.30  ph1data 3.33/3.84/4.61  ph1end 16.90/18.69/19.20  cntok 19.97/19.97/20.22  ph2data 20.22/20.22/20.48  end 24.58/26.88/27.14
+   pr1 (us vs tk2f first entry): entry -19.20 | router blocks (32) end med -12.29 max -1.79 | routing written -1.79 | pooler blocks (100) end min -4.10 med -3.33 max -1.79 | routing: last pre-ticket -13.06 post-ticket -11.78 scores loaded -4.10 top8 -2.30
+decode 1 sliding s17 E2 CTAs 132 graph 70.8: entry 0.00/0.00/0.26  routed 1.54/1.54/1.79  prodTMA 2.05/2.30/2.30  pastwait 2.05/2.05/2.30  ph1data 3.33/3.84/4.10  ph1end 12.29/14.34/14.85  cntok 15.36/15.36/15.62  ph2data 15.62/15.62/15.87  end 17.66/19.97/19.97
+   pr1 (us vs tk2f first entry): entry -19.46 | router blocks (32) end med -12.03 max -1.28 | routing written -1.54 | pooler blocks (100) end min -4.10 med -3.07 max -1.54 | routing: last pre-ticket -13.06 post-ticket -11.78 scores loaded -3.84 top8 -2.05
+decode 1 full s13 E2 CTAs 132 graph 82.6: entry 0.00/0.00/0.26  routed 1.54/1.54/1.79  prodTMA 2.05/2.30/2.30  pastwait 2.05/2.05/2.30  ph1data 3.33/3.84/4.10  ph1end 12.03/14.08/14.34  cntok 15.10/15.10/15.36  ph2data 15.36/15.36/15.62  end 17.66/19.71/20.48
+   pr1 (us vs tk2f first entry): entry -20.74 | router blocks (32) end med -12.80 max -1.54 | routing written -1.79 | pooler blocks (100) end min -4.35 med -3.33 max -1.54 | routing: last pre-ticket -13.31 post-ticket -12.29 scores loaded -3.84 top8 -2.05
+decode 1 full s11 E3 CTAs 132 graph 90.1: entry 0.00/0.00/0.00  routed 1.54/1.54/1.79  prodTMA 2.05/2.30/2.30  pastwait 2.05/2.05/2.30  ph1data 3.33/3.84/4.10  ph1end 16.38/18.69/19.20  cntok 19.97/19.97/20.22  ph2data 20.22/20.22/20.48  end 24.58/27.14/27.39
+   pr1 (us vs tk2f first entry): entry -20.74 | router blocks (32) end med -12.54 max -1.79 | routing written -1.79 | pooler blocks (100) end min -4.61 med -3.33 max -1.54 | routing: last pre-ticket -13.06 post-ticket -12.03 scores loaded -4.10 top8 -2.30
+decode 1 full s17 E2 CTAs 132 graph 82.4: entry 0.00/0.00/0.00  routed 1.54/1.54/1.54  prodTMA 2.05/2.30/2.30  pastwait 2.05/2.05/2.30  ph1data 3.33/3.58/4.10  ph1end 12.29/14.34/14.59  cntok 15.10/15.36/15.36  ph2data 15.36/15.36/15.62  end 17.66/20.22/20.48
+   pr1 (us vs tk2f first entry): entry -20.48 | router blocks (32) end med -12.80 max -2.05 | routing written -2.05 | pooler blocks (100) end min -4.61 med -3.33 max -1.54 | routing: last pre-ticket -13.57 post-ticket -12.54 scores loaded -4.35 top8 -2.30
+
+
+h200: charged 2.4 GPU-min; 10 of 60 used today

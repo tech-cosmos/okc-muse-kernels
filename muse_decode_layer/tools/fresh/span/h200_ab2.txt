@@ -1,0 +1,14 @@
+decode 1 sliding s11: base 77.97  hoist 78.07  idf 80.06  idfn 76.55  idf0 81.60  maxdiff hoist:0.0e+00 idf:0.0e+00 idfn:0.0e+00 idf0:0.0e+00
+decode 1 sliding s17: base 70.84  hoist 70.82  idf 72.24  idfn 68.77  idf0 73.82  maxdiff hoist:0.0e+00 idf:0.0e+00 idfn:0.0e+00 idf0:0.0e+00
+decode 1 sliding s7: base 63.49  hoist 63.73  idf 65.06  idfn 61.73  idf0 65.92  maxdiff hoist:0.0e+00 idf:0.0e+00 idfn:0.0e+00 idf0:0.0e+00
+decode 1 sliding s99: base 78.16  hoist 77.88  idf 79.39  idfn 76.34  idf0 80.70  maxdiff hoist:0.0e+00 idf:0.0e+00 idfn:0.0e+00 idf0:0.0e+00
+== decode 1 sliding: base 70.92 (+0.00)  hoist 71.22 (+0.30)  idf 72.24 (+1.32)  idfn 69.08 (-1.84)  idf0 73.94 (+3.02)
+decode 1 full s13: base 81.50  hoist 81.87  idf 84.27  idfn 80.54  idf0 84.59  maxdiff hoist:0.0e+00 idf:0.0e+00 idfn:0.0e+00 idf0:0.0e+00
+decode 1 full s11: base 89.50  hoist 89.58  idf 91.47  idfn 87.63  idf0 92.37  maxdiff hoist:0.0e+00 idf:0.0e+00 idfn:0.0e+00 idf0:0.0e+00
+decode 1 full s17: base 82.19  hoist 81.90  idf 83.99  idfn 80.35  idf0 84.45  maxdiff hoist:0.0e+00 idf:5.4e-04 idfn:5.4e-04 idf0:0.0e+00
+decode 1 full s7: base 81.82  hoist 82.09  idf 83.27  idfn 79.98  idf0 84.51  maxdiff hoist:0.0e+00 idf:3.1e-02 idfn:0.0e+00 idf0:0.0e+00
+decode 1 full s99: base 96.51  hoist 96.79  idf 99.06  idfn 95.70  idf0 99.72  maxdiff hoist:0.0e+00 idf:0.0e+00 idfn:0.0e+00 idf0:6.2e-02
+== decode 1 full: base 82.30 (+0.00)  hoist 82.17 (-0.14)  idf 84.32 (+2.02)  idfn 80.76 (-1.54)  idf0 84.83 (+2.53)
+
+
+h200: charged 2.7 GPU-min; 15 of 60 used today

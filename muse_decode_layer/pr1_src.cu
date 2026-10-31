@@ -170,6 +170,13 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
     };
     if (g < NG) load(g);
     pf(g + RB);
+    // fresh x8: the routing block's bias / local_start reads, hoisted above the wait (weights / a graph input). Read at
+    // the routing (as before) they were DRAM trips queued behind the pooler's W stream: 8 us on the H200 (routing written
+    // ~1.5 us before pr1 ends instead of ~10 us), which is what made IDF's early moe_tk2f wait (layer n7s7/n7s8).
+    __shared__ float sbias[E];
+    __shared__ int sls;
+    if (t < E) sbias[t] = __ldg(a.bias + t);
+    if (t == E) sls = __ldg(a.ls);
     asm volatile("griddepcontrol.wait;" ::: "memory");
     float4 xr[J];
     if (a.bnd) {
@@ -225,7 +232,7 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
         const int e = lane + 32 * i;
         const float lg = __ldcg(a.logits + e);
         sc[i] = 1.f / (1.f + expf(-lg * a.mult));
-        key[i] = sc[i] + __ldg(a.bias + e);
+        key[i] = sc[i] + sbias[e];
     }
     int myid = 0; float mysc = 0.f, sum = 0.f;
 #pragma unroll
@@ -249,7 +256,7 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
     }
     if (lane < TOPK) {
         a.ids[lane] = myid;
-        int loc = (myid - __ldg(a.ls) + E) % E;
+        int loc = (myid - sls + E) % E;
         a.lids[lane] = loc < a.local ? loc : -1;
         a.wts[lane] = mysc / (sum + a.reps);
     }
