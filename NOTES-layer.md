@@ -3666,3 +3666,13 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Side note (proj n24 (2)): T=16 sl {g30n:unpool} wins the first pass here too (171.0 vs 171.7, confirm 171.0 vs 172.1) and
   locally (217.6 vs 218.8): pin candidate in TUNE_BASE[(16, True)] for a later bundle (~-0.2 us), not put on main now.
 - Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
+
+## n33 (session 27, 2026-10-31 18:32-18:45Z real UTC): T=16 {g30n:unpool} pin = H100 tie; 0 judge runs, 0 Modal.
+- No lead line after 16:30Z, no new Handoff for layer, layer list empty (n29-n32 closed the rest).
+- Re-timed d1 sl on main v181 (H100 timeline): qkv g13 0-15.6 | csl 20.6 | o g13 24.9 | bnd 28.1 | pr1 48.2 | norm 49.2 |
+  tk2f 84.3 | n2u 89.5 | bnd 91.3 us: same hops as the n10s1/n13s3/n19s1 record, nothing new to cut.
+- proj n24 / layer n32 side note tested: pin {g30n:unpool} in TUNE_BASE[(16, True)] (and {g30n:unpool, g30n:qkv_gate} at
+  (16, False)), tools/ab_flag.py TUNE {} vs pinned, seeds 99/7/13 x 4 rounds, H100: d16 sl 187.67/152.58/153.40 vs
+  187.75/152.58/153.34, full 286.97/267.63/266.86 vs 286.94/267.66/267.11 us = tie on real routings. Not pinned (the H200
+  tuner can keep it as an option; flips there are <= ~1 us near-ties per proj n24).
+- Plan unchanged: first session after 00:00Z 11-01 submits v181 (main 38d0c23, check 84eb0719 2.1896 raw) once.
