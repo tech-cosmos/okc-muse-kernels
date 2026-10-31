@@ -3352,3 +3352,4 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - BAL d1 (proj n13s1): H100 +1.6 us per round on record -> fails the lead's H100-sum rule by itself; not re-run.
 - tk2f last-wave K-split d16/d32: inside moe's tk2f row scheduler (moe is stamping tk2f in o7) -> asked moe under Requests.
 - Bundle status: layer-side sum 0 us; nothing to check. Open for the bundle: moe's K-split, any new proj/fresh/moe handoff.
+- 12:15Z: moe o7b closed the tk2f last-wave K-split (DEAD at d16: tail-removal oracle -1.84 us < the bytes it skips). Whole bundle closed with 0 us. moe o7 points the d16 lever at _routing's tail (ends 2.9 us after router/pooler) = proj's 11:25Z hoist/IDF port to _routing/rg; layer integrates when handed off.

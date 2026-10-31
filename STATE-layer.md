@@ -5,7 +5,7 @@ Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-2
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
 n14s2 (10-31 12:15Z): lead 11:25Z SUB-GATE BUNDLE: layer items DEAD (H100): d32 qkv g30 reduce-scatter +0.1..0.7 us standalone
   (cluster reduce = latency, not bytes); uneven K split (rank 0 more stages) best -0.2 standalone, in-layer d32 tie; stealing/BAL
-  not built. tk2f K-split asked of moe. main = v174 unchanged; 0 runs. Patches dev/n14s2_*.patch, tools/n14/rs_ab.py.
+  not built. tk2f K-split: moe o7b DEAD. Whole bundle closed (sum 0). d16 lever left = _routing tail 2.9 us (moe o7) = proj 11:25Z item. main = v174; 0 runs. Patches dev/n14s2_*.patch, tools/n14/rs_ab.py.
 n14s1 (10-31 ~12:15Z): moe/slack T<=8 (lead 10:55Z): T=1 slack fused into pr1 (branch layer/slack1 1fc464c on moe/slack, NOT
   on main, NOT for submission until approved): H100 d1 sl/full -4.6/-2.9 us mean over 8 seeds (~-2.7 expected), 0/600 route
   fails, 13/13. T=8 OFF: anything compiled into pr8 costs +1.5..5 us (ptxas), gain ~1.75. moe's separate kernel +9..11 us. 0 runs.
