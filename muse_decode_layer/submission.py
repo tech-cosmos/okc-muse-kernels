@@ -10580,7 +10580,7 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     _routing[(tokens,)](part, state["router_bias"], local_start, ids, lids, wts, tokens, E=N_EXPERTS, KS=ks,
                         TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, PDL=rpdl,
                         num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4, launch_pdl=rpdl)
-    _slack(part, ks, tokens * N_EXPERTS, N_EXPERTS, state, local_start, ids, lids, wts, tokens)
+    _slack(part, ks, tokens * N_EXPERTS, N_EXPERTS, state, local_start, ids, lids, wts, tokens, trig)
     return ids, lids, wts
 @triton.jit
 def _post_expert_wsum(y_ptr, wts_ptr, lids_ptr, nw_ptr, out_ptr, D: tl.constexpr, TOPK: tl.constexpr,
@@ -14861,6 +14861,7 @@ struct Args {
   uint32_t* msk;  // [5][MAXT]: L, K, R, N, need
   int* cnt;       // ticket (zero, self-resetting)
   int T; float mult, reps, rt, kt, tie, dmarg, rmarg;
+  int trig;  // trigger dependents at once (= the routing kernel's TRIG at this site)
 };
 
 __device__ __forceinline__ uint32_t okey(float k) {  // order-preserving bits
@@ -14868,17 +14869,28 @@ __device__ __forceinline__ uint32_t okey(float k) {  // order-preserving bits
   return (b & 0x80000000u) ? ~b : (b | 0x80000000u);
 }
 
-// lane j holds experts (ls + j + 32 k) mod 256; k = 0 is local expert j. Returns v8 (the 8th best key).
-__device__ __forceinline__ float token_keys(const Args& a, int t, int ls, int lane, float (&key)[8], uint32_t& in8m) {
-  const int myid = lane < TOPK ? a.ids[t * TOPK + lane] : 0;
+// lane j holds experts (ls + j + 32 k) mod 256; k = 0 is local expert j. Returns v8 (the 8th best key); sg[k] = the
+// routing score (sigmoid, as the routing kernel computes it) for the weights. All global loads are issued before any use
+// (one round trip: the selection is latency-bound, o6).
+__device__ __forceinline__ float token_keys(const Args& a, int t, int ls, int lane, float (&key)[8], float (&sg)[8],
+                                            uint32_t& in8m, int& myid_out) {
+  const int myid = lane < TOPK ? __ldcg(a.ids + t * TOPK + lane) : 0;
+  float l0[8], l1[8], bb[8];
 #pragma unroll
   for (int k = 0; k < 8; k++) {
     const int e = (ls + lane + 32 * k) & (E - 1);
-    float lg = __ldcg(a.part + (size_t)t * a.st + e);
-    for (int q = 1; q < a.ks; q++) lg += __ldcg(a.part + (size_t)q * a.sks + (size_t)t * a.st + e);
-    key[k] = 1.f / (1.f + __expf(-lg * a.mult)) + __ldg(a.bias + e);
+    l0[k] = __ldcg(a.part + (size_t)t * a.st + e);
+    l1[k] = a.ks > 1 ? __ldcg(a.part + (size_t)a.sks + (size_t)t * a.st + e) : 0.f;
+    bb[k] = __ldg(a.bias + e);
+  }
+#pragma unroll
+  for (int k = 0; k < 8; k++) {
+    const float lg = a.ks > 1 ? l0[k] + l1[k] : l0[k];
+    key[k] = 1.f / (1.f + __expf(-lg * a.mult)) + bb[k];
+    sg[k] = 1.f / (1.f + expf(-lg * a.mult));
   }
   // in8m bit k: expert k of this lane is in the top 8. id's lane = (id - ls) & 31, its k = ((id - ls) & 255) >> 5
+  myid_out = myid;
   const int rel = (myid - ls) & (E - 1);
   in8m = 0;
 #pragma unroll
@@ -14901,13 +14913,16 @@ __global__ void __launch_bounds__(NW * 32) slack_kernel(Args a) {
   __shared__ uint32_t gM, gU, gN, gS, gUse;
   __shared__ int gRef, gNr, gRoutes, gAny, gDone, gLast, gNc;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, T = a.T;
+  // PDL secondary of the routing kernel; the experts wait for our completion (griddepcontrol.wait = full grid done)
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  if (a.trig) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
   const int ls = *a.ls;
   // ---- A: one token per warp
   {
     const int t = blockIdx.x * NW + warp;
     if (t < T) {
-      float key[8]; uint32_t in8m;
-      const float v8 = token_keys(a, t, ls, lane, key, in8m);
+      float key[8], sg[8]; uint32_t in8m; int myid;
+      const float v8 = token_keys(a, t, ls, lane, key, sg, in8m, myid);
       float v9 = -3.4e38f;
 #pragma unroll
       for (int k = 0; k < 8; k++) if (!((in8m >> k) & 1u)) v9 = fmaxf(v9, key[k]);
@@ -15029,8 +15044,8 @@ __global__ void __launch_bounds__(NW * 32) slack_kernel(Args a) {
   int nmine = 0;
   for (int i = warp; i < nc; i += NW, nmine++) {
     const int t = sList[i];
-    float key[8]; uint32_t in8m;
-    const float v8 = token_keys(a, t, ls, lane, key, in8m);
+    float key[8], sg[8]; uint32_t in8m; int myid;
+    const float v8 = token_keys(a, t, ls, lane, key, sg, in8m, myid);
     const float thr = v8 - a.rt;
     uint64_t pk[8];
 #pragma unroll
@@ -15040,7 +15055,6 @@ __global__ void __launch_bounds__(NW * 32) slack_kernel(Args a) {
       pk[k] = ok ? ((uint64_t)(k == 0) << 41) | ((uint64_t)okey(key[k]) << 8) | (uint64_t)(E - 1 - e) : 0ull;
     }
     // slot s (lane s < 8) dropped if its id is local and outside S; the r-th dropped slot gets the r-th best candidate
-    const int myid = lane < TOPK ? a.ids[t * TOPK + lane] : 0;
     const int rel = (myid - ls) & (E - 1);
     const bool dropped = lane < TOPK && rel < LOC && !((S >> rel) & 1u);
     const uint32_t dm = __ballot_sync(0xffffffffu, dropped);
@@ -15059,10 +15073,15 @@ __global__ void __launch_bounds__(NW * 32) slack_kernel(Args a) {
       }
       if (dropped && myrank == r) id = E - 1 - (int)(w & 0xFF);
     }
-    float lg = 0.f;
-    if (lane < TOPK)
-      for (int q = 0; q < a.ks; q++) lg += __ldcg(a.part + (size_t)q * a.sks + (size_t)t * a.st + id);
-    const float sc = lane < TOPK ? 1.f / (1.f + expf(-lg * a.mult)) : 0.f;
+    // the pick's score from the lane holding it (no reload: lane (id - ls) & 31, slot ((id - ls) & 255) >> 5)
+    const int prel = (id - ls) & (E - 1);
+    float sc = 0.f;
+#pragma unroll
+    for (int k = 0; k < 8; k++) {
+      const float v = __shfl_sync(0xffffffffu, sg[k], prel & 31);
+      if ((prel >> 5) == k) sc = v;
+    }
+    if (lane >= TOPK) sc = 0.f;
     float sum = sc;
 #pragma unroll
     for (int o = 4; o; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);  // lanes 0..7
@@ -15092,14 +15111,21 @@ __global__ void __launch_bounds__(NW * 32) slack_kernel(Args a) {
 
 void slack_launch(torch::Tensor part, int64_t ks, int64_t sks, int64_t st, torch::Tensor bias, torch::Tensor ls,
                   torch::Tensor ids, torch::Tensor lids, torch::Tensor wts, torch::Tensor scratch, int64_t T,
-                  double mult, double reps, double rt, double kt, double tie, double dmarg, double rmarg) {
+                  double mult, double reps, double rt, double kt, double tie, double dmarg, double rmarg, int64_t trig) {
   TORCH_CHECK(T >= 1 && T <= slk::MAXT, "slack: T out of range");
+  TORCH_CHECK(ks >= 1 && ks <= 2, "slack: ks must be 1 or 2");
   // scratch int32 [>= 5 * 256 + 1]: masks, then the ticket (zero at first use; the kernel resets it)
   slk::Args a{part.data_ptr<float>(), (int)ks, (int)sks, (int)st, bias.data_ptr<float>(), ls.data_ptr<int>(),
               ids.data_ptr<int>(), lids.data_ptr<int>(), wts.data_ptr<float>(), (uint32_t*)scratch.data_ptr<int>(),
               scratch.data_ptr<int>() + 5 * slk::MAXT, (int)T, (float)mult, (float)reps, (float)rt, (float)kt,
-              (float)tie, (float)dmarg, (float)rmarg};
-  slk::slack_kernel<<<(T + slk::NW - 1) / slk::NW, slk::NW * 32, 0, at::cuda::getCurrentCUDAStream()>>>(a);
+              (float)tie, (float)dmarg, (float)rmarg, (int)trig};
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3((T + slk::NW - 1) / slk::NW); cfg.blockDim = dim3(slk::NW * 32);
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute attr[1];
+  attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1;
+  cfg.attrs = attr; cfg.numAttrs = 1;
+  cudaLaunchKernelEx(&cfg, slk::slack_kernel, a);
 }
 '''
 SLACK = True
@@ -15116,15 +15142,16 @@ def _slack_build():
         _GSLACK["lib"] = load_inline(
             name="layer_slack_" + hashlib.sha256(_GSLACK_SRC.encode()).hexdigest()[:12],
             cpp_sources="void slack_launch(torch::Tensor, int64_t, int64_t, int64_t, torch::Tensor, torch::Tensor, "
-                        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, double, double, double, double, double, double);",
+                        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, double, double, double, double, double, double, int64_t);",
             cuda_sources=_GSLACK_SRC, functions=["slack_launch"],
             extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
     except Exception as e:
         print("layer slack build failed:", e)
         _GSLACK["lib"] = None
-def _slack(part, ks, sks, st, state, local_start, ids, lids, wts, tokens):
+def _slack(part, ks, sks, st, state, local_start, ids, lids, wts, tokens, trig=False):
     """Overwrite ids/lids/wts [T, 8] in place with the slack routing (one CTA; reads logits = sum of ks partials
-    part[k * sks + t * st + e]). A plain launch (no PDL, no trigger): every later kernel sees the final routing."""
+    part[k * sks + t * st + e]). A PDL secondary of the routing (griddepcontrol.wait first); triggers its dependents at
+    once iff trig (= the routing's TRIG at this site, so later kernels keep main's PDL edges and read after their wait)."""
     if _SLACK_DBG is not None:
         _SLACK_DBG.append(sum(part.as_strided((tokens, N_EXPERTS), (st, 1), part.storage_offset() + k * sks).float()
                               for k in range(ks)).clone())
@@ -15134,7 +15161,7 @@ def _slack(part, ks, sks, st, state, local_start, ids, lids, wts, tokens):
     keep = KEEP_TOL[0] if tokens <= KEEP_TOKENS else KEEP_TOL[1]
     lib.slack_launch(part, ks, sks, st, state["router_bias"], local_start, ids, lids, wts, state["slack_scratch"], tokens,
                      ROUTER_MULTIPLIER,
-                     ROUTE_EPS, ROUTE_TOL - SLACK_MR, keep - SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM)
+                     ROUTE_EPS, ROUTE_TOL - SLACK_MR, keep - SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM, int(bool(trig)))
 G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2),
            ("pooler", 32): (32, 1024, 8, 2, 2, 1), ("unpool", 32): (32, 1024, 8, 2, 2, 1),
            ("qkv_gate", 16): (16, 1024, 4, 4, 4, 2),
@@ -18082,7 +18109,7 @@ def _kernel_fn(data, state):
         _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
                             E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
                             SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, TRIG=rpdl, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4)
-        _slack(pr[:, D_EXPERT:], 2, N_EXPERTS, D_EXPERT + 2 * N_EXPERTS, state, data["local_start"], ids, lids, wts, tokens)
+        _slack(pr[:, D_EXPERT:], 2, N_EXPERTS, D_EXPERT + 2 * N_EXPERTS, state, data["local_start"], ids, lids, wts, tokens, rpdl)
         bucket = _moe_bucket(state, lids, rpdl) if bkt else None
         if gnorm:
             p = pr[:, :D_EXPERT]
