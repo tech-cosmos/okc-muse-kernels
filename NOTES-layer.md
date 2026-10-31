@@ -3564,3 +3564,23 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - Not submitted (10-31 layer submit cap used). SUBMIT RECOMMENDATION after 00:00Z: v180 instead of v178 (v178 carries the
   HOT_ET race; v180 = v178 + bitwise/near-free changes; v180's own check raw 2.1977 beats the board, the CLAUDE.md rule).
   Re-checking unchanged v180 gives 'duplicate' (content dedupe), so no further check of the same file is possible.
+
+## n27 (session 21, 2026-10-31 16:52-17:10Z real UTC): 1 MB headroom + v181 (HOT_IL); 1 check (84eb0719), 0 submits.
+- build.py `strip_cuda_comments`: drops whole-line and trailing `//` comments inside triple-quoted string tokens holding CUDA
+  (__global__/__device__/#include); comments named by other string literals (runtime text-patch anchors like
+  "// n4s1 (NORM_EARLY)") are kept (first try without that rule tripped an anchor assert at import). submission.py 999018 ->
+  909538 B: ~90 KB headroom. tools/n27/srccmp.py rec/cmp hooks torch load_inline over prepare + 13 tests + 12 scored shapes:
+  17/17 sources IDENTICAL modulo comments vs v180. Commit f0ab506 (= v180's code, not checked: nothing to check).
+- v181 (38d0c23) = that + proj n22 HOT_IL (`IL=2 python r-proj/.../dev/n22/mk_il.py moe_src.py`, @64f3bf7: moe_hot claims a
+  >128-token expert's slices rb-major, 2nd W read = L2 hit; gated ns>1; bitwise; proj H100 v32 ~-2.5 us on dominant-expert
+  inputs, tie otherwise). Own H100 A/B NOT run (proj's on v178bal+IL2). validate ALL OK: 13/13, scored 0/24, opt 0/40,
+  tk2f 0/1200, replay 0/480, route 0/240 (gap 0.0256, drop-lead 0.0172), fuzz 0/188, cold prep 64.6 s. 909824 B.
+- CHECK 84eb0719 **2.1896 raw** [2.157, 2.222] (board 2.1717). us sl/full: d1 65.2/73.2, d16 121.0/200.3, d32 144.3/296.4,
+  v1 108.2/123.2, v16 251.7/339.7, v32 326.8/498.8. Fixed-SGLang (bench.SGLANG_H200, 46/16 weights, geomean of loads; this
+  formula gives v180 2.1643 / v178 2.1917 vs the 2.1629 / 2.1874 on record, i.e. ~+0.002-0.004 high) = **2.2105** > bar 2.1913:
+  best fixed on record. d16 sl 121.0 (v180 130.1) / d32 sl 144.3 (157.8) = node draw, HOT_IL only touches T=256.
+- SUBMIT PLAN (first session after 00:00Z 11-01): submit **v181** = main 38d0c23 (`okc submit muse_decode_layer/submission.py`)
+  once, INSTEAD of v180: it has v180's race fix + QLO, its own check beats the board raw and the lead's fixed bar.
+- Accident: `rm -rf profiles` in the repo root deleted the gitignored ~/r-layer/profiles (old layer judge JSONs from sessions run
+  from the root). Restored 16 layer jobs via `okc status <job> --json` (it writes ./profiles/<id>.{json,txt} as a side effect;
+  non-layer ones removed). okc check run from muse_decode_layer/ writes muse_decode_layer/profiles/ (42 jobs, untouched).
