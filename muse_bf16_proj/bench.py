@@ -46,6 +46,12 @@ def _force(st):
                     st["pick"][(layer, c[0])] = ("g22", c)
                     st.setdefault("_forced", set()).add((layer, c[0]))
         print("forced:", sorted((k, v) for k, v in st["pick"].items() if v[0] == "g22"))
+    if os.environ.get("FORCE") == "gx":  # n19: g30 with G30_GX=1 escape records (tuner candidate the H100 never picks)
+        for (layer, m), cfgs in submission.BF16_G30.items():
+            for c in cfgs:
+                if len(c) > 3 and ("g30gx", layer, c[0]) in st:
+                    st["pick"][(layer, m)] = ("g30", (m, *c))
+        print("forced:", sorted((k, v) for k, v in st["pick"].items() if v[0] == "g30" and len(v[1]) > 4))
 
 
 def test():
@@ -74,6 +80,9 @@ def test_esc():
         mx = t.float().abs().max().item()
         vals = torch.tensor([0.0, -0.0, 2.0 ** -133, -3 * 2.0 ** -131, 2.0 ** -100, -1.37 * 2.0 ** -60,
                              mx * 2.0 ** -17, -mx * 1.9 * 2.0 ** -18, 1.5 * 2.0 ** -126], device="cuda").to(torch.bfloat16)
+        if os.environ.get("ESCV") == "bf16":  # n19: only escapes g30 keeps (BF16-exact, normal): exercises g30/GX escape paths
+            vals = torch.tensor([0.0, -0.0, 2.0 ** -100, -1.37 * 2.0 ** -60, mx * 2.0 ** -17, -mx * 1.9 * 2.0 ** -18],
+                                device="cuda").to(torch.bfloat16)
         C[name] = torch.randperm(k, device="cuda", generator=g)[:32]
         for j in range(2 if k == 8192 else 3):  # + natural escapes (up to 6 per row at k = 8192) <= G13_ESC = 8
             rows = torch.arange(n, device="cuda")[torch.rand(n, device="cuda", generator=g) < 0.75]
@@ -97,7 +106,9 @@ def test_esc():
         ok, msg = reference.check_implementation(data, out, w)
         ref = reference.ref_kernel(data, w)
         exact = torch.equal(out[sp].view(torch.int16), ref[sp].view(torch.int16))
-        if m >= 128 and not exact:  # gemv22 adds escape fixups by separate FP32 red.adds (ordinary rounding): near-exact
+        pk = _STATE["pick"].get((layer, m)) or ("", ())
+        gx = pk[0] == "g30" and len(pk[1]) > 4  # n19: GX fixups = FP32 2^-15 + (v - 2^-15) (lead 10-25 23:30Z)
+        if (m >= 128 or gx) and not exact:  # gemv22 adds escape fixups by separate FP32 red.adds (ordinary rounding): near-exact
             exact = bool(((out[sp].float() - ref[sp].float()).abs() <= ref[sp].float().abs() * 2 ** -7 + 1e-12).all())
         ok = ok and exact
         bad += not ok

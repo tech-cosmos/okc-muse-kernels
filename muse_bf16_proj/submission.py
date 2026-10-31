@@ -7181,15 +7181,17 @@ BF16_LT = {('o', 8): [(66, 312, 35, 1, 0, 0, 3, 3), (66, 312, 35, 1, 0, 0, 7, 3)
 LT_WS_BYTES = 32 << 20
 # s100: g30 (layer's 12-bit W decoded into wgmma A registers, swap-AB; MTOK 16/32 = proj s95 g30n with a (1, S, 1) cluster
 # split-K + DSMEM reduce; MTOK 128 = layer s99 g30). Per (layer, m): (S, NW, NS) tuner candidates; one build per (m, S, NW, NS).
-BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 16, 16)], ("qkv_gate", 16): [(3, 16, 16), (2, 16, 16)],
-            ("unpooler", 32): [(1, 16, 16)], ("pooler", 32): [(2, 16, 16)], ("qkv_gate", 32): [(3, 16, 16)],
+# n19: (S, NW, NS, "G30_GX=1") = escapes out of the main loop (n5s6; H200 diag30e a670beb1 qkv m32 standalone 12.86 vs 13.09).
+BF16_G30 = {("unpooler", 16): [(1, 16, 16)], ("pooler", 16): [(1, 16, 16), (2, 16, 16)],
+            ("qkv_gate", 16): [(3, 16, 16), (2, 16, 16), (3, 16, 16, "G30_GX=1")],
+            ("unpooler", 32): [(1, 16, 16)], ("pooler", 32): [(2, 16, 16)], ("qkv_gate", 32): [(3, 16, 16), (3, 16, 16, "G30_GX=1")],
             ("unpooler", 128): [(1, 10, 10)]}  # n5s4: o and the 20/8 rings dropped (H200 never picked them, checks 7ad5148c/7cbaa0fd)
 # n5s4 _diag30k only (print, no picks): g30k (stream-K g30 on G CTAs; G30K_F32 1 = FP32 slabs, 0 = BF16 out via slab+ticket)
 # vs g30 S-split, standalone (first op) and after a 3 us PDL predecessor: does qkv gain from 132 CTAs on the H200?
 DIAG30K = {}  # n5s4 diag done (check 6d9063a1: qkv kF132 only -0.2 us vs g30 S3; pooler/unpool g30k lose 1-3 us; NOTES n5s4)
 # n5s4 _diag30e only (print, no picks): g30 with the escape path compiled out (G30_ESC 0: WRONG output, timing only) vs g30,
 # m32, standalone and after a 3 us PDL predecessor = the H200 upper bound of a cheaper escape format.
-DIAG30E = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}  # n5s6: G30_GX vs g30 (print only). n5s5 diag done (check b3ff96fb: G30_PL vs g30 m32 standalone -0.3/-0.4/-0.4, after pred -0.2/-0.2/-0.5 us qkv/pool/unp; was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}). n5s4 diag done (check 198e7084: escapes cost H200 qkv/pool/unp m32 1.2/1.1/0.6 us standalone, 1.5/2.0/2.0 after a pred; NOTES n5s4); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
+DIAG30E = {}  # n19: GX is a qkv tuner candidate now (diag30e a670beb1: GX standalone qkv -0.23, pooler +1.0, unp +0.6 us); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}. n5s6: G30_GX vs g30 (print only). n5s5 diag done (check b3ff96fb: G30_PL vs g30 m32 standalone -0.3/-0.4/-0.4, after pred -0.2/-0.2/-0.5 us qkv/pool/unp; was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}). n5s4 diag done (check 198e7084: escapes cost H200 qkv/pool/unp m32 1.2/1.1/0.6 us standalone, 1.5/2.0/2.0 after a pred; NOTES n5s4); was {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
 DIAG30E_M = 32
 DIAG30E_V = "G30_GX=1"  # n5s6: escapes out of the main loop (prepare() records, TMA x boxes, escape warps). n5s5 was "G30_PL=0": the variant timed against g30 ("noesc" column): escape keys in a per-thread smem list (0 = no escape path)
 DIAG30K_S = {"qkv_gate": 3, "pooler": 2, "unpooler": 1}
@@ -7615,6 +7617,14 @@ def prepare(weights):
                 print("g30 dropped (escape value not exact in BF16):", name)  # g30 patches escapes as BF16 A halves
                 continue
             st[("g30", name)] = (_pack30(code, sm), hdr.contiguous(), scale)
+            for (l_, _m), cs in BF16_G30.items():
+                for c_ in cs:
+                    if l_ == name and len(c_) > 3 and ("g30gx", name, c_[0]) not in st:
+                        hb = _g30_gx_tables(hdr.contiguous(), k, c_[0])
+                        if hb is not None:
+                            st[("g30gx", name, c_[0])] = hb
+                        else:
+                            print("g30 GX records do not fit:", name, c_[0])
     st["pick"] = _tune(st)
     _diag30k(st)
     _diag30e(st)
@@ -7676,6 +7686,8 @@ def _run(st, layer, x, out, cand):
         _tg2.tg2(x, st[layer][:out.shape[1]], out, False)  # W[:n] prefix rows, BF16 out
     elif kind == "g30":
         P, hdr, scale = st[("g30", layer)]
+        if len(c) > 4:
+            hdr = st[("g30gx", layer, c[1])]
         _G30[c].g30_gemm(x, P, hdr, out, scale, 0)
     elif kind == "g12":
         _mod.g12_gemm(st[(layer, c[1])], x, out, st["ws12"], st["cnt12"], st[layer].shape[0] // 8, *c[1:])
@@ -7748,7 +7760,7 @@ def _tune(st, reps=25):
         if ("g30", layer) in st:
             k = st[layer].shape[1]
             for c in cfgs:
-                if _G30.get((m, *c)) is not None and k // 64 >= 4 * c[0]:
+                if _G30.get((m, *c)) is not None and k // 64 >= 4 * c[0] and (len(c) < 4 or ("g30gx", layer, c[0]) in st):
                     shapes.setdefault((layer, m), []).append(("g30", (m, *c)))
     if _lt is not None:
         for key, cfgs in BF16_LT.items():
@@ -7811,7 +7823,7 @@ def _tune(st, reps=25):
         if cands[best] is not None:
             picks[(layer, m)] = cands[best]
         print(f"tune {layer} m{m}: best {cands[best]} {med[best] * 1e3:.2f} us; "
-              + " ".join(f"{'F' if c is None else c[0] + ('' if c[0] != 'g30' else 'S%dW%dN%d' % c[1][1:])}:{t * 1e3:.2f}"
+              + " ".join(f"{'F' if c is None else c[0] + ('' if c[0] != 'g30' else 'S%dW%dN%d' % c[1][1:4] + ('GX' if len(c[1]) > 4 else ''))}:{t * 1e3:.2f}"
                          for c, t in zip(cands, med)))
     del flush
     return picks
