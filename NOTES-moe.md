@@ -3803,3 +3803,14 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
 - Harness pitfalls: (1) a literal gsc let ptxas fold the TWM_ORC 16 runtime skip and drop acc (228 cyc/stage for every N) -> pass
   gsc as a kernel arg; (2) a data-free producer must arrive ONCE per stage before the first consumer wait (2 arrivals -> the
   parity-0 wait waits for phase 2 = hang; my sweep held /tmp/okc-gpu.lock ~10 min hung before I killed it). Smoke-test unlocked first.
+
+## o10 (2026-10-31 14:07-14:20Z): lead 13:58Z: fresh x10 'late' onto the moe board
+- Applied r-fresh muse_decode_layer/tools/fresh/bs1/late.patch (b15f672) to muse_moe_w4a16/submission.py: TK2F 204 -> 84204
+  (slot-ordered y32 + moe_norm3 at M=1), NORM2_PDL 0 -> 1, tk2f griddepcontrol.launch_dependents moved from entry to just
+  before the gemm2 consume. Commit f90bcaf. bench test 15/15.
+- CHECK bef7bd02 2.3201x (CI 2.285-2.355), medians us bs1 25.5, bs16 89.6, bs32 118.7, bs8 63.6, bs128 197.9, bs256 232.3.
+- SUBMIT e37e578e (same content_hash c124dc40): 2.3198x (CI 2.285-2.355): bs1 25.3, bs16 87.3, bs32 118.6, bs8 63.2,
+  bs128 194.0, bs256 234.3 us. NEW MOE BOARD BEST (was aeba42c5 2.2792; vs it bs1 -0.9, bs16 -3.0, bs32 -1.0, bs8 -4.4,
+  bs128 -1.8, bs256 -3.1 us). Board #316 -> #282 (#1 dolanzhao 2.758x). So the H200 confirms fresh's reading: PDL norm with
+  the LATE trigger wins (n5s19's +3.4 us loss was the entry trigger). Layer may want the same late-trigger idea where a
+  PDL secondary follows tk2f.
