@@ -3280,3 +3280,7 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
 - Still no lead reply to n28's pause request (last Human decision 16:30Z); no new proj item in COORD Requests/Handoffs.
 - r-layer muse_decode_layer/submission.py unchanged since n29's dry run (856cc18 = v182), so the 00:00Z
   `bash muse_bf16_proj/dev/n15/mk_h200.sh` run stays valid as prepared (gate: flat <= -1 us v1 sl on the H200).
+## n31 (2026-10-31 19:42-19:50Z, unattended session 19): status only; 0 judge runs, 0 Modal
+- No lead line since 16:30Z; no new proj Request/Handoff. r-layer main submission.py still 856cc18 (v182): the 00:00Z
+  `bash muse_bf16_proj/dev/n15/mk_h200.sh` run stays valid. Not run early: shared Modal ledger 10-31 = 50.9/60 min,
+  the run needs ~7 min (would leave the other lanes ~2 min today).
