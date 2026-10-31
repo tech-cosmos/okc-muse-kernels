@@ -806,6 +806,9 @@ _NVS_SRC = r'''// agent2 nvs: native verify-SLIDING attention (L 8, G 8, D 64, H
 // the online softmax and P@V with P in E4M3 (FA3's FP8 path), QK(i) overlapping PV(i-1). Partials in
 // _attn_split's layout [B, HKV, S, 64, 64] FP32 for _combine_hb. NVS_NEW: split S-1 also attends the 8 new tokens.
 #define NV_NS 5
+#ifndef NVS_PW
+#define NVS_PW 1  // as NDS_PW
+#endif
 #define NV_LAG 2
 #define NV_PFD 4
 #define NV_TR 1
@@ -1154,6 +1157,10 @@ __device__ __forceinline__ void consumer(Smem<NS>& sm, int h, const QT* __restri
     const bool isnew = NV_HALF ? (split == S - 1 && h == 1) : split == S - 1;
     const uint32_t qa = smem_u32(&sm.q[h][0]);
     const int n = rg.n, lo = rg.lo, hi = rg.hi, b = rg.b;
+#if NVS_PW
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
     {   // Queries: row r = token r / 8, head h * 8 + r % 8; 2 threads per row (32 d each); RMS-norm, RoPE, FP8.
         const int r = tid >> 1, half = tid & 1;
         const int pos = rg.seq + (r >> 3);
@@ -1368,7 +1375,9 @@ __global__ void __launch_bounds__(384, NV_MINB) nvs(const QT* __restrict__ qkv, 
                                               int qkv_w, int win, const uint8_t* __restrict__ pf, long long pfb, int qss) {
     extern __shared__ __align__(1024) uint8_t smraw[];
     Smem<NS>& sm = *reinterpret_cast<Smem<NS>*>((reinterpret_cast<uintptr_t>(smraw) + 1023) & ~uintptr_t(1023));
+#if !NVS_PW
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
     const int tid = threadIdx.x, wg = tid >> 7;
     if (tid == 0) {
         for (int i = 0; i < NS; ++i) { mb_init(&sm.ready[i], 4); mb_init(&sm.empty[i], 8); }
@@ -1423,7 +1432,14 @@ void nvs(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc
         auto f = nv::nvs<NV_NS, NV_LAG, QT_>; \
         static bool once = false; \
         if (!once) { cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, smem); once = true; } \
-        f<<<dim3((unsigned)(S * B * (1 + NV_HALF))), 384, smem, c10::cuda::getCurrentCUDAStream()>>>( \
+        cudaLaunchConfig_t cfg = {}; \
+        cfg.gridDim = dim3((unsigned)(S * B * (1 + NV_HALF))); cfg.blockDim = dim3(384); cfg.dynamicSmemBytes = smem; \
+        cfg.stream = c10::cuda::getCurrentCUDAStream(); \
+        cudaLaunchAttribute at[1]; \
+        at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; \
+        at[0].val.programmaticStreamSerializationAllowed = 1; \
+        cfg.attrs = at; cfg.numAttrs = NVS_PW ? 1 : 0; \
+        cudaLaunchKernelEx(&cfg, f, \
             (const QT_*)qkv.data_ptr(), (const float*)cs.data_ptr(), (uint8_t*)kc.data_ptr(), \
             (uint8_t*)vc.data_ptr(), (const float*)ks.data_ptr(), (const float*)vsc.data_ptr(), \
             (const long long*)loc.data_ptr(), (const int*)pt.data_ptr(), \
@@ -2195,7 +2211,7 @@ NVS_MIN_BATCH = 16  # verify sliding from this batch on nvs (verify 32: H100 pai
 
 _NDS_SRC = r'''#define NV_NS 3
 #ifndef NDS_PW
-#define NDS_PW 1  // fresh x14: nds is the qkv GEMM's PDL secondary (KV producer before the wait)
+#define NDS_PW 1  // fresh x14: PDL secondary of qkv
 #endif
 #define NV_MAXR 96
 #define NV_PREGS 40
@@ -2571,8 +2587,7 @@ __device__ __forceinline__ void dconsumer(Smem<NS>& sm, const QT* __restrict__ q
         asm volatile("bar.sync 2, 128;" ::: "memory");
     }
 #if NDS_PW
-    // fresh x14 NDS_PW: the producer streamed page-table rows and old KV (inputs only) before this; qkv after. Trigger
-    // only now: _combine_hb (our PDL secondary) loads its qkv gate before its own wait.
+    // KV producer (inputs only) ran pre-wait; trigger after the wait (_combine_hb reads qkv pre-wait)
     asm volatile("griddepcontrol.wait;" ::: "memory");
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 #endif
