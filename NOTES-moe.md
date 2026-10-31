@@ -4257,3 +4257,5 @@ Status only. Lead 21:50Z: largest item = sliding attention d1/v1 latency, owned 
 Status only. No lead line after 21:50Z, no moe request. Hold aa51716 (board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
 ## o40 (2026-10-31 22:25-22:30Z, session 38)
 Status only. No lead line after 21:50Z, no moe request (lead item = sliding attention, fresh+layer). Hold aa51716 (board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
+## o41 (2026-10-31 22:40-22:45Z, session 39)
+Status only. No lead line after 21:50Z, no moe request; r-layer since aa51716 has no expert-path change (v185 = attention CSL_PW only). Hold aa51716 (board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
