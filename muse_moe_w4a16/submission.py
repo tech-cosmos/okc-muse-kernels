@@ -927,22 +927,32 @@ __global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y, co
     float4 a = wp[0], b = wp[1];
     wv[0] = a.x; wv[1] = a.y; wv[2] = a.z; wv[3] = a.w; wv[4] = b.x; wv[5] = b.y; wv[6] = b.z; wv[7] = b.w;
   }
-  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
-  if (tok == 0 && tid < 128) zc[tid] = 0;  // moe_tk2f's segment counters: zero again for the next call
   float v[8][8], ss[8], twv[8];
   bool loc[8];
   int eid[8];
   // n5s24: all ids and tw of the token in one batch (tw was loaded per local slot after the barrier: serial trips)
+  // o16 = layer IDW (moe n10s1): ... and BEFORE the wait (the harness's inputs: complete before moe_tk2f starts); a
+  // branch on the loaded words keeps ptxas from hoisting ACQBULK above them. Y (moe_tk2f's output) then needs .cg
+  // loads: ptxas hoists .nc loads whose address is known above the wait.
 #pragma unroll
   for (int s = 0; s < 8; ++s) { eid[s] = ids[tok * 8 + s]; twv[s] = tw[tok * 8 + s]; }
+  {
+    unsigned u = 0;
+#pragma unroll
+    for (int s = 0; s < 8; ++s) u ^= (unsigned)eid[s] ^ __float_as_uint(twv[s]);
+    __shared__ unsigned pin;
+    if (u == 0x7fbfffffu) *(volatile unsigned*)&pin = u;  // a store to its own word, never read (volatile: kept)
+  }
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
+  if (tok == 0 && tid < 128) zc[tid] = 0;  // moe_tk2f's segment counters: zero again for the next call
 #pragma unroll
   for (int s = 0; s < 8; ++s) {
     const int e = eid[s] - start;
     loc[s] = e >= 0 && e < count;
     ss[s] = 0.f;
     if (loc[s]) {
-      const float4* p = reinterpret_cast<const float4*>(Y + (size_t)(SLOT ? tok * 8 + s : inv[tok * 8 + s]) * NOUT + tid * 8);
-      const float4 a = p[0], b = p[1];
+      const float4* p = reinterpret_cast<const float4*>(Y + (size_t)(SLOT ? tok * 8 + s : __ldcg(inv + tok * 8 + s)) * NOUT + tid * 8);
+      const float4 a = __ldcg(p), b = __ldcg(p + 1);  // .cg: see o16 above
       const float f[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
       if (SLOT) {
 #pragma unroll
