@@ -915,3 +915,22 @@ o has x: 1.8 us); v1 = first loads after entry (1.8) and merge -> store (1.0) + 
 - Not built (under the 1 us gate): v1 vtk early start (16-CTA clusters wait for free GPCs beside g14; bound ~0.5 us: KV is
   already in by ~1 us after the wait), flag-spin instead of the PDL waits (record: BND_SPIN lost, n5s14).
 - Next: H200 A/B after 00:00Z: tools/fresh/x35/mk_h200.sh (d1 sl only, ~3-4 GPU-min).
+
+## x36 (2026-10-31 22:22Z-22:35Z): d1 sl attention TAIL hop (csl store -> o gemv13 sees x), lead 21:50Z lane. H100, 0 judge, 0 Modal
+- csl already triggers dependents at entry, so o's 528 CTAs are resident with their W prologue in registers; the x35 0.85 us
+  'store -> o has x' hop is csl grid completion -> griddepcontrol.wait release.
+- Oracle (wrong output, timing bound): o g13 without griddepcontrol.wait (/tmp/fx36/nowait.py = v183+CSL_PW submission with
+  the wait line removed). H100 ab_files pinned tuner, 6 rounds: d1 sl 82.75/83.50 -> 80.86 (-1.9..-2.6; overstates: o then
+  ignores csl entirely and its post-wait W stream overlaps csl); d1 full tie (+0.7..+0.9, noise).
+- BUILT as a prototype (tools/fresh/x36/oflag.diff, NOT kept): csl's 16 head-merge warps __syncwarp + __threadfence +
+  atomicAdd(counter) after their store; o g13 (pdl == 2, counter passed as its unused pft arg) thread 0 spins until 16, the
+  last o CTA resets; a counter armed but not consumed is zeroed in-stream. graph_eq d1 sl/full vs base BITWISE (8 inputs),
+  0 bad replays. SASS: W prologue LDGs stay above the spin. H100 d1 sl (base ~82.1-83.1):
+  ld.acquire spin +1.0/+0.1 (4-way run), +1.8 (5-way); ld.relaxed spin + one fence.acq_rel +2.5; acquire + __nanosleep(200)
+  +1.1/+1.3. => DEAD: every flag form loses 1-2.5 us; spinning issue pressure is not the cause (nanosleep same). Unexplained
+  (csl-side __threadfence after the store? o's early post-wait W stream competing with csl's tail?); not worth a stamp
+  session at <= ~0.8 us expected (~0.1% score).
+- v1 sl hops (x35): merge -> store 1.0 us is mostly the store-completion fence in the stamp; vtk early start bound ~0.5 us;
+  KV_PF at v1 <= 0.3 (layer n46). With the d1 front (CSL_PW T=1) built, nothing on d1/v1 sliding attention clears the 1 us
+  gate. Attention lane CLOSED for fresh.
+- Next (after 00:00Z): Modal H200 A/B of CSL_PW T=1 (tools/fresh/x35/mk_h200.sh, ~3-4 GPU-min), then hand off/drop.

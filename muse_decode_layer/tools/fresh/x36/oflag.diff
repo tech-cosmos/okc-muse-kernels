@@ -1,0 +1,149 @@
+diff --git a/muse_decode_layer/attn_src.py b/muse_decode_layer/attn_src.py
+index 2737a51..250fa90 100644
+--- a/muse_decode_layer/attn_src.py
++++ b/muse_decode_layer/attn_src.py
+@@ -141,7 +141,7 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const
+                                               const int* __restrict__ seqs, const long* __restrict__ loc,
+                                               const float* __restrict__ ks, const float* __restrict__ vs,
+                                               __nv_bfloat16* __restrict__ out, int MP, float qk_scale, int spec,
+-                                              const unsigned char* __restrict__ pf, long long pfb) {
++                                              const unsigned char* __restrict__ pf, long long pfb, int* __restrict__ oflag) {
+     __shared__ __align__(16) float racc[16][D];
+     __shared__ __align__(16) float rml[16][2];
+     __shared__ __align__(16) float lpart[2][4][8][D];
+@@ -379,13 +379,17 @@ __global__ void __launch_bounds__(128) decode(const QT* __restrict__ qkv, const
+         o0 *= ni / (1.f + __expf(-g0));
+         o1 *= ni / (1.f + __expf(-g1));
+         *(__nv_bfloat162*)(out + (long)b * HQ * D + (h * 8 + rank) * D + 2 * lane) = __floats2bfloat162_rn(o0, o1);
++        if (oflag != nullptr) {  // x36 O_FLAG: this head is stored; the o gemv13 spins on the count (16 at batch 1)
++            __syncwarp();
++            if (lane == 0) { __threadfence(); atomicAdd(oflag, 1); }
++        }
+     }
+ }
+ }  // namespace csl
+ 
+ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Tensor vc, torch::Tensor pt,
+                 torch::Tensor seq, torch::Tensor loc, torch::Tensor ks, torch::Tensor vs, torch::Tensor out, int64_t page,
+-                double qk_scale, int64_t pf_ptr, int64_t pf_bytes, int64_t pw) {
++                double qk_scale, int64_t pf_ptr, int64_t pf_bytes, int64_t pw, int64_t oflag) {
+     int batch = seq.size(0), mp = pt.size(1);
+     const int spec = (batch == 1 && page == 1 && CSL_SPEC) ? mp - 1 : -1;
+     cudaLaunchConfig_t cfg = {};
+@@ -402,7 +406,7 @@ void csl_decode(torch::Tensor qkv, torch::Tensor cs, torch::Tensor kc, torch::Te
+ #define CSL_ARGS(QT) (const QT*)qkv.data_ptr(), cs.data_ptr<float>(), (unsigned char*)kc.data_ptr(), \
+     (unsigned char*)vc.data_ptr(), pt.data_ptr<int>(), seq.data_ptr<int>(), loc.data_ptr<long>(), ks.data_ptr<float>(), \
+     vs.data_ptr<float>(), (__nv_bfloat16*)out.data_ptr(), mp, (float)qk_scale, spec, \
+-    (const unsigned char*)pf_ptr, (long long)pf_bytes
++    (const unsigned char*)pf_ptr, (long long)pf_bytes, (int*)oflag
+ #define CSL_LAUNCH1(P, QT, PW) { \
+         static bool set = false; \
+         if (!set) { cudaFuncSetAttribute(csl::decode<P, QT, PW>, cudaFuncAttributeNonPortableClusterSizeAllowed, 1); \
+@@ -785,7 +789,7 @@ try:
+     _CSL = _load_inline(
+         name="muse_csl_s96_" + __import__("hashlib").sha256(_CSL_SRC.encode()).hexdigest()[:10],
+         cpp_sources="void csl_decode(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+-                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t, int64_t);"
++                    "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t, int64_t, int64_t, int64_t);"
+                     "void vtk_verify(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, "
+                     "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, int64_t);",
+         cuda_sources=_CSL_SRC, functions=["csl_decode", "vtk_verify"],
+@@ -4788,9 +4792,13 @@ def kernel_fn(data: Inputs) -> torch.Tensor:
+     if _CSL is not None and cfg["window"] == 2048 and length == 1 and batch <= CSL_MAX_BATCH and hq == 16 \
+             and hkv == 2 and d == 64 and cfg["page_size"] in (1, 64) and cfg["rope_theta"]:
+         out = torch.empty((batch, 1, hq * d), dtype=torch.bfloat16, device=device)
++        of = data.get("o_flag") if batch == 1 else None  # x36 O_FLAG (layer.py): 16 head stores counted at batch 1
++        if of is not None:
++            of["used"] = 1
+         _CSL.csl_decode(qkv, _cos_sin(cfg["rope_theta"], d, device), data["k_cache"], data["v_cache"], page_table,
+                         data["seq_lens"], data["cache_loc"], data["k_scale"], data["v_scale"], out, cfg["page_size"],
+-                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, *data.get("o_pf", (0, 0)), int(data.get("csl_pw", 0)))
++                        cfg["sm_scale"] * cfg["qk_scale_factor"] * LOG2E, *data.get("o_pf", (0, 0)), int(data.get("csl_pw", 0)),
++                        of["t"].data_ptr() if of is not None else 0)
+         return out
+     if _CSL is not None and cfg["window"] == 2048 and length == 8 and batch <= VTK_MAX_BATCH and hq == 16 \
+             and hkv == 2 and d == 64 and cfg["page_size"] in (1, 64) and cfg["rope_theta"]:
+diff --git a/muse_decode_layer/layer.py b/muse_decode_layer/layer.py
+index 8f78cac..57acec0 100644
+--- a/muse_decode_layer/layer.py
++++ b/muse_decode_layer/layer.py
+@@ -1250,6 +1250,14 @@ def _g10_lib():
+                  "                asm volatile(\"prefetch.global.L2::evict_last [%0];\" :: \"l\"(pfv + (long)pg * pfrb));\n"
+                  "            }\n        }\n    }\n"
+                  "    if (pdl) {  // s33: PDL secondary: W prologue above, x (the predecessor's output) after the wait\n"
++                 "        if (pdl == 2) {  // x36 O_FLAG: pft = csl's counter (16 heads stored); the last CTA resets it\n"
++                 "            if (threadIdx.x == 0) {\n"
++                 "                int* f = (int*)pft; int v;\n"
++                 "                do { asm volatile(\"ld.acquire.gpu.global.b32 %0, [%1];\" : \"=r\"(v) : \"l\"(f) : \"memory\"); } while (v < 16);\n"
++                 "                if (atomicAdd(f + 1, 1) == (int)gridDim.x - 1) { f[0] = 0; f[1] = 0; }\n"
++                 "            }\n"
++                 "            __syncthreads();\n"
++                 "        } else\n"
+                  "        asm volatile(\"griddepcontrol.wait;\" ::: \"memory\");\n"
+                  "#pragma unroll\n"
+                  "        for (int q = 0; q < XV; ++q) {\n"
+@@ -3420,6 +3428,10 @@ TUNE_BASE = {(1, True): {"g13o": True, "pr1_rb": 32}, (1, False): {"g13o": True,
+ # x35: T=1 too (csl after the qkv gemv13, which triggers at start): s62's d1 +1.3..1.7 us was the PW instance's smem
+ # carveout 100 (now T=16 only); without it H100 d1 sl -1.2..-1.4 us (tools/fresh/x35).
+ CSL_PW_TOKENS = (16, 1)
++# x36 O_FLAG: at d1 sliding the o gemv13 (PDL secondary of csl, W prologue before its wait) waits on a counter instead of
++# griddepcontrol.wait: each of csl's 16 head-merge warps adds 1 (release) after storing its head; o's CTAs spin
++# (acquire) until 16, the last o CTA resets it. Saves the csl grid-completion -> wait-release hop (~0.85 us H100 stamps).
++O_FLAG = True
+ CSL_PW_CARVE = False  # s62 (TUNE cslcarve): the g19 qkv asks for the full smem carveout so 1 csl CTA/SM fits beside it from
+ # the start (H100: csl starts at 2.8 us, but its gathers slow g19 17.3 -> 20.6 us: d16 sl +0.3..0.6 net; xb 1 qkv: same)
+ if _moe_TK2F_DIAG:  # s81: DIAG check copies only: the tk2f probes (+ the defaults) at T = 1/16/32, no other tuning
+@@ -3694,6 +3706,7 @@ def _g12_prepare(state):
+     state["g12"] = {key: _pack12(w[key], 1024 * c[0]) for key, c in G12_CFG.items()}
+     state["g12_ws"] = torch.empty(8 * 32 * 8192, dtype=torch.float32, device=dev)
+     state["g12_cnt"] = torch.zeros(1024, dtype=torch.int32, device=dev)
++    state["o_flag"] = torch.zeros(2, dtype=torch.int32, device=dev)  # x36 O_FLAG: [csl heads stored, o CTAs passed]
+     state["ob8_part"] = torch.empty(G12_CFG["o"][3] * 32, dtype=torch.float32, device=dev)  # s86 OB8 per-block partials
+     state["ob8_bar"] = torch.zeros(1, dtype=torch.int32, device=dev)  # s86 OB8 grid barrier (epoch counter)
+     state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)  # pr1's router ticket (self-resetting)
+@@ -3705,7 +3718,7 @@ def _g12_prepare(state):
+                      for kc in sorted({a[0] for a in v} - {G14_CFG[key][0]}) if (pk := _pack14(w[key], 1024 * kc)) is not None}
+ 
+ 
+-def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
++def _linear(x, w, key, state=None, sliding=False, kv_pf=None, oflag=None):
+     """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), gemv12 at 8 (FP32 accumulate and
+     split-K partials), else cuBLAS."""
+     lib = _G10.get("lib")
+@@ -3716,9 +3729,11 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
+             out = torch.empty((x.shape[0], w.shape[0]), dtype=torch.bfloat16, device=x.device)
+             if x.shape[0] == 1:
+                 pf = kv_pf if kv_pf is not None else (x, x, x, 0, 0)
++                pdl = int(o13 and UNPOOL_PDL and key in GEMV_PDL_SECONDARY.get((1, sliding), ()))
++                if pdl and o13 and oflag is not None:  # x36 O_FLAG: spin on csl's counter (passed as pft) instead of the wait
++                    pf, pdl, oflag["used"] = (oflag["t"], x, x, 0, 0), 2, 0
+                 lib.g13_gemv(pk[0], pk[1], pk[2], x.contiguous(), out, pk[3],
+-                              *(G13_O if o13 else _cfg(state, 1, "g13", key, G13_CFG)), *pf,
+-                              int(o13 and UNPOOL_PDL and key in GEMV_PDL_SECONDARY.get((1, sliding), ())))
++                              *(G13_O if o13 else _cfg(state, 1, "g13", key, G13_CFG)), *pf, pdl)
+             else:
+                 c = _cfg(state, G12_TOKENS, "g14", key, G14_CFG)
+                 pk = pk if c[0] == G14_CFG[key][0] else state["g14k"][(key, c[0])]
+@@ -4002,8 +4017,9 @@ def _kernel_fn(data, state):
+         if e30 is not None and _opt(state, tokens, "g30n:o", ("o", tokens) in G30N_DEFAULT_ON):  # n5s4: g30n o reads its pack
+             w = e30[1][0]
+         o_pf = (w.data_ptr(), int(w.numel() * w.element_size() * pf_frac) & ~15)
++    oflag = {"t": state["o_flag"], "used": 0} if O_FLAG and tokens == 1 and cfg["window"] > 0 and "o_flag" in state else None
+     o = attn_kernel_fn({
+-        "o_pf": o_pf, "csl_pw": csl_pw, "nvs_cl": _opt(state, tokens, "nvscl", NVS_CL),
++        "o_flag": oflag, "o_pf": o_pf, "csl_pw": csl_pw, "nvs_cl": _opt(state, tokens, "nvscl", NVS_CL),
+         "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
+         "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
+         "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
+@@ -4039,7 +4055,10 @@ def _kernel_fn(data, state):
+         a = _g19(o, "o", state, otrig)
+         otrig = otrig and a is not None  # s57: the first boundary is then the o GEMM's PDL secondary
+         if a is None:
+-            a = _linear(o, dense["o"], "o", state, cfg["window"] > 0)  # all-reduce: identity
++            a = _linear(o, dense["o"], "o", state, cfg["window"] > 0,  # all-reduce: identity
++                        oflag=oflag if oflag is not None and oflag["used"] else None)
++    if oflag is not None and oflag["used"]:  # x36: csl counted but o took another path: reset the counter in-stream
++        state["o_flag"].zero_()
+     bnd = ob8 or pr1 and tokens == 1 and _opt(state, tokens, "pr1bnd", PR1_BND) and a.dtype == torch.bfloat16  # s74: TUNE option
+     nos = None
+     if not bnd:
