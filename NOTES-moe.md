@@ -4210,3 +4210,6 @@ H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-
 - No lead line after 16:30Z; no moe Request open; all lanes (layer n33, fresh x22, proj n28) report empty lists.
 - submission.py == aa51716 (only tools/o26 added since). Moe board today: checks 5/20 left, scored 8 left (agent cap 2/day used).
 - Queued unchanged: SUBMIT aa51716 ONCE after 00:00Z 11-01 (check 5a45c7a7 2.3456x > board 2.3198). No new lever (see STATE CLOSED list).
+
+## o28 (2026-10-31 19:14-19:20Z)
+Status only: board #290 2.320x (#1 2.758x). moe dir == aa51716. No new lead item for moe. Submit aa51716 once after 00:00Z 11-01 (check 5a45c7a7 2.3456x). 0 judge runs, 0 GPU.
