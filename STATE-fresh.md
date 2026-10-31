@@ -1,4 +1,11 @@
 # STATE-fresh (newest first)
+## x15 (2026-10-31 15:32Z-16:20Z): lead 15:25Z 'continue'. 0 judge, 0 Modal. FRESH.md x15.
+- CORRECTION: the x14 judge FAIL was on v32 sl REPETITION 1 with the run's own router seed; repro_v32.py never reproduced that
+  input. NVS_PW code read: pre-wait producer touches inputs/old KV only (no race found). Record ~2 routing fails / ~100 layer
+  runs. If layer's v177 check fails v32 sl again, suspect NVS_PW first (NVS_PW 0 in attn_src.py).
+- H100 timelines d16/v1 sl on branch fresh: nothing new beyond the record (front chain, pooler window, first-op ramp).
+## Next (x16): after 00:00Z Modal H200 A/B v176 vs v177 (or x14 / MRG 2 split if v177's check is ambiguous); d32 sl+full,
+  v16 sl, d16 full; one load per Modal call. Read Human decisions IN FULL first.
 ## x14 (2026-10-31 15:00Z-): lead 15:00Z early-trigger audit. FOUND: the attention kernels after qkv were not PDL. FRESH.md x14.
 - Built on branch fresh (attn_src.py only): NDS_PW (nds = qkv's PDL secondary, KV producer pre-wait, trigger after the
   consumer's wait), NVS_PW (same for nvs), GD_PW (batched _gd_full), CB_HB_TRIG on. H100 pinned-tuner A/B: d32 sl -3.1
