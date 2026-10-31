@@ -3772,3 +3772,9 @@ No new lead/human line. Stressed the exact 00:00Z file (`git show 70591ea:muse_d
 with NEW router seeds 31,37 (H100): tools/replay_test.py 30 inputs x 12 shapes x 2 seeds = 0/720 output fails;
 tools/route_judge.py same = 0/720 routing fails; worst drop-lead 0.0289 (verify 32 full, rs 31) = fp8ref's own 0.0289
 (inherent to the input, not ours); our worst pick gap 0.0256 < 0.05. Logs tools/n42/. Plan unchanged: submit v184 once after 00:00Z 11-01.
+
+## n43 (2026-10-31 ~21:15-21:20Z, session 37): status only; 0 judge runs, 0 Modal
+- No lead line after 16:30Z, no new Handoff or Request for layer. Layer board: #224 at 2.172x, #1 pjmullin3 2.459x (#2 2.418).
+- v184 file `git show origin/layer/v181nsa:muse_decode_layer/submission.py` = sha1 926ce2ec (unchanged). okc limits 10-31: 5 checks
+  / 7 scored left, but the lead's 2 submits/day are used and there is no new candidate (identical code is deduplicated).
+- NEXT unchanged: the first session after 00:00Z 11-01 submits v184 once and logs it in Judge runs.

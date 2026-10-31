@@ -3,6 +3,7 @@
 BOARD BEST = submit 50534b24 = v174 (c62cdb0), **2.1717x**, #198 (n13s5, 10-31; d1 64.5/73.7, d16 123.0/199.2, d32 153.4/304.1, v1 111.6/126.1, v16 251.6/343.7, v32 313.9/486.9; check 2d1f9256 2.1514 / fixed-SGLang 2.1650).
 Previous BOARD BEST = submit 3e3b9fd3 = v153 (3ef3268), **2.1580x**, #50 on 10-29 (#35 when set) (n5s10; d1 66.3/75.0, d16 129.9/205.9, d32 155.7/308.2, v1 110.6/122.6, v16 266.6/356.1, v32 335.7/506.4). Previous: 35dd53d0 v125 2.1339x.
 Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v108 2.0860x. Lead 09:28Z rule: <= 2 'within 1% + per-shape evidence' submits/day (1 used 10-27).
+n43 (10-31 21:20Z, session 37): status only. Board: we are #224 at 2.172x, #1 pjmullin3 2.459x. v184 on origin/layer/v181nsa still sha1 926ce2ec; layer 10-31 left: 5 checks / 7 scored (lead cap used). NEXT unchanged: submit v184 once after 00:00Z 11-01. 0 runs.
 n42 (10-31 21:15Z, session 36): v184 file pre-submit stress, new seeds 31,37: replay 0/720, route_judge 0/720 (tools/n42). 0 runs.
   NEXT unchanged: submit v184 (70591ea, sha1 926ce2ec) once after 00:00Z 11-01.
 n41 (10-31 20:50Z, session 35): status only. No new lead line; v184 file on origin/layer/v181nsa 70591ea verified (sha1 926ce2ec).
