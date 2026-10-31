@@ -4190,3 +4190,18 @@ H100 A/B of the csl/vtk kernels from two files); tools/s31/cslstamp.py [B] (per-
   >= 2^-6 = normal) but a crash = no score. Asked proj (layer held-out audit, n26) to run mode 2 on the layer.
 - check 5a45c7a7 aa51716 2.3456x (CI 2.310-2.381): bs1 25.4, bs16 88.0, bs32 116.7, bs8 64.0, bs128 192.9, bs256 231.6 us
   (= 8242d5e's 8c75ecb3 2.3498 within noise). Beats board 2.3198: SUBMIT aa51716 ONCE after 00:00Z 11-01. moe checks 15/20 today.
+
+## o26 (session 24, 2026-10-31 18:40Z - 19:30Z): moe-board ROUTING-VARIANCE audit (held-out reruns); H100; 0 judge runs, 0 Modal
+- Why: final ranking = medians of reruns, possibly on other routings; proj n20 found a routing-triggered slow mode in the layer
+  (>128-token expert at T=256). Did the moe board submission (aa51716) have one?
+- tools/o26/rv.py <bs> <n>: 40 reference.generate_input seeds (5000-5039) per scored bs, our graph time (cold L2) vs distinct
+  local experts (+ extra 8-token groups). H100 fits: bs1 8.5 + 9.89/expert (resid sd 0.6 us), bs8 10.9 + 9.29 (0.9),
+  bs16 11.4 + 9.15/expert + 1.0/extra group (1.3), bs32 14.4 + 9.20 + 1.04 (sd ~2.4 excl. one contention outlier),
+  bs128 41.9 + 8.46 (4.3), bs256 48.2 + 8.51 (4.6). Largest repeatable residuals = 3..5%: one expert taking ~all tokens
+  (bs32 seed 5002 [32, 20] +7.7; bs256 5002 [256, 155] ~+10 us vs 22-expert peers 237-242; bs128 5002 [128, 76] none).
+  That is the MMA work of the hot expert(s), not a path switch; ~10% of draws per bs have an expert with >= 90% of tokens.
+- tools/o26/ab32.py: bs32 tk2h weight W 0/3/6/9 vs plain tk2f (TK2H_M off) on 7 seeds incl. the hot ones: all within
+  H100 noise (+-3 us; e.g. 5002 W3 158.1 / off 152.3, 5029 W3 166.3 / off 169.3). No shape-only change to make.
+- tools/o26/rep.py <bs> <seeds>: 4-round repeats; spreads <= 3.5 us; residuals above are stable.
+- Verdict: no routing-triggered slow mode >= 5% on the moe board (H100; big-M H100 is not a strict H200 proxy). Nothing to fix.
+- Queued, unchanged: SUBMIT aa51716 ONCE after 00:00Z 11-01 (check 5a45c7a7 2.3456x).
