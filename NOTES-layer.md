@@ -3428,3 +3428,15 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - CHECK d8fc46c5 v175 (da9b87c) 2.1705x, fixed-SGLang 2.1846 (best on record; v174 check 2.1641/2.1514). H200 d16 full 200.7,
   d32 full 304.8 (v174 board 199.2/304.1: the H200 gain is not visible inside the noise). SUBMIT 68c3ba66 2.1641x (fixed
   2.1677) < board 2.1717: board unchanged. Don't resubmit v175 unchanged. Layer 10-31: 2 checks, 2 submits used (cap 2 reached).
+
+## n18s1 (2026-10-31 14:39-15:05Z): v176 = v175 + fresh a269066 TK2F_CW (lead 14:30Z); 1 check, 0 submits (cap). Modal 0.
+- Merge: `git diff a269066~1 a269066 -- layer.py moe_src.py` applied cleanly onto v175 (fresh's branch base 14d4170 is
+  older than v174/v175; its other hunks were notes/STATE); tools/fresh/cw/{cw3.patch,ab_seeds.py,cw_v1_dead.patch} copied.
+  TK2F_CW = True: T=1 tk2f cfg 184204 -> 184294 (PF | 8192). bench test 13/13; replay_test 40 x seeds 11,7,13 all loads 0/480.
+- H100 ab_files "decode 1 " 8 rounds (v175, v176, v176, v175): sl 84.48 / 84.11 -> 84.15 / 83.82; full 103.89 / 104.90 ->
+  102.70 / 102.66 us (= fresh x12: sl -0.3..-0.5, full -1.2..-2.2).
+- CHECK 0ac4a2f0 v176 (b051588): 2.1584x raw (own-run SGLang slow draw), fixed-SGLang 2.1913 = best on record (v175 check
+  2.1824). H200 d1 sl/full 64.7/73.5 (v175 check 64.9/73.5; board v174 64.5/73.7): the d1 gain is inside H200 noise; v16/v32
+  this run 250.0/337.4, 303.7/484.7 (fast draw). tools/fixed_sglang_score.py: v176 check added.
+- SUBMIT NOT DONE: layer 10-31 submit cap (2/agent/day, lead 09:55Z) used by n13s5 + n17s1. v176 passes the bar
+  (fixed > 2.1650): next session after 00:00Z 11-01 may `okc submit` v176 unchanged (it has its check) once.
