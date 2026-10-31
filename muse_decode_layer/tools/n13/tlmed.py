@@ -9,7 +9,7 @@ exec(os.environ.get("STMT", ""), vars(sub))
 for load, c in bench.SCORED:
     if flt != f"{load} {c['layer']}":
         continue
-    data = bench.make_input(c, w, 99)
+    data = bench.make_input(c, w, int(os.environ.get("SEED", "99")))
     g = bench.capture(lambda: sub.kernel_fn(data, st))
     flush = torch.empty(512 << 20, dtype=torch.uint8, device="cuda"); sink = torch.zeros((), dtype=torch.int64, device="cuda")
     runs = []

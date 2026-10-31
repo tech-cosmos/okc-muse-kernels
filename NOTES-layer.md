@@ -3449,3 +3449,94 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
   v1 sl: g14 qkv 0-14.9 | vtk -19.5 | g30 o -26.8 | bnd -30.0 | pr8 19.3-50.3 | rmsnorm -52.1 | tk2f 50.9-133.1 |
          nu8 -138.4 | bnd2 -141.5 (total 141.5; tk2f 82.8 us after pr8 = moe bs-fit stream rate, fixed cost = fresh x13 CW T=8).
 - No hop >= 1 us outside the closed record. Waiting on fresh x13 (CW T=8/16/32) handoff; v176 submit after 00:00Z 11-01 stands.
+
+## n20s1 (2026-10-31 15:04-15:15Z): lead 15:00Z SUBMIT v176; 1 submit, 0 checks, 0 Modal.
+- muse_decode_layer/ unchanged since b051588 (git diff empty) -> `okc submit` = e0f2159f: 2.1497x raw (CI 2.117-2.182),
+  fixed-SGLang 2.1533; board stays v174 50534b24 2.1717 (#206). Per shape us: d1 65.3/73.3, d16 122.2/203.0, d32 152.7/303.5,
+  v1 110.6/124.2, v16 258.2/342.1, v32 345.5/518.3 (sl/full). Slow draw is v32: SGLang's own v32 sl/full was also slow in this
+  run (733.1/1093.0 vs 664.9/1038.5 in check 0ac4a2f0) -> node noise, both sides move together; nothing to fix.
+- Layer 10-31: 4 checks, 3 submits (lead's raised cap 3 used). v176 must NOT be resubmitted unchanged. Next layer candidate
+  needs new code with fixed-SGLang > 2.1913. Open handoff: fresh x13 d32 tk2h MRG 2 (Modal A/B after 00:00Z 11-01).
+- tools/fixed_sglang_score.py: e0f2159f added.
+
+## n21s1 (2026-10-31 15:10-15:35Z): v176 v16/v32 H100 timelines, non-expert audit; no build; 0 judge runs, 0 Modal.
+- No new layer item from the lead after 15:00Z (v176 submit done in n20s1). Own item: tools/n13/tlmed.py on main b051588, 25 cold
+  replays, seed 99 (start / end / dur us):
+  v16 sl 296.3: qkv nvjet 0-18.8 | nvs 19.1-29.2 | combine_hb -31.5 | o -38.9 | bnd -44.4 | FR torch.mm 44.4-78.2 (33.8) |
+    routing -81.6 | rg -84.3 | hot -85.8 | twm 83.8-266.6 | norm -268.7 | g30 unpool 238.8-291.3 (PDL W pre-wait) | bnd2 -296.3.
+  v32 sl 371.0: qkv 0-22.7 | nvs -37.0 | o -47.2 | bnd -54.2 | FR 54.2-90.8 (36.6) | routing -94.5 | rg -98.5 | hot 96.5-254.3 |
+    twm 97.9-325.3 | norm -327.1 | unpool cuBLAS 327.2-359.9 (32.7, serial) | bnd2 359.7-371.0 (11.3).
+  v16 full 446.8: qkv 18.0 | _gw_verify 18.4-147.4 | new_tokens/combine_bal tail -151.3 | o -160.8 | bnd -166.8 | FR -200.9 |
+    route+rg -207.4 | twm 207.3-417.8 | norm -419.5 | g30 unpool -442.0 | bnd2 -446.8.
+  v32 full 624.8: qkv 19.3 | _gw_verify 19.7-268.0 | tail -271.8 | o -282.0 | bnd -290.4 | FR -327.7 | rg -335.3 | twm -578.1 |
+    norm -579.7 | unpool -613.5 | bnd2 -624.8.
+- No hop >= 2 us outside the closed record. Every non-expert piece maps to an entry already on record:
+  * T=256 unpool 32.7 us = 17.2 GFLOP at ~525 TFLOPS / 2 TB/s: neither bound saturated (128x128 tiles, one 128-CTA wave, A re-read
+    x64 from L2 = SM-ingest). g30 at T=256 dead (s100); proj m256 GEMMs lost (s16/s25/s28). W prefetch cannot help (not HBM-bound).
+  * bnd2 at T=256 11.3 us ~ its 28 MB (s FP32 8 + x1 4 + f 4 in, s 8 + h 4 out) at ~2.5-3 TB/s (NOS already on). L2-prefetching
+    s/x1 (12 MB) during the compute-bound unpool: bound ~-3 us H200 v32 sl+full = ~0.13%, and the 67 MB W stream would evict it. Not built.
+  * qkv T=128 (18.8, 2x its byte floor): g30 S3 + DSMEM cluster reduce (instead of s101's fence+ticket+global reduce) estimated
+    ~-1..2 us H100 standalone, worse on the H200 (ingest-bound): < 0.1%. Not built.
+  * _gw_verify excess over the decode-full gather floor (~13/22 us H200 v16/v32 full, ~0.4%): ~/attn s1-s126, closed without a
+    structural idea.
+- Layer lane's own list stays empty. Open: fresh's d32 tk2h MRG 2 (Modal A/B after 00:00Z 11-01), then merge + check (bar 2.1913).
+
+## n22s1 (2026-10-31 15:30-16:20Z): v177 = v176 + fresh x13 MRG 2 + fresh x14 attn PDL-secondary; 1 check, 0 submits, 0 Modal.
+- Merge: `git checkout origin/fresh -- attn_src.py layer.py` (main's muse_decode_layer/ unchanged since b051588; fresh e4432a2
+  = v176 + x13 tk2h MRG 2 (layer.py 1 line, T=32 SQ cfg 14x004) + x14 NDS_PW/NVS_PW/GD_PW/CB_HB_TRIG (attn_src.py)); build.py
+  output == fresh's submission.py (998080 B: 1 MB cap is tight). main = v177 51eaeff.
+- validate ALL OK: test 13/13, scored 0/24, opt 0/40, tk2f 0/1200, replay 0/480, route 0/240 (worst gap 0.0256, drop-lead
+  0.0179), fuzz 0/188, cold prepare 63 s.
+- graph_eq v176 vs v177 (10 inputs): diffs ~1e-3 on d1 full / d16 sl / d16 full / d32 full = SAME as v176 vs v176 control
+  (inherent near-tie routing flips from atomics order); everything else bitwise.
+- H100 ab_files all shapes 4 rounds (v176, v177, v177, v176): d32 sl 184.6 -> 180.0, d32 full 410.0 -> 406.9, d16 full
+  288.6 -> 286.3, d16 sl 189.5 -> 188.3, d1 full 103.6 -> 103.0, v1 full 155.9 -> 157.0 (+1.1), rest tie.
+- CHECK a4582885 v177: 2.1776 raw, fixed-SGLang 2.1673 (< bar 2.1913; adding this run moved v176 check to 2.1917). Per shape
+  (sl/full us) vs v176 check 0ac4a2f0: d1 65.1/75.0 (64.7/73.5), d16 131.1/208.0 (128.7/206.0), d32 151.0/304.9 (154.6/306.3),
+  v1 110.3/127.3 (110.5/118.5), v16 253.3/343.9 (250.0/337.4), v32 315.0/484.8 (303.7/484.7). Only d32 sl moves the right way.
+  H200 node noise dominates: the tuner's synthetic T=8 times were 6 us FASTER in this run (no code change at T=8) and T=256 sl
+  14 us slower; v1 full profile 111.6 us vs 129.6 in v176's (timed 127.3 vs 118.5): single draws. Tuner picks differ (T=16 full
+  g30n:qkv_gate on). Unresolved on the H200 -> NOT submittable (bar). v177 stays on main (H100 + tests clean).
+- NEXT: after 00:00Z 11-01, H200 Modal A/B v176 vs v177 per shape (fresh planned MRG 2 A/B; ask to include x14 and v1 full).
+  If v1 full / d16 full lose on the H200, drop GD_PW (batched only; v1 = batch 1, so v1 full can't be GD_PW: check CB_HB_TRIG/NVS_PW).
+
+## n23s1 (2026-10-31 15:42-16:05Z, real clock): v177 v1 full '+1.1 us' = tuner noise, not x14; 0 judge runs, 0 Modal.
+- x14 reach at v1 (T=8, batch 1): GD_PW is gated `batch > 1` (off), NVS_PW is the v16/v32 sl kernel (v1 sl runs vtk),
+  MRG 2 is T=32 only. Only CB_HB_TRIG can touch v1.
+- H100 tools/ab_flag.py v177 "verify" 4 rounds, SEEDS=99,7,13, CB_HB_TRIG True vs False: v1 full s7 128.67/128.79,
+  s13 155.57/155.72 (s99 same tie), v16 sl/full all within +-0.5 us both ways -> CB_HB_TRIG ties at T=8.
+  So n22s1's v1 full 155.9 -> 157.0 (ab_files, tuner ON in each file's prepare) is a tuner-pick difference, not code.
+  Pinned-tuner rule (fresh x14 lesson) applies to every future whole-file A/B.
+- Side note for proj's variance audit: v1 full spreads 128.7 (s7) vs 155.6 us (s13) by routing seed alone on the H100.
+- Nothing to build; next is still fresh's post-00:00Z Modal H200 A/B v176 vs v177 (d32 sl/full, v16 sl, d16 full).
+
+## n24s1 (2026-10-31 16:00-16:05Z, sandbox clock): v1 (T=8) per-seed spread = distinct local experts, no slow mode; 0 judge runs, 0 Modal.
+- Own item from n23s1 (v1 full 128.7 vs 155.6 us by seed). tools/n24/seedspread.py (one process, one prepare = pinned tuner,
+  3 rounds x 40 cold replays) on main v177, seeds 1-24, H100. Time is a step function of distinct local experts:
+  v1 sl (ref-distinct tiers) 4:104 | 5:115 | 6:122 | 7:132.5 | 8:141.3 | 9:150.3 | 10:162 us; v1 full 5:119-129 | 6:137 | 7:147 |
+  8:157 | 9:166.5 | 10:176 us. ~9.5-10 us per expert on the H100 = 28.3 MB at ~2.9-3.0 TB/s (stream rate).
+- Seeds one step off their ref tier (sl s19/s8/s2/s10, full s15/s20/s21/s13/s24/s7) are explained by the LAYER's own topk_ids
+  (tools/n24/layer_distinct.py): the layer's distinct count differs from the reference's by +-1 (legal router-logit near-ties;
+  usually LOWER, because local_start is the reference's busiest 32-range, so perturbations regress to the mean). On the
+  layer's own count every seed sits on its tier.
+- tools/n13/tlmed.py (now takes SEED=) v1 full s15/s10/s5: only moe_tk2f moves (75.1 / 93.9 / 105.4 us); all other kernels
+  within ~2 us (g14 qkv 14, attn 14-15, g30 o 11-13, bnd 12, pr8 32, rmsnorm 23, nu8 10-13, bnd2 9.5). tk2f fixed part ~5 us.
+- Verdict: v1's routing-seed variance is inherent byte cost (SGLang streams the same experts); unlike proj n20's T=256
+  >128-token mode there is nothing to fix at T=8. Bonus for proj's audit: v16 seeds 1-16 also track distinct (sl 15:279 ..
+  21:311, full 14:378 .. 21:449), ~5-6 us/expert at T=128, no outlier beyond +-1 tier.
+
+## n25s1 (2026-10-31 16:20-17:05Z): v178 = v177 + proj n20 HOT_SL; 1 check (9117bd11), 0 submits, 0 Modal.
+- Merge: `git apply` of r-proj muse_bf16_proj/dev/n20/hotsl_moe_src.diff@10d86ca (moe_src.py only, 7 edits: moe_hot<NH 128>
+  takes every >64-token expert as ceil(nt/128) 128-token slices; moe_twm with hx skips nt > 64; gemm2 waits/done counts x slices).
+  build.py -> submission.py 998564 B (1 MB cap: ~1.4 KB headroom left). main = v178 161c986.
+- validate ALL OK: 13/13, scored 0/24, opt 0/40, tk2f 0/1200, replay 0/480, route 0/240 (worst gap 0.0256), fuzz 0/188, cold prep 65.2 s.
+- H100 proj ab_route (v177 A vs v178 B, tuner off, routers 5,12 = dominant-expert, 3 = control, 3 inputs each): v32 sl/full
+  rs5 -10.4/-2.8/-5.5 | -11.1/-5.2/-14.4, rs12 -13.2/-10.5/-8.5 | -14.1/-12.9/-15.8, rs3 tie (-0.4..+0.2 / -0.7..-1.9);
+  means v32 sl -6.0 / full -8.7, v16 sl -1.1 / full -0.5, v1 tie; v16/v32 bitwise 36/36 (v1 T=8 non-bitwise = known atomics near-ties).
+- CHECK 9117bd11 **2.1886 raw** [2.156, 2.221] (fixed-SGLang 2.1874; v176 check 2.1917, bar 2.1913; board best 2.1717 raw).
+  us sl/full: d1 64.1/73.3, d16 131.9/202.7, d32 148.9/299.9, v1 107.9/120.7, v16 252.8/344.2, v32 317.2/498.9.
+  Per-shape evidence: v32 sl profile moe_hot<128> 133 us (takes the >128-token expert) beside moe_twm 193 us; submit e0f2159f's
+  slow-mode v32 sl profile had moe_hot 2.8 us (empty) + moe_twm 231 us. v32 full: hot 135 / twm 191 (e0f2159f 2.5 / 189).
+- NOT submitted: lead 15:25Z = no more layer submits on 10-31. QUEUED for the first session after 00:00Z 11-01: submit v178
+  (161c986) once. It beats the board best raw (CLAUDE.md rule) and meets the 09:28Z rule (within 1% of the 2.1913 bar + per-shape
+  profile evidence on its target shape); fixed-SGLang 2.1874 is 0.2% under the lead's fixed bar = noise. If the lead objects, hold.

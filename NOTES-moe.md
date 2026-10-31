@@ -3845,3 +3845,93 @@ No lead line after 03:50Z; LANE A done in n11a. moe paused. 0 judge runs, 0 Moda
   bs256 230.3. Board keeps 2.3198 (e37e578e); no resubmit. Moe board 10-31: 4 checks, 2 submits (cap reached for today).
 - Takeaway: hotdyn+HOT128 at bs128 is the real gain (+1.2..2.4% on that shape in both checks); the ~0.5% overall win is inside
   the run-to-run noise of the other shapes (bs16 swings 87-94 us between runs of untouched code).
+
+## o12 (2026-10-31 14:52Z - 15:40Z): moe board: layer HOT_XN 16 ported into moe_hot; 1 check, 0 submits (cap 2/2 used today)
+- Unported layer piece #2 (after o11's hotdyn): HOT_XN 16 (fresh f1s6, layer v172): moe_hot NH 128 items run wgmma N = nv rounded
+  up to 16 (80/96/112/128); x box stays 128 rows, rows >= nv never stored -> exact. Runtime A/B switch: hot grid + 1e8 = XN off
+  (passed to the kernel as per bit 30). main 7139706.
+- Bitwise vs N128 (tools/o11/hot.py, 16 seeds bs256 + 16 seeds bs128, assert torch.equal), test 15/15.
+  H100: bs256 xn 271.70 / off 272.14 (hot seeds -0.9), bs128 240.91 / 240.48 = tie (H100 DRAM-bound, as n5s21).
+- check 2ba95722 (7139706) 2.3265x (CI 2.292-2.361): bs1 25.8, bs16 89.6, bs32 118.3, bs8 68.6, bs128 197.3 (x2.406),
+  bs256 234.8 (x2.728 vs x2.683 in both e59302f4 and b4e94b61 = +1.7% on the shape, matches H200 exact-N n5s21 -2.3 us).
+  Untouched shapes drew slow (bs8 x2.204 vs 2.225). SUBMIT CANDIDATE for 11-01 after 00:00Z (beats board 2.3198 already).
+- HOT_ET (layer v171, ~1 us no-hot cost at bs128) still NOT ported: o11's theoretical meta[67] race note.
+
+## o13 (2026-10-31 15:00Z - 15:30Z): lead 15:00Z moe-board bs8/bs16 vs layer T=8/T=16: BAL ported; 2 checks, 0 submits (cap)
+- Layer T=16 moe = tk2f SQ + BAL + slot y32 (PF 548, TUNE_BASE (16,*) "bal"); the moe board ran SQ without BAL (PF 516).
+  Layer T=8 = nu8 (router-fused PF 5 on w13q): does not map (no router on the moe board). Nothing else at T=8/16 differs.
+- Port (main acf63a9): SQ launcher cfg 98204 -> tk2f_go<8,4,2,..,8,0,548>; python TK2F_BAL_M = {8, 16} -> sa + 98204
+  (-> 10198204 SQ, moe_norm3). Bitwise vs main (tools/o11/eq1.py, 200 eager + 400 replay at bs 16 and 8: 0 differ), test 15/15.
+- H100 (tools/o11/ab.py 8 seeds x 4 rounds): bs16 -1.17, bs8 -0.92 us.
+- H200 DIAG 51ba444e (/tmp copy + tools/o13/diag_bal.diff: O13_DIAG in prepare, moe-board routings = inline clone of
+  reference.generate_input, seeds 500..511, sq/bal/sqb/balb interleaved, 40 cold-L2 replays): bs16 sq 87.62/87.54 -> bal
+  86.50/86.50 (11/12 seeds faster), bs8 68.18/68.08 -> 67.79/67.83 (mixed per seed: 2-4-expert seeds +0.5..1.2, others
+  -1..-1.6), maxdiff 0. Its own timed run: 2.3429x. REUSABLE: the diff is a moe-board-routing H200 A/B harness.
+- Clean check bfd582aa (acf63a9) 2.3694x (CI 2.334-2.405) = best moe check: bs1 26.4, bs16 84.8, bs32 117.2, bs8 62.1,
+  bs128 193.4, bs256 228.4 us. SUBMIT acf63a9 after 00:00Z 11-01 (supersedes o12's 7139706; beats board 2.3198).
+
+## o14 (2026-10-31 15:16Z - 15:31Z): moe board: fresh x13 tk2h MRG 2 ported to bs32; 2 checks (1 DIAG), 0 submits (cap)
+- Layer d32 tk2h MRG 1 -> 2 (fresh x13 b0017ad: per-segment gemm13 -> gemm2 counters cnt[64 + j], existing code) maps 1:1
+  onto the moe board's bs32 (SQ tk2h GS16 PF4 dispatch, line ~5508: tk2f_go<..., 16, 2, 516>). norm3 already zeroes cnt[0..127].
+- Bitwise vs main (tools/o11/eq1.py 200 eager + 400 replay bs32: 0 differ), bench test 15/15.
+- H100 ab.py 8 seeds x 4 rounds: bs32 -2.29 us (every seed -1.4..-4.2). H100 DIAG (tools/o14, 16 seeds x 2 interleaved
+  pairs): 162.5 -> 160.3 us, maxdiff 0.
+- H200 DIAG cc253b3b (tools/o14/diag_mrg.diff = o13 harness with a runtime MRG switch via moe_set_l2h2 + 1e6; moe-board
+  routings seeds 500..515): m1 118.52/118.38 -> m2 117.75/117.78 us (-0.7, 15/16 seeds). Smaller than the H100's -2.2
+  (as s12's PSC record: H200 gemm13 tail shorter). Its own timed run 2.3273x.
+- main cbd4bcf. Clean check c015407f 2.3737x (CI 2.338-2.409) = BEST moe check: bs1 25.9, bs16 85.2, bs32 120.0 (x1.778
+  vs 1.744-1.756 before; SGLang drew 213 us), bs8 61.5, bs128 189.9, bs256 229.4 us.
+- Dead (H100 ab.py): tk2h MRG 2 at bs16 instead of BAL (TK2H_M {16: 3}) +2.45 us every seed; BAL at bs32 instead of tk2h
+  MRG 2 = tie (+0.05). Neither checked.
+- NEXT SESSION AFTER 00:00Z 11-01: SUBMIT cbd4bcf (supersedes acf63a9 / 7139706) ONCE; beats board 2.3198.
+
+## o15 (2026-10-31 15:32Z - 16:15Z): moe board bs1 lever: cluster-split norm3 = DEAD on the H100; 0 judge runs
+- Geomean leverage per us (c015407f times): bs1 0.64 %/us, bs8 0.27, bs16 0.20, bs32 0.14, bs128 0.09, bs256 0.07 ->
+  bs1 fixed cost (fresh x11: ~8.8 us = pre-data 4.3 + transition 1.4 + norm 2.4 + launch ~1) is the best-paid target.
+- nsys (tools/o15/nsys_bs.py, graph node trace, H100 shared): bs1 = tk2f + norm3 only; norm3 ends ~3 us after tk2f.
+- Hypothesis: norm3 at M = 1 is ONE 512-thread CTA reading every local route's 16 KB FP32 row (one SM's L2 rate).
+  Built moe_norm3c<CS> (tools/o15/n3c.diff): grid M * CS as a CS-CTA cluster, columns split, per-warp sums of squares
+  published to every peer by st.shared::cluster, summed in norm3's warp order -> bitwise = main (eq1 bs1 200 eager +
+  400 replay, bs8/bs16 100 + 200: 0 differ).
+- H100 ab.py (8 seeds x 4 rounds): CS 8 at bs1 +0.43 us (7/8 seeds slower); CS 2 bs1 +0.69, bs8 +0.47. DEAD: a cluster
+  PDL secondary costs more than the single-SM read (it is not the norm's bottleneck). Not checked.
+- main unchanged (cbd4bcf). NEXT SESSION AFTER 00:00Z 11-01: SUBMIT cbd4bcf ONCE (best check c015407f 2.3737x).
+
+## o16 (2026-10-31 15:40Z - 15:55Z): moe board: layer IDW ported into moe_norm2/norm3; 1 check, 0 submits (cap 2/2 used today)
+- The moe-board moe_norm2<SLOT> still loaded ids/tw AFTER griddepcontrol.wait (one dependent trip after tk2f's trigger).
+  Layer v173 has IDW (moe n10s1): ids/tw before the wait (harness inputs, complete before moe_tk2f; topk_weights is FP32 so
+  .float() is a no-op), volatile pin store on the loaded words, Y and inv via __ldcg. Copied 1:1 (main 34dd790).
+- SASS (cuobjdump of the build): ids/tw/w1 LDG.CONSTANT before ACQBULK, Y loads LDG.E.128.STRONG.GPU after. Good.
+- Bitwise vs cbd4bcf: tools/o11/eq1.py bs 1/8/16/32, 100 eager + 200 replay each: 0 differ. bench test 15/15.
+- H100 tools/o11/ab.py 8 seeds x 4 rounds: bs1 -0.32, bs8 -0.44, bs16 -0.34, bs32 -0.07 us (big-M paths use moe_norm/norme: untouched).
+- Check ce1a1aa4 (34dd790) 2.3335x (CI 2.298-2.368): bs1 25.8, bs16 90.1, bs32 123.3, bs8 67.4, bs128 190.8, bs256 230.9 us.
+  bs8/16/32 drew slow vs c015407f (61.5/85.2/120.0): judge run-to-run swing (bs8 has ranged 61.5-68.6 on unchanged code).
+- NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE (= cbd4bcf + IDW, strictly fewer trips; check > board 2.3198).
+
+
+## o17 (2026-10-31 15:50Z - 16:25Z): HOT_ET RACE (layer main v171+ carries it) DEMONSTRATED + FIX; moe-board HOT_ET port
+- HOT_ET (layer v171, moe n7s39): moe_hot (per > 0) triggers moe_twm BEFORE its own griddepcontrol.wait; twm (hx) polls
+  meta[67] bit 30, set by moe_hot CTA 0 after that wait. meta is a per-call torch.empty: at entry meta[67] holds the
+  previous replay's word (bit 30 SET) or pool garbage, and moe_routegather(n) zeroes it only AFTER its own PDL trigger
+  (CTA 0, after the count pass). If twm polls before that zero, it passes on the stale bit and runs on stale meta.
+- Demonstration (moe-board copy = HOT_ET exactly as the layer, tools/o17/mk.py fix=0 delay=40000: routegather CTA 0 spins
+  40000 cycles after its trigger, TEST ONLY): device printf at the poll, eager: first value seen = 0xbf409ccc /
+  0xbb93d998 (leftover negative floats: bit 30 clear by luck; a positive float >= 2.0 has bit 30 set). Graph replay
+  (tools/o11/race.py): routegather sees meta[67] = 0x40000040 (previous replay) at its delay point, 98/132 twm CTAs pass
+  the poll on it (first 0x40000040, stale meta[66] 279/564) and the replay HANGS (100% GPU, killed).
+- Fix (fix=1): routegather CTA 0 `meta[67] = 0; __threadfence();` BEFORE launch_dependents. Same 40000-cycle delay:
+  0/200 graph replays differ at bs128, no hang. Ordering: moe_hot launches only after every routegather CTA triggered,
+  twm only after moe_hot's trigger, so the zero is performed before any twm read; call N's twm is complete before
+  routegather(N+1) passes its wait (the same assumption meta[66]/[68+] zeroing already relies on).
+- Layer: TUNE_BASE (128/256, *) = "rg": True + "hot": moe_routegathern + moe_hot (HOT_ET) + twm = exposed on v16/v32 in
+  every layer run since v171 (incl. the board runs). The moe_route + moe_gathern path is safe (route completes first).
+  Branch moe/hotet-race (layer.py moe_routegathern: zero + fence before the trigger, both RG_XPRE branches; build.py
+  regenerates submission.py with only that 4-line diff).
+- Layer evidence (worktree of branch moe/hotet-race, layer's own tools): same 40000-cycle spin after moe_routegathern's
+  trigger: main -> CUDA illegal instruction in the T=128/256 tuner (tools/replay_test.py verify 32 sliding); fixed ->
+  tuner completes, 0/20 fails on every verify shape. Fix without delay: replay_test 0/40 x router seeds 11,12 on verify
+  1/16/32 sl+full; bench test PASS (cases 9-12 shown, no FAIL); H100 ab_files 4 rounds vs main: v16 sl -0.5 / full -0.3,
+  v32 sl -0.3 / full +0.2 us = tie. Branch moe/hotet-race e24be08 (on main 0d36b3a), pushed; layer merges.
+- Moe board HOT_ET (fixed form, /tmp/o17/etfix; race.py 0/400 bs128, 0/200 bs256, 0/100 bs256 with the delay): H100
+  tools/o11/ab.py 8 seeds x 4 rounds: bs128 -0.12, bs256 -0.07 us = TIE (seed spread +-3) -> NOT ported. Moe main stays
+  34dd790. Tools: tools/o17/mk.py (variant writer: fix, delay), printf_poll.py (eager poll printf driver). 0 judge runs.

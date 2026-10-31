@@ -1,3 +1,27 @@
+## o17 16:25Z 10-31: HOT_ET RACE in layer main (v171+) DEMONSTRATED + FIXED: branch moe/hotet-race e24be08 (moe_routegathern
+## zeroes meta[67] + fence BEFORE its PDL trigger; forced window: main hangs / illegal instr, fix 0 fails; H100 tie). Request to
+## layer (v178) + lead (withdraw call) in COORD. Moe-board HOT_ET (fixed) = tie -> not ported. main 34dd790 unchanged.
+## NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE. Then: proj's HOT_SL (>128-token expert slices) onto moe board bs256
+## (+ bs128 if proj n21 says it maps) when proj hands it off (lead 15:58Z). Moe board 10-31: 10 checks, 2 submits used.
+## o16 15:55Z 10-31: main 34dd790 = cbd4bcf + layer IDW in moe_norm2/norm3 (ids/tw before griddepcontrol.wait, Y .cg;
+## SASS checked), bitwise, test 15/15; H100 bs1 -0.32, bs8 -0.44, bs16 -0.34, bs32 -0.07 us. Check ce1a1aa4 2.3335x (bs1 25.8,
+## bs16 90.1, bs32 123.3, bs8 67.4, bs128 190.8, bs256 230.9: bs8/16/32 slow draws, untouched paths). moe board 10-31: 10 checks,
+## 2 submits. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 34dd790 ONCE (supersedes cbd4bcf; check > board 2.3198). Remaining
+## moe-board items all < 0.1% (HOT_ET race-safe ~1 us bs128 no-hot draws); lead lines decide.
+## o15 16:15Z 10-31: bs1 is 0.64 %/us of the moe board (bs32 0.14, bs256 0.07). Cluster-split norm3 (moe_norm3c, bitwise,
+## tools/o15/n3c.diff) H100 bs1 +0.4/+0.7, bs8 +0.5 us = DEAD. 0 judge runs. main still cbd4bcf: SUBMIT IT ONCE AFTER 00:00Z 11-01.
+## o14 15:31Z 10-31: main cbd4bcf = acf63a9 + tk2h MRG 2 at bs32 (fresh x13 per-segment counters); bitwise, test 15/15.
+## H100 bs32 -2.2 us; H200 DIAG cc253b3b bs32 -0.7 us (16 seeds, 2 pairs). Clean check c015407f 2.3737x = BEST check:
+## bs1 25.9, bs16 85.2, bs32 120.0, bs8 61.5, bs128 189.9, bs256 229.4. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT cbd4bcf ONCE
+## (supersedes acf63a9/7139706). moe board 10-31: 9 checks, 2 submits. Dead: tk2h at bs16 (+2.5 H100), BAL at bs32 (tie).
+## o13 15:30Z 10-31: main acf63a9 = 7139706 + tk2f BAL on SQ (PF 548, layer T=16 'bal') at bs 8/16; bitwise, test 15/15.
+## H200 DIAG 51ba444e (moe-board routings, interleaved): bs16 -1.1, bs8 -0.3 us. Clean check bfd582aa 2.3694x (best check):
+## bs1 26.4, bs16 84.8, bs32 117.2, bs8 62.1, bs128 193.4, bs256 228.4. NEXT SESSION AFTER 00:00Z 11-01: SUBMIT acf63a9 ONCE
+## (not 7139706). moe board 10-31: 7 checks, 2 submits. Layer T=8 (nu8) does not map; HOT_ET still unported (o11 race note).
+## H200 moe-board A/B harness: tools/o13/diag_bal.diff (O13_DIAG hook; copy, edit variants, okc check the copy, read log_tail).
+## o12 15:40Z 10-31: main 7139706 = c75be69 + moe_hot HOT_XN 16 (layer v172), bitwise, test 15/15. check 2ba95722 2.3265x
+## (bs256 x2.728 vs 2.683 twice before = real; others slow draws). NEXT SESSION AFTER 00:00Z 11-01: SUBMIT 7139706 once
+## (moe board cap resets; beats 2.3198). Then: HOT_ET port (race-safe form) is the last unported layer moe piece.
 ## o11 10-31: moe board = layer moe_hot hotdyn+HOT128 (HOT_M {128: 16048, 256: 3216064}) + bs32 tk2h W3 (TK2H_M {32: 3}) on main c75be69,
 ## bitwise, test 15/15. Checks e59302f4 2.3275 (hotdyn only) / b4e94b61 2.3323; submit 41ad7717 drew 2.3124 -> board stays 2.3198 (e37e578e).
 ## moe board 10-31: 4 checks (1 DIAG), 2 submits = lead's 2/agent/day cap reached. Do NOT resubmit c75be69 unchanged.

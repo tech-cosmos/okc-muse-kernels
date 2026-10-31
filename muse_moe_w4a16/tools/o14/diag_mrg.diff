@@ -1,0 +1,112 @@
+--- /home/daytona/r-moe/muse_moe_w4a16/submission.py	2026-10-31 15:27:47.834960068 +0000
++++ submission.py	2026-10-31 15:20:30.210131939 +0000
+@@ -5379,8 +5379,10 @@
+ static int g_tk2f_l2h = TK2F_L2H;  // n4s3: tk2f L2 hint mode of the next launch (moe_tk2f_launch: cfg / 1000000 - 1)
+ static int g_tk2f_l2h2 = -1;  // n18: gemm2 rows' L2 hint mode (-1 = as gemm13); kernel arg l2h bits 4+ = mode + 1
+ static int g_tk2f_orc = 0;  // n5s16: DIAG oracle (v + 1000 in moe_set_l2h2)
+-static int g_tk2f_pfl2 = 0;  // n5s27 PFL2 (DIAG): prefetch distance in rows (v + 10000 * d in moe_set_l2h2)
++static int g_tk2f_pfl2 = 0;
++static int g_o14_mrg2 = 0;  // o14 DIAG: tk2h MRG 2 (v + 1000000 in moe_set_l2h2)  // n5s27 PFL2 (DIAG): prefetch distance in rows (v + 10000 * d in moe_set_l2h2)
+ int64_t moe_set_l2h2(int64_t v) {
++  g_o14_mrg2 = v >= 500000; if (g_o14_mrg2) v -= 1000000;
+   g_tk2f_pfl2 = (int)((v + 5000) / 10000); v -= 10000 * (int64_t)g_tk2f_pfl2;
+   g_tk2f_orc = v >= 500; g_tk2f_l2h2 = (int)(v >= 500 ? v - 1000 : v); return 0;
+ }
+@@ -5505,7 +5507,8 @@
+ #endif
+ #if TK2H_P4 || TK2_EXP
+     if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 40000 && cfg < 50000 && cfg % 1000 == 4)  // n16: tk2h GS16 + PF4 on SQ stages
+-      return tk2f_go<8, 4, 2, false, false, true, 16, 2, 516>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);  // o14: MRG 2 = per-segment gemm13 -> gemm2 counters (fresh x13); H200 DIAG cc253b3b bs32 -0.7 us, bitwise
++      return g_o14_mrg2 ? tk2f_go<8, 4, 2, false, false, true, 16, 2, 516>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0) :
++             tk2f_go<8, 4, 2, false, false, true, 16, 1, 516>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+ #endif
+ #if TK2X
+     if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 60000 && cfg < 70000 && cfg % 1000 == 4)  // n5s16 HYB GS16 + PF4 on SQ stages
+@@ -6039,6 +6042,9 @@
+     st["w1"] = (1.0 + weights["post_norm_w"].float()).contiguous()
+     torch.cuda.synchronize()
+     global _DIAG_DONE
++    if O13_DIAG and not _DIAG_DONE:
++        _DIAG_DONE = True
++        _o13_diag(st)
+     if DIAG and not _DIAG_DONE:
+         _DIAG_DONE = True
+         _diag(st)
+@@ -6514,7 +6520,7 @@
+             return out
+         if TK2F:
+             c = _tk2f_cfg(M, st)
+-            lib.moe_set_l2h2((-1 if TK2F_L2H2_RT is None else TK2F_L2H2_RT) + (1000 if TK2F_ORACLE and DIAG else 0)
++            lib.moe_set_l2h2((-1 if TK2F_L2H2_RT is None else TK2F_L2H2_RT) + (1000 if TK2F_ORACLE and DIAG else 0) + (1000000 if O14_MRG2 else 0)
+                              + (10000 * TK2F_PFL2 if DIAG else 0))  # n5s27 PFL2
+             if c >= 10000000:  # n14 SQ
+                 k = "s6p" if c >= 40000000 else "s6" if c >= 20000000 else "sq4" if c % 1000 in (402, 403, 404, 405) else "sq8" if c % 1000 in (104, 106) else "sq"
+@@ -6631,3 +6637,68 @@
+     lib.moe_gemm2(p2, st["w2q"], st["w2s"], st["gs2"], st["lut"], inter, meta, sroutes, y)
+     lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out)
+     return out
++
++
++O14_MRG2 = 0  # o14 DIAG copy ONLY (never submit)
++O13_DIAG = 1  # o13 DIAG copy ONLY (never submit): H200 interleaved sq vs BAL tk2f on moe-board routings (bs 8 / 16)
++
++
++def _o13_gen(bs, seed):  # = reference.generate_input(bs, "ep8", seed) (dist normal, rank busiest)
++    gen = torch.Generator(device="cuda").manual_seed(seed)
++    x = torch.randn((bs, 4096), generator=gen, device="cuda").to(torch.bfloat16)
++    scores = torch.rand((bs, 256), generator=gen, device="cuda")
++    z = torch.randn((256,), generator=gen, device="cuda")
++    u = torch.rand((256,), generator=gen, device="cuda").clamp(min=1e-12)
++    scores = scores + 0.03 * z / (-u.log()).sqrt()
++    routed = scores.topk(8, dim=-1)
++    ids = routed.indices
++    pairs = torch.bincount((ids // 32).flatten(), minlength=8)
++    ids = (ids - 32 * pairs.argmax()) % 256
++    return {"hidden_states": x, "topk_ids": ids.to(torch.int32),
++            "topk_weights": (routed.values / routed.values.sum(-1, keepdim=True)).float(),
++            "config": {"bs": bs, "d_hidden": 4096, "local_start": 0, "local_count": 32}}
++
++
++def _o13_diag(st):
++    g = globals()
++    flush = torch.zeros(256 << 20, dtype=torch.uint8, device="cuda").view(torch.int64)
++    sink = torch.empty((), dtype=torch.int64, device="cuda")
++    vs = [("m1", {"O14_MRG2": 0}), ("m2", {"O14_MRG2": 1}), ("m1b", {"O14_MRG2": 0}), ("m2b", {"O14_MRG2": 1})]
++    res = {}
++    for bs in (32,):
++        for seed in range(500, 516):
++            data = _o13_gen(bs, seed)
++            graphs = []
++            for name, ov in vs:
++                old = {k: g[k] for k in ov}
++                g.update(ov)
++                try:
++                    kernel_fn(data, st)
++                    torch.cuda.synchronize()
++                    gr = torch.cuda.CUDAGraph()
++                    with torch.cuda.graph(gr):
++                        o = kernel_fn(data, st)
++                    gr.replay()
++                    torch.cuda.synchronize()
++                    graphs.append((name, gr, o))
++                finally:
++                    g.update(old)
++            base = graphs[0][2].float()
++            ts = {n: [] for n, _, _ in graphs}
++            for _ in range(40):
++                for n, gr, _ in graphs:
++                    torch.sum(flush, 0, out=sink)
++                    a, b = torch.cuda.Event(True), torch.cuda.Event(True)
++                    a.record(); gr.replay(); b.record()
++                    torch.cuda.synchronize()
++                    ts[n].append(a.elapsed_time(b) * 1e3)
++            for n, _, o in graphs:
++                t = sorted(ts[n])[len(ts[n]) // 2]
++                err = (o.float() - base).abs().max().item()
++                res.setdefault((bs, n), []).append((t, err))
++            del graphs
++    for (bs, n), v in res.items():
++        print(f"o14diag MEAN bs{bs} {n}: {sum(x[0] for x in v) / len(v):.2f} us | seeds "
++              + " ".join(f"{x[0]:.1f}" for x in v) + f" | maxdiff {max(x[1] for x in v):.3g}", flush=True)
++    del flush
++    torch.cuda.synchronize()

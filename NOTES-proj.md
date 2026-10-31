@@ -3011,3 +3011,123 @@ tools/validate.py in s75). Nothing to port or validate; no judge runs, no H100 w
   (ingest wall ~50 GB/s/SM, split-K red); flashinfer in the judge image lists tinygemm_bf16 / trtllm_low_latency_gemm / mm_bf16
   (diagext line): untested at m128 -> a one-check diag (print only) of those vs the lt pick is cheap. (2) router m16/m32 zero kernel
   (0.7-1.1 us) needs an intra-CTA K split + small cluster (clusters of 16 dead). (3) layer lane per lead.
+
+## n17 (2026-10-31 14:45Z-, unattended session 5): lead 13:58Z/14:30Z PROJ BOARD lane, router m16/m32 + m128 library check
+- Per-shape (check 5b420410, H200 us ours/SoL): d1 sum 39.4 (1.537x), d16 55.6 (1.375), d32 58.4 (1.333), v1 44.9 (1.69),
+  v16 71.7 (1.199), v32 85.5 (1.19). Biggest gaps vs SoL: m128/m256 GEMMs (+5..8.5 each), router m16/m32 +4.0/+4.8, qkv m16/32 +4.5/5.1.
+- DEAD: R3_IZ (dev/n17/r3v.cu): router3 zeroes out itself (each CTA a slice, fence, epoch-counter arrive pre-loop, acquire-poll
+  before the atomics) instead of the PDL zero kernel: H100 m16 8.42 vs 6.94, m32 8.90 vs 7.81, m8 8.13 vs 7.52 (+0.6..1.5 us):
+  the per-CTA loop at KC 256 is ~1 us, so fence + 112-224 same-address atomics + poll sit on the critical path. Third dead
+  in-kernel replacement of the zero kernel (R3_FA, R3_CL): the 0.7 us zero kernel stays.
+- DEAD: cuDNN frontend matmul (= flashinfer mm_bf16 backend 'cudnn', the only sm90 path; cutlass/tgv are sm100-only)
+  (dev/n17/cdn.py, nvidia-cudnn-frontend 1.18 in ~/okc): every engine ties F.linear (eng0 = cuBLAS): qkv m128 20.61 vs 20.54,
+  pooler m128 27.23 vs 27.26, qkv m256 21.25 vs 21.73, unp m128 26.82 vs 26.66. No judge diag needed.
+- DEAD: bmm+rsum router at m16/m32 (dev/n16/bmm.py): S8 8.64/9.50 vs router3 6.94/7.81.
+- router3 tile configs m16/m32 (H100 r3b, GPU shared, +-0.5 noise): m32 (32,32,2,2,256,4) 7.17-7.74 vs (16,64,1,4,256,4)
+  7.17-7.97; m16 (16,32,1,2,256,4) ~tie. Put in ROUTER_R3_TUNE[16/32] (51388e8): local tuner m16 9.98 -> 9.66, m32 10.05 -> 9.70.
+- Judge: check a670beb1 (51388e8) 1.3839 [1.363, 1.405] vs best dba12fb4 1.3847: NOT submitted (does not beat). Router H200:
+  m32 6.71 -> 5.84 (picked (32,32,2,2,256,4)), m16 5.82 -> 5.47 (picked (16,32,1,2,128,4)); rest = noise (qkv m16/32 12.11/12.57,
+  pool 15.67/16.03). Kept on main (router gain is real; next submit-worthy change carries it). Budget 10-31: checks 4/20, scored 1/10.
+- NEXT: proj board has no open >= 1 us item with a design not on record (v16/v32 GEMMs, qkv m16/32, router zero kernel all
+  closed). Options: 00:00Z H200 queue (dev/n15/mk_h200.sh); stack small wins + submit when a check beats 1.3847.
+
+## n18 (2026-10-31 15:08-15:45Z, unattended session 6): lead 15:00Z PROJ BOARD v16 m128; router m128/m256 oracles (H100), 0 judge runs
+- Judge profile a670beb1 (H200 GPU us): v16 qkv nvjet 15.1, o 5.5, pool 21.3, unp 19.7, router nvjet bmm 5.4 + pj_rsum 1.4;
+  v32 qkv 25.3(!), o 7.8, pool 26.4, unp 24.4, router 6.5 + rsum 1.6. Router m128/m256 = 6 us above SoL each: took it first
+  (the qkv/pool/unp m128 designs are all on record dead: g22/g23/g28/sk128/CUTLASS/DeepGEMM/cuDNN, n9s1-n9s3, n17).
+- ORACLE router3 (dev/n18/r3v.cu = n17 + R3_NOMMA + R3_BULK; r3b.py takes VARS ';'-separated, DEFS ','-joined), H100 us minus
+  empty graph: m128 (128,64,4,4,256,4) base 9.8 | NOMMA 9.2 | NORED 9.1 | NOMMA+NORED 9.0 | NOZERO 9.3; m256 (256,32,4,2,512,4)
+  13.1-13.5 | 13.2 | 12.5 | 11.3-12.0 | 12.4. Bare grid-stride reader (dev/n18/rd.py) of the same bytes: 10.5 MB 6.1-6.4, 12.6 MB 6.7-7.0.
+  => load-only structure costs ~2.7 (m128) / ~4.5 (m256) us over a bare reader; MMA + atomics only ~0.8 / ~1.5.
+- Retiling to cut x re-reads (ingest 41 -> 16 MB at m256): load-only 10.45-11.0 at best, full kernels WORSE (atomics volume
+  grows: (256,64,4,4,256,4) 14.1, (256,128,4,4,128,3) 17.7; m128 (128,128,..) 12.6, (128,256,..,64,2) 17.1). Ingest is not the wall.
+- R3_BULK (1D cp.async.bulk per row per part, padded 528-B rows, NS mbarriers, all issued up front; correct, err 2.5e-6):
+  load-only 9.5 (m128) / 12.1-12.9 (m256), full 10.8-10.9 / 15.8-16.6: copy mechanism is not the wall either. DEAD.
+- PDL-launched pj_rsum after the cuBLAS bmm (dev/n18/rsp.py, griddepcontrol.wait first): m128 S4 9.44 vs 9.52, m256 S4 11.07 vs
+  11.26, S8 -0.2..-0.3: noise-level (nvjet doesn't trigger dependents early). DEAD (not worth a check).
+- Verdict: router m128/m256 stays bmm4 + rsum. The ~6 us vs SoL is launch (2 kernels) + a latency-bound small-read structure
+  (~2.5-4.5 us above a bare reader regardless of copy mechanism/tiling). No proj-board item >= 1 us with a new design left.
+
+## n19 (2026-10-31 15:23Z-, unattended session 7): proj board, lead 15:00Z lane; DSMEM split-K bound + G30_GX qkv tuner candidate
+- Per-shape table (dba12fb4 / 5b420410 / a670beb1, H200 us) re-read: by load the weakest are v16 1.20 / v32 1.19; per shape vs
+  SGLang the m128/m256 unpooler (1.02) and o (1.05) are cuBLAS-vs-cuBLAS ties; qkv m16/m32 12.1/12.6 vs a '12-bit bytes/4.3 + 2.5'
+  fit of ~9.1 is the largest gap in the small (high-weight-per-us) d16/d32 loads.
+- DSMEM REDUCE-SCATTER microbench (dev/n19/dsm.py, dsm2.py; H100 shared, 128 CTAs, FP32 partial P per CTA, rank r pulls slice r
+  from all C peers, ld.shared::cluster v4): pull rate ~13 GB/s/SM at C = 4/8/16 for P = 32-128 KB, ~20-24 GB/s/SM at C = 2;
+  unchanged with 1024 threads or 2-4x ILP (U) -> throughput wall, not latency. Local smem pass (C1) 128 KB = 1.2 us.
+  => any split-K GEMM reducing >= ~32 KB partials per CTA over DSMEM pays >= ~2.5 us per pass: extends n9s3's cluster-16 verdict
+  to clusters 2-8. Global FP32 partials through L2 (~50 GB/s/SM ingest) are faster than DSMEM. Closes 'small-cluster split-K
+  m128 GEMM' before building it.
+- G30_GX (n5s6: escapes out of g30's main loop) as a TUNER CANDIDATE for qkv m16/m32 (BF16_G30 cfg (3,16,16,"G30_GX=1"); prepare
+  stores st[("g30gx", layer, S)] = _g30_gx_tables; _run swaps hdr). Judge diag30e a670beb1 had qkv m32 standalone GX 12.86 vs
+  13.09 (H100 says GX loses +0.2..1.0 standalone: the H200 decides). diag30e turned off (its pooler/unp GX lose standalone).
+  bench.py: FORCE=gx forces GX picks; ESCV=bf16 makes esc use only escapes g30 keeps (the default esc set drops g30 entirely,
+  so it never exercised g30/GX). GX spike rows are near-exact, not bitwise, for tiny escapes (2^-15 + (v - 2^-15) in FP32 =
+  ordinary accumulation, lead 10-25 23:30Z); bench allows that for GX picks like g22. Tests 39/39 (+FORCE=gx), esc 16/16,
+  ESCV=bf16 FORCE=gx 24/24.
+- Judge: check 67759f2f (0740cb2) 1.3676 [1.347, 1.388] vs best dba12fb4 1.3847: NOT submitted. H200 tuner picked GX at qkv m16
+  (15.10 vs 15.49) and m32 (15.90 vs 16.10); board shapes qkv m16 11.94 (-0.17 vs a670beb1), m32 12.32 (-0.25) but SGLang's own
+  times moved the same (-0.16/-0.32): within noise. The overall drop comes from untouched lt shapes (qkv/o/unp m128 +0.6..0.8,
+  router m128/256 +0.3..0.4: SGLang slower there too), i.e. a slow node draw. GX kept on main (the tuner decides per run).
+- Budget 10-31: proj checks 5/20, scored 1/10. 0 Modal.
+- NEXT: nothing >= 1 us with a new design on the proj board (DSMEM split-K now closed for clusters 2-16 too). Standing: 00:00Z
+  H200 queue dev/n15/mk_h200.sh (pr8 v1 flat/NOW/TK1); stack small wins; lead's call for a lane.
+
+## n20 (2026-10-31 15:41Z-, unattended session 8): lead 15:25Z VARIANCE AUDIT of the layer -> HOT_SL fix
+- Judge data: 36 layer profile JSONs in r-layer/muse_decode_layer/profiles (benchmarks[].runs_ns / baseline_runs_ns / ratios
+  per rep + one-replay kernel tables). Table: dev/n20/table.txt. v170-v176 (13 runs) run-to-run our/SGLang ratio cv per
+  shape 0.7-2.1% (v32 sl 2.1% worst; d1 1.8-2.1% is mostly version drift; d32 ours-vs-SGLang corr only 0.3 = independent
+  noise both sides). Within a run each rep is a fresh input: our time and SGLang's move together with the input's distinct
+  experts, so the per-rep paired ratios are tight. v16 sl reps show modes ~227 / ~255 / ~290 us = D and hot count (bytes).
+- The one outlier: v176 submit e0f2159f v32 sl 345.5 (ratio 0.471) / full 518 (0.474) vs 0.438-0.457 in the other runs;
+  every rep ~6% worse vs SGLang, the other 10 shapes normal. Its v32 sl profile: moe_hot 2.8 us (empty) + moe_twm 231 us;
+  other runs moe_hot 105-140 + moe_twm 176-189 (dev/n20/kdiff.py <idx> <jobs..> diffs kernel tables).
+- H100 sweep (dev/n20/route_var.py, v177 = r-layer 51eaeff, tuner off; 20 router seeds x 6 inputs x v16/v32 sl/full;
+  log dev/n20/sweep1.log, fit dev/n20/analyze.py): time = a + 8.8 us x D (+~0.09 us x R), R2 0.86-0.90. 65..128-token
+  experts cost nothing extra now (nh coef -1..+1: hotdyn/HOT128 did their job). Router-level residual sd 2.8-5 us (<1%):
+  no tuner / near-tie bimodality. ONE structural mode: T=256 inputs whose top local expert has > 128 tokens: +10.5 us v32
+  sl / +11.8 us v32 full at equal D/R (fit on the routers that never have one). It is a ROUTER property: 7/20 routers
+  have it on >= 75% of inputs, 9/20 never (so it is a per-run slow mode, the e0f2159f signature).
+- Cause: moe_hot only takes 65..128-token experts (`h = nt > NH/2 && nt <= NH`), moe_twm runs a >128 expert as
+  ceil(nt/64) = 3 serial 64-token passes on one item chain.
+- FIX HOT_SL (dev/n20/mk_hotsl.py patches a built layer submission.py, 7 string edits in moe_src): NH 128 moe_hot takes
+  every > 64-token expert as ceil(nt/128) slices (smem slice table s_e/s_so/s_ns[64] built by a warp scan; producer and
+  consumer use off = s_off[e] + slice offset, nv = min(128, ...); gemm2 waits for HG::NRB * slices gemm13 items of the
+  expert; NORM_EARLY finish flag at HN::NRB * slices - 1); moe_twm skips nt > 64 when hot is on (was 65..128). NH 64
+  (moe_twq) unchanged. Output bitwise = v177 (same tw_item math, 128-row slices are disjoint token ranges).
+- H100 A/B v177 vs HOT_SL (dev/n20/ab_route.py: same router seeds + inputs, interleaved replays, tuner off; log in /tmp only,
+  numbers here): 9 routers (5,12,17,20,7,9 dominant-ish; 1,3,8 never) x 4 inputs x v16/v32 sl/full: inputs with a > 128
+  expert v32 sl -9.62 us (19/19 faster), full -11.40 (22/22); others v32 sl -0.77 / full +0.14 (tie); v16 sl -1.1 / full
+  -0.4 (tie; T=128 never has > 128). Outputs bitwise = v177 in 144/144, check_implementation 144/144.
+- validate --quick --skip=prep on the patched v177: ALL OK (13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240, route
+  0/240 worst gap 0.0256 drop-lead 0.0179, fuzz 0/58); replay_test 20 inputs on dominant routers 5,12,17 v32 sl/full 0/120.
+- Handoff (COORD): dev/n20/hotsl_moe_src.diff (git apply in r-layer; checked to apply on 51eaeff). Judge effect only on runs
+  whose router has a dominant expert (~35-45%): ~3% on v32 sl/full there (~+0.4-0.5% score); H200 maybe more (e0f2159f twm
+  231 vs 176-189 us). 0 judge runs, 0 Modal. Lesson: `pgrep -f <pattern>` in a wait loop matches the loop's own command line.
+- NEXT: layer merges HOT_SL (v178) + check. Proj: if wanted, the same audit at d32 (T=32: experts <= 32 tokens, no hot path;
+  layer n24s1 found T=8 bytes-only). 00:00Z H200 queue dev/n15/mk_h200.sh stands.
+
+## n21 (2026-10-31 16:15Z-, unattended session 9): lead 15:58Z follow-ups to HOT_SL
+- T=128 (lead's question): a slow mode like T=256's cannot happen: each token routes to an expert at most once, so nt <= T =
+  128 <= NH 128 and moe_hot already takes every 65..128-token expert. Same on the moe board at bs128 (200 seeds: max 128).
+- MOE BOARD bs256 (dist normal, reference.generate_input): 37% of 200 seeds have a >128-token local expert (median max nt
+  100, p90 256 = every token on one expert); bs128 0%. moe board moe_hot had the same 65..128 window (h = nt > 64 && nt <= NH)
+  and twm the same skip line, so mk_hotsl's edits port with one changed string (dev/n21/mk_hotsl_moe.py).
+- H100 interleaved A/B (dev/n21/ab_moe.py, cwd r-moe/muse_moe_w4a16, 4 rounds x 30 replays per seed): first variant on
+  40 seeds: >128 inputs -5.6 us (9/9 faster), <=128 +0.75 (19). A/A control (same code twice, 12 seeds): +-0.8 per seed,
+  mean 0.0. SL2 (+ ballot fast path when no expert > 128): >128 (225-256 tokens) -9.7 (4/4), <=128 +0.45 (8; maybe real,
+  maybe noise: twm's skip line changed, SASS sizes changed; no new 64 KB loop crossing in moe_hot).
+- BALANCED SLICES (mk_hotsl_moe3.py): ns = ceil(nt/128) slices of ceil(nt/ns) rows rounded up to 16 (167 -> 2 x 96 instead
+  of 128 + 39 at N 80): vs SL2 on 129-170-token inputs -1.7 us (4/5), >200 tie. bench.py test 15/15; dev/n21/stress.py
+  bitwise vs base: eager 180/180 (bs256 x80, 257 x30, 256 skewed x30, 128 skewed, 200, 384; 65 with a >128 expert), graph
+  replay with fresh inputs copied in: bs256 60/60, bs257 60/60. Diff for moe: dev/n21/hotsl_moe_board.diff (applies on
+  r-moe 0d36b3a). Expected bs256 ~-2 us/input mean (~0.8% on that shape).
+- Same balanced slices in the LAYER (dev/n21/mk_bal_layer.py on top of the n20 HOT_SL file; diff
+  dev/n21/bal_on_hotsl_moe_src.diff, patch -p1 checked on layer v178 161c986 moe_src.py): n20 ab_route.py HOT_SL v177 vs
+  +bal, routers 5,12,17,20,7 x 4 inputs, tuner off: v32 sl -1.67 us (15/20), v32 full -3.07 (19/20); bitwise + check 40/40.
+  The real routers' top experts sit at 130-190 tokens (the sweet spot). Handoffs to layer + moe in COORD. 0 judge runs.
+- Lesson: torch_extensions cache is shared by all agents; identify my .so by mtime, not "newest".
+- validate --quick --skip=prep on layer v178 (161c986 submission.py) + mk_bal_layer.py (/tmp/n21keep/v178bal.py): ALL OK
+  (13/13, scored 0/12, opt 0/40, tk2f 0/300, replay 0/240, route 0/240 worst gap 0.0256, fuzz 0/58).
+- NEXT: layer merges balanced slices into v178/v179 before its post-00:00Z check; moe takes hotsl_moe_board.diff for the moe
+  board (its own check). Proj standing: 00:00Z H200 queue dev/n15/mk_h200.sh.

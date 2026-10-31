@@ -1,0 +1,81 @@
+--- submission.py
++++ submission.py (o13 DIAG copy)
+@@ -6039,6 +6039,9 @@
+     st["w1"] = (1.0 + weights["post_norm_w"].float()).contiguous()
+     torch.cuda.synchronize()
+     global _DIAG_DONE
++    if O13_DIAG and not _DIAG_DONE:
++        _DIAG_DONE = True
++        _o13_diag(st)
+     if DIAG and not _DIAG_DONE:
+         _DIAG_DONE = True
+         _diag(st)
+@@ -6631,3 +6634,68 @@
+     lib.moe_gemm2(p2, st["w2q"], st["w2s"], st["gs2"], st["lut"], inter, meta, sroutes, y)
+     lib.moe_norm_launch(y, ids, tw, st["w1"], st["start"], st["count"], POST_NORM_EPS, out)
+     return out
++
++
++O13_DIAG = 1  # o13 DIAG copy ONLY (never submit): H200 interleaved sq vs BAL tk2f on moe-board routings (bs 8 / 16)
++
++
++def _o13_gen(bs, seed):  # = reference.generate_input(bs, "ep8", seed) (dist normal, rank busiest)
++    gen = torch.Generator(device="cuda").manual_seed(seed)
++    x = torch.randn((bs, 4096), generator=gen, device="cuda").to(torch.bfloat16)
++    scores = torch.rand((bs, 256), generator=gen, device="cuda")
++    z = torch.randn((256,), generator=gen, device="cuda")
++    u = torch.rand((256,), generator=gen, device="cuda").clamp(min=1e-12)
++    scores = scores + 0.03 * z / (-u.log()).sqrt()
++    routed = scores.topk(8, dim=-1)
++    ids = routed.indices
++    pairs = torch.bincount((ids // 32).flatten(), minlength=8)
++    ids = (ids - 32 * pairs.argmax()) % 256
++    return {"hidden_states": x, "topk_ids": ids.to(torch.int32),
++            "topk_weights": (routed.values / routed.values.sum(-1, keepdim=True)).float(),
++            "config": {"bs": bs, "d_hidden": 4096, "local_start": 0, "local_count": 32}}
++
++
++def _o13_diag(st):
++    g = globals()
++    flush = torch.zeros(256 << 20, dtype=torch.uint8, device="cuda").view(torch.int64)
++    sink = torch.empty((), dtype=torch.int64, device="cuda")
++    vs = [("sq", {"TK2F_BAL_M": set()}), ("bal", {"TK2F_BAL_M": {8, 16}}), ("sqb", {"TK2F_BAL_M": set()}),
++          ("balb", {"TK2F_BAL_M": {8, 16}})]
++    res = {}
++    for bs in (16, 8):
++        for seed in range(500, 512):
++            data = _o13_gen(bs, seed)
++            graphs = []
++            for name, ov in vs:
++                old = {k: g[k] for k in ov}
++                g.update(ov)
++                try:
++                    kernel_fn(data, st)
++                    torch.cuda.synchronize()
++                    gr = torch.cuda.CUDAGraph()
++                    with torch.cuda.graph(gr):
++                        o = kernel_fn(data, st)
++                    gr.replay()
++                    torch.cuda.synchronize()
++                    graphs.append((name, gr, o))
++                finally:
++                    g.update(old)
++            base = graphs[0][2].float()
++            ts = {n: [] for n, _, _ in graphs}
++            for _ in range(40):
++                for n, gr, _ in graphs:
++                    torch.sum(flush, 0, out=sink)
++                    a, b = torch.cuda.Event(True), torch.cuda.Event(True)
++                    a.record(); gr.replay(); b.record()
++                    torch.cuda.synchronize()
++                    ts[n].append(a.elapsed_time(b) * 1e3)
++            for n, _, o in graphs:
++                t = sorted(ts[n])[len(ts[n]) // 2]
++                err = (o.float() - base).abs().max().item()
++                res.setdefault((bs, n), []).append((t, err))
++            del graphs
++    for (bs, n), v in res.items():
++        print(f"o13diag MEAN bs{bs} {n}: {sum(x[0] for x in v) / len(v):.2f} us | seeds "
++              + " ".join(f"{x[0]:.1f}" for x in v) + f" | maxdiff {max(x[1] for x in v):.3g}", flush=True)
++    del flush
++    torch.cuda.synchronize()

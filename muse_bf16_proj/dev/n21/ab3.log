@@ -1,0 +1,28 @@
+AA seed 1 maxnt  55 n>64 0 bitwise True chk True: base  250.46 sl  249.72 d  -0.74
+AA seed 4 maxnt  63 n>64 0 bitwise True chk True: base  239.74 sl  238.94 d  -0.80
+AA seed 12 maxnt  77 n>64 1 bitwise True chk True: base  277.42 sl  277.74 d  +0.31
+AA seed 17 maxnt  83 n>64 2 bitwise True chk True: base  234.73 sl  235.42 d  +0.70
+AA seed 22 maxnt  77 n>64 1 bitwise True chk True: base  246.32 sl  246.14 d  -0.18
+AA seed 25 maxnt 109 n>64 1 bitwise True chk True: base  248.17 sl  248.50 d  +0.33
+AA seed 32 maxnt  49 n>64 0 bitwise True chk True: base  262.94 sl  262.92 d  -0.02
+AA seed 38 maxnt  61 n>64 0 bitwise True chk True: base  268.53 sl  268.93 d  +0.40
+AA seed 0 maxnt 225 n>64 2 bitwise True chk True: base  256.16 sl  256.06 d  -0.10
+AA seed 16 maxnt 256 n>64 1 bitwise True chk True: base  228.11 sl  228.02 d  -0.10
+AA seed 20 maxnt 256 n>64 1 bitwise True chk True: base  236.33 sl  236.91 d  +0.58
+AA seed 39 maxnt 256 n>64 1 bitwise True chk True: base  267.56 sl  267.49 d  -0.07
+AA bs 256 maxnt>128 n=4 base  247.04 sl  247.12 d  +0.08 us
+AA bs 256 maxnt<=128 n=8 base  253.54 sl  253.54 d  -0.00 us
+SL2 seed 1 maxnt  55 n>64 0 bitwise True chk True: base  250.46 sl  249.60 d  -0.86
+SL2 seed 4 maxnt  63 n>64 0 bitwise True chk True: base  238.24 sl  238.46 d  +0.22
+SL2 seed 12 maxnt  77 n>64 1 bitwise True chk True: base  277.25 sl  277.98 d  +0.74
+SL2 seed 17 maxnt  83 n>64 2 bitwise True chk True: base  234.88 sl  235.61 d  +0.73
+SL2 seed 22 maxnt  77 n>64 1 bitwise True chk True: base  245.42 sl  245.73 d  +0.31
+SL2 seed 25 maxnt 109 n>64 1 bitwise True chk True: base  248.74 sl  248.86 d  +0.13
+SL2 seed 32 maxnt  49 n>64 0 bitwise True chk True: base  263.62 sl  264.54 d  +0.92
+SL2 seed 38 maxnt  61 n>64 0 bitwise True chk True: base  267.59 sl  269.02 d  +1.42
+SL2 seed 0 maxnt 225 n>64 2 bitwise True chk True: base  255.86 sl  244.35 d -11.50
+SL2 seed 16 maxnt 256 n>64 1 bitwise True chk True: base  227.09 sl  222.14 d  -4.94
+SL2 seed 20 maxnt 256 n>64 1 bitwise True chk True: base  235.93 sl  225.70 d -10.23
+SL2 seed 39 maxnt 256 n>64 1 bitwise True chk True: base  267.58 sl  255.42 d -12.16
+SL2 bs 256 maxnt>128 n=4 base  246.61 sl  236.90 d  -9.71 us
+SL2 bs 256 maxnt<=128 n=8 base  253.28 sl  253.73 d  +0.45 us

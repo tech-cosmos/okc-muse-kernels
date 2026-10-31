@@ -927,22 +927,32 @@ __global__ void __launch_bounds__(512) moe_norm2(const float* __restrict__ Y, co
     float4 a = wp[0], b = wp[1];
     wv[0] = a.x; wv[1] = a.y; wv[2] = a.z; wv[3] = a.w; wv[4] = b.x; wv[5] = b.y; wv[6] = b.z; wv[7] = b.w;
   }
-  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
-  if (tok == 0 && tid < 128) zc[tid] = 0;  // moe_tk2f's segment counters: zero again for the next call
   float v[8][8], ss[8], twv[8];
   bool loc[8];
   int eid[8];
   // n5s24: all ids and tw of the token in one batch (tw was loaded per local slot after the barrier: serial trips)
+  // o16 = layer IDW (moe n10s1): ... and BEFORE the wait (the harness's inputs: complete before moe_tk2f starts); a
+  // branch on the loaded words keeps ptxas from hoisting ACQBULK above them. Y (moe_tk2f's output) then needs .cg
+  // loads: ptxas hoists .nc loads whose address is known above the wait.
 #pragma unroll
   for (int s = 0; s < 8; ++s) { eid[s] = ids[tok * 8 + s]; twv[s] = tw[tok * 8 + s]; }
+  {
+    unsigned u = 0;
+#pragma unroll
+    for (int s = 0; s < 8; ++s) u ^= (unsigned)eid[s] ^ __float_as_uint(twv[s]);
+    __shared__ unsigned pin;
+    if (u == 0x7fbfffffu) *(volatile unsigned*)&pin = u;  // a store to its own word, never read (volatile: kept)
+  }
+  asm volatile("griddepcontrol.wait;" ::: "memory");  // PDL secondary of gemm2
+  if (tok == 0 && tid < 128) zc[tid] = 0;  // moe_tk2f's segment counters: zero again for the next call
 #pragma unroll
   for (int s = 0; s < 8; ++s) {
     const int e = eid[s] - start;
     loc[s] = e >= 0 && e < count;
     ss[s] = 0.f;
     if (loc[s]) {
-      const float4* p = reinterpret_cast<const float4*>(Y + (size_t)(SLOT ? tok * 8 + s : inv[tok * 8 + s]) * NOUT + tid * 8);
-      const float4 a = p[0], b = p[1];
+      const float4* p = reinterpret_cast<const float4*>(Y + (size_t)(SLOT ? tok * 8 + s : __ldcg(inv + tok * 8 + s)) * NOUT + tid * 8);
+      const float4 a = __ldcg(p), b = __ldcg(p + 1);  // .cg: see o16 above
       const float f[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
       if (SLOT) {
 #pragma unroll
@@ -2632,6 +2642,7 @@ int64_t moe_twf_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor gs1
 #endif
 #ifndef HOT_EMU
 #ifndef HOT_XN
+#define SLW 1  // o18: slice-aware moe_hot working CTAs (see moe_hot)
 #define HOT_XN 16  // layer v172 (fresh f1s6): moe_hot NH 128 items at wgmma N = nv rounded up to 16 (0 = N 128)
 #endif
 #define HOT_NX 0  // n5s21: exact-N moe_hot probe builds (tests only)
@@ -2810,7 +2821,7 @@ __global__ void __launch_bounds__(384, 1) moe_twm(
     const int e = tid < nact ? meta[1 + sl] : 0;
     s_e[tid] = e;
     int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0;
-    if (hx && nt > 64 && nt <= 128) nt = 0;
+    if (hx && nt > 64) nt = 0;  // proj n21 HOT_SL: moe_hot takes every >64-token expert (128-token slices)
     const int big = nt > 32;
     const int hc = hot && nt > 64 && nt <= 96;  // s17 hot class: one pass, 1 tile per warp
     const int npass = hc ? 1 : big ? (nt + PB - 1) / PB : (nt + 31) / 32;
@@ -3125,7 +3136,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   extern __shared__ __align__(1024) uint4 smem_tw[];
   char* smem = reinterpret_cast<char*>(smem_tw) + ((1024 - (smem_u32(smem_tw) & 1023)) & 1023);
   __shared__ uint32_t slut[256];
-  __shared__ int s_e[32], s_off[33], s_item[NSTG], s_nh;
+  __shared__ int s_e[64], s_so[64], s_ns[64], s_sz[64], s_off[33], s_item[NSTG], s_nh, s_cw;  // proj n21: slice table (expert, token offset, slices)
   __shared__ __align__(8) uint64_t full[NSTG], empty[NSTG];
   int* done = meta + 68;
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
@@ -3142,10 +3153,24 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int nact = meta[0];
     const int e = tid < nact ? meta[1 + tid] : 0;
     const int nt = tid < nact ? s_off[e + 1] - s_off[e] : 0;
-    const bool h = nt > (NH > 64 ? 64 : NH / 2) && nt <= NH;
-    const unsigned b = __ballot_sync(0xffffffffu, h);
-    if (h) s_e[__popc(b & ((1u << tid) - 1))] = e;
-    if (tid == 0) s_nh = __popc(b);
+    const bool h = nt > (NH > 64 ? 64 : NH / 2) && (NH == 128 || nt <= NH);
+    const int ns = h ? (nt + NH - 1) / NH : 0;  // proj n21 HOT_SL: >128-token experts as ceil(nt / 128) slices (NH 128 only)
+    const unsigned b = __ballot_sync(0xffffffffu, h), bm = __ballot_sync(0xffffffffu, ns > 1);
+    if (!bm) {  // n21 fast path (no expert > 128 tokens): the old ballot compaction
+      const int p = __popc(b & ((1u << tid) - 1));
+      if (h) { s_e[p] = e; s_so[p] = 0; s_ns[p] = 1; s_sz[p] = NH; }
+      if (tid == 0) { s_nh = __popc(b); s_cw = 0; }
+    } else {
+      int pos = ns;
+#pragma unroll
+      for (int o = 1; o < 32; o <<= 1) { const int y = __shfl_up_sync(0xffffffffu, pos, o); if (tid >= o) pos += y; }
+      const int sz = ns > 1 ? (((nt + ns - 1) / ns + 15) & ~15) : NH;  // n21c: balanced slices (167 -> 2 x 96 rows, not 128 + 39)
+      for (int q = 0; q < ns; ++q) { s_e[pos - ns + q] = e; s_so[pos - ns + q] = q * sz; s_ns[pos - ns + q] = ns; s_sz[pos - ns + q] = sz; }
+      // o18 SLW: with slices, size the working CTAs by hot vs moe_twm work (slice ~3.2 x a <= 64-token expert; H100 sweep:
+      // the best fixed count ran 40..64 with the twm expert count): 132 SMs * hot share
+      const int oth = nact - __popc(b);
+      if (tid == 31) { s_nh = pos; s_cw = 132 * pos * 16 / (pos * 16 + oth * 5); }
+    }
   }
   __syncthreads();
   const int nh = s_nh, n13 = nh * HG::NRB, nitems = n13 + nh * HN::NRB;
@@ -3153,7 +3178,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
   per &= ~(1 << 30);
   // n7s32 HOT_PER (layer v169 hotdyn, o11 here): per > 0 = only max(per >> 8, (per & 255) * nh) CTAs work (<= the grid);
   // the others exit at once, so their SMs go to moe_twm (the PDL secondary)
-  if (per > 0 && (int)blockIdx.x >= max(per >> 8, (per & 255) * nh)) return;
+  if (per > 0 && (int)blockIdx.x >= max(per >> 8, SLW && s_cw ? s_cw : (per & 255) * nh)) return;
   if (warp >= 8) {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
     if (warp > 8 || lane != 0) return;
@@ -3169,7 +3194,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
         break;
       }
       const int g2 = item >= n13, it = g2 ? item - n13 : item, nrb = g2 ? HN::NRB : HG::NRB;
-      const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e];
+      const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e] + s_so[a];
       const char* wsrc = (g2 ? W2 : W13) + ((size_t)e * nrb + rb) * 64 * HG::WB;
       const char* ssrc = (g2 ? S2 : S13) + ((size_t)e * nrb + rb) * 64 * HG::SB;
       const CUtensorMap* map = g2 ? &maps2.m[NX == 128 ? 5 : 3] : &maps13.m[NX == 128 ? 5 : 3];
@@ -3177,7 +3202,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
         int v;
         for (;;) {
           asm volatile("ld.acquire.gpu.global.b32 %0, [%1];" : "=r"(v) : "l"(done + e) : "memory");
-          if (v >= HG::NRB * NEEDK) break;
+          if (v >= HG::NRB * NEEDK * s_ns[a]) break;
           __nanosleep(64);
         }
         asm volatile("fence.proxy.async.global;" ::: "memory");
@@ -3202,7 +3227,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
     const int item = s_item[st];
     if (item < 0) break;
     const int g2 = item >= n13, it = g2 ? item - n13 : item, nrb = g2 ? HN::NRB : HG::NRB;
-    const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e], nv = s_off[e + 1] - off;
+    const int a = it / nrb, rb = it - a * nrb, e = s_e[a], off = s_off[e] + s_so[a], nv = min(s_sz[a], s_off[e + 1] - off);
     const float gsc = (g2 ? gs2[e] : gs13[e]) * 256.0f;
 #define HOT_ITEM(NN) tw_item<2, 1, NN, NSTG, true, 8, true, SA, STRIDE, XB>(smem, full, empty, st, ph, slut, warp, lane, \
                                                                            nv, off, rb, gsc, sroutes, g2 ? Y : Inter, g2)
@@ -3231,7 +3256,7 @@ __global__ void __launch_bounds__(384, 1) moe_hot(
       asm volatile("bar.sync 1, 256;" ::: "memory");
       if (tid == 0) {
         __threadfence();
-        if (atomicAdd(done + 32 + e, 1) == HN::NRB - 1) atomicAdd(done + 32 + e, 1 << 20);
+        if (atomicAdd(done + 32 + e, 1) == HN::NRB * s_ns[a] - 1) atomicAdd(done + 32 + e, 1 << 20);
       }
     }
 #endif
@@ -5505,7 +5530,7 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
 #endif
 #if TK2H_P4 || TK2_EXP
     if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 40000 && cfg < 50000 && cfg % 1000 == 4)  // n16: tk2h GS16 + PF4 on SQ stages
-      return tk2f_go<8, 4, 2, false, false, true, 16, 1, 516>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);
+      return tk2f_go<8, 4, 2, false, false, true, 16, 2, 516>(8 + (int)(cfg / 1000) % 10, TK2F_ARGS0);  // o14: MRG 2 = per-segment gemm13 -> gemm2 counters (fresh x13); H200 DIAG cc253b3b bs32 -0.7 us, bitwise
 #endif
 #if TK2X
     if (sa && g_tk2f_l2h == TK2F_L2H && cfg >= 60000 && cfg < 70000 && cfg % 1000 == 4)  // n5s16 HYB GS16 + PF4 on SQ stages
@@ -5571,7 +5596,8 @@ int64_t moe_tk2f_launch(torch::Tensor w13_, torch::Tensor s13_, torch::Tensor w2
       return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516 | 4096 | (3 << 28)>(0, TK2F_ARGS0);
     }
 #endif
-    TORCH_CHECK(sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0 && (cfg == 204 || cfg == 84204), "moe_tk2f SQ: cfg ", cfg);
+    TORCH_CHECK(sa && g_tk2f_l2h == TK2F_L2H && g_tk2f_l2h2 < 0 && (cfg == 204 || cfg == 84204 || cfg == 98204), "moe_tk2f SQ: cfg ", cfg);
+    if (cfg == 98204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 548>(0, TK2F_ARGS0);  // o13: layer d16 = SQ + BAL + PF 4
     if (cfg == 204) return tk2f_go<8, 4, 2, false, false, true, 8, 0, 512>(0, TK2F_ARGS0);
     return tk2f_go<8, 4, 2, false, false, true, 8, 0, 516>(0, TK2F_ARGS0);
   }
@@ -6445,6 +6471,7 @@ TK2S_M = {}  # n5s16: TK2S one-body consumer (x in smem, rolled stage loop): {M:
 TK2X2_M = {}  # n5s16: HYB2 = HYB with the 2-group rows in a __noinline__ function (cfg 1005W004 SQ): {M: W}
 TK2DT_M = {}  # n5s18: per-M deferred-TWO tk2f (16-token pair rows in their own loop after the 1-group rows): {M: 1}
 TK2X_M = {}  # n5s16: per-M HYB GS16 (tk2x_consume, SQ + PF4 -> moe_norm3) 2-group row weight W: {M: W}
+TK2F_BAL_M = {8, 16}  # o13: layer TUNE_BASE T=16 "bal" (moe n8 BAL, SQ PF 548). H200 DIAG 51ba444e (moe-board routings, 12 seeds x 2 interleaved): bs16 87.6 -> 86.5, bs8 68.1 -> 67.8 us; bitwise
 TK2H_W = 0  # GS16 2-group row weight (8 + W) / 8 in the static split (tk2g_split)
 
 
@@ -6477,6 +6504,8 @@ def _tk2f_cfg0(M, st):
         return sa + 50000 + TK2X2_M[M] * 1000 + 4
     if M in TK2X_M and sa:  # n5s16 HYB (W >= 10: probe without the TWO body, wrong output)
         return sa + 60000 + TK2X_M[M] * 1000 + 4
+    if M in TK2F_BAL_M and sa:  # o13: layer TUNE_BASE T=16 "bal" (moe n8 BAL on SQ stages, PF 548)
+        return sa + 98204
     if M in TK2H_M:  # n6: {M: W}: GS16 tk2h + PF4 (moe_norm3), 2-group row weight (8 + W) / 8; SA only in TK2H_P4 builds
         return sa + 40000 + TK2H_M[M] * 1000 + 4
     if TK2W and M > 1:
