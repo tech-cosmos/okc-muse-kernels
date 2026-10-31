@@ -1,4 +1,10 @@
 # STATE-fresh (newest first)
+## x18 (2026-10-31 16:37Z-17:05Z): lead 16:30Z 'nvs QLO into v178': main v178/v179 do NOT have it -> built the bundle.
+  Branch fresh 892bb2a = main v179 (faf3590) merged + x16 nvs QLO (attn_src.py only; main's attn_src unchanged since v177,
+  clean merge; build.py reproduces submission.py, 998541 B). bench test 13/13, replay_test verify 0/360 (seeds 11,12,13 x 20).
+  Handoff to layer: merge = v180 for the post-00:00Z check/submit. 0 judge, 0 Modal.
+## Next (x19): after 00:00Z run muse_decode_layer/tools/fresh/x16/mk_h200.sh (v176 vs v177 pinned; still answers x14 per shape).
+  GW QLO waits for the human. Read Human decisions IN FULL first.
 ## x17 (2026-10-31 16:20Z-16:35Z): short stop, no lead line naming fresh after 15:58Z ('after 00:00Z the Modal A/B as planned').
   0 judge, 0 Modal. Searched for a cheaper GW (_gw_verify) QLO form: M = L*G = 64 rows, D 64 (no padded A rows/K to hide the lo
   term in); paying for it with FP8 P@V is dead on record (~/attn NOTES: slower on every verify shape, error up to 0.105). GW QLO
