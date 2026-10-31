@@ -429,13 +429,18 @@ def _compress(w):
     n, k = w.shape
     b = w.contiguous().view(torch.int16).int() & 0xFFFF
     e = (b >> 7) & 0xFF
-    base = int(e.max()) - 15
-    if base < 1:
+    # n26: base = max exponent - 15, or one lower when that halves the escapes (a lone top-exponent outlier then
+    # becomes an escape itself: header value w / scale, exact). Fewest escapes wins; rows must stay <= G13_ESC.
+    best = None
+    for base in (int(e.max()) - 15, int(e.max()) - 16):
+        code = e - base
+        esc = (code < 0) | (code > 15)
+        nr = esc.sum(1)
+        if base >= 1 and int(nr.max()) <= G13_ESC and (best is None or int(nr.sum()) < best[0]):
+            best = (int(nr.sum()), base, code, esc)
+    if best is None:
         return None
-    code = e - base
-    esc = code < 0
-    if int(esc.sum(1).max()) > G13_ESC:
-        return None
+    _, base, code, esc = best
     code = torch.where(esc, 0, code)
     sm = torch.where(esc, 0, ((b >> 8) & 0x80) | (b & 0x7F))
     scale = 2.0 ** (base - 112)

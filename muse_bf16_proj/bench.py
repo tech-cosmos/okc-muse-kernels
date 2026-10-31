@@ -11,6 +11,8 @@ import fcntl, importlib.util, math, os, statistics, sys, torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import reference
 
+if os.environ.get("WSEED"):  # n27: held-out weight seeds
+    reference.WEIGHTS_SEED = int(os.environ["WSEED"])
 _spec = importlib.util.spec_from_file_location("submission", os.environ.get("SUB", "submission.py"))
 submission = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(submission)
