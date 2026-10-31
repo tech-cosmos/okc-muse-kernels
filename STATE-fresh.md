@@ -146,7 +146,3 @@
 ## Next (x10): read Human decisions IN FULL. My d1/v1 latency list is exhausted at the 0.5 us gate on the H100. Open only
   if the lead wants: H200 (Modal after 00:00Z) A/B of the bundle c3 (pr1 loads+unroll1, tk2f rolled bounds) + w1
   prefetch, since H100 may hide sub-us effects; or the grid-1 item if it measured >= 0.5.
-## x8 (2026-10-31 09:46Z-~11:20Z): lead 09:55Z items (a) + (b) DONE. 0 judge, Modal 18.0 GPU-min (my cap 20).
-- (a) ROUTING-SLACK oracle (tools/fresh/slack): min distinct local experts passing check_routing saves ~1 (d1) .. ~4 (v32)
-  experts/load = geomean x1.096 at 6.5 us/expert; KEEP_TOL binds. Lead 10:25Z: moe prepares a slack build (no runs until
-  the organizers approve). Never in submission.py from fresh.
