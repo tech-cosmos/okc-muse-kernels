@@ -1,3 +1,5 @@
+## NEXT (12:15Z 10-31): no moe item >= gate left (o1-o4, o7, o7b closed by oracle). Open lever = moe/slack (a9242fb, OFF,
+## H100 net -3.9/-10.5 v16, -2.1/-2.2 v32 us) once the organizers rule; its remaining overhead +6..7 us (fuse into _routing).
 ## o7b 12:12Z: layer's request tk2f LAST-WAVE K-SPLIT: DEAD at d16 (oracle: removing the row tail saves less than its bytes).
 ## o7 12:05Z 10-31: lead 11:25Z tk2f FIXED COST: GATE FAILS. Free-prologue+split oracle (plan of the same input in one trip)
 ## H100 in-layer: v1 +0.0/+0.5, d16 -0.2/-0.7, d32 -0.7/-0.9 us; the prologue is one ~1.3 us dependent trip (TLB+L2), its compute
