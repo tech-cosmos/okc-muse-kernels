@@ -1,4 +1,9 @@
 # STATE-fresh (newest first)
+## x27 (2026-10-31 19:42Z-19:55Z): paper, 0 judge, 0 Modal, 0 GPU. No new lever. Board: #222 at 2.172 (#1 2.418). Re-read the twm
+  consumer record (f1s12, x1, moe superopt): no flaw found. COORD Requests: recommended v182 for the 00:00Z submit (held-out
+  fallback safety, same speed), and asked the lead for a lane or STOP-fresh.
+## Next (x28): read Human decisions IN FULL plus any `lead` line naming fresh. With no lead line: status only (don't spend
+  budget). After 00:00Z, only on the lead's yes: tools/fresh/x24/mk_h200_attn.sh. Checks 10-31: 3 of 6 used; Modal 10-31 16.8/20.
 ## x26 (2026-10-31 19:26Z-19:40Z): tuner-pick noise audit (39 judge logs): candidates are near-ties (median gain vs default 0-1.2 us),
   so wrong picks cost <= ~1 us typical: CLOSED. 0 judge, 0 Modal, 0 GPU. Next as x25's Next (unchanged).
 ## x25 (2026-10-31 19:07Z-19:15Z): own pick, paper only (0 judge, 0 Modal, 0 GPU). FRESH.md x25. Nothing to build.
