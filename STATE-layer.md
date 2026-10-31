@@ -6,7 +6,10 @@ Same code checked 2.0731x (19163546): whole-run noise ~+-1.5%. Older: 19ebde23 v
 n25s1 (10-31 17:05Z): **main = v178** (161c986) = v177 + proj n20 HOT_SL (>128-token experts as moe_hot 128-token slices).
   validate ALL OK (65 s prep); H100 v32 sl/full -6.0/-8.7 us mean (dominant routers -8..-16, control tie), bitwise.
   CHECK 9117bd11 **2.1886 raw** (> board 2.1717; fixed-SGLang 2.1874 vs bar 2.1913); v32 profile hot 133 + twm 193 vs e0f2159f 2.8 + 231.
-  **NEXT (first session after 00:00Z 11-01): SUBMIT v178 161c986 once** (not on 10-31: lead cap). Then H200 A/B v176/v177 per shape.
+  v179 (faf3590, main) = v178 + proj n21 balanced slices: H100 dominant v32 sl -1.5 / full -2.7 us vs v178, controls tie; validate OK;
+  CHECK 36474b5e 2.1634 = slow node on untouched shapes (v1/d32 sl), v32 ~ v178. submission.py 999109 B (~0.9 KB under 1 MB cap!).
+  **NEXT (first session after 00:00Z 11-01): SUBMIT v178 = `git show 161c986:muse_decode_layer/submission.py`** once (not 10-31:
+  lead cap). Then check v179 (main); submit it if that check beats the board. Then H200 A/B v176/v177 per shape.
 n24s1 (10-31 16:05Z): v1 (T=8) seed spread = distinct local experts only (~9.7 us/expert H100, only tk2f moves; layer's own
   count +-1 vs ref from legal near-ties). No slow mode at T=8. tools/n24/seedspread.py, layer_distinct.py; tlmed SEED=. 0 runs.
 n23s1 (10-31 16:05Z): v177's H100 v1 full +1.1 us = tuner noise (GD_PW off at batch 1, NVS_PW not at v1, CB_HB_TRIG

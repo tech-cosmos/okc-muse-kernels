@@ -3540,3 +3540,13 @@ Idle stop: still no lead line after 09:10Z; DEFNORM closed n12s1; fresh oracle s
 - NOT submitted: lead 15:25Z = no more layer submits on 10-31. QUEUED for the first session after 00:00Z 11-01: submit v178
   (161c986) once. It beats the board best raw (CLAUDE.md rule) and meets the 09:28Z rule (within 1% of the 2.1913 bar + per-shape
   profile evidence on its target shape); fixed-SGLang 2.1874 is 0.2% under the lead's fixed bar = noise. If the lead objects, hold.
+- v179 (faf3590) = v178 + proj n21 balanced HOT_SL slices (r-proj dev/n21/bal_on_hotsl_moe_src.diff via git apply; ns slices of
+  ceil(nt/ns) rows rounded to 16; ballot fast path when no expert > 128). submission.py 999109 B (cap ~1 MB: ~0.9 KB left!).
+  validate ALL OK (cold prep 63.6 s). H100 ab_route v178 A vs v179 B, verify 32: dominant routers 5/12/17 x 3 inputs sl
+  -2.2/-8.9/-0.2, +0.5/-3.4/-2.8, -2.5/+0.5/-3.2 | full -0.5/-1.9/-2.5, -4.3/-4.3/-0.8, -3.7/-2.5/-3.5; control routers 1/2/3
+  (max expert <= 121) mean sl +0.4 / full -0.8; A/A v178 vs v178 on 1/3: per-input +-3, mean -1.2/-0.7 = noise. bitwise all.
+- CHECK 36474b5e v179 **2.1634** (fixed-SGLang 2.1450): slow node on UNTOUCHED shapes (v1 sl 116.8 vs 107.9, d32 sl 156.8 vs
+  148.9, d1 sl 65.7 vs 64.1); v32 sl/full 317.7/498.5 ~ v178 (hot 133 + twm 190 us in the v32 profile). Not a v179 regression.
+- SUBMIT PLAN after 00:00Z 11-01: submit **v178** = `git show 161c986:muse_decode_layer/submission.py > /tmp/sub_v178.py;
+  okc submit /tmp/sub_v178.py --json` (its check 9117bd11 2.1886 beats board 2.1717; v179's own check does not). v179 stays
+  on main; give it one check after 00:00Z and submit it too if that check beats the board (it's new code, not a resubmit).
