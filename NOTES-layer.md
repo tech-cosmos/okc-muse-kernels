@@ -4082,3 +4082,19 @@ Status only. No lead reply on the v187 submit (n61 Request). Board: #1 pjmullin3
   Consistent with n64: d16/d32 full sit within 7.7 us of the random-gather ceiling, so their tail is not recoverable.
 - Verdict: dynamic balancing lane done. Best = n66 v1 at q8 (~-4/-5 us H100, ~0.12%), q1 adds ~0.02%. Not wired; a
   rider only if a bundle is built anyway (needs H200 A/B + layer wiring + validate + replay stress).
+
+## n68 (11-01 ~20:15Z-, session 8): v188 = v187 + n66 dynamic tile pool wired (rider), 1 check attempted.
+- No lead line after 20:00Z; the lane list is empty, other agents STOPped. n66's pool (precision-identical, ~0.12%) was the
+  only built-and-correct item, and today's layer checks were unused (they don't carry over), so wired it as v188.
+- Wiring: build.py patches vjx_src's CUDA_SRC with vjx_dyn.py (= dev/n66/dyn.py, DYNF 100 / DYNCH 2) BEFORE inlining
+  (the built vjx CUDA source loses its indentation, so a runtime text patch can't anchor). Apache notice line added to the
+  vjx header ("Modified by tech-cosmos ... dynamic pool"). Size: patch put the file at 1,001,642 B -> new build.py
+  strip_docstrings drops function/class docstrings outside the vjx part (AST-checked) -> 985,428 B (14.5 KB headroom).
+- bench test 13/13. tools/replay_test.py 30 inputs x router seeds 11,7 x 6 full shapes: 0/360.
+- H100 tools/ab_files.py full 6 rounds seed 99 (v187 | v188): d1 101.7|102.4, d16 288.9|288.2, d32 397.5|397.9,
+  v1 152.4|152.1, v16 442.7|441.8, v32 626.9|623.1 us. H100 tuner keeps vjx off at T=128 (v16), so v16 hardly uses it here;
+  the H200 tuner picks vjx at T=128 (n61), where the standalone -2.3..-4.7 applies.
+- CHECK NOT RUN: every authenticated okc call (problems, status, check) answered HTTP 530 from 20:12Z to 20:52Z
+  (30 check retries 60 s apart); the public leaderboard and general internet answered. 0 checks/submits spent.
+- NEXT: when the API is back, `okc check muse_decode_layer/submission.py` (v188, sha1 78038fe2) once; submit only if
+  raw > 2.2048 (board v185). If the API is still down after 00:00Z, the check runs on 11-02's budget.
