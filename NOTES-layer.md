@@ -3920,3 +3920,8 @@ Status only. Lead 22:55Z: hold v185 (board fcb67ee9 2.2048x, #180); integrate ha
   (expected H200 gain small: d1/v1/d32 full ~1-3 us each, ~+0.2-0.3%; plus the decode-full precision gain). If d16 full matters,
   look at why in-layer loses (+1..2 us) while standalone wins (vjx's mid-kernel launch_dependents vs our RF_TRIG o overlap).
   Size headroom only 1.9 KB: any later addition needs space first.
+
+## n58 (11-01 01:07-01:12Z, session 52): status only
+- No lead line after 00:35Z; vjeux copy / QLO full half still wait on the human. All other agents STOPped; no Handoff.
+- Board unchanged (#1 pjmullin3 2.469x; ours v185 fcb67ee9 2.2048x). 0 judge runs, 0 GPU.
+- NEXT unchanged (n57): on a human yes, one check of v187 (layer/vjeux), submit if > 2.2048 raw.
