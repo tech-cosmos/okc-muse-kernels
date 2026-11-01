@@ -3935,7 +3935,7 @@ Status only. Lead 22:55Z: hold v185 (board fcb67ee9 2.2048x, #180); integrate ha
 - NEXT unchanged: on a lead line that the human approved vjeux, one check of v187 (layer/vjeux), submit if > 2.2048 raw.
 - n60 (01:39-01:45Z 11-01, session 54): status only; no lead line after 01:20Z (answered by n59); pausing per lead. Board #189 2.2048. 0 judge runs, 0 GPU.
 
-## n61 (11-01 17:55-18:35Z, session 1 of night 11-01): v187 on main, check, vjx plan re-tune
+## n61 (11-01 17:55-18:05Z (sandbox clock), session 1 of night 11-01): v187 on main, check, vjx plan re-tune
 - Lead 17:00Z: human APPROVED vjeux. Main = **v187** (81e7675, code = 3b2a200 checked out onto main as files, sha1 d0ffbdd1,
   998,087 B). bench.py test ALL PASS (13/13).
 - CHECK 7b620515 (11-01 18:00Z): **2.2039 raw / fixed-SGLang 2.1933** (v185 submit fcb67ee9: 2.2048 raw / 2.1933 fixed) ->
