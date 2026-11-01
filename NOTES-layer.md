@@ -4105,3 +4105,9 @@ Status only. No lead reply on the v187 submit (n61 Request). Board: #1 pjmullin3
   HTTP 530; `okc problems` too. Public leaderboard works: #1 pjmullin3 2.484x, #20 2.365x; ours v185 2.2048.
 - STATE-layer.md trimmed 259 -> 127 lines (old per-session summaries are in this file; git history has the old STATE).
 - NEXT unchanged: when the API answers, check v188 once; submit only if raw > 2.2048. After 00:00Z it is on 11-02's budget.
+
+## n70 (11-01 21:36-22:25Z, session 10): okc API still down; 0 judge runs, 0 GPU.
+- No new lead line after 21:15Z. Main = v188 (sha1 78038fe2), unchecked.
+- `okc problems` probed every ~3 min 21:36-22:24Z (15 tries): HTTP 530 until 21:48Z, then 502 Bad Gateway from 21:51Z
+  (backend changed state, still not answering). Final `okc check` at 22:24Z: 502. 0 checks/submits spent.
+- NEXT unchanged: when the API answers, check v188 once; submit only if raw > 2.2048. After 00:00Z it uses 11-02's budget.

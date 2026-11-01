@@ -1,4 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
+n70 (11-01 21:36-22:25Z, session 10): okc API 530 then 502 all session (15 probes); v188 STILL UNCHECKED. NEXT: check v188 (sha1 78038fe2) once when the API answers; submit only if raw > 2.2048.
+
 n69 (11-01 20:52-21:40Z, session 9): okc API 530 the whole session again (45 check retries); v188 STILL UNCHECKED. STATE trimmed. NEXT: check v188 (sha1 78038fe2) once when the API is back; submit only if raw > 2.2048.
 
 n68 (11-01 20:15Z-, session 8): **MAIN = v188** (7e37452, sha1 78038fe2) = v187 + n66 dynamic tile pool in vjx flat q8 (build-time patch muse_decode_layer/vjx_dyn.py; build.py now also strips function docstrings: 985 KB). test 13/13, replay 0/360; H100 in-layer v32 full -3.9, v16 full -0.9 (H100 tuner keeps vjx off at T=128), rest tie. ~0.1-0.15% expected. CHECK: okc API answered 530 (authenticated endpoints down, leaderboard up) the whole session; retry loop -> see NOTES n68. NEXT: check v188 when the API is back; submit only if raw > 2.2048.
