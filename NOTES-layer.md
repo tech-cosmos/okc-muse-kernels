@@ -4059,3 +4059,26 @@ Status only. No lead reply on the v187 submit (n61 Request). Board: #1 pjmullin3
 - Verdict: -4 to -5 us H100 per shape (~-3.5 H200) = ~0.12% score, gate (-10 / -6) NOT met, below the 0.3% bar.
   Not wired into the layer. Rider candidate only (precision-identical; would need H200 tuner A/B + layer wiring +
   validate). 0 judge runs.
+
+## n67 (11-01 20:01-20:50Z, session 7): lead 20:00Z 'inside-request balancing' = n66 already; two follow-ups, both null. 0 judge runs.
+- Lead 20:00Z asked for per-request dynamic split-K (atomic chunk counter, FP32 merge, in-kernel reset) with the
+  19:05Z gate, plus d16/d32. That is n66's dyn.py v1 (v16 -2.3..-4.7, v32 -4.5..-5.4 H100, gate -6/-10 not met).
+- (1) SEGK sweep (dev/n67/ab.py, virtual keys per request boundary in the static partition, n65 saw 2-segment CTAs
+  end early). H100 graph replay, 3 rounds:
+  | shape (seed) | base | dyn100:2 SEGK600 | SEGK300 | SEGK150 | SEGK300 no pool |
+  | d32 full s7/s11 | 241.8/243.8 | 241.7/243.6 | 241.8/243.5 | 241.8/243.7 | 241.5/243.8 |
+  | v32 full s7/s11 | 255.4/258.5 | 251.2/252.2 | 251.1/251.1 | 251.2/251.3 | 256.1/256.5 |
+  SEGK is flat within +-1 us: the remaining between-group spread is not boundary compensation.
+- (2) Pool ported to the q_len-1 flat kernel (dev/n67/dyn1.py on top of dev/n66/dyn.py; kind 2 = q1 only): q1 flat is
+  not coop, so drainers add pool keys to the per-request merge counter (mine += tiles*64) and the merging (last)
+  CTA resets the ticket counter (every drainer drew its last ticket before arriving); tflag init added to the
+  kernel-start barrier init (L == 1 skips the per-segment init for its first segment; without it = hang risk).
+  Correct (rel err 3-5e-4 vs base = FP16-P partition noise; base vs itself 1e-6). H100, seeds 7/11, 3 rounds:
+  | shape | base | pool 10%:2 | 20%:2 | 30%:1 |
+  | d1 full | 13.63/13.63 | 13.63/13.50 | 13.63/13.63 | 13.57/13.60 |
+  | d16 full | 126.4/125.9 | 125.7/124.7 | 126.2/125.6 | 127.0/126.8 |
+  | d32 full | 242.9/242.8 | 242.6/242.7 | 243.9/244.4 | 246.2/247.1 |
+  At most -1.2 us (d16), d32 nothing; larger pools lose (pool tiles skip the TMA page-index pipeline and pfast path).
+  Consistent with n64: d16/d32 full sit within 7.7 us of the random-gather ceiling, so their tail is not recoverable.
+- Verdict: dynamic balancing lane done. Best = n66 v1 at q8 (~-4/-5 us H100, ~0.12%), q1 adds ~0.02%. Not wired; a
+  rider only if a bundle is built anyway (needs H200 A/B + layer wiring + validate + replay stress).
