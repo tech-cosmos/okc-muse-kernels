@@ -4,8 +4,8 @@ import re, sys, pathlib
 import ast, io, tokenize
 
 
-def moe_namespaced(src):
-    """The moe agent's submission with every top-level Python name prefixed _moe_ (tokens only: strings,
+def moe_namespaced(src, pre="_moe_"):
+    """The moe agent's submission with every top-level Python name prefixed _moe_ (pre) (tokens only: strings,
     including the CUDA source, and attributes stay as they are)."""
     src = src.split("\n", 1)[1]
     tree = ast.parse(src)
@@ -20,7 +20,7 @@ def moe_namespaced(src):
     out, prev = [], None
     for tok in tokenize.generate_tokens(io.StringIO(src).readline):
         if tok.type == tokenize.NAME and tok.string in names and not (prev and prev.string == "."):
-            tok = tok._replace(string="_moe_" + tok.string)
+            tok = tok._replace(string=pre + tok.string)
         out.append(tok)
         if tok.type not in (tokenize.NL, tokenize.COMMENT):
             prev = tok
@@ -63,6 +63,20 @@ moe = moe_namespaced((here / "moe_src.py").read_text())
 _a = '    x = data["hidden_states"].contiguous()\n'
 assert moe.count(_a) == 1
 moe = moe.replace(_a, '    x = data["hidden_states"] if data.get("gather_norm") is not None else data["hidden_states"].contiguous()\n')
+# n57 VJX (branch layer/vjeux): vjeux's Apache-2.0 attention (vjx_src.py: attribution header + license text kept),
+# names prefixed _vjx_; the layer runs it for full-attention layers only (TUNE option vjx)
+vjx = (here / "vjx_src.py").read_text()
+vjx_head = vjx.split("\n", 1)[1].split('"""', 1)[0]  # the attribution header (comment lines: kept in the built file)
+_t = ast.parse(vjx)  # n57: drop vjx's top-level helpers the layer never calls (1 MB cap): the layer runs _launch only
+_drop = [n for n in _t.body if getattr(n, "name", None) in ("_fallback", "_rms", "_rope", "kernel_fn", "Inputs")]
+assert len(_drop) == 5
+_ls = vjx.split("\n")
+for _n in sorted(_drop, key=lambda n: -n.lineno):  # (each with its decorators / comments directly above: none)
+    del _ls[_n.lineno - 1:_n.end_lineno]
+vjx = "\n".join(_ls)
+vjx = moe_namespaced(vjx, "_vjx_")
+assert layer.count("# @@VJX@@\n") == 1
+layer = layer.replace("# @@VJX@@\n", "# ---- vjx (vjx_src.py, names prefixed _vjx_) ----\n" + vjx + "\n# ---- layer ----\n")
 layer = layer.replace("# @@MOE@@\n", "# ---- experts (moe_src.py, names prefixed _moe_) ----\n" + moe + "\n# ---- layer ----\n")
 g10 = (here / "g10_src.cu").read_text()  # proj's gemv10 CUDA source, as a raw string literal in the layer
 Q3 = "'" * 3
@@ -71,7 +85,7 @@ layer = layer.replace("_G10_SRC = None  # @@G10@@\n", "_G10_SRC = r" + Q3 + g10 
 g12 = (here / "g12_src.cu").read_text()  # proj's gemv12 (m = 8)
 assert Q3 not in g12 and layer.count("_G12_SRC = None  # @@G12@@\n") == 1
 layer = layer.replace("_G12_SRC = None  # @@G12@@\n", "_G12_SRC = r" + Q3 + g12 + Q3 + "\n")
-DEAD_SRCS = ("22", "OB8")  # n5s6: g22 (G22_CFG = {}, s22 dead) and ob8 (OB8 False, s86 dead) not embedded: judge 1 MB limit
+DEAD_SRCS = ("22", "OB8", "PR32")  # n57: + PR32 (PR32_TOKENS = (), never built since n5s10)  # n5s6: g22 (G22_CFG = {}, s22 dead) and ob8 (OB8 False, s86 dead) not embedded: judge 1 MB limit
 for _n in ("13", "14", "19", "22", "24", "27", "30", "PR3", "PR1", "PR8", "OB8", "PR32", "BND2"):  # proj's gemv13 / gemv14 (compressed BF16 weights), router3 (hi/lo, T 9..128)
     assert layer.count(f"_G{_n}_SRC = None  # @@G{_n}@@\n") == 1
     if _n in DEAD_SRCS:  # n5s6: left None (size limit); their paths are off and never built
@@ -106,6 +120,9 @@ def strip_comments(src):
 HEADER = "# okc: problem=muse_decode_layer\n"
 assert out.startswith(HEADER)
 out = HEADER + strip_comments(out[len(HEADER):])
+_vm = '\n"""Gated attention decode for Muse Spark Open'
+assert out.count(_vm) == 1
+out = out.replace(_vm, "\n" + vjx_head.rstrip("\n") + _vm, 1)
 
 
 _CUDA_MARK = re.compile(r"__global__|__device__|#include")
@@ -163,7 +180,12 @@ def strip_cuda_comments(src):
 
 
 out = strip_cuda_comments(out)
-assert len(out.encode()) < 1_000_000, f"submission.py is {len(out.encode())} bytes (judge limit 1,000,000)"
+# n57: the vjx CUDA source without its indentation (judge 1 MB cap; nvcc ignores it; no runtime text patch reads vjx)
+_a = out.index('\n_vjx_CUDA_SRC = r"""')
+_b = out.index('"""', _a + 22)
+out = out[:_a] + "\n".join(l.lstrip(" ") for l in out[_a:_b].split("\n")) + out[_b:]
+import os as _os
+assert _os.environ.get("NOCAP") or len(out.encode()) < 1_000_000, f"submission.py is {len(out.encode())} bytes (judge limit 1,000,000)"
 (here / (sys.argv[1] if len(sys.argv) > 1 else "submission.py")).write_text(out)
 import ast as _ast
 _ast.parse(out)  # the built file must at least parse
