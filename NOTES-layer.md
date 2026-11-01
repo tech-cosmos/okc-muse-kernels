@@ -3959,3 +3959,28 @@ Status only. Lead 22:55Z: hold v185 (board fcb67ee9 2.2048x, #180); integrate ha
 
 ## n63 (11-01 18:20Z, session 3)
 Status only. No lead reply on the v187 submit (n61 Request). Board: #1 pjmullin3 2.484x, ours 2.2048 (overall #236). Checks left on 11-01: 19 checks, 10 scored. No candidate; 0 judge runs, 0 GPU.
+
+## n64 (11-01 18:35-18:50Z, session 4): v187 SUBMITTED; full-attention TB/s table + gather ceiling (lead 18:35Z)
+- Lead 18:35Z yes -> SUBMIT 122374d8 (main 81e7675 = v187, sha1 d0ffbdd1): **2.2028** (CI 2.170-2.236) < board 2.2048, so the
+  board keeps v185 (#237). Medians us sl/full: d1 64.4/73.0, d16 130.8/207.5, d32 145.1/307.2, v1 105.0/116.7,
+  v16 260.3/338.9, v32 323.7/489.3 (full v1/v32 = best on record). Speedups sl/full d1 2.67/2.50 d16 2.09/2.13
+  d32 1.80/2.04 v1 2.41/2.34 v16 2.03/2.08 v32 2.22/2.22. Budget left 11-01: 19 checks, 9 scored.
+- H200 full attention from this submit's profiles (kernel row includes its PDL wait): d32 vjx 169.7 us = 3.86 TB/s on 654.5 MB;
+  d16 _gd_full 84.6 (+ _red_fin) = 3.87 TB/s on 327 MB; v32 vjx 182.3 = 3.59 TB/s; v16 attn_kernel<8> 100.5 = 3.26 TB/s.
+- CEILING ORACLE dev/n64/gather_oracle.py (H100, no math): per key page id int32 + random 128 B K row + 128 B V row
+  (page=1 randperm pool, as reference.generate_input). Flat over 12 grid/block/unroll configs:
+  B32 2.557 M keys: gather 234.0-235.3 us = 2.83 TB/s; contiguous read of the same bytes 213.4 us = 3.07 TB/s.
+  B16 1.283 M keys: gather 119.0 us = 2.80 TB/s; contiguous 108.1 us.
+  So the 195 us 'floor' (nominal 3.35 TB/s) isn't reachable: random 128 B rows cap at ~2.83 TB/s on the H100, and the layout
+  is the input's (no reorder allowed, and sorting 2.5 M ids costs more than it saves).
+- Attention-only on the layer's inputs (dev/n57/attn_ab.py, seed 7, 3 rounds; H100) vs that ceiling:
+  | shape    | ours  | vjx   | best  | gather ceiling | gap   |
+  | d16 full | 126.5 | 126.6 | 126.5 | 119.0          | 7.5   |
+  | d32 full | 243.4 | 242.1 | 242.1 | 234.4          | 7.7   |
+  | v16 full | 134.3 | 135.5 | 134.3 | 119.0          | 15.3  |
+  | v32 full | 252.8 | 255.6 | 252.8 | 234.4          | 18.4  |
+  (ceiling uses the oracle's own lengths; key counts agree within ~1%).
+- Verdict: the lead's d32 gate (>= 15 us standalone) is unreachable: d32 full has <= 7.7 us H100 to the bare-gather ceiling
+  (~0.1% score even if fully closed). d16 the same. The only real gap is at q_len 8 (v16/v32 full, 15-18 us H100 = compute or
+  latency not hidden behind the KV stream; ~0.18 + 0.19% score at %/us ~ 16/time). Realistic half of that ~0.2%: below the
+  0.3% bar for a multi-session kernel build. Asked the lead under Requests. 1 submit, 0 checks.
