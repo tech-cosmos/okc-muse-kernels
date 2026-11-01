@@ -2795,7 +2795,6 @@ USE_GBAL = True
 _PDT = {"f32": torch.float32}
 print(f"env: torch {torch.__version__}, triton {triton.__version__}", flush=True)
 def _cos_sin(theta, d, device):
-    """[2^21, d] float32 cos | sin, built as SGLang's RotaryEmbedding (and the reference) do."""
     cache = _ROPE.get(theta)
     if cache is None:
         inv_freq = 1.0 / (theta ** (torch.arange(0, d, 2, dtype=torch.float, device=device) / d))
@@ -2803,14 +2802,11 @@ def _cos_sin(theta, d, device):
         cache = _ROPE[theta] = torch.cat((ang.cos(), ang.sin()), dim=-1).contiguous()
     return cache
 def _counters(n, device, tag=""):
-    """Zeroed int32 arrival counters for the fused merges; each call leaves them zeroed again (the Gluon
-    merge's generation words, tag "g", just count up)."""
     buf = _COUNTERS.get((device, tag))
     if buf is None or buf.numel() < n:
         buf = _COUNTERS[(device, tag)] = torch.zeros(max(n, 4096), dtype=torch.int32, device=device)
     return buf
 def _red_buf(n, device, tag="red"):
-    """Zeroed FP32 sums for plan red's in-grid merge; each call leaves them zeroed again."""
     buf = _COUNTERS.get((device, tag))
     if buf is None or buf.numel() < n:
         buf = _COUNTERS[(device, tag)] = torch.zeros(n, dtype=torch.float32, device=device)
@@ -2854,8 +2850,6 @@ if HAVE_GLUON:
     @gluon.jit
     def _gw_merge_rows(qkv_ptr, b, h, split, HQ: gl.constexpr, HKV: gl.constexpr, G: gl.constexpr,
                        L: gl.constexpr, M: gl.constexpr, D: gl.constexpr, RS: gl.constexpr, R_PAD: gl.constexpr):
-        """Program `split`'s slice of the merge: rows [split * RS, +RS) of the pair's 2 * M rows (KV heads h,
-        h + 1), and their gate logits (loaded before the wait for the other programs)."""
         ML: gl.constexpr = gl.BlockedLayout([1, 4], [2, 16], [4, 1], [1, 0])
         r2 = split * RS + gl.arange(0, R_PAD, layout=gl.SliceLayout(1, ML))
         ok = (r2 < split * RS + RS) & (r2 < 2 * M)
@@ -2871,8 +2865,6 @@ if HAVE_GLUON:
     @gluon.jit
     def _gw_merge(pacc_ptr, pml_ptr, out_ptr, vs, b, hh, r, c, ok, tok, col, gate, HQ: gl.constexpr,
                   HKV: gl.constexpr, S: gl.constexpr, M: gl.constexpr, D: gl.constexpr, R_PAD: gl.constexpr):
-        """_combine inside _gw_verify for _gw_merge_rows' slice: merge all S + 1 partials, then the per-head
-        RMSNorm and sigmoid(gate)."""
         ML: gl.constexpr = gl.BlockedLayout([1, 4], [2, 16], [4, 1], [1, 0])
         SP: gl.constexpr = S + 1
         base = (b * HKV + hh) * SP * M + r
@@ -2931,7 +2923,6 @@ if HAVE_GLUON:
     def _gw_producer_cv(pt_row, kbase, vbase, k_ring, v_ring, vh0, vh1, ready, empty, lo, hi, ntiles,
                         PAGE: gl.constexpr, ROW_W: gl.constexpr, BN: gl.constexpr, C: gl.constexpr,
                         D: gl.constexpr, NS: gl.constexpr, PW: gl.constexpr, LAG: gl.constexpr):
-        """_gw_producer that also converts V to FP16 (per-head halves), LAG tiles behind its gathers."""
         GLY: gl.constexpr = gl.BlockedLayout([1, 16], [4, 8], [PW, 1], [1, 0])
         VL: gl.constexpr = gl.BlockedLayout([1, 8], [4, 8], [PW, 1], [1, 0])
         n_g = gl.arange(0, BN, layout=gl.SliceLayout(1, GLY))
@@ -3082,7 +3073,6 @@ if HAVE_GLUON:
         return a + b
     @gluon.jit
     def _gw_seg(idx, seqv, tiles, start, end, b, BN: gl.constexpr):
-        """Segment of request b in tile range [start, end): its keys [lo, hi) and tile count."""
         excl = gl.sum(gl.where(idx < b, tiles, 0), 0)
         nb = gl.sum(gl.where(idx == b, tiles, 0), 0)
         sb = gl.sum(gl.where(idx == b, seqv, 0), 0)
@@ -3096,9 +3086,6 @@ if HAVE_GLUON:
                          B: gl.constexpr, B_PAD: gl.constexpr, P: gl.constexpr, MAX_PAGES: gl.constexpr,
                          PAGE: gl.constexpr, ROW_W: gl.constexpr, BN: gl.constexpr, C: gl.constexpr,
                          D: gl.constexpr, NS: gl.constexpr, PW: gl.constexpr, LAG: gl.constexpr, GX: gl.constexpr = 0):
-        """_gw_producer_cv over the program's segments (the ring position carries across them).
-        GX (layer s84 DIAG probes, wrong results, tuner timing only): 1 = no V widen once every ring slot holds one,
-        2 = every tile re-gathers the segment's first rows (all-L2), 4 = both."""
         GLY: gl.constexpr = gl.BlockedLayout([1, 16], [4, 8], [PW, 1], [1, 0])
         VL: gl.constexpr = gl.BlockedLayout([1, 8], [4, 8], [PW, 1], [1, 0])
         n_g = gl.arange(0, BN, layout=gl.SliceLayout(1, GLY))
@@ -3146,8 +3133,6 @@ if HAVE_GLUON:
                          B: gl.constexpr, B_PAD: gl.constexpr, P: gl.constexpr, NID: gl.constexpr, M: gl.constexpr,
                          D: gl.constexpr, BN: gl.constexpr, NS: gl.constexpr, LZ: gl.constexpr = 0,
                          GX: gl.constexpr = 0):
-        """(GX 3, layer s84 DIAG: no math after the exact tiles, wrong results.) _gw_consumer_cv (PEEL, LSUM) over the program's segments: each loads its request's queries and stores
-        its partial at id p + b."""
         S_L: gl.constexpr = gl.NVMMADistributedLayout(version=[3, 0], warps_per_cta=[4, 1],
                                                       instr_shape=[16, BN, 32])
         O_L: gl.constexpr = gl.NVMMADistributedLayout(version=[3, 0], warps_per_cta=[4, 1],
@@ -3510,8 +3495,6 @@ if HAVE_GLUON:
     @gluon.jit
     def _gd_red_add(acc, m_i, l_i, flg, split, kid, red_ptr, rcnt_ptr, M: gl.constexpr, D: gl.constexpr,
                     NR: gl.constexpr):
-        """plan red: add this program's partial (acc [M, D], m, l in the mma layout) into replica split % NR of the
-        sums at reference max 0, or, if its max is out of range (flg), list it (its partial is stored) for _red_fin."""
         MMA: gl.constexpr = gl.NVMMADistributedLayout(version=[2, 0], warps_per_cta=[1, 1], instr_shape=[16, 8])
         ML: gl.constexpr = gl.BlockedLayout([1, 4], [2, 16], [1, 1], [1, 0])
         ro = gl.arange(0, M, layout=gl.SliceLayout(1, MMA))
@@ -3648,7 +3631,6 @@ if HAVE_GLUON:
             _gw_merge(pacc_ptr, pml_ptr, out_ptr, vs, b, hh, r, c, ok, tok, col, gate, HQ, HKV, S, M, D, R_PAD)
 @triton.jit
 def _norm_rope_ld(ptr, off, ok, c, pos, cs_ptr, ROPE: tl.constexpr, D: tl.constexpr):
-    """_norm_rope's loads, to issue them before other work."""
     x = tl.load(ptr + off, mask=ok, other=0.0)
     if ROPE:
         xp = tl.load(ptr + (off ^ 1), mask=ok, other=0.0)
@@ -3677,8 +3659,6 @@ def _norm_rope_fin(x, xp, cos, sin, c, ROPE: tl.constexpr, D: tl.constexpr, HPP:
     return x * r
 @triton.jit
 def _norm_rope(ptr, off, ok, c, pos, cs_ptr, ROPE: tl.constexpr, D: tl.constexpr, HPP: tl.constexpr):
-    """[R, HPP*D] rows of HPP heads at ptr + off: per-head rmsnorm (no weight), then interleaved
-    RoPE at pos [R]. Masked-out entries are 0."""
     x = tl.load(ptr + off, mask=ok, other=0.0).to(tl.float32)
     sq = x * x
     if HPP == 1:
@@ -3701,8 +3681,6 @@ def _tile(t, hi, pt_row, kc_ptr, vc_ptr, q, pos, c, m_i, l_i, acc, scale, hp0, M
           PAGE: tl.constexpr, ROW_W: tl.constexpr, D: tl.constexpr, WINDOW: tl.constexpr, QK8: tl.constexpr,
           DOT: tl.constexpr, MIF: tl.constexpr = False, need=False, FIXED: tl.constexpr = False,
           CL: tl.constexpr = False):
-    """One tile of cached keys at positions t through the online softmax. MASKED: some t >= hi.
-    MIF (with MASKED): the score masks run only if the runtime scalar `need` says this tile has masked keys."""
     if MASKED:
         t_ok = t < hi
         t_ld = tl.minimum(t, hi - 1)
@@ -3744,8 +3722,6 @@ def _new(split, b, seq, j, q, m_i, l_i, acc, hp0, c, scale, k_scale, qkv_ptr, cs
          vc_ptr, vs_ptr, loc_ptr, HQ: tl.constexpr, HKV: tl.constexpr, HPP: tl.constexpr,
          L: tl.constexpr, L_PAD: tl.constexpr, MG: tl.constexpr, D: tl.constexpr, ROPE: tl.constexpr,
          S: tl.constexpr, QK8: tl.constexpr, DOT: tl.constexpr, SEP: tl.constexpr = False):
-    """Split 0 (or with SEP the extra program S, which has no cached keys) attends the block's own tokens (and stores them in the cache). Done before the
-    cached keys, so these loads overlap the page-table and cache trips instead of following them."""
     QKV_W: tl.constexpr = (2 * HQ + 2 * HKV) * D
     ROW_W: tl.constexpr = HKV * D
     if split == (S if SEP else 0):
@@ -3773,7 +3749,6 @@ def _new(split, b, seq, j, q, m_i, l_i, acc, hp0, c, scale, k_scale, qkv_ptr, cs
 @triton.jit
 def _finish(split, b, j, m_i, l_i, acc, hp0, hp, rr, r_ok, q_ok, c, pacc_ptr, pml_ptr, HKV: tl.constexpr,
             MG: tl.constexpr, D: tl.constexpr, S: tl.constexpr, SEP: tl.constexpr = False):
-    """Every split writes its partial (max, sum, accumulator) for KV heads hp0 .. hp0 + HPP - 1."""
     part = ((b * HKV + hp0 + hp) * (S + SEP) + split) * MG + rr
     tl.store(pml_ptr + part * 2, m_i, mask=r_ok)
     tl.store(pml_ptr + part * 2 + 1, l_i, mask=r_ok)
@@ -3781,7 +3756,6 @@ def _finish(split, b, j, m_i, l_i, acc, hp0, hp, rr, r_ok, q_ok, c, pacc_ptr, pm
 @triton.jit
 def _range(split, b, seq, pt_ptr, WINDOW: tl.constexpr, BALANCE: tl.constexpr, S: tl.constexpr, BLOCK_N: tl.constexpr,
            CHUNK: tl.constexpr, MAX_PAGES: tl.constexpr):
-    """_attn_split's cached keys [lo, hi) for this split, its page-table row and the tile offsets."""
     if WINDOW > 0:
         base = tl.maximum(seq - (WINDOW - 1), 0)
     else:
@@ -3807,10 +3781,6 @@ def _attn_body(seq_in, SEQ_IN: tl.constexpr, qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks
                 BALANCE: tl.constexpr = False, SEP: tl.constexpr = False, PF: tl.constexpr = False,
                 PRE: tl.constexpr = 0, MIF: tl.constexpr = False, PREQ: tl.constexpr = 0, FIX: tl.constexpr = 0,
                 FDELTA: tl.constexpr = 14.0):
-    """One program: a split of request b's context for HPP adjacent KV heads, which share each
-    cache row's contiguous HPP*D bytes. Queries are block-diagonal [HPP*MG, HPP*D] (row r is KV
-    head hp = r // MG of the pair, and holds values only in that head's D columns), so one
-    [rows, HPP*D] x [HPP*D, N] product scores every head against its own keys."""
     split = tl.program_id(0)
     b = tl.program_id(1)
     hp0 = tl.program_id(2) * (2 if DUAL else HPP)
@@ -3948,9 +3918,6 @@ def _attn_split(qkv_ptr, cs_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, pt_ptr, seq_ptr
                 BALANCE: tl.constexpr = False, SEP: tl.constexpr = False, PF: tl.constexpr = False,
                 PRE: tl.constexpr = 0, SPEC: tl.constexpr = 0, MIF: tl.constexpr = False, PREQ: tl.constexpr = 0,
                 FIX: tl.constexpr = 0, FDELTA: tl.constexpr = 14.0):
-    """Kernel wrapper of _attn_body. SPEC > 0 (batch 1, page 1, shapes only): SGLang slices the page table to the
-    batch's longest length, so seq = width - L is known before the seq_lens load lands; run on it at once (the
-    page-table and cos/sin loads skip one DRAM trip) and redo the split with the real length if it differs."""
     if SPEC > 0:
         real = tl.load(seq_ptr + tl.program_id(1))
         seq = tl.full([], SPEC, tl.int32)
@@ -3966,8 +3933,6 @@ def _new_tokens(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, seq_ptr, loc_ptr, pacc_
                 HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, MG: tl.constexpr,
                 L_PAD: tl.constexpr, D: tl.constexpr, S: tl.constexpr, DOT: tl.constexpr, NID: tl.constexpr = 0,
                 NBASE: tl.constexpr = 0, WAIT: tl.constexpr = False):
-    """For _gw_verify: one program per (request, KV head) stores the block's new keys and values as FP8
-    and attends them causally, into partial slot S (of S + 1)."""
     b = tl.program_id(0)
     hp0 = tl.program_id(1)
     gdc_launch_dependents()
@@ -3994,8 +3959,6 @@ def _new_tokens(qkv_ptr, kc_ptr, vc_ptr, ks_ptr, vs_ptr, seq_ptr, loc_ptr, pacc_
 @triton.jit
 def _norm_gate_store(o, qkv_ptr, out_ptr, tok, head, c, ok, HQ: tl.constexpr, HKV: tl.constexpr,
                      D: tl.constexpr):
-    """out[tok, head] = rmsnorm(o) * sigmoid(gate) for [R, C] rows holding one head's D values each
-    (the rest masked out and 0)."""
     QKV_W: tl.constexpr = (2 * HQ + 2 * HKV) * D
     o = o * tl.rsqrt(tl.sum(o * o, 1) / D + 1e-5)[:, None]
     col = head[:, None] * D + (c % D)[None, :]
@@ -4096,9 +4059,6 @@ def _combine_hb(qkv_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
                 HQ: tl.constexpr, HKV: tl.constexpr, G: tl.constexpr, L: tl.constexpr, M: tl.constexpr,
                 D: tl.constexpr, S: tl.constexpr, S_PAD: tl.constexpr, SB: tl.constexpr, HB: tl.constexpr,
                 PDL: tl.constexpr, ONE: tl.constexpr = True, QSS: tl.constexpr = 0, TRIG: tl.constexpr = False):
-    """_combine for HB adjacent query heads of one KV head per program: their partial rows are
-    contiguous in every split, so each split's [HB, D] block is one contiguous read. Faster on
-    sliding layers (fewer, fuller programs); full layers keep _combine."""
     if TRIG:
         gdc_launch_dependents()
     tok = tl.program_id(0)
@@ -4146,8 +4106,6 @@ def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
                  BN: tl.constexpr, SB: tl.constexpr, HB: tl.constexpr, ONE: tl.constexpr = True,
                  PROP: tl.constexpr = False, REDO: tl.constexpr = False, kc_ptr=None, vc_ptr=None, ks_ptr=None,
                  pt_ptr=None, qk_scale=1.0, MAX_PAGES: tl.constexpr = 1, PAGE: tl.constexpr = 1, QSS: tl.constexpr = 0):
-    """_combine_hb for balanced splits (_gw_bal): request b's partials are at ids p + b for the programs p whose
-    tile range meets b's tiles, and its new tokens at P + B + b."""
     tok = tl.program_id(0)
     head0 = tl.program_id(1) * HB
     b = tok // L
@@ -4252,10 +4210,6 @@ def _combine_bal(qkv_ptr, seq_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr,
     o = o * tl.rsqrt(tl.sum(o * o, 1) / D + 1e-5)[:, None]
     tl.store(out_ptr + tok * HQ * D + col, (o * tl.sigmoid(gate)).to(tl.bfloat16))
 def _plan(cfg, max_pages, device):
-    """Launch parameters from shapes only, tuned on an H100 over the scored shapes: splits per
-    (request, KV head group), tile size, warps, pipeline stages, KV heads per program (hpp),
-    whether the last program merges the splits (fuse), and whether QK^T runs in FP8 (qk8:
-    queries rounded to E4M3, as FA3 does with an FP8 cache)."""
     batch, length, hkv = cfg["batch"], cfg["q_len"], cfg["num_kv_heads"]
     heads = batch * hkv
     pairs = heads // 2
@@ -4318,10 +4272,6 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
              G: tl.constexpr, D: tl.constexpr, M: tl.constexpr, S: tl.constexpr, NR: tl.constexpr,
              SL: tl.constexpr = 0, RCW: tl.constexpr = 0, BAL: tl.constexpr = False, TRIG: tl.constexpr = 0,
              QSS: tl.constexpr = 0):
-    """plan red's merge (one KV head pair, M = 2 G rows = query heads; program b = request b): the NR replicas of
-    the sums at reference max 0, merged exactly with any listed out-of-range partials (slot ids in rcnt[2:]); then
-    RMSNorm and sigmoid(gate). Leaves the sums and the list count zeroed for the next call. Batched (s103): request
-    b's sums at b * NR * M * (D + 1), its list at b * RCW, partial slots per head SL (S + 1, or NID with BAL)."""
     QKV_W: tl.constexpr = (2 * HQ + 2 * HKV) * D
     b = tl.program_id(0)
     if RCW > 0:
@@ -4372,7 +4322,6 @@ def _red_fin(qkv_ptr, red_ptr, rcnt_ptr, pacc_ptr, pml_ptr, vs_ptr, out_ptr, HQ:
     o = o * tl.rsqrt(tl.sum(o * o, 1) / D + 1e-5)[:, None]
     tl.store(out_ptr + col, (o * tl.sigmoid(gate)).to(tl.bfloat16))
 def _verify_nvs(data, cfg):
-    """Verify sliding (L 8, G 8, D 64, HKV 2, page 1) on the native nvs kernel + _combine_hb."""
     batch, length, hq, hkv, d = cfg["batch"], cfg["q_len"], cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     qkv, device = data["qkv"], data["qkv"].device
     if NVS_HALF:
@@ -4401,7 +4350,6 @@ def _verify_nvs(data, cfg):
         ONE=MERGE1, PDL=USE_PDL, QSS=data.get("qkv_ss", 0), num_warps=1, launch_pdl=USE_PDL, TRIG=CB_HB_TRIG)
     return out
 def _decode_nds(data, cfg):
-    """Decode sliding (L 1, G 8, D 64, HKV 2, page 1) on the native nds kernel + _combine_hb."""
     batch, hq, hkv, d = cfg["batch"], cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     qkv, device = data["qkv"], data["qkv"].device
     S = 8
@@ -4563,8 +4511,6 @@ def _verify_gluon(data, cfg, plan):
         launch_pdl=USE_PDL, TRIG=CB_TRIG and USE_PDL)
     return out
 def _verify_bal(data, cfg, plan, out, qk_scale):
-    """_verify_gluon with balanced splits (plan gbal): the programs of each KV head pair index share the batch's
-    key tiles equally; partials [HKV, NID, rows, D] by id (see _gw_bal); merged by _combine_bal."""
     batch, length = cfg["batch"], cfg["q_len"]
     hq, hkv, d = cfg["num_q_heads"], cfg["num_kv_heads"], cfg["head_dim"]
     group = hq // hkv
@@ -4607,7 +4553,6 @@ def _verify_bal(data, cfg, plan, out, qk_scale):
         num_warps=plan.get("cw", 1), launch_pdl=USE_PDL)
     return out
 def _red_bufs(batch, group, d, sl, device):
-    """plan red's sums and out-of-range lists (batch 1 keeps its s95 buffers; batched ones are per batch size)."""
     if batch == 1:
         return _red_buf(4 * 2 * group * (d + 1), device), _counters(sl + 3, device, "r"), 0
     rcw = sl + 2
@@ -9546,7 +9491,6 @@ def _moe__lib():
                            extra_cflags=["-O3"], verbose=False)
     return _moe__LIB
 def _moe__unpack_codes(packed):
-    """uint8 [..., K/2] -> uint8 codes [..., K] (element 2i = low nibble)."""
     lo = packed & 0x0F
     hi = packed >> 4
     return torch.stack((lo, hi), dim=-1).flatten(-2)
@@ -9557,7 +9501,6 @@ _moe__POS = [
     ((1, 0, 4, 3), (17, 16, 20, 19)),
 ]
 def _moe__pack_weight(packed):
-    """One expert's uint8 [N, K/2] -> int32 [N/16, K/64, 32 lanes, 4] in A-fragment order."""
     N = packed.shape[0]
     K = packed.shape[1] * 2
     c = _moe__unpack_codes(packed).to(torch.int32)
@@ -9575,23 +9518,17 @@ def _moe__pack_weight(packed):
             word |= (code & 1) << pm
     return (word - ((word >> 31) << 32)).to(torch.int32)
 def _moe__pack_scales(sf):
-    """One expert's e4m3 [N, K/16] -> uint8 [N/16, K/512, 32 lanes, 16]."""
     N = sf.shape[0]
     K = sf.shape[1] * 16
     b = sf.view(torch.uint8).view(N // 16, 2, 8, K // 512, 8, 4)
     b = b.permute(0, 3, 2, 5, 4, 1)
     return b.reshape(N // 16, K // 512, 32, 16).contiguous()
 def _moe__sq_pack(wq, s2, nq=4):
-    """layer s68 (moe n14 SQ): wq int32 [E, NRT, 64, 32, 4] + s2 int32 [E, NRT/2, 64, 32] -> int32 [E, NRT/2, nq, 2 * W + S]: per
-    (row-tile pair lr, k quarter q) the tk2f stage image {tile lr kc q*16.., tile lr + NRT/2 same kc, scales}."""
     E, nrt = wq.shape[0], wq.shape[1]
     w = wq.reshape(E, 2, nrt // 2, nq, -1)
     sc = s2.reshape(E, nrt // 2, nq, -1)
     return torch.cat((w[:, 0], w[:, 1], sc), dim=-1).contiguous()
 def _moe__s6_pack(wq, s2, nq=4):
-    """layer s73 (moe n20 S6): as _sq_pack, but the stage's scales as 6-bit codes c = e4m3 byte - 80 (caller checked
-    80 <= byte <= 0x7E): per (lr, q) {tile lr, tile lr + NRT/2, nibbles int32 [8 warps][32 lanes], high bits int16
-    [8][32]}; lane word bits 4k / 2k hold code k = 4 h + r. 17920 B/stage (lossless)."""
     E, nrt = wq.shape[0], wq.shape[1]
     w = wq.reshape(E, 2, nrt // 2, nq, -1)
     c = s2.contiguous().view(torch.uint8).reshape(E, nrt // 2, nq, 2, 8, 32, 4).long() - 80
@@ -9603,14 +9540,10 @@ def _moe__s6_pack(wq, s2, nq=4):
     hi = (hi - ((hi >> 15) << 16)).to(torch.int16).reshape(E, nrt // 2, nq, 256).view(torch.int32)
     return torch.cat((w[:, 0], w[:, 1], nib, hi), dim=-1).contiguous()
 def _moe__pair_scales(ps):
-    """_pack_scales output [NRT, K/512, 32, 16] -> uint8 [NRT/2, K/64, 32 lanes, 4]: per (row-tile pair rp, k chunk)
-    each lane's 4 bytes (tile rp rows g, g+8, tile rp + NRT/2 rows g, g+8)."""
     n = ps.shape[0]
     v = ps.view(n, ps.shape[1], 32, 8, 2).permute(0, 1, 3, 2, 4).reshape(n, ps.shape[1] * 8, 32, 2)
     return torch.cat((v[: n // 2], v[n // 2:]), dim=-1).contiguous()
 def _moe__tb_pack(wq, ws, gated, rt):
-    """moe_tb layout: weights [E][rb][kc][warp][RT][lane] uint4, scales [E][rb][kc][warp][lane][RT] u16.
-    Gated: warp w of block rb owns gate tiles rb*8*H + w*H + (0..H) and the matching up tiles (H = RT/2)."""
     E, nrt = wq.shape[0], wq.shape[1]
     nrb = nrt // (8 * rt)
     rb = torch.arange(nrb).view(-1, 1, 1)
@@ -9630,7 +9563,6 @@ def _moe__tb_pack(wq, ws, gated, rt):
         S.append(se.permute(0, 3, 1, 4, 2).contiguous())
     return torch.stack(W), torch.stack(S)
 def _moe__scale_lut(device):
-    """e4m3 byte -> bf16x2 of (value * 2^118), both halves."""
     v = torch.arange(256, dtype=torch.int32).to(torch.uint8).view(torch.float8_e4m3fn).float() * (2.0 ** 118)
     bits = v.to(torch.bfloat16).view(torch.int16).to(torch.int32) & 0xFFFF
     word = bits | (bits << 16)
@@ -9802,7 +9734,6 @@ def _moe__diag(st):
     torch.cuda.synchronize()
 _moe_DIAG_TL = ()
 def _moe__diag_tl(st, data, name, order):
-    """s14: per-CTA moe_twm timeline (TWM_TL build): exit spread, HBM-rate estimate per 10 us, item durations by kind."""
     import collections
     g = globals()
     old = (g["TWM_ORDER"], g["TWM_TAIL_M"], g["TWM_ORDER_M"])
@@ -9880,7 +9811,6 @@ _moe_TK2F_S6 = 0
 _moe_TK2F_S6_ON = True
 _moe_TK2F_S6_KEEPSQ = False
 def _moe__s6_unpack(p):
-    """inverse of _s6_pack's scale part -> int32 view of the paired scales (prepare-time round-trip check)."""
     E, rpe, nq = p.shape[0], p.shape[1], p.shape[2]
     t = p[..., -384:]
     nib = t[..., :256].reshape(E, rpe, nq, 8, 32, 1).long() & 0xFFFFFFFF
@@ -9891,7 +9821,6 @@ def _moe__s6_unpack(p):
     return c.to(torch.uint8).contiguous().view(torch.int32).reshape(E, rpe, nq * 16, 32)
 _moe_TK2F_SQ = 1
 def _moe__tk2f_w(c, st):
-    """(cfg, w13, w2) for moe_tk2f_launch: SA 84204 (+ BAL) -> + 10000000 on the single-copy buffers (SQ)."""
     sq = c % 1000000 == 184204 or (140000 <= c % 1000000 < 150000 and c % 1000 == 4)
     if _moe_TK2F_SQ and sq and _moe_TK2F_S6_ON and "w13s6" in st:
         return c + 20000000, st["w13s6"], st["w2s6"]
@@ -9902,7 +9831,6 @@ _moe_TK2F_ORX = False
 _moe_TK2F_DIAG = False
 _moe_TK2X_M = {}
 def _moe__tk2x(c, st, code):
-    """layer s81 DIAG: (cfg, w13, w2) of probe `code` (c = the SQ 184204 cfg) -- wrong outputs for the nm codes."""
     assert _moe_TK2F_DIAG and c == 10184204, c
     if code == 6:
         return c, st["w13sq"], st["w2sq"]
@@ -10059,6 +9987,8 @@ def _moe_kernel_fn(data, st):
 # runs on the layer's build pool, and the decode layer calls it for full-attention layers only (TUNE option vjx);
 # in the built submission.py, comments, the CUDA source's indentation and the unused helpers (_fallback, _rms, _rope,
 # kernel_fn, Inputs) are left out (judge 1 MB file limit).
+# Modified by tech-cosmos (2026-11-01): the flat q_len-8 kernel drains a per-request dynamic pool of KV tiles
+# (atomic tile tickets, counters reset in the finalize) to even out the end of the grid.
 """Gated attention decode for Muse Spark Open: one fused CUDA kernel per call.
 
 Algorithm
@@ -10174,6 +10104,16 @@ constexpr int IDX_SLOTS = 2 * STAGES;
 constexpr int MAXB = 512;
 constexpr int MAXSEG = 64;
 
+#ifndef DYNF
+#define DYNF 100
+#endif
+#define DYNCH 2
+#define DYNMODE 0
+#define DYNPF 1
+__device__ __forceinline__ int dyn_q(int seq) {
+const int q = ((seq >> 6) * DYNF / 1000) << 6;
+return min(q, max(0, ((seq >> 6) - 1) << 6));
+}
 struct Params {
 const __nv_bfloat16* qkv;
 const int* seq_lens;
@@ -10533,6 +10473,9 @@ int nseg;
 int fcs, fce;
 int pseg[F ? MAXSEG : 1][3];
 int pnseg, pchunk;
+int dyn_t[2];
+int tflag[8];
+int dshare;
 int dq[F ? 16 : 1][4];
 uint64_t dqf[F ? 16 : 1];
 uint64_t dqe[F ? 16 : 1];
@@ -10910,6 +10853,7 @@ if (ROLE == 2 && tid == 0) {
 for (int st = 0; st < STAGES; ++st) {
 mbar_init_n(&S.full[st], NP);
 mbar_init_n(&S.empty[st], NT);
+if constexpr (FLAT) S.tflag[st] = 1;
 }
 
 mbar_fence_init();
@@ -11022,6 +10966,55 @@ asm volatile("bar.sync 2, %0;\n" ::"n"(NP) : "memory");
 } else {
 #pragma unroll
 for (int k = 0; k < PK; ++k) pg[k] = pgn[k];
+}
+}
+
+if constexpr (L == 8 && FLAT && DYNF > 0) if (chunk) {
+const int nq = dyn_q(seq) >> 6;
+int* ctr = p.ws_cnt + 31000 + bp;
+int pend = 0;
+if (q == 0) { S.dyn_t[0] = atomicAdd(ctr, 1); pend = atomicAdd(ctr, 1); }
+asm volatile("bar.sync 9, %0;\n" ::"n"(NP) : "memory");
+int cur = *reinterpret_cast<volatile int*>(&S.dyn_t[0]);
+int x = ntiles;
+int pgd[PK];
+while (cur * DYNCH < nq) {
+const int t0 = cur * DYNCH, t1 = min(nq, t0 + DYNCH);
+for (int t = t0; t < t1; ++t, ++x) {
+#pragma unroll
+for (int k = 0; k < PK; ++k) pgd[k] = __ldg(ptr + ((t * TILE + r0 + PR * k) >> p.lp));
+if (DYNPF && q < 2 && t + 1 < t1)
+asm volatile("prefetch.global.L2 [%0];" ::"l"(ptr + (((t + 1) * TILE + 32 * q) >> p.lp)));
+const int st = (tb + x) % STAGES;
+if (tb + x >= STAGES) mbar_wait_full(&S.empty[st], (((tb + x) / STAGES) - 1) & 1);
+const uint32_t kb = smem_u32(S.k + st * STAGE_BYTES), vb = smem_u32(S.v + st * STAGE_BYTES);
+#pragma unroll
+for (int k = 0; k < PK; ++k) {
+const int r = r0 + PR * k;
+const int pos = t * TILE + r;
+const uint32_t so = r * ROWB + ((ch ^ (r & 7)) << 4);
+if (p.off32) {
+const uint32_t off = ((((uint32_t)pgd[k] << p.lp) + (uint32_t)(pos & (p.P - 1))) << p.lrb) + (uint32_t)(pair * 128 + ch * 16);
+cp_async16(kb + so, p.k_cache + off, 16);
+cp_async16(vb + so, p.v_cache + off, 16);
+} else {
+const int64_t off = (((int64_t)pgd[k] << p.lp) + (pos & (p.P - 1))) * p.row_bytes + pair * 128 + ch * 16;
+cp_async16(kb + so, p.k_cache + off, 16);
+cp_async16(vb + so, p.v_cache + off, 16);
+}
+}
+cp_async_mbar_arrive(&S.full[st]);
+}
+asm volatile("bar.sync 9, %0;\n" ::"n"(NP) : "memory");
+if (q == 0) { S.dyn_t[0] = pend; pend = atomicAdd(ctr, 1); }
+asm volatile("bar.sync 9, %0;\n" ::"n"(NP) : "memory");
+cur = *reinterpret_cast<volatile int*>(&S.dyn_t[0]);
+}
+{
+const int st = (tb + x) % STAGES;
+if (tb + x >= STAGES) mbar_wait_full(&S.empty[st], (((tb + x) / STAGES) - 1) & 1);
+if (q == 0) *reinterpret_cast<volatile int*>(&S.tflag[st]) = 0;
+mbar_arrive(&S.full[st]);
 }
 }
 
@@ -11611,7 +11604,8 @@ r_span = __shfl_sync(0xffffffffu, bz >= a ? (uint32_t)(bz - a) : 0u, 0);
 
 int i_cur = 0, cnt2 = 0;
 
-const int nit = ntiles;
+constexpr bool DYNC = L == 8 && FLAT && WS && DYNF > 0;
+const int nit = (DYNC && chunk) ? 0x7fffffff : ntiles;
 constexpr int UNR8 = WS ? 2 : 1;
 #pragma unroll (UNR8)
 for (int jj = 0; jj < nit; ++jj) {
@@ -11621,7 +11615,8 @@ if constexpr (WS) {
 bool patched;
 
 mbar_wait_full(&S.full[st_c], ph_c);
-patched = ((uint32_t)i - r_lo > r_span) && (i >= i_new) && ws_patch_ni<L, NT, false>(&S, i, st_c, start, seq, end, tid);
+if (DYNC && i >= ntiles && *reinterpret_cast<volatile int*>(&S.tflag[st_c]) == 0) break;
+patched = (!DYNC || i < ntiles) && ((uint32_t)i - r_lo > r_span) && (i >= i_new) && ws_patch_ni<L, NT, false>(&S, i, st_c, start, seq, end, tid);
 
 
 if (patched || i == 0) csync<WS, NT>();
@@ -11704,7 +11699,7 @@ mbar_arrive(&S.empty[st]);
 }
 
 
-const bool common_t = WS && ((uint32_t)i - r_lo <= r_span);
+const bool common_t = WS && (((uint32_t)i - r_lo <= r_span) || (DYNC && i >= ntiles));
 const int t0 = start + i * TILE;
 const bool interior = common_t || ((t0 >= lo_all) && (t0 + TILE - 1 <= hi_all));
 if (!interior) {
@@ -12191,6 +12186,8 @@ __nanosleep(64);
 csync<WS, NT>();
 const int pairs = p.Hkv >> 1;
 const int rows = p.B * pairs * L * 16;
+if (L == 8 && DYNF > 0 && c == 0)
+for (int i = tid; i < p.B * pairs; i += NT) p.ws_cnt[31000 + i] = 0;
 const int R = fdiv_i(rows + G - 1, G);
 const int r_lo = c * R, r_hi = min(rows, r_lo + R);
 const float vscale = __ldg(p.v_scale);
@@ -12302,6 +12299,18 @@ mbar_fence_init();
 if (threadIdx.x < 32) {
 int run = 0;
 int incl_l = 0, n_l = 0, seq_l = 0;
+int dshare = 0;
+if (L == 8 && DYNF > 0) {
+int tot = 0;
+for (int b = threadIdx.x; b < p.B; b += 32) {
+const int sq = __ldg(p.seq_lens + b);
+tot += sq + L - (p.window ? max(0, sq + 1 - p.window) : 0);
+}
+#pragma unroll
+for (int o = 16; o > 0; o >>= 1) tot += __shfl_xor_sync(0xffffffffu, tot, o);
+const int G_ = gridDim.x;
+dshare = (tot + (p.B - 1) * 600 + G_ - 1) / G_ + 64;
+}
 for (int b0 = 0; b0 < p.B; b0 += 32) {
 const int b = b0 + (int)threadIdx.x;
 int n = 0;
@@ -12309,6 +12318,11 @@ if (b < p.B) {
 const int seq = __ldg(p.seq_lens + b);
 const int lo = p.window ? max(0, seq + 1 - p.window) : 0;
 n = seq + L - lo;
+if (L == 8 && DYNF > 0) {
+const int dq = (p.window == 0 && n - dyn_q(seq) > dshare) ? dyn_q(seq) : 0;
+if (b0 == 0 && threadIdx.x == 0) S.dshare = dshare;
+n -= dq;
+}
 seq_l = seq;
 }
 int incl = n;
@@ -12464,10 +12478,11 @@ const int b = S.seg[k][0];
 const int seq = __ldg(p.seq_lens + b);
 const int lo = p.window ? max(0, seq + 1 - p.window) : 0;
 const int n_keys = seq + L - lo;
-const int s0 = S.seg[k][1] + lo, s1 = S.seg[k][2] + lo;
-
+const int dq_ = (L == 8 && DYNF > 0 && p.window == 0 && n_keys - dyn_q(seq) > S.dshare) ? dyn_q(seq) : 0;
+const int s0 = S.seg[k][1] + lo + dq_, s1 = S.seg[k][2] + lo + dq_;
+const int dyn_ = (DYNMODE != 1 && dq_ > 0 && p.coop && k == nseg - 1) ? 1 : 0;
 if (s0 < s1) {
-segment<L, FLAT, R>(p, S, b, pair, s0 == lo, s0, s1, seq, n_keys, vc - fdiv_i(vc, p.nc) * p.nc, 0,
+segment<L, FLAT, R>(p, S, b, pair, S.seg[k][1] == 0, s0, s1, seq, n_keys, vc - fdiv_i(vc, p.nc) * p.nc, dyn_,
 0, 0,
 L == 1 && Cfg<L, FLAT>::WS && k == 0);
 tb += (s1 - s0 + TILE - 1) / TILE;
@@ -13095,19 +13110,6 @@ def _boundary(br_ptr, s_ptr, alpha_ptr, beta_ptr, bgain_ptr, gain_ptr, s_out_ptr
               sc_ptr=None, ids_ptr=None, tw_ptr=None, SC: tl.constexpr = False, SC_LOCAL: tl.constexpr = 0,
               SC_K: tl.constexpr = 4096, SC_EPS: tl.constexpr = 0.0, rb_ptr=None, x1_ptr=None, a1_ptr=None, b1_ptr=None,
               NOS: tl.constexpr = 0, rst_ptr=None, RST: tl.constexpr = False):
-    """One row. b = branch (its first NB columns; the rest are zero), times (1 + w) with BGAIN;
-    s' = alpha s + beta rmsnorm(b, EPS_POST); h = rmsnorm(s', EPS) (1 + w) in BF16 (and FP32 with H32).
-    RB: the branch is FP32 (gemv19 output), rounded to BF16 first.
-    PF > 0: the last PF programs instead L2-prefetch PF x PF_NT x 1 KB from pf_ptr (the router weight) and exit.
-    TRIG: let the PDL dependent (the gemv19 pooler, which streams W before its griddepcontrol.wait) launch now.
-    NS > 1 (RB): the branch is the sum of NS FP32 split-K slabs SS elements apart (nu8).
-    SPL > 1 (s33 BND_SPLIT): SPL programs per row, each computes the row's norms redundantly and stores its N / SPL slice.
-    SC (s59 NU8D, with SEP): the branch is sum over the row's 8 route slots j (local: 0 <= ids < SC_LOCAL) of
-    tw_j rsqrt(sc[j] / SC_K + SC_EPS) br[j] (br = nu8 D's per-slot unpool rows [T * 8][NB], sc its sums of squares).
-    NOS (proj n7s3, BND_NOS_TOKENS; NB = N, no SEP): 1 = the first boundary skips its FP32 s' store (the second boundary's
-    input stream, 8 MB at T=256) and stores rb (one FP32 per row) to rb_ptr instead; 2 = the second boundary recomputes that
-    stream from the layer input stream s_ptr, the o output x1_ptr (BF16 [T, N]), res1 a1/b1 and rb, with the first boundary's
-    FP32 ops (bitwise the same s')."""
     if TRIG:
         gdc_launch_dependents()
     if PF > 0:
@@ -13203,10 +13205,6 @@ def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, 
                   SS: tl.constexpr = 0, z_ptr=None, ZN: tl.constexpr = 0, TRIG2: tl.constexpr = False,
                   zl_ptr=None, ids_ptr=None, ZL: tl.constexpr = 0, ZW: tl.constexpr = 1024,
                   zr_ptr=None, ZR: tl.constexpr = 0, ZRP: tl.constexpr = 1):
-    """One row: rmsnorm(x) (1 + w), BF16 in and out. ZN > 0: program 0 also zeroes z_ptr[:ZN] after its wait (nu8's
-    sums of squares, accumulated by the following moe_tk2f). TRIG: let the dependent (moe_tk2 gemm13) launch now.
-    XS: x row stride (0: N). ROUND: x is FP32, rounded to BF16 first (the pooler's output dtype).
-    NS > 1: x is the sum of NS FP32 split-K partials SS elements apart (then rounded with ROUND)."""
     if TRIG:
         gdc_launch_dependents()
     row = tl.program_id(0).to(tl.int64)
@@ -13240,8 +13238,6 @@ def _rmsnorm_gain(x_ptr, gain_ptr, out_ptr, N: tl.constexpr, EPS: tl.constexpr, 
 def _router_split(h_ptr, w_ptr, wlo_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr,
                   BT: tl.constexpr, BE: tl.constexpr, BK: tl.constexpr, KS: tl.constexpr, HILO: tl.constexpr,
                   TRIG: tl.constexpr = False):
-    """part[ks, t, e] = sum over this split's K of h[t, k] w[e, k]. HILO: h BF16, w = hi + lo (BF16 pair, both
-    [E, K]), FP32 accumulation; else h and w FP32 in FP32 FMA (ieee). TRIG (s39): let the PDL dependent (_routing) launch."""
     if TRIG:
         gdc_launch_dependents()
     pe = tl.program_id(0)
@@ -13266,7 +13262,6 @@ def _router_split(h_ptr, w_ptr, wlo_ptr, part_ptr, T, K: tl.constexpr, E: tl.con
 @triton.jit
 def _router_fma(h_ptr, w_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr, BT: tl.constexpr, BE: tl.constexpr,
                 BK: tl.constexpr, KS: tl.constexpr):
-    """Up to BT tokens, FP32: part[ks, t, e] = sum over this split's K of h[t, k] w[e, k], in FP32 FMAs."""
     pe = tl.program_id(0)
     ks = tl.program_id(1)
     e = pe * BE + tl.arange(0, BE)
@@ -13284,9 +13279,6 @@ def _router_fma(h_ptr, w_ptr, part_ptr, T, K: tl.constexpr, E: tl.constexpr, BT:
 def _routing(part_ptr, bias_ptr, ls_ptr, ids_ptr, lids_ptr, wts_ptr, T, E: tl.constexpr, KS: tl.constexpr,
              TOPK: tl.constexpr, LOCAL: tl.constexpr, MULT: tl.constexpr, REPS: tl.constexpr,
              SKS: tl.constexpr = 0, ST: tl.constexpr = 0, TRIG: tl.constexpr = False, PDL: tl.constexpr = False):
-    """One token: scores = sigmoid(MULT logits); the top TOPK of scores + bias (lowest index on ties);
-    weights = picked scores / (their sum + REPS); local ids = (id - local_start) mod E, -1 off this GPU.
-    TRIG (s39 ROUTE_PDL): let the PDL dependent (moe_route) launch now. PDL: launched as a PDL secondary (of pr3)."""
     if TRIG:
         gdc_launch_dependents()
     if PDL:
@@ -13320,7 +13312,6 @@ def _routing(part_ptr, bias_ptr, ls_ptr, ids_ptr, lids_ptr, wts_ptr, T, E: tl.co
     tl.store(lids_ptr + t * TOPK + j, loc)
     tl.store(wts_ptr + t * TOPK + j, wts)
 def _router_plan(tokens):
-    """(BT, BE, BK, KS, warps) for the split-K router."""
     if tokens <= ROUTER_FP32_MAX_TOKENS:
         return triton.next_power_of_2(tokens), 2, 1024, 8, 4
     if tokens <= 64:
@@ -13358,8 +13349,6 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
 @triton.jit
 def _post_expert_wsum(y_ptr, wts_ptr, lids_ptr, nw_ptr, out_ptr, D: tl.constexpr, TOPK: tl.constexpr,
                       EPS: tl.constexpr):
-    """One token: out = sum over its local slots k of wts[k] rmsnorm(bf16(y[k] (1 + w))), BF16 (SGLang's
-    fused_post_expert_norm_weighted_sum with weight_first; slots off this GPU (local id -1) are skipped)."""
     t = tl.program_id(0).to(tl.int64)
     cols = tl.arange(0, D)
     k = tl.arange(0, TOPK)
@@ -13372,7 +13361,6 @@ def _post_expert_wsum(y_ptr, wts_ptr, lids_ptr, nw_ptr, out_ptr, D: tl.constexpr
     acc = tl.sum(z * (wt * r)[:, None], 0)
     tl.store(out_ptr + t * D + cols, acc.to(tl.bfloat16))
 def _marlin_bank(weights):
-    """The local experts in Marlin's layout, via SGLang's own loader step."""
     import types
     device = weights["w13"].device
     layer = types.SimpleNamespace(
@@ -13395,7 +13383,6 @@ def _marlin_bank(weights):
         "workspace": marlin_make_workspace(device, max_blocks_per_sm=4),
     }
 def _experts_marlin(x, topk_weights, local_ids, state):
-    """MuseSpark1xFp4Experts._marlin_expert_outputs and its post-expert-norm finalize; local_ids -1 off this GPU."""
     bank = state["bank"]
     num_tokens, size_k = x.shape
     size_n = bank["size_n"]
@@ -13443,15 +13430,12 @@ MARLIN_TOKENS = ()
 def _use_moe(tokens):
     return not HAVE_SGL or tokens not in MARLIN_TOKENS
 def _moe_bucket(state, local_ids, pdl=False):
-    """moe_src's route kernel: this GPU's routes bucketed by expert (meta, sorted route ids). pdl (s39 ROUTE_PDL): as a
-    PDL secondary of the routing kernel just before it (which triggers at its start)."""
     dev = local_ids.device
     meta = torch.empty(132, dtype=torch.int32, device=dev)
     sroutes = torch.empty(local_ids.numel(), dtype=torch.int32, device=dev)
     (state["moe"]["lib"].moe_route_pdl_launch if pdl else state["moe"]["lib"].moe_route_launch)(local_ids, 0, LOCAL_EXPERTS, meta, sroutes)
     return meta, sroutes
 def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
-    """moe_src's route -> gemm13 -> gemm2 -> norm, on local ids (-1 off this GPU: skipped as out of range)."""
     st = state["moe"]
     lib = st["lib"]
     m = x.shape[0]
@@ -13527,8 +13511,6 @@ def _experts_moe(x, topk_weights, local_ids, state, bucket=None, gnorm=False):
     lib.moe_norm_launch(y, local_ids, topk_weights, st["w1"], 0, LOCAL_EXPERTS, POST_NORM_EPS, out)
     return out
 def _experts_local(x, topk_weights, local_ids, state):
-    """Local test fallback (no SGLang): every local expert on every token from BF16 copies made in prepare,
-    each output post-normed (scale, round to BF16, RMSNorm) and kept by its routing weight."""
     tokens = x.shape[0]
     y = torch.zeros((tokens, TOP_K, D_EXPERT), dtype=torch.bfloat16, device=x.device)
     for e, (w13, w2) in enumerate(state["experts_bf16"]):
@@ -13545,7 +13527,6 @@ def _residual(gate):
     alpha = torch.sqrt(torch.clamp(torch.sigmoid(-w) * (1.0 + beta), min=RESIDUAL_GATE_EPS))
     return alpha.contiguous(), beta.contiguous()
 def _join_builds():
-    """Wait for the import-time JIT builds (s68); resolve the attention extensions."""
     for f in _PREBUILD:
         try:
             f.result()
@@ -13559,10 +13540,6 @@ def _join_builds():
         if isinstance(g.get(n), _LazyBuild):
             g[n] = g[n].get()
 def _own_stream(dev, priority=0):
-    """n5s2: a CUDA stream outside PyTorch's stream pool. torch.cuda.Stream() hands out 32 pooled streams per priority
-    round-robin, so a harness's capture stream (torch.cuda.Stream() / torch.cuda.graph's own pool stream) can be the SAME
-    stream as our side stream: the side branch (router || pooler, ...) is then captured in line and serializes (H100: the
-    first capture after prepare() got exactly our side stream, d16 sl 201.6 vs 192.2 us). Own stream: never collides."""
     try:
         import ctypes
         rt = ctypes.CDLL("libcudart.so.13")
@@ -16409,7 +16386,6 @@ PR32_CFG = {16: (8, 16), 32: (8, 16)}
 _GPR32_SRC = None
 _PR32 = {}
 def _pr32_build(c):
-    """c = (MTOK, NW, NS) -> the pr32 lib (moe n5s1, pr32_src.cu) or None."""
     if c not in _PR32:
         try:
             import hashlib
@@ -17612,7 +17588,6 @@ G10_ALT = {"o": [(1024, 4, 4, 1, 1, 132)]}
 G14_ALT = {"qkv_gate": [(8, 8, 4, 96, 1), (8, 8, 4, 96, 2), (8, 8, 8, 96, 1)]}
 _ALTS = {"g10": G10_ALT, "g13": G13_ALT, "g14": G14_ALT}
 def _cfg(state, tokens, kind, key, cfg):
-    """key's config for that GEMV kind, or the TUNE-picked alternative."""
     i = int(_opt(state, tokens, kind + "alt:" + key, 0)) if key in _ALTS[kind] else 0
     return _ALTS[kind][key][i - 1] if i else cfg[key]
 G14_CFG = {"qkv_gate": (2, 2, 4, 32, 1), "pooler": (8, 8, 4, 128, 1)}
@@ -17629,10 +17604,6 @@ OB8 = False
 PR1_BND = False
 G13_ESC = 8
 def _compress(w):
-    """Lossless 12-bit BF16 (gemv13/gemv14): sign|mantissa byte and 4-bit exponent code c = e - base per weight
-    (base = max exponent - 15 or - 16, fewest escapes; decoded exponent 112 | c, so sums are rescaled by scale = 2^(base - 112)); weights outside
-    the window (zeros, tiny values, a top outlier at base - 16) are escapes: code 0, byte 0 (decodes to 2^(base - 127)) plus a per-row header of
-    G13_ESC (col, true / scale) entries (exact; kernels subtract 2^-15 = 2^(base - 127) / scale). None if a row has more than G13_ESC escapes."""
     n, k = w.shape
     b = w.contiguous().view(torch.int16).int() & 0xFFFF
     e = (b >> 7) & 0xFF
@@ -17669,14 +17640,10 @@ def _compress(w):
         return None
     return code, sm, hdr, scale
 def _nib(code):
-    """Codes [..., 8] -> int32 words: weight 2p + h at bits 4p + 16h."""
     sh = torch.tensor([4 * (i // 2) + 16 * (i % 2) for i in range(8)], device=code.device)
     v = (code.long() << sh).sum(-1)
     return torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
 def _dec3(sm, code):
-    """s35 DEC3 layout over groups of 8 weights (last dim = the kernels' dec8 unit: 8 bytes + 1 word): byte = c0 << 7 |
-    mantissa; word: weight 2P + h's sign, c1, c2, c3 at bits (15, 8, 9, 10) + 16h + (0, -4, -8, 4)[P] (mod 32). Kernels
-    (decw in dev/gemv*.cu): prmt with 0x38 for the exponent's top bits + one lop3 per BF16 pair. Checked lossless here."""
     sm, code = sm.long(), code.long()
     i = torch.arange(8, device=sm.device)
     off = 16 * (i % 2) + torch.tensor([0, -4, -8, 4], device=sm.device)[i // 2]
@@ -17690,7 +17657,6 @@ def _dec3(sm, code):
         raise RuntimeError("DEC3 packing round trip failed")
     return b3.to(torch.uint8), torch.where(v >= 2 ** 31, v - 2 ** 32, v).int()
 def _pack13(w):
-    """gemv13 layout: flat byte plane, code words over 8 consecutive weights."""
     c = _compress(w)
     if c is None:
         return None
@@ -17698,7 +17664,6 @@ def _pack13(w):
     s3, n3 = _dec3(sm.flatten().view(-1, 8), code.flatten().view(-1, 8))
     return s3.flatten().contiguous(), n3.contiguous(), hdr, scale
 def _pack14(w, kc):
-    """gemv14 layout: gemv12's atom order [ks][rg][atom][lane][8] for bytes and codes."""
     c = _compress(w)
     if c is None:
         return None
@@ -17714,7 +17679,6 @@ G10_PFL2 = {}
 G12_CFG = {"qkv_gate": (2, 2, 4, 32), "pooler": (8, 8, 4, 128), "o": (1, 2, 8, 128), "unpool_slice": (4, 4, 4, 32)}
 G12_TOKENS = 8
 def _pack12(w, kc):
-    """proj's gemv12 layout: [k-chunk][8-row group][kc/32 atoms][lane][8] (atom = 8 rows x 32 k), lossless."""
     n, k = w.shape
     return w.view(n // 8, 8, k // kc, kc // 32, 4, 8).permute(2, 0, 3, 1, 4, 5).contiguous()
 def _g10_lib():
@@ -19050,7 +19014,6 @@ int64_t lt_gemm_raw(std::vector<int64_t> d, std::vector<int64_t> cfg, int64_t st
             print("layer cuBLASLt build failed, F.linear instead:", e)
             _LT["lib"] = None
 def _lt_prepare(state):
-    """Build the cuBLASLt wrapper; keep the configs that launch on this GPU and match F.linear."""
     state["lt_ok"] = {}
     if not LT_CFG or _LT_SRC is None:
         return
@@ -19094,8 +19057,6 @@ G22_CFG = {}
 _G22_SRC = None
 _G22 = {}
 def _pack22(c, ap, E):
-    """proj's _pack22: tile-major gemv22 stages + E escapes per stage (int32 row | k << 8, true / scale bits); None
-    if a stage has more than E escapes."""
     code, sm, hdr, scale = c
     n, k = code.shape
     kc = 32 * ap
@@ -19131,7 +19092,6 @@ def _g22_build():
             print("layer gemv22 build failed:", e)
             _G22["lib"] = None
 def _g22_prepare(state):
-    """gemv22 packs per (key, T), each checked once against F.linear (dropped -> the default path)."""
     state["g22"] = {}
     if not G22_CFG or _G22_SRC is None:
         return
@@ -19171,7 +19131,6 @@ def _g22_prepare(state):
             print("layer gemv22 config dropped:", key, m, c)
     del comp
 def _pack19(c, kc, ap, tm=0, dec3=True):
-    """proj's pack19 (r-proj dev/g19_lib.py): _compress output -> stage-major uint8 [stages, 8 * ap * 768]."""
     code, sm, hdr, scale = c
     n, k = code.shape
     perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()
@@ -19189,8 +19148,6 @@ def _pack19(c, kc, ap, tm=0, dec3=True):
     N = N.view(torch.uint8).view(ks, ntr, 8, spk, ap * 256).permute(*pm).reshape(ks * ntr * spk, 8 * ap * 256)
     return torch.cat([S, N], 1).contiguous()
 def _g19_prepare(state):
-    """gemv19 packs per (key, T) (shared when kc/ap match) + one epoch counter per call site; each pick is checked
-    once against F.linear (dropped -> cuBLAS)."""
     state["g19"] = {}
     lib = _G10.get("lib")
     if lib is None or not G19_CFG or _G19_SRC is None:
@@ -19233,8 +19190,6 @@ def _g19_prepare(state):
     _g30k_prepare(state, w, comp, g)
     del comp
 def _pack24(c, kc, ap):
-    """gemv24 stages (pack19 with one 16-row group per stage): stage (ks, row group, st) = [ap atoms x 32 lanes x 16 B
-    sign|mantissa][ap x 32 x 8 B codes], DEC3."""
     code, sm, hdr, scale = c
     n, k = code.shape
     perm = lambda t: t.view(n // 16, 2, 8, k // kc, kc // 32, 2, 2, 4, 2).permute(3, 0, 4, 2, 7, 5, 6, 1, 8).contiguous()
@@ -19348,7 +19303,6 @@ class _LtRaw:
     def lt_gemm(self, w, x, out, ws, cfg):
         return self.mod.lt_gemm_raw(_tdesc(w, x, out, ws), cfg, torch.cuda.current_stream().cuda_stream)
 def _g30_load(name, dfs, k):
-    """The g30 (k False) / g30k (k True) lib with defines dfs; TSHIM: torch-free build behind _G30Raw."""
     from torch.utils.cpp_extension import load_inline
     fl = ["-O3", "-gencode=arch=compute_90a,code=sm_90a", *dfs]
     if not TSHIM:
@@ -19395,7 +19349,6 @@ def _g30_build():
             print("layer g30 build failed:", ex)
             _G30["lib"] = None
 def _g30n_build(c):
-    """c = (MTOK, S, NW, NS) -> the g30 lib built with those defines (None on failure)."""
     if c not in _G30N:
         try:
             import hashlib
@@ -19407,7 +19360,6 @@ def _g30n_build(c):
             _G30N[c] = None
     return _G30N[c]
 def _g30gx_build(c):
-    """c = (MTOK, S, NW, NS) -> the G30_GX g30 lib (None on failure)."""
     if c not in _G30GX:
         try:
             import hashlib
@@ -19423,9 +19375,6 @@ def _g30gx_builds():
         return []
     return [(lambda c=c: _g30gx_build(c)) for c in sorted({(m, *G30N_CFG[(k, m)]) for (k, m) in G30GX_CFG if (k, m) in G30N_CFG})]
 def _g30_gx_tables(hdr, K, S, gxc=64, gxr=512):
-    """proj n5s6 (r-proj dev/n5s6/gx.py): hdr [N][ESC] (col bits, v) pairs from _compress -> int32 [N / 64 * S][rlen]
-    escape records for G30_GX: [0] ncols, [1..5] list starts per 16 rows + end, [8, 8 + gxc) sorted escape cols (slot =
-    index), [8 + gxc ..] (slot | row << 16 | last-of-row << 22 | (col & 7) << 28, v bits) in row order. None if one does not fit."""
     h = hdr.detach().cpu()
     N = h.shape[0]
     cols = h[:, :, 0].contiguous().view(torch.int32)
@@ -19460,7 +19409,6 @@ def _g30_gx_tables(hdr, K, S, gxc=64, gxr=512):
         out[i, 8 + gxc:8 + gxc + len(ent)] = ent
     return out.to(hdr.device)
 def _g30kgx_build(c):
-    """c = (MTOK, NW, NS) -> the G30_GX g30k lib (None on failure)."""
     if c not in _G30KGX:
         try:
             import hashlib
@@ -19472,9 +19420,6 @@ def _g30kgx_build(c):
             _G30KGX[c] = None
     return _G30KGX[c]
 def _g30k_gx_tables(hdr, K, G, gxc=64, gxr=512, gxs=4):
-    """proj n5s7 (r-proj dev/n5s7/gxk.py): G30_GX records for g30k, one per CTA: int32 [G][rlen]: [0] ncols, [1] nseg,
-    [2 + 5 s, + 5) list starts per 16 rows + end of segment s, [24, 24 + gxc) the CTA's escape cols ascending (slot = index),
-    [24 + gxc ..] (slot | row << 16 | last-of-row << 22 | (col & 7) << 28, v bits) segment-major, row order. None if one does not fit."""
     h = hdr.detach().cpu()
     N = h.shape[0]
     cols = h[:, :, 0].contiguous().view(torch.int32)
@@ -19518,7 +19463,6 @@ def _g30k_gx_tables(hdr, K, G, gxc=64, gxr=512, gxs=4):
         out[i, 24 + gxc:24 + gxc + len(ent)] = ent
     return out.to(hdr.device)
 def _g30k_build(c):
-    """c = (MTOK, NW, NS) -> the g30k (stream-K, FP32 slab out) lib (None on failure)."""
     if c not in _G30K:
         try:
             import hashlib
@@ -19539,8 +19483,6 @@ def _g30n_builds():
         return []
     return [(lambda c=c: _g30n_build(c)) for c in sorted({(m, *v) for (k, m), v in G30N_CFG.items()})]
 def _pack30(code, sm):
-    """[N, K] codes / sign|mantissa bytes -> [N/64][K/64][6144 B] stages: DEC3 bytes [2][128 thr][16], words [128][4]
-    (thread = (w, gq, q) of the wgmma A fragment; layer s99 dev/s99_g30.py pack30)."""
     n, k = code.shape
     G, KS = n // 64, k // 64
     perm = lambda t: t.view(G, 4, 2, 8, KS, 4, 2, 4, 2).permute(0, 4, 1, 3, 7, 5, 6, 2, 8).reshape(G, KS, 128, 4, 8)
@@ -19618,7 +19560,6 @@ def _g30n_prepare(state, w, comp, g):
         else:
             print("layer g30n dropped:", key, m)
 def _g30gx_prepare(state, key, m, c, e, wk, x, ref):
-    """proj n5s6: the G30_GX twin of a g30n entry: same pack, escape records instead of the header."""
     lib = _g30gx_build((m, *c))
     rec = _g30_gx_tables(e[1], wk.shape[1], c[0]) if lib is not None else None
     if rec is None:
@@ -19637,7 +19578,6 @@ def _g30gx_prepare(state, key, m, c, e, wk, x, ref):
     else:
         print("layer g30gx dropped:", key, m)
 def _g30k_slabs(n, k, G):
-    """(slabs the kernel may address, slabs any tile uses) for an [n, k] weight on G CTAs (g30k's split)."""
     kp = k // 128
     p = n // 64 * kp
     def cta(u):
@@ -19692,7 +19632,6 @@ def _g30k_prepare(state, w, comp, g):
             else:
                 print("layer g30k dropped:", key, m, G)
 def _g30kgx_prepare(state, key, m, c, e, buf, ns, G, x, ref):
-    """proj n5s7: the G30_GX twin of a g30k entry (same pack and slab buffer, per-CTA escape records)."""
     lib = _g30kgx_build(c)
     rec = _g30k_gx_tables(e[1], x.shape[1], G) if lib is not None else None
     if rec is None:
@@ -19820,7 +19759,6 @@ def _synth_stream(router, tokens, g):
     st = (pick | fill).float() @ u * (HIDDEN / TOP_K) ** 0.5
     return st + 0.3 * torch.randn((tokens, HIDDEN), generator=g, device=dev)
 def _synth_input(batch, dev, ctx=3000, q_len=1, sliding=True, router=None):
-    """A decode step / verify block (page 1) of random data with the scored inputs' shapes and dtypes."""
     g = torch.Generator(device=dev).manual_seed(1234)
     tokens = batch * q_len
     seq = torch.full((batch,), ctx, dtype=torch.int32, device=dev)
@@ -19917,12 +19855,10 @@ def _tune(state):
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
 def _g27_sel(state, key, m):
-    """The gemv27 entry _g19 runs for (key, m), or None."""
     if key is None or not _opt(state, m, "g27:" + key, (key, m) in G27_ON):
         return None
     return state.get("g27", {}).get((key, m))
 def _g24_sel(state, key, m):
-    """The gemv24 entry _g19 runs for (key, m), or None (g22 or g19/cuBLAS take it)."""
     if _g27_sel(state, key, m) is not None:
         return None
     if _opt(state, m, "g22:" + key, False) and state.get("g22", {}).get((key, m)) is not None:
@@ -19940,7 +19876,6 @@ def _NOZ(dev):
     return z
 _NOZ_T = {}
 def _g19(x, key, state, trig=False):
-    """x @ W.T (key's weight) in FP32 by gemv19 (a PDL dependent of the previous kernel), or None."""
     m = x.shape[0]
     e = state.get("g22", {}).get((key, m)) if _opt(state, m, "g22:" + key, False) else None
     if e is not None:
@@ -20018,8 +19953,6 @@ def _g19(x, key, state, trig=False):
     _G10["lib"].g19_gemm(e[0], e[1], e[2], x.contiguous(), out, ctr, c[1], c[2], c[3], 1, grid, 0, 2, c[4] | (trig << 16), c[5])
     return out
 def _g12_prepare(state):
-    """gemv12's packed weights, FP32 split-K workspace (overwritten each call) and per-rg counters (left zeroed).
-    All gemv12 calls run on the main stream, one at a time, so they share the workspace and counters."""
     if _G10.get("lib") is None:
         return
     dev = state["unpool_slice"].device
@@ -20037,8 +19970,6 @@ def _g12_prepare(state):
     state["g14k"] = {(key, kc): pk for key, v in G14_ALT.items() if key in state["g14"]
                      for kc in sorted({a[0] for a in v} - {G14_CFG[key][0]}) if (pk := _pack14(w[key], 1024 * kc)) is not None}
 def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
-    """x @ w.T in BF16: gemv10 at 1 token (FP32 accumulate, no split-K reduce), gemv12 at 8 (FP32 accumulate and
-    split-K partials), else cuBLAS."""
     lib = _G10.get("lib")
     if state is not None and x.shape[0] in (1, G12_TOKENS):
         pk = state.get("g13" if x.shape[0] == 1 else "g14", {}).get(key)
@@ -20091,7 +20022,6 @@ def _linear(x, w, key, state=None, sliding=False, kv_pf=None):
 TK2F_SQ_T1 = False
 TK2F_CW = True
 def _experts_n2u(x, topk_weights, local_ids, state, bnd=(), idf=False):
-    """T = 1: moe_tk2f (as moe_src's kernel_fn) -> n2u (moe_norm2 + unpool slice): the unpool slice output."""
     st = state["moe"]
     lib = st["lib"]
     dev = x.device
@@ -20145,8 +20075,6 @@ TK2F_BAL_DEFAULT = False
 def _nu8_d(state, tokens):
     return _opt(state, tokens, "nu8d", NU8_D)
 def _experts_nu8(x, topk_weights, local_ids, state, y32):
-    """T = 8: moe_tk2f (PF 20) -> nu8: the unpool slice as FP32 split-K slabs [D_EXPERT / NU8_KB, 8, 1024]. y32 [65, 4096]:
-    row 64 (the slots' sums of squares) was zeroed by the pre-expert _rmsnorm_gain."""
     st = state["moe"]
     _moe_TK2F_BAL_M.discard(8)
     if _opt(state, 8, "bal", TK2F_BAL_DEFAULT):
@@ -20177,8 +20105,6 @@ BND2_TOKENS = {8: 8}
 BND2_CFGS = (101, 102, 104, 108, 121, 122, 124, 128, 801, 802, 804, 808, 811, 812, 814, 818)
 BND_SEP_TOKENS = (8,)
 def _tail(moe, stream1, h, tokens, state, pdl, f=None, sc=None, nos=None, rst=None):
-    """unpool -> second boundary: (next attention input, stream). nos = (stream, o output, res1 alpha, beta, rb): stream1
-    was not stored (NOS): the boundary recomputes it."""
     sliced = tokens <= SLICED_UNPOOL_MAX_TOKENS
     if f is None:
         trig = not sliced and _opt(state, tokens, "g19trig", tokens in G19_TRIG_TOKENS)

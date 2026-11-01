@@ -66,6 +66,16 @@ moe = moe.replace(_a, '    x = data["hidden_states"] if data.get("gather_norm") 
 # n57 VJX (branch layer/vjeux): vjeux's Apache-2.0 attention (vjx_src.py: attribution header + license text kept),
 # names prefixed _vjx_; the layer runs it for full-attention layers only (TUNE option vjx)
 vjx = (here / "vjx_src.py").read_text()
+# v188 (n66): the flat q_len-8 kernel drains a per-request dynamic tile pool (vjx_dyn.py, DYNF 100 / DYNCH 2: end-of-grid
+# tail at v16/v32 full, H100 standalone -2.3..-5.4 us); patched here because the built CUDA source loses its indentation
+import vjx_dyn
+_c0 = vjx.index('\nCUDA_SRC = r"""') + 16
+_c1 = vjx.index('"""', _c0)
+vjx = vjx[:_c0] + vjx_dyn.patch(vjx[_c0:_c1], 100, 2) + vjx[_c1:]
+_m = "# kernel_fn, Inputs) are left out (judge 1 MB file limit).\n"
+assert vjx.count(_m) == 1
+vjx = vjx.replace(_m, _m + "# Modified by tech-cosmos (2026-11-01): the flat q_len-8 kernel drains a per-request dynamic pool of KV tiles\n"
+                  "# (atomic tile tickets, counters reset in the finalize) to even out the end of the grid.\n", 1)
 vjx_head = vjx.split("\n", 1)[1].split('"""', 1)[0]  # the attribution header (comment lines: kept in the built file)
 _t = ast.parse(vjx)  # n57: drop vjx's top-level helpers the layer never calls (1 MB cap): the layer runs _launch only
 _drop = [n for n in _t.body if getattr(n, "name", None) in ("_fallback", "_rms", "_rope", "kernel_fn", "Inputs")]
@@ -117,8 +127,36 @@ def strip_comments(src):
     return res
 
 
+def strip_docstrings(src, keep_from, keep_to):
+    """v188: function/class docstrings outside [keep_from, keep_to) (the vjx part keeps its text) are dropped (1 MB cap);
+    the AST must equal the source's with those docstrings removed."""
+    t = ast.parse(src)
+    lines = src.split("\n")
+    offs = [0]
+    for ln in lines:
+        offs.append(offs[-1] + len(ln) + 1)
+    drop = []
+    for n in ast.walk(t):
+        if (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and len(n.body) > 1
+                and isinstance(n.body[0], ast.Expr) and isinstance(n.body[0].value, ast.Constant)
+                and isinstance(n.body[0].value.value, str)):
+            d = n.body[0]
+            a, b = offs[d.lineno - 1], offs[d.end_lineno]
+            if keep_from <= a < keep_to or lines[d.lineno - 1][:d.col_offset].strip() or lines[d.end_lineno - 1][d.end_col_offset:].strip():
+                continue
+            drop.append((a, b))
+            n.body = n.body[1:]
+    for a, b in sorted(drop, reverse=True):
+        src = src[:a] + src[b:]
+    assert ast.dump(ast.parse(src)) == ast.dump(t), "strip_docstrings changed more than the docstrings"
+    return src
+
+
 HEADER = "# okc: problem=muse_decode_layer\n"
 assert out.startswith(HEADER)
+_k0 = out.index("# ---- vjx (vjx_src.py")
+_k1 = out.index("# ---- layer ----", _k0)
+out = strip_docstrings(out, _k0, _k1)
 out = HEADER + strip_comments(out[len(HEADER):])
 _vm = '\n"""Gated attention decode for Muse Spark Open'
 assert out.count(_vm) == 1
