@@ -64,6 +64,7 @@ class _LazyBuild:
 
 # @@ATTENTION@@
 # @@MOE@@
+# @@VJX@@
 
 
 class Weights(TypedDict):
@@ -3370,13 +3371,15 @@ def _g27_prepare(state, w, comp, g, packs):
 # g19:<key> (bool) gemv19 for that GEMM; pr1_npf / pr1_rb (int) pr1's L2-prefetched pooler chunks / router blocks;
 # kv_pf (bool) KV_PF; tk2fx / tk2fj (bool) TK2FX / TK2FJ (s27); rf_trig (bool) attention's _red_fin early trigger (s27); qf32 (bool) QF32 (s28); bkt / gnorm (bool) BKT / GNORM (s27); pr1 (bool) pr1/pr8 at that T; twm_order / twm_tail (int) moe_twm item order / tail items (s25); twq (int) moe_twq flags, twm_hot (int) moe_twm hot class (moe s17); twf_split (int) moe_twm K-split tail items (moe s19); rg (bool) RG (s52); tk2h (int) moe n6 tk2h GS16+PF4 at T=16/32, 2-group weight W + 1 (s58); nu8d (bool) NU8_D (s59); pr1bnd (bool) PR1_BND at T=1 (s74); bspl1 / bspl2 (int) BND_SPLIT of the first / second boundary (s74); bal (bool) moe n8 BAL tk2f (s61); fr (bool) fused pooler+router GEMM above 8 tokens (s37, FR_TUNE); lt:<key> (bool) the cuBLASLt pick (else cuBLAS heuristics). A candidate that fails to run is skipped.
 # s18: the T=16/32 pooler grid (108..132): the H200 picks 108 too (check ea9421fa), so it is fixed now.
-TUNE = {1: ({}, {"g10alt:o": 1}),
-        16: ({}, {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}),
+_VJX_OFF, _VJX_ON = {"vjx": False, "full": True}, {"vjx": True, "full": True}  # n57 VJX: full-layer-only tuner options
+TUNE = {1: ({}, {"g10alt:o": 1}, _VJX_OFF),
+        16: ({}, {"g30n:unpool": True}, {"g30n:qkv_gate": True}, {"g30n:unpool": True, "g30n:qkv_gate": True}, _VJX_ON,
+             {"g30n:unpool": True, "g30n:qkv_gate": True, **_VJX_ON}),
         32: ({}, {"g30kgx:pooler": False}, {"g19:o": True}, {"tk2h": 3},
-             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}),
-        8: ({}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}),
-        128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}),
-        256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
+             {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}, _VJX_OFF),
+        8: ({}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}, _VJX_OFF),
+        128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}, _VJX_ON),
+        256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, _VJX_ON)}
 # n5s10 (lead 03:25Z: judge prepare_s <= 220 s; drop options the H200 tuner hasn't picked in the last 3 checks): TUNE lists
 # cut to the picks of checks bb8ea548 / 60f02748 / submit 3e3b9fd3 (+ escapes back to the old base); the full old lists are in
 # git (r-layer 51acdef layer.py). T=32 base += g30kgx:pooler (picked sl 60f02748 + 3e3b9fd3, full 3e3b9fd3); T=8 full base
@@ -3986,7 +3989,8 @@ def _kernel_fn(data, state):
                trig=csl_pw and (1 + 2 * bool(_opt(state, tokens, "cslcarve", CSL_PW_CARVE))))
     csl_pw = csl_pw and (qkv is not None or tokens in (1, 8))  # T=1/8: the qkv gemv13/14 trigger at start (GEMV_PDL)
     slabs, qss = None, 0
-    if (qkv is None and (length == 1 and batch >= NDS_MIN_BATCH and HAVE_GLUON and USE_GDEC and QF32_NDS
+    vjx = _vjx_on(state, cfg)  # n57: vjeux's attention reads BF16 qkv (no QSS slabs, no FP32 qkv)
+    if (not vjx and qkv is None and (length == 1 and batch >= NDS_MIN_BATCH and HAVE_GLUON and USE_GDEC and QF32_NDS
                          and (_NDS is not None or cfg["window"] == 0)
                          # s72: verify sliding on nvs (it sums the 2 slabs at its loads, as nds)
                          or length == 8 and batch >= NVS_MIN_BATCH and _NVS is not None and cfg["window"] == 2048
@@ -4001,11 +4005,11 @@ def _kernel_fn(data, state):
         qkv, qss = slabs[0], slabs[0].numel()
     if qkv is None:
         qkv = _linear(data["attn_input"], dense["qkv_gate"], "qkv_gate", state, kv_pf=kv_pf)
-    elif not qss and not (length == 1 and HAVE_GLUON and USE_GDEC and _opt(state, tokens, "qf32", QF32)
+    elif not qss and (vjx or not (length == 1 and HAVE_GLUON and USE_GDEC and _opt(state, tokens, "qf32", QF32)
               and (batch <= CSL_MAX_BATCH and _CSL is not None
                    or batch >= NDS_MIN_BATCH and (_NDS is not None or cfg["window"] == 0) and QF32_NDS)
               or length == 8 and VTK_QF32 and _CSL is not None and cfg["window"] == 2048 and batch <= VTK_MAX_BATCH
-              and cfg["page_size"] in (1, 64) and cfg["rope_theta"]):
+              and cfg["page_size"] in (1, 64) and cfg["rope_theta"])):
         qkv = qkv.to(torch.bfloat16)
     o_pf = (0, 0)
     pf_frac = _opt(state, tokens, "o_pf", O_PF.get(tokens, 0)) if cfg["window"] > 0 else 0
@@ -4017,13 +4021,19 @@ def _kernel_fn(data, state):
         if e30 is not None and _opt(state, tokens, "g30n:o", ("o", tokens) in G30N_DEFAULT_ON):  # n5s4: g30n o reads its pack
             w = e30[1][0]
         o_pf = (w.data_ptr(), int(w.numel() * w.element_size() * pf_frac) & ~15)
-    o = attn_kernel_fn({
-        "o_pf": o_pf, "csl_pw": csl_pw, "nvs_cl": _opt(state, tokens, "nvscl", NVS_CL),
-        "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
-        "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
-        "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
-        "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
-        "seq_lens": data["seq_lens"], "config": cfg, "qkv_ss": qss, "qkv_slabs": slabs}).view(tokens, hq * d)
+    vd = vjx and {"qkv": qkv.view(batch, length, -1), "cache_loc": data["cache_loc"], "k_cache": data["k_cache"],
+                  "v_cache": data["v_cache"], "k_scale": data["k_scale"], "v_scale": data["v_scale"],
+                  "page_table": data["page_table"], "seq_lens": data["seq_lens"], "config": cfg}
+    if vjx and _vjx__fits(vd):  # (else ours: it takes the BF16 qkv too)
+        o = _vjx__launch(vd, pdl=VJX_PDL).view(tokens, hq * d)
+    else:
+        o = attn_kernel_fn({
+            "o_pf": o_pf, "csl_pw": csl_pw, "nvs_cl": _opt(state, tokens, "nvscl", NVS_CL),
+            "qkv": qkv.view(batch, length, -1), "positions": data["positions"], "cache_loc": data["cache_loc"],
+            "cache_seqlens": data["cache_seqlens"], "cu_seqlens_q": data["cu_seqlens_q"],
+            "scheduler_metadata": data["scheduler_metadata"], "k_cache": data["k_cache"], "v_cache": data["v_cache"],
+            "k_scale": data["k_scale"], "v_scale": data["v_scale"], "page_table": data["page_table"],
+            "seq_lens": data["seq_lens"], "config": cfg, "qkv_ss": qss, "qkv_slabs": slabs}).view(tokens, hq * d)
     fp32_router = tokens <= ROUTER_FP32_MAX_TOKENS
     pdl = GLUE_PDL or (GEMV_PDL and tokens in PDL_TOKENS and _G10.get("lib") is not None)
     stream1 = torch.empty((tokens, HIDDEN), dtype=torch.float32, device=dev)
@@ -4260,4 +4270,23 @@ def _kernel_fn(data, state):
     return _tail(moe, stream1, h, tokens, state, pdl, nos=nos) + (topk_ids,)
 
 
-_PREBUILD = [_BUILD_POOL.submit(f) for f in (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]
+# n57 VJX (branch layer/vjeux; HUMAN APPROVAL PENDING, not on main): full-layer attention on vjeux's okc-2026 kernel
+# (vjx_src.py, Apache-2.0, attribution kept). TUNE option vjx at the full-layer token counts; VJX_TOKENS = default on.
+VJX_BUILD = True
+VJX_TOKENS = (1, 8, 32)  # H100 in-layer ab_files 6 rounds (vs v186): d1 -0.8, v1 -3.8, d32 -9.7 us; d16 +0.6, v16 +2.0, v32 +4.2
+# (tuner option there: fresh x39c H200 standalone has vjeux ahead on all 6 full shapes, d16 -1.4, v16 -4.4, v32 -9.3 us)
+VJX_PDL = True  # launched as a PDL secondary (griddepcontrol.wait before its first qkv read)
+
+
+def _vjx_build():
+    global _vjx__MOD
+    _vjx__MOD = _vjx__build()
+    return _vjx__MOD
+
+
+def _vjx_on(state, cfg):
+    return (cfg["window"] == 0 and _vjx__MOD is not None and _vjx__supported(cfg)
+            and _opt(state, cfg["tokens"], "vjx", cfg["tokens"] in VJX_TOKENS))
+
+
+_PREBUILD = [_BUILD_POOL.submit(f) for f in ((_vjx_build,) if VJX_BUILD else ()) + (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]
