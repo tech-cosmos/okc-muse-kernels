@@ -1,4 +1,8 @@
 # STATE-fresh (newest first)
+## x40 (2026-11-01 00:09Z-00:15Z): status only, 0 judge, 0 Modal, 0 GPU. Lead 23:55Z items (a) CSL_PW H200 A/B and (b) x24 vjeux
+  A/B were both done in x39b/x39c. No newer lead line; board #185 at 2.205 (#1 pjmullin3 2.469). Idle-stop per lead 23:55Z.
+## Next (x41): read Human decisions + lead lines naming fresh (human checks in 11-01; vjeux copy + QLO full half are human calls).
+  Checks 11-01: 0/6; Modal 11-01 7.5/20.
 ## x39 (2026-10-31 23:03Z-11-01 00:10Z): lead 22:55Z WHOLE-LAYER HOP STAMPS d16 sl + d32 sl (H100, v185 pinned), 0 judge, 3.7 Modal.
   New tool tools/fresh/x39/lstamp.py (load_inline hook: per-warp entry/exit + pre/post griddepcontrol.wait stamps in every CUDA
   kernel; Triton kernels too) + lan.py / cta.py / strag.py. FRESH.md x39 has both tables. PDL releases 0.4-0.8 us except
