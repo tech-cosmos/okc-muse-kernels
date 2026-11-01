@@ -28,7 +28,12 @@ struct StpG {
   __device__ __forceinline__ StpG(unsigned tag) {
     r = nullptr;
     const unsigned tl = threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z);
+#ifdef STP_LIGHT
+    if ((tl & 31) == 0) reinterpret_cast<unsigned long long*>(%(BUF)dULL)[8ull * ((blockIdx.x * 32 + (tl >> 5)) & 0xffff) + 1] = stp_gt();
+    if (0) {
+#else
     if ((tl & 31) == 0) {
+#endif
       unsigned long long t = stp_gt();
       unsigned i = atomicAdd(reinterpret_cast<unsigned*>(%(CNT)dULL), 1u);
       if (i < %(NREC)d) {
@@ -89,7 +94,7 @@ def patch_cuda(code, modname):
     out.append(code[pos:])
     code = "".join(out)
     if not os.environ.get("STP_NOWAIT"): code = WAIT_RE.sub(lambda m: "{ stp_pre(); " + m.group(0) + " stp_wait(); }", code)
-    return ("#define STP_NODTOR\n" if os.environ.get("STP_NODTOR") else "") + HDR + code
+    return ("#define STP_LIGHT\n" if os.environ.get("STP_LIGHT") else "") + ("#define STP_NODTOR\n" if os.environ.get("STP_NODTOR") else "") + HDR + code
 
 
 import torch.utils.cpp_extension as cx

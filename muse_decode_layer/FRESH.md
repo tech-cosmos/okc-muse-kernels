@@ -995,3 +995,8 @@ Hops >= 0.5 us (producer's last exit -> consumer's first release), H100:
   198.9 (H100). d32 unpool g30n: CTAs 112-127 enter at 169.7-170.1 (after norm2), exit 188-189.3 vs median 187.3. Bound on
   record: proj n7s1 R2 oracle (norm2 cut to 1 block, i.e. 15-31 SMs freed early) H200 d16 sl -0.5 / d32 sl -0.9 us. Not
   built. Other kernels have no straggler CTA (max - 2nd exit 0.03-0.3 us; tk2f 0.26-0.67).
+- g27 stamp crash, narrowed: a light guard (one plain globaltimer store per warp, no atomic, no slot map, no live pointer)
+  passes 2/2; the full guard (atomicAdd + slot-map write + a 64-bit pointer live to exit; g27 M=16 goes 127 -> 128 regs at
+  its 512-thread launch bound) fails intermittently. Unstamped g27 passes every test on record. Stamping artifact; not chased.
+- H200 A/B (00:00Z 11-01, tools/fresh/x35/mk_h200.sh, ABBA, tuner pinned off): d1 sl v183 69.74 / 69.50 vs CSL_PW T=1
+  (= v185) 68.53 / 68.16 us -> -1.3 us on the H200, the same as the H100. 3.7 GPU-min.
