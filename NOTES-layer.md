@@ -4023,3 +4023,39 @@ Status only. No lead reply on the v187 submit (n61 Request). Board: #1 pjmullin3
   static variance. (B) q_len 1 only: per-SM weighted partition from a prepare()-time calibration (like the
   layer's TUNE timing), indexed by %smid + arrival rank. Needs an H200 per-SM check first: vjeux's removal hints it
   may not transfer.
+
+## n66 (11-01 19:02-20:00Z sandbox clock, session 6): v16/v32 full end-of-grid tail fix = per-request dynamic tile pool. 0 judge runs.
+- Lead 19:05Z: YES build the v16/v32 full q_len-8 lane; gate H100 standalone v32 full <= 242 (-10) or v16 <= 128 (-6) vs v187.
+  n65 showed the gap is the grid tail (equal-key CTAs end 223..260 us), so I built option (A): a per-request tile pool
+  drained in the SAME segment state (no extra segment / merge; the merge is absolute-scaled FP32 reds, order-free).
+- Code: dev/n66/dyn.py (v1) and dev/n66/donor.py (v2), both string patches of vjx_src.CUDA_SRC (L == 8 flat only):
+  v1: each long request's first DYNF/1000 of its cached tiles (whole tiles, interior: no mask, no new rows) leave the
+  static partition (S.cum built from static lengths); a pool only if the static part > one CTA share + 64 (then some
+  CTA ends inside it); every CTA whose LAST segment is the request drains it after its static tiles: producer q0
+  takes tickets of DYNCH tiles from an atomic counter (ws_cnt[31000 + b*pairs + pair], next ticket in flight), a
+  sentinel stage (S.tflag = 0, plain mbarrier arrives) stops the consumers (loop trip = INT_MAX, break on flag);
+  counters reset by CTA 0 in flat_finalize after the grid barrier. v2 'donor': static partition unchanged; each CTA
+  ending inside a request donates its last X keys; equal pool per drainer.
+  Precision = vjx's (same math; only which CTA takes which tiles). Output vs base differs ~2% rel = partition noise
+  of the e4m3 P (base with n_splits 260/256 vs 264 differs by the same 2.2%), not a bug.
+- Pitfalls hit (for anyone patching vjx): (1) smem: +2 KB (int[MAXB]) dropped the flat kernel below 2 CTAs/SM ->
+  host turned coop off -> wrong results; keep new Smem fields tiny. (2) an int64 division in the kernel = a call ->
+  STACK 88 B + spills everywhere -> +50 us; always check `cuobjdump -res-usage` (base: REG 80, STACK 0). (3) first rule
+  (crossing CTA also drains) made one CTA drain early; drain only in the CTA's last segment.
+- H100 standalone (dev/n66/ab.py, graph replay, cold L2, 3 rounds; vjx base = v187's full kernel):
+  | shape    | seed | base   | v1 100:2 | v2 donor 100:2 |
+  | v16 full | 7    | 136.6  | 132.6    | 133.8          |
+  | v16 full | 11   | 136.0  | 131.3    | 133.0          |
+  | v16 full | 13   | 135.5  | 133.2    | 133.9          |
+  | v32 full | 7    | 255.8  | 251.3    | 251.8          |
+  | v32 full | 11   | 257.3  | 252.3    | 252.4          |
+  | v32 full | 13   | 254.9  | 249.6    | 248.7          |
+  v1 1 full untouched (16.5). Sweeps (seed 7): pool 5-20%, tickets 1/2/4/8 tiles, L2 page prefetch, register page
+  prefetch (v2): all within +-1 us of v1 100:2 (8-tile tickets lose 2-5 us).
+- Stamps (dev/n66/stamps.py 32 100 2): CTA mean wait 13.7 -> 5.2-5.7 us, max end 260 -> 254-255, but the median CTA
+  ends ~3 us later (pool-tile overhead), and the remaining spread is BETWEEN request groups (group max end 247-255;
+  not the 7-vs-9 drainer count: v2 equalizes that and gains nothing). Closing it needs cross-request stealing =
+  a new segment per steal (~7-12 us at q8, n65): no.
+- Verdict: -4 to -5 us H100 per shape (~-3.5 H200) = ~0.12% score, gate (-10 / -6) NOT met, below the 0.3% bar.
+  Not wired into the layer. Rider candidate only (precision-identical; would need H200 tuner A/B + layer wiring +
+  validate). 0 judge runs.
