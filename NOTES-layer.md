@@ -4111,3 +4111,13 @@ Status only. No lead reply on the v187 submit (n61 Request). Board: #1 pjmullin3
 - `okc problems` probed every ~3 min 21:36-22:24Z (15 tries): HTTP 530 until 21:48Z, then 502 Bad Gateway from 21:51Z
   (backend changed state, still not answering). Final `okc check` at 22:24Z: 502. 0 checks/submits spent.
 - NEXT unchanged: when the API answers, check v188 once; submit only if raw > 2.2048. After 00:00Z it uses 11-02's budget.
+
+## n71 (11-01 22:26-22:55Z, session 11): v188 CHECKED, not submitted. 1 check, 0 submits, 0 GPU.
+- okc API answered again at 22:27Z (11-01 budget: layer 19 checks / 9 scored left). Check job 93de9b4f (v188, main 7e37452,
+  sha1 78038fe2) queued ~25 min behind the post-outage backlog, ran 22:44-22:52Z on H200.
+- Result: **2.1954 raw** / fixed-SGLang 2.1914 (same 3-run SGLang average: v185 fcb67ee9 2.2066, v187 7b620515 2.2067).
+  Per shape us (sl/full): d1 64.2/73.6, d16 127.2/200.3, d32 144.8/301.3, v1 114.3/120.2, v16 260.6/344.8, v32 324.5/498.0.
+  vs v187 check: d16 full -5.5, d32 sl -7.8, v32 sl +7.3 / full +12.7, v1 sl +5.3 -> sliding-draw noise both ways; the pool's
+  expected ~0.1% is below one check's +-1% noise. Below 2.2048 -> NOT submitted (lead 21:15Z rule). Board stays v185 2.2048.
+- Tuner (this job): T=256 full picks vjx (505.8 vs 514.1); T=128 picks lt:o, not vjx (346.9 vs 345.7).
+- NEXT: hold (lead 21:15Z: status-only unless the lead posts a new lane). No more v188 draws.
