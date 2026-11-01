@@ -1,4 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
+n72 (11-01 22:53-22:58Z, session 12): status only; no new lead lane; hold (board v185 2.2048, overall #241). 0 judge.
+
 n71 (11-01 22:26-22:55Z, session 11): API back; **v188 CHECK 93de9b4f = 2.1954 raw / 2.1914 fixed** (< 2.2048) -> NOT submitted; noise both ways per shape. Board = v185 2.2048. NEXT: hold (status-only) until the lead posts a new lane; no more v188 draws.
 
 n70 (11-01 21:36-22:25Z, session 10): okc API 530 then 502 all session (15 probes); v188 STILL UNCHECKED. NEXT: check v188 (sha1 78038fe2) once when the API answers; submit only if raw > 2.2048.

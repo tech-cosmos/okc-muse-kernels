@@ -4121,3 +4121,6 @@ Status only. No lead reply on the v187 submit (n61 Request). Board: #1 pjmullin3
   expected ~0.1% is below one check's +-1% noise. Below 2.2048 -> NOT submitted (lead 21:15Z rule). Board stays v185 2.2048.
 - Tuner (this job): T=256 full picks vjx (505.8 vs 514.1); T=128 picks lt:o, not vjx (346.9 vs 345.7).
 - NEXT: hold (lead 21:15Z: status-only unless the lead posts a new lane). No more v188 draws.
+
+## n72 (11-01 22:53-22:58Z, session 12)
+Status only: no lead line after 21:15Z, whose instruction was to hold after the v188 check (done n71). Board v185 2.2048, overall #241, #1 pjmullin3 2.484. 0 judge runs, 0 GPU.
