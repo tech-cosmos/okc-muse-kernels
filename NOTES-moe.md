@@ -4292,3 +4292,19 @@ Status only. No lead line after 21:50Z, no moe request; r-layer since aa51716 ha
 Status only. No lead line after 22:55Z. The o42 nu8 'mmq' rider is already in r-layer's working tree (uncommitted, layer agent
 integrating): moe did not re-validate it (would duplicate layer's validate/ab). With fresh x39 (d16/d32) + o42 (v1), no
 expert-side hop >= 1 us is left open. Hold aa51716 (moe board 5ef66b6c 2.3391x). 0 judge runs, 0 GPU.
+## o44 (2026-11-01 20:31-21:05Z, session 1 of 11-01): lead 20:20Z IBM col-major/L2-reuse question; H100 ncu, 0 judge runs
+- Tool: muse_moe_w4a16/tools/o44/l2reuse.py (run from muse_decode_layer under
+  `ncu --profile-from-start off -k regex:moe_ --cache-control all --metrics dram__bytes_read.sum,...`; one profiler range per
+  scored shape, eager kernel_fn, seed 99, sliding). Layer = main 7e37452 (v188). Expert = 28.31 MB (w13+w2 codes + e4m3 scales).
+- Unique bytes use the LAYER's own topk ids (kernel output [2]): they differ from reference topk on near-ties at d16/v16
+  (11 vs 10, 18 vs 17 distinct; legal), which first looked like +1 expert of re-reads.
+  shape  T   distinct  unique MB | expert kernels' DRAM read MB (kernels)          | read/unique | L2 read hit
+  d1     1   3          84.9     | 85.0 (tk2f)                                      | 1.001       | 1.5%
+  d16    16  11        311.4     | 311.6 (tk2f) + 0.4 norm2                         | 1.001       | 0.9%
+  d32    32  9         254.8     | 255.1 (tk2f) + 0.9 norm2                         | 1.001       | 2.7%
+  v1     8   8         226.5     | 226.6 (tk2f)                                     | 1.000       | 0.7%
+  v16    128 18        509.6     | 511.2 twm + 0.1 hot + 2.1 gather + 1.4 norm      | 1.003       | twm 5.3%
+  v32    256 21        594.5     | 540.3 twm + 59.5 hot + 4.2 gather + 3.0 norm      | 1.009       | twm 7.3%, hot 39%
+  (activations 0.01-2.1 MB; v32's +5 MB over unique = gathered activations + inter re-reads, not weights.)
+- Verdict: no weight tensor is re-read from DRAM anywhere (all <= 1%): IBM-style col-major tile order / L2 weight reuse has
+  nothing to recover; split-K atomics already exist where they pay (tk2f/twm per earlier closures). col-major/L2 reuse: CLOSED.
