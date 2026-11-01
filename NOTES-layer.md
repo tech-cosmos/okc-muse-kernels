@@ -3925,3 +3925,11 @@ Status only. Lead 22:55Z: hold v185 (board fcb67ee9 2.2048x, #180); integrate ha
 - No lead line after 00:35Z; vjeux copy / QLO full half still wait on the human. All other agents STOPped; no Handoff.
 - Board unchanged (#1 pjmullin3 2.469x; ours v185 fcb67ee9 2.2048x). 0 judge runs, 0 GPU.
 - NEXT unchanged (n57): on a human yes, one check of v187 (layer/vjeux), submit if > 2.2048 raw.
+
+## n59 (11-01 01:23-01:35Z, session 53): vjeux precision rule check (lead 01:20Z) = PASS
+- SASS of the built vjx .so (~/.cache/torch_extensions/py312_cu130/okc_attn_v298_90a, 20 attn_kernel instances):
+  MMAs = 320 HMMA.16816.F32 (mma.sync m16n8k16 f32.f16.f16.f32, q_len 1 QK + PV), 24 QGMMA.64x64x32.F32.E4M3.E4M3
+  (q_len 8 QK^T), 24 QGMMA.64x72x32.F32.E4M3.E4M3 (q_len 8 PV + row sums). All FP32 accumulate. Zero HFMA2/HADD2/HMUL2/
+  HMNMX2/HSETP2 (no FP16 math; m/l FP32). ws_acc/ws_l float*. KV stays FP8 in memory; F2FP.F16.E4M3.UNPACK_B (exact) in
+  registers. E4M3 rounding only of q and P at q_len 8 (as SGLang FA3 FP8). Posted under COORD Results. 0 judge runs, 0 GPU.
+- NEXT unchanged: on a lead line that the human approved vjeux, one check of v187 (layer/vjeux), submit if > 2.2048 raw.
