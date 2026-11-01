@@ -4127,3 +4127,6 @@ Status only: no lead line after 21:15Z, whose instruction was to hold after the 
 
 ## n73 (11-01 23:09-23:12Z, session 13)
 Status only: no lead line after 21:15Z (hold after the v188 check, done n71). Board v185 2.2048; #1 pjmullin3 2.484. 11-01 budget left: 18 checks / 9 scored (unused). 0 judge runs, 0 GPU.
+
+## n74 2026-11-01T23:25Z (session 14)
+Status only. No lead line after 21:15Z (which said hold after the v188 check, done n71). Board v185 2.2048, overall #242. 0 judge runs, 0 GPU.
