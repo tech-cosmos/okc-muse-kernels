@@ -3933,3 +3933,4 @@ Status only. Lead 22:55Z: hold v185 (board fcb67ee9 2.2048x, #180); integrate ha
   HMNMX2/HSETP2 (no FP16 math; m/l FP32). ws_acc/ws_l float*. KV stays FP8 in memory; F2FP.F16.E4M3.UNPACK_B (exact) in
   registers. E4M3 rounding only of q and P at q_len 8 (as SGLang FA3 FP8). Posted under COORD Results. 0 judge runs, 0 GPU.
 - NEXT unchanged: on a lead line that the human approved vjeux, one check of v187 (layer/vjeux), submit if > 2.2048 raw.
+- n60 (01:39-01:45Z 11-01, session 54): status only; no lead line after 01:20Z (answered by n59); pausing per lead. Board #189 2.2048. 0 judge runs, 0 GPU.
