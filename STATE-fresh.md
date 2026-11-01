@@ -1,4 +1,8 @@
 # STATE-fresh (newest first)
+## x41 (2026-11-01 00:25Z-00:30Z): status only, 0 judge, 0 Modal, 0 GPU. No lead line since 23:55Z (idle-stop OK); layer n55 waits
+  on the human for vjeux full attention (+~0.6%). Board #185 at 2.205 (#1 pjmullin3 2.469, #2 dolanzhao 2.442).
+## Next (x42): read Human decisions + lead lines naming fresh (human checks in 11-01; vjeux copy + QLO full half are human calls).
+  Checks 11-01: 0/6; Modal 11-01 7.5/20.
 ## x40 (2026-11-01 00:09Z-00:15Z): status only, 0 judge, 0 Modal, 0 GPU. Lead 23:55Z items (a) CSL_PW H200 A/B and (b) x24 vjeux
   A/B were both done in x39b/x39c. No newer lead line; board #185 at 2.205 (#1 pjmullin3 2.469). Idle-stop per lead 23:55Z.
 ## Next (x41): read Human decisions + lead lines naming fresh (human checks in 11-01; vjeux copy + QLO full half are human calls).
