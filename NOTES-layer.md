@@ -3884,3 +3884,39 @@ Status only. Lead 22:55Z: hold v185 (board fcb67ee9 2.2048x, #180); integrate ha
 - No lead line after 23:55Z, no new Handoff or Claim; ~/STOP-moe and ~/STOP-proj exist, so no new riders will arrive.
 - Board unchanged (#1 pjmullin3 2.469x; ours v185 fcb67ee9 2.2048x). Main v186 already checked (dedups). 0 judge runs, 0 GPU.
 - NEXT unchanged: vjeux full-attention copy / QLO full half need the human's yes; otherwise hold.
+
+## n57 (11-01 00:44Z-, session 51): VJX = vjeux's full-layer attention, PREPARED on branch layer/vjeux (lead 00:35Z)
+- Lead 00:35Z: prepare (not submit) vjeux's full attention on branch layer/vjeux, license + attribution kept, prepare()-tuned,
+  full layers only; ZERO judge runs, no merge to main until a lead line says the human approved. Done as below; 0 judge runs.
+- Code: muse_decode_layer/vjx_src.py = vjeux okc-2026 muse_attention_decode.py @ f35a41ee VERBATIM + an attribution header
+  (source URL, commit, Apache-2.0, list of our modifications) + the full LICENSE text (_VJX_LICENSE). build.py inlines it with
+  every top-level name prefixed _vjx_ (moe_namespaced(src, pre)), drops its 5 helpers the layer never calls (_fallback, _rms,
+  _rope, kernel_fn, Inputs), strips comments (as for all CUDA) + the vjx CUDA's indentation, and re-inserts the attribution
+  header in front of the inlined code. Also drops the dead pr32 source (PR32_TOKENS = () since n5s10). Built file 998,087 B
+  (cap 1,000,000: 1.9 KB headroom!). The vjx JIT build runs on _BUILD_POOL with the others (_PREBUILD).
+- layer.py: _vjx_on(state, cfg) = window 0 and the build loaded and _vjx__supported(cfg) and TUNE option vjx (default:
+  tokens in VJX_TOKENS = (1, 8, 32)). When on: no QSS slabs, qkv to BF16 if a GEMM gave FP32 (no conversion kernel in any
+  scored full shape: d16/d32 qkv is g30n BF16), then _vjx__launch(..., pdl=True) if _vjx__fits, else our attn_kernel_fn.
+  TUNE: escape {vjx False} at T=1/8/32, candidates {vjx True} at T=16 (+ the g30n combo), 128, 256.
+- PDL safety: vjx's pre-wait region reads only page_table / seq_lens (inputs), no global writes; the workspace atomics are
+  after the wait; it triggers its dependents mid-kernel (o GEMM pre-wait = weights only).
+- PRECISION: vjx at q_len 1 runs QK in FP16 (not E4M3 queries): full-layer decode errors vs reference 8x lower
+  (dev/n57/seedcmp.py, s7: d1 update 7.4e-2 -> 7.3e-3, d16 6.0e-2 -> 7.2e-3, d32 5.9e-2 -> 6.9e-3; same for attention input).
+  q_len 8 (FP8 P@V as SGLang's FA3 FP8 path): error ~ ours (+2-3% relative: v16 6.15 -> 6.32e-2). So at d1/d16/d32 full it
+  also removes most of the full-decode share of the routing-fail risk (fresh x16).
+- TIMING (H100). Whole-layer A/B per seed is routing noise: vjx changes 10-50% of top-k ids vs ours at decode (it is closer to
+  the reference), and the expert load moves +-20 us (d16 s7 tk2f 74.5 vs 93.6 us). Clean measures:
+  attention alone on the layer's inputs (dev/n57/attn_ab.py, 3 seeds x 4 rounds, vjx - ours): d1 -0.3..-0.7, d16 -0.3..-0.9,
+  d32 -1.4..+0.8, v1 -0.4..-0.7, v16 +0.6..+2.0, v32 +2.5..+4.0 us.
+  in-layer with routing pinned (dev/n57/pin_ab.py: scored input + tuner's synthetic stream, top-k agree >= 0.98):
+  d1 -0.1/-0.9/-1.2, d16 +1.2/+1.9/+2.4, d32 -14.0(2% topk drift)/-2.7/-0.6, v1 -3.3/-3.4/-2.8, v16 +1.9/+1.8/+2.9,
+  v32 +3.5/+3.5/+2.0 us. -> defaults on at T=1/8/32; tuner option at 16/128/256 (fresh x39c H200 standalone: vjx ahead on all
+  6 full shapes, v16 -4.4, v32 -9.3 us, so the H200 tuner may take it there).
+  ab_files v186 vs v187 (own tuners, seed 99, 4 rounds): d1 full -1.35, d32 full -11.5 (part routing), v1 full -4.2; rest tie.
+- validate --quick on v187: ALL OK (13/13, scored 0/12, opt 0/54, tk2f 0/300, replay 0/240, route 0/240 gap .0256/.0172,
+  fuzz 0/78, cold prepare 71.3 s vs v186 64.9).
+- Branch layer/vjeux: submission.py = **v187** = v186 + VJX (ready-to-check file). main untouched (v186). 0 judge runs.
+- NEXT: on a lead line that the human approved vjeux: one check of v187 (layer/vjeux submission.py); submit if > 2.2048 raw
+  (expected H200 gain small: d1/v1/d32 full ~1-3 us each, ~+0.2-0.3%; plus the decode-full precision gain). If d16 full matters,
+  look at why in-layer loses (+1..2 us) while standalone wins (vjx's mid-kernel launch_dependents vs our RF_TRIG o overlap).
+  Size headroom only 1.9 KB: any later addition needs space first.
