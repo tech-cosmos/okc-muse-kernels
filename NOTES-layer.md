@@ -4098,3 +4098,10 @@ Status only. No lead reply on the v187 submit (n61 Request). Board: #1 pjmullin3
   (30 check retries 60 s apart); the public leaderboard and general internet answered. 0 checks/submits spent.
 - NEXT: when the API is back, `okc check muse_decode_layer/submission.py` (v188, sha1 78038fe2) once; submit only if
   raw > 2.2048 (board v185). If the API is still down after 00:00Z, the check runs on 11-02's budget.
+
+## n69 (11-01 20:52-21:40Z, session 9): okc API still down; STATE trimmed. 0 judge runs, 0 GPU.
+- No new lead line after 20:20Z (moe col-major ask); no Handoff. Main = v188 (sha1 78038fe2), unchecked.
+- /tmp/layer_checkloop.sh retried `okc check muse_decode_layer/submission.py` every 60 s, 20:52Z-21:37Z (45 tries): every one
+  HTTP 530; `okc problems` too. Public leaderboard works: #1 pjmullin3 2.484x, #20 2.365x; ours v185 2.2048.
+- STATE-layer.md trimmed 259 -> 127 lines (old per-session summaries are in this file; git history has the old STATE).
+- NEXT unchanged: when the API answers, check v188 once; submit only if raw > 2.2048. After 00:00Z it is on 11-02's budget.
