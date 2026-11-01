@@ -3934,3 +3934,20 @@ Status only. Lead 22:55Z: hold v185 (board fcb67ee9 2.2048x, #180); integrate ha
   registers. E4M3 rounding only of q and P at q_len 8 (as SGLang FA3 FP8). Posted under COORD Results. 0 judge runs, 0 GPU.
 - NEXT unchanged: on a lead line that the human approved vjeux, one check of v187 (layer/vjeux), submit if > 2.2048 raw.
 - n60 (01:39-01:45Z 11-01, session 54): status only; no lead line after 01:20Z (answered by n59); pausing per lead. Board #189 2.2048. 0 judge runs, 0 GPU.
+
+## n61 (11-01 17:55-18:35Z, session 1 of night 11-01): v187 on main, check, vjx plan re-tune
+- Lead 17:00Z: human APPROVED vjeux. Main = **v187** (81e7675, code = 3b2a200 checked out onto main as files, sha1 d0ffbdd1,
+  998,087 B). bench.py test ALL PASS (13/13).
+- CHECK 7b620515 (11-01 18:00Z): **2.2039 raw / fixed-SGLang 2.1933** (v185 submit fcb67ee9: 2.2048 raw / 2.1933 fixed) ->
+  NOT submitted (lead bar: > 2.2048). Per shape (ours, sl/full): d1 62.4/72.4, d16 130.3/205.8, d32 152.6/303.1,
+  v1 109.0/117.9, v16 257.6/341.6, v32 317.2/485.3. Full shapes d1/v1/v16/v32 = best on record; d32 full 303.1 (record range
+  288-306). Shortfall = untouched sliding draws (d16 sl 130.3 vs 122.6, v16 sl 257.6 vs 252.7, d32 sl 152.6 vs 148.4).
+  H200 tuner log (same job): T=1 full vjx 69.4 vs off 71.6; T=8 123.5 vs 127.2; T=32 329.5 vs 330.3 (tie);
+  T=128 picks vjx (378.1 vs 379.8); T=256 picks vjx (500.0 vs 511.5). So the tuner already does per-shape vjx dispatch;
+  a 'vjx only where it wins' variant would be a re-draw of the same speed -> not built, no 2nd check.
+- vjx plan re-tune (lead's next item), dev/n61/vjx_sweep.py, attention-only on the layer's full inputs, H100 graph replay
+  cold L2, 7 rounds: default plan (flat n_splits 264 at B16/32; 264/252 at B1) is the optimum everywhere. n_splits x0.5..x2
+  all lose (+0.3..+64 us; 330 is a cliff: +20/+41/+38/+64 at d16/d32/v16/v32); coop flip: d16 -0.18, d32 -0.02 (tie), v* lose.
+  DEAD. Floor: d32/v32 full = 2.56 M keys x 256 B = 654.5 MB; vjx 240.6 us (d32) / 254.3 (v32) on H100 = 2.72 / 2.57 TB/s
+  (nominal floor 195 us). What's left is inside vjeux's kernel (KV streaming efficiency), not its plan.
+- 0 submits; 1 check (19 left on 11-01).
