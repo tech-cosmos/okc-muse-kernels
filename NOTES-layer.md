@@ -3951,3 +3951,8 @@ Status only. Lead 22:55Z: hold v185 (board fcb67ee9 2.2048x, #180); integrate ha
   DEAD. Floor: d32/v32 full = 2.56 M keys x 256 B = 654.5 MB; vjx 240.6 us (d32) / 254.3 (v32) on H100 = 2.72 / 2.57 TB/s
   (nominal floor 195 us). What's left is inside vjeux's kernel (KV streaming efficiency), not its plan.
 - 0 submits; 1 check (19 left on 11-01).
+
+## n62 (2026-11-01 18:03-18:20Z, session 2): status + paper audit. 0 judge runs, 0 GPU.
+- No lead line after 17:00Z; n61's question (submit v187 under the 09:28Z rule, check 7b620515 raw 2.2039 within 0.04% of board) still open. Not submitted.
+- vjx for sliding layers: vjx_src.py handles window (p.window), but fresh x24 H200 standalone: vjx sl d1 5.50 vs ours 4.96, d16 8.74/8.37, d32 10.61/11.55, v1 7.36/6.10, v16 12.13/11.94, v32 15.82/15.60 us -> only d32 sl wins (-0.9 us = ~0.05% score). Below the lead's 0.3% bar; one more tuner option also costs prepare time. Not built.
+- Re-scanned ~/lead_ideas (fable #1-#12, codex): all closed on record (COORD 10-30 09:10Z strike list, fresh x5 oracle sweep, layer n12s1 DEFNORM, megakernel forms n5s*). No new-code item >= 0.3% predicted.
