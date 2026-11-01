@@ -3984,3 +3984,42 @@ Status only. No lead reply on the v187 submit (n61 Request). Board: #1 pjmullin3
   (~0.1% score even if fully closed). d16 the same. The only real gap is at q_len 8 (v16/v32 full, 15-18 us H100 = compute or
   latency not hidden behind the KV stream; ~0.18 + 0.19% score at %/us ~ 16/time). Realistic half of that ~0.2%: below the
   0.3% bar for a multi-session kernel build. Asked the lead under Requests. 1 submit, 0 checks.
+
+## n65 (11-01 18:44-19:00Z sandbox clock, session 5): why v16/v32 full attention sits 15-18 us above the gather ceiling. 0 judge runs.
+- dev/n65/l2_oracle.py (page ids % 8192 -> KV gather L2-resident; H100 graph replay, seed 7):
+  | shape | ours hbm | vjx hbm | ours L2 | vjx L2 |
+  | d16 full | 126.7 | 126.6 | 64.4 | 64.2 |
+  | d32 full | 243.0 | 242.2 | 118.4 | 117.7 |
+  | v16 full | 134.4 | 135.6 | 95.4 | 90.5 |
+  | v32 full | 252.5 | 255.3 | 174.8 | 164.6 |
+  On the H200 vjx v32 full = 182.3 us and v16 = 100.5 (n64 profiles), close to these no-HBM floors, so q_len 8 full is
+  near-compute/latency-bound on the judge.
+- dev/n65/abl.py (vjx q_len-8 ablations, timing only): P's ex2 -> 1 LOP3, and/or P's f32->e4m3 cvt -> PRMT: NO gain
+  (v32 L2 165.1 base vs 176.5/166.7/180.5; hbm all within +1 us). MUFU/F2FP throughput is not the limit.
+- ncu (dev/n65/ncu_drv.py, v32 full, vjx attn_kernel<8,true,0>): issue 45-56%, no pipe > 34% (alu 34, tensor 29, fma 12),
+  stalls long_scoreboard/wait/barrier. SASS samples: main loop ~58%, producer mbarrier spin 16-26%, and 5.7% (hbm) /
+  7.1% (L2) of ALL samples are consumer warps parked at the cooperative finalize's grid barrier (BAR.SYNC 1,256 while
+  thread 0 spins in the NANOSLEEP loop) = ~9-13% of consumer time.
+- dev/n65/stamps.py (dev build of vjx: per-CTA globaltimer at partition end and at consumer end; H100, eager):
+  | shape | CTA consumer-end min / p10 / med / p90 / max (us) | mean wait to last CTA |
+  | v32 full (q8) | 223 / 236 / 246 / 252 / 258-260 | 12.2-15.0 us |
+  | v16 full (q8) | 118 / 126 / 131 / 135 / 141 | 9.8-11.0 |
+  | d32 full (q1) | 210-215 / 217-221 / 243 / 245 / 248 | 8.9-10.2 |
+  | d16 full (q1) | 110-113 / 116 / 128 / 130 / 132 | 5.7-7.2 |
+  Every CTA has equal keys (B32: 9852 virtual keys). So the tail is CTA *speed* variance under a static equal-key
+  partition, not uneven work. q_len 8: per-SM end-time correlation between runs 0.1-0.3 (random per run).
+  q_len 1: correlation 0.95-0.97 (STATIC): the same ~1/6 of SMs (TPC pairs, e.g. 43, 80-85, 124, 37, 16, 34 on this
+  H100) finish ~25 us (10%) early on every run, both CTAs of an SM together.
+- Segment boundary cost (from SEGK=600 compensation): CTAs with 2 segments finish 0.8-3.3 us earlier despite ~600
+  fewer real keys (= 8-15 us of work) -> one extra segment costs ~7-12 us at q8. So naive dynamic chunking (new
+  segment per chunk) loses. Balancing must reuse the CTA's softmax state (same request).
+- vjx's Smem still declares fields of removed balancing code (vidx 'flat weighted partition: 2*SM + arrival rank',
+  w0g_* generation-tagged registration, pseg/dq 'flat dynamic chunks'). vjeux tried both and dropped them (tuned on
+  the H200; maybe no static SM pattern there).
+- Ideal ceiling if the tail were fully closed (H100 us -> x0.7 for H200 -> %/us): v32 12.5, v16 10, d32 9.5, d16 6
+  -> ~0.55% score; realistic ~0.3%. Candidates: (A) within-request dynamic tile pool: each CTA keeps its static
+  range minus ~15%; the request's last 15% of tiles go to a per-request atomic counter drained by the CTAs whose
+  last segment is that request (no new segment, no extra merge, the producer grabs tile groups); fixes random and
+  static variance. (B) q_len 1 only: per-SM weighted partition from a prepare()-time calibration (like the
+  layer's TUNE timing), indexed by %smid + arrival rank. Needs an H200 per-SM check first: vjeux's removal hints it
+  may not transfer.
