@@ -6,9 +6,11 @@
   pooler end->tk2f release 6.9/5.8 us (all pieces on record; tk2f can't co-reside with the pooler); unpool late CTAs (blocked
   by norm2) = tail, bounded by proj n7s1 R2 (-0.5/-0.9 H200). Nothing >= 1 us unbounded -> nothing built.
   H200 A/B CSL_PW T=1 (v185's change): d1 sl -1.3 us (69.74/69.50 -> 68.53/68.16, ABBA). Confirmed.
+  x24 H200 attention A/B (measurement only): vjeux faster on all 6 FULL shapes (-0.9..-9.3 us, v32 fu 193.2 -> 183.8) and d32 sl;
+  ours faster d1/v1 sl. ~+0.6% layer if carried 1:1. Human decides on copying (FRESH.md x39). Modal 11-01: 7.5/20.
 ## Next (x40): read Human decisions + lead lines naming fresh. Candidates if asked: the d16 sl attention phase (qkv end -> csl
   end 13.6 us H100 for ~8 MB of page-1 gathers; csl CTAs reach their wait 7.7 us after entry) for the attention owner; v16/v32
-  whole-layer stamps with lstamp.py (STP_SKIP=layer_g27_ if g27 is in the path; pin TUNE). Checks 11-01: 0/6; Modal 11-01 3.7/20.
+  whole-layer stamps with lstamp.py (STP_SKIP=layer_g27_ if g27 is in the path; pin TUNE). Checks 11-01: 0/6; Modal 11-01 7.5/20. Lead 23:55Z: idle-stop OK when nothing is open.
 ## x38 (2026-10-31 22:47Z-22:52Z): status only, 0 judge, 0 Modal, 0 GPU. Board #180 at 2.205 (layer v185 fcb67ee9 = v183 + fresh
   x35 CSL_PW T=1); #1 pjmullin3 2.469. No lead line since 21:50Z; lane request (x36) open.
 ## Next (x39): after 00:00Z run tools/fresh/x35/mk_h200.sh (H200 A/B CSL_PW T=1 on d1 sl, ~3-4 GPU-min) as confirmation of what

@@ -1000,3 +1000,9 @@ Hops >= 0.5 us (producer's last exit -> consumer's first release), H100:
   its 512-thread launch bound) fails intermittently. Unstamped g27 passes every test on record. Stamping artifact; not chased.
 - H200 A/B (00:00Z 11-01, tools/fresh/x35/mk_h200.sh, ABBA, tuner pinned off): d1 sl v183 69.74 / 69.50 vs CSL_PW T=1
   (= v185) 68.53 / 68.16 us -> -1.3 us on the H200, the same as the H100. 3.7 GPU-min.
+- x24 H200 A/B (00:20Z 11-01, MEASUREMENT ONLY per lead 23:55Z; tools/fresh/x24/mk_h200_attn.sh, standalone
+  muse_attention_decode, 1 round each, 3.8 GPU-min): ours (~/attn main) vs vjeux okc-2026 muse_attention_decode.py
+  (Apache-2.0), us: d1 sl 4.96/5.50, d1 fu 12.51/11.58, d16 sl 8.37/8.74, d16 fu 88.48/87.06, d32 sl 11.55/10.61,
+  d32 fu 170.24/168.37, v1 sl 6.10/7.36, v1 fu 17.52/15.01, v16 sl 11.94/12.13, v16 fu 103.18/98.74, v32 sl 15.60/15.82,
+  v32 fu 193.15/183.84. vjeux is faster on every FULL shape (-0.9/-1.4/-1.9/-2.5/-4.4/-9.3 us) and d32 sl (-0.9); ours is
+  faster on d1/v1 sl. If it carried in-layer 1:1, the full-layer half would be ~+0.6% layer geomean. Not copied (human's call).
