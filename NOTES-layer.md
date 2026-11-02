@@ -4165,3 +4165,6 @@ Status only. No lead line after 21:15Z (which said hold after the v188 check, do
   once the kernel is not HBM-bound (H100 real-cache runs hide it under the gather). Expected H200 cost ~0.25-0.3% of score =
   the lead's accepted ~0.3%. Lever if wanted: cheaper lo term (lo plane only for the K32 half that matters? no: all dims
   matter) -> none found this session; the QK^T pair is tensor work (QK 2x64^3 + PV 64x72x64 per tile -> +47% MMA).
+
+## n76 (11-02 01:00-01:10Z, session 2)
+Status only: no lead line after 23:45Z (QLO full half, done n75: v189 check 180453c9 2.1884, not submitted). Board v185 2.2048, overall #244; #1 pjmullin3 2.484. Idea noted, not started: hide QLO's second QK wgmma pair (+6.6/+12.5 us v16/v32 full on H200) by overlapping QK of tile i+1 with softmax of tile i in vjx flat q8; the M=64 tile is already full (8 tokens x 8 q heads), so no cheaper lo term; upside <= ~0.3% = the gate. 0 judge runs, 0 GPU.
