@@ -135,6 +135,9 @@ TOP_K = 8
 LOCAL_EXPERTS = 32
 ROUTER_MULTIPLIER = 0.1767766952966369
 ROUTE_EPS = 1e-15
+ROUTE_TOL = 5e-2  # moe/slack: reference.ROUTE_TOL / KEEP_TOL / KEEP_TOKENS (TASK.md routing tolerance)
+KEEP_TOL = (0.03, 0.04)
+KEEP_TOKENS = 256
 ROUTER_FP32_MAX_TOKENS = 8  # MuseSpark1xRouter: FP32 F.linear up to here, BF16 hi/lo GEMMs above
 SLICED_UNPOOL_MAX_TOKENS = 8
 UNPOOL_SLICE = HIDDEN // 8
@@ -451,6 +454,7 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     _routing[(tokens,)](part, state["router_bias"], local_start, ids, lids, wts, tokens, E=N_EXPERTS, KS=ks,
                         TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, PDL=rpdl,
                         num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4, launch_pdl=rpdl)
+    _slack(part, ks, tokens * N_EXPERTS, N_EXPERTS, state, local_start, ids, lids, wts, tokens, trig)
     return ids, lids, wts
 
 
@@ -940,6 +944,87 @@ _GPR1_SRC = None  # @@GPR1@@
 _GPR8_SRC = None  # @@GPR8@@
 _GOB8_SRC = None  # @@GOB8@@
 _GBND2_SRC = None  # @@GBND2@@
+_GSLACK_SRC = None  # @@GSLACK@@
+_GSLACK8_SRC = None  # @@GSLACK8@@
+# moe/slack (moe s5 2026-10-31): ROUTING-SLACK selection step (slack_src.cu): after the routing, re-route inside
+# TASK.md's routing tolerance onto the fewest local experts (greedy + redundancy pass; = fresh x8's exact minimum on
+# 11/12 scored loads). NOT for submission until the organizers approve it (lead 2026-10-31T10:25Z). Margins: picks
+# within ROUTE_TOL - SLACK_MR of the 8th best, keeps every local top-8 expert beating the 9th by > KEEP_TOL - SLACK_MK,
+# reference counts for the floors taken over near-tie flips within SLACK_TIE.
+SLACK = False  # fresh x42 (branch fresh-slack-h200, measurement only): OFF by default; tools/fresh/x42 makes the ON file
+# moe s5 slack_judge.py (H100, margins below): distinct local experts saved d1/d16 ~0, v1 0.1-0.4, d32 0.3-0.7,
+# v16 1.1-1.4, v32 0.8-1.1 -> only T = 128/256 can repay the extra launch.
+# H100 A/B vs main with (128, 256) (tools/slack/ab_seeds.py, seeds 801-803): v16 sl/fu +6.4/+1.6, v32 +4.8/+8.9 us = net
+# LOSS (kernel 4.4/8.7 us + lost PDL > ~1 expert saved). Off by default; set (128, 256) to test.
+SLACK_TOKENS = ()
+# moe s5 tools/slack/leaderr.py: the layer's keep-rule leads differ from the FP32 reference's by std ~0.0045 (max 0.019
+# over ~1.7k droppable experts), the same as the reference with E4M3 queries: FP8-query noise. Margins ~4.5-5 std.
+SLACK_MR, SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM = 0.023, 0.022, 0.0, 2.0, 8.0
+_GSLACK = {}
+_SLACK_DBG = None
+# layer n14: at T = 1 the same rule runs inside pr1's routing warp, independent of SLACK_TOKENS (no extra launch: moe's one-CTA slack_kernel costs
+# ~10 us at d1 on the H100 even when it changes nothing). T <= 8 margins: the reference's local count is bounded by
+# ours + local near-ties within SLACK1_TIE of the 8th (instead of the fixed DM/RM margins, which save 0 at T <= 8).
+SLACK_T1 = True
+SLACK1_MR, SLACK1_MK, SLACK1_TIE, SLACK1_DM, SLACK1_RM = SLACK_MR, SLACK_MK, 0.02, 0.0, 0.0
+# layer n14 T = 8: OFF (no selection at all at T = 8). In pr8's finish block (slack8_src.cu) the rule costs +1.5..5 us at
+# v1 sl on the H100 even when never executed (ptxas re-schedules pr8's main path; forceinline +5.5, noinline +1.5..4.7),
+# moe's separate slack_kernel ~+9 us; the gain is only ~0.39 experts x ~4.5 us at v1 (tools/n14, NOTES-layer n14s1).
+SLACK_T8 = False
+
+
+def _pr8_slk(src):
+    """layer n14: at T = 8 the slack selection runs in pr8's finish block right after its routing (slack8_src.cu)."""
+    if not (SLACK and SLACK_T8) or _GSLACK8_SRC is None:
+        return src
+    call = "    if (wp < MT) route_token(a, lgs, bs_, ls_, wp, lane);\n"
+    assert src.count(call) == 1
+    keep = KEEP_TOL[0]
+    defs = ("#define SLK8_RT %.9ef\n#define SLK8_KT %.9ef\n#define SLK8_TIE %.9ef\n#define SLK8_DM %.9ef\n"
+            "#define SLK8_RM %.9ef\n") % (ROUTE_TOL - SLACK1_MR, keep - SLACK1_MK, SLACK1_TIE, SLACK1_DM, SLACK1_RM)
+    return defs + _GSLACK8_SRC + "\n" + src.replace(call, call + "    slk8::select(lgs, bs_, ls_, MT, a.ids, a.lids, a.wts, a.mult, a.reps);\n")
+
+
+def _pr1_slk_defs():
+    if not (SLACK and SLACK_T1):
+        return ""
+    keep = KEEP_TOL[0]
+    return ("#define PR1_SLK 1\n#define PR1_SLK_RT %.9ef\n#define PR1_SLK_KT %.9ef\n#define PR1_SLK_TIE %.9ef\n"
+            "#define PR1_SLK_DM %.9ef\n#define PR1_SLK_RM %.9ef\n") % (ROUTE_TOL - SLACK1_MR, keep - SLACK1_MK, SLACK1_TIE,
+                                                                       SLACK1_DM, SLACK1_RM)
+
+
+def _slack_build():
+    if not SLACK or not SLACK_TOKENS or _GSLACK_SRC is None or "lib" in _GSLACK:
+        return
+    try:
+        import hashlib
+        from torch.utils.cpp_extension import load_inline
+        _GSLACK["lib"] = load_inline(
+            name="layer_slack_" + hashlib.sha256(_GSLACK_SRC.encode()).hexdigest()[:12],
+            cpp_sources="void slack_launch(torch::Tensor, int64_t, int64_t, int64_t, torch::Tensor, torch::Tensor, "
+                        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, double, double, double, double, double, double, int64_t);",
+            cuda_sources=_GSLACK_SRC, functions=["slack_launch"],
+            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+    except Exception as e:  # noqa: BLE001
+        print("layer slack build failed:", e)
+        _GSLACK["lib"] = None
+
+
+def _slack(part, ks, sks, st, state, local_start, ids, lids, wts, tokens, trig=False):
+    """Overwrite ids/lids/wts [T, 8] in place with the slack routing (one CTA; reads logits = sum of ks partials
+    part[k * sks + t * st + e]). A PDL secondary of the routing (griddepcontrol.wait first); triggers its dependents at
+    once iff trig (= the routing's TRIG at this site, so later kernels keep main's PDL edges and read after their wait)."""
+    if _SLACK_DBG is not None:  # tools/slack/keyerr.py (eager only): the logits the selection sees
+        _SLACK_DBG.append(sum(part.as_strided((tokens, N_EXPERTS), (st, 1), part.storage_offset() + k * sks).float()
+                              for k in range(ks)).clone())
+    lib = _GSLACK.get("lib") if SLACK and tokens in SLACK_TOKENS else None
+    if lib is None:
+        return
+    keep = KEEP_TOL[0] if tokens <= KEEP_TOKENS else KEEP_TOL[1]
+    lib.slack_launch(part, ks, sks, st, state["router_bias"], local_start, ids, lids, wts, state["slack_scratch"], tokens,
+                     ROUTER_MULTIPLIER,
+                     ROUTE_EPS, ROUTE_TOL - SLACK_MR, keep - SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM, int(bool(trig)))
 # proj's gemv19 (g19_src.cu = r-proj dev/gemv19.cu @6996d0c): m = 16/32 GEMM over the 12-bit weights, FP32 out zeroed
 # in-kernel (epoch grid barrier on ctr[1]) + red.add split-K partials, launched as a PDL dependent of the previous
 # kernel: its producer streams the first npre weight stages before griddepcontrol.wait. (key, T) -> (m, kc, ap, ns,
@@ -1285,9 +1370,9 @@ def _g10_lib():
                 src = src + "\nvoid g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
             if _GPR1_SRC is not None:
-                src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
+                src = src + "\n" + _pr1_slk_defs() + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
                 if _GPR8_SRC is not None:
-                    src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
+                    src = src + "\n" + _pr8_slk(_GPR8_SRC).replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
             else:
                 src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
             if _GOB8_SRC is not None and OB8:  # s86: dead (H100), built only when forced on
@@ -3715,6 +3800,7 @@ def _g12_prepare(state):
     state["ob8_part"] = torch.empty(G12_CFG["o"][3] * 32, dtype=torch.float32, device=dev)  # s86 OB8 per-block partials
     state["ob8_bar"] = torch.zeros(1, dtype=torch.int32, device=dev)  # s86 OB8 grid barrier (epoch counter)
     state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)  # pr1's router ticket (self-resetting)
+    state["slack_scratch"] = torch.zeros(5 * 256 + 32, dtype=torch.int32, device=dev)  # moe/slack masks + ticket
     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n2u's last-block counter (self-resetting)
     state["idf"] = torch.zeros(1, dtype=torch.int32, device=dev)  # n7s7 IDF: pr1's routing release flag (reset by the tail)
     state["g13"] = {key: pk for key in list(G13_CFG) + (["o"] if G13_O else []) if (pk := _pack13(w[key])) is not None}
@@ -4121,6 +4207,7 @@ def _kernel_fn(data, state):
         _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
                             E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
                             SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, TRIG=rpdl, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4)
+        _slack(pr[:, D_EXPERT:], 2, N_EXPERTS, D_EXPERT + 2 * N_EXPERTS, state, data["local_start"], ids, lids, wts, tokens, rpdl)
         bucket = _moe_bucket(state, lids, rpdl) if bkt else None
         if gnorm:
             p = pr[:, :D_EXPERT]
@@ -4154,6 +4241,8 @@ def _kernel_fn(data, state):
             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
                                    ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)
+        if not (SLACK_T1 or tokens == 8):  # layer n14: T = 1 selects inside pr1; T = 8 in pr8 (SLACK_T8) or not at all
+            _slack(logits, 1, 0, N_EXPERTS, state, data["local_start"], topk_ids, local_ids, topk_weights, tokens)
     elif (pr32 := (tokens in PR32_TOKENS and state.get("pr32", {}).get(tokens) is not None
                    and _opt(state, tokens, "pr32", PR32_DEFAULT))):
         side_stream.wait_stream(main_stream)  # nothing runs there, but the later joins need it forked in the capture
@@ -4292,4 +4381,4 @@ def _vjx_on(state, cfg):
             and (QLO_VJX and cfg["q_len"] == 8 or _opt(state, cfg["tokens"], "vjx", cfg["tokens"] in VJX_TOKENS)))
 
 
-_PREBUILD = [_BUILD_POOL.submit(f) for f in ((_vjx_build,) if VJX_BUILD else ()) + (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]
+_PREBUILD = [_BUILD_POOL.submit(f) for f in ((_vjx_build,) if VJX_BUILD else ()) + (_slack_build, _moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]

@@ -13117,6 +13117,9 @@ TOP_K = 8
 LOCAL_EXPERTS = 32
 ROUTER_MULTIPLIER = 0.1767766952966369
 ROUTE_EPS = 1e-15
+ROUTE_TOL = 5e-2
+KEEP_TOL = (0.03, 0.04)
+KEEP_TOKENS = 256
 ROUTER_FP32_MAX_TOKENS = 8
 SLICED_UNPOOL_MAX_TOKENS = 8
 UNPOOL_SLICE = HIDDEN // 8
@@ -13378,6 +13381,7 @@ def _route(state, h, h32, local_start, tokens, router_pdl=False, trig=False):
     _routing[(tokens,)](part, state["router_bias"], local_start, ids, lids, wts, tokens, E=N_EXPERTS, KS=ks,
                         TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS, TRIG=trig, PDL=rpdl,
                         num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4, launch_pdl=rpdl)
+    _slack(part, ks, tokens * N_EXPERTS, N_EXPERTS, state, local_start, ids, lids, wts, tokens, trig)
     return ids, lids, wts
 @triton.jit
 def _post_expert_wsum(y_ptr, wts_ptr, lids_ptr, nw_ptr, out_ptr, D: tl.constexpr, TOPK: tl.constexpr,
@@ -16482,6 +16486,9 @@ _GPR1_SRC = r'''// pr1: the layer's pooler + router + routing at 1 token in ONE 
 namespace pr1 {
 #ifndef BPRE
 #define BPRE 1
+#ifndef PR1_SLK
+#define PR1_SLK 0
+#endif
 #endif
 #define XI(k) (((k) >> 4) * 20 + ((k) & 15))
 constexpr int ESC = 8, MAXC = 16, E = 256, K = 8192, TOPK = 8;
@@ -16697,6 +16704,9 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
         key[i] = sc[i] + sbias[e];
     }
     int myid = 0; float mysc = 0.f, sum = 0.f;
+#if PR1_SLK
+    float mykey = 0.f, v8 = 0.f;
+#endif
 #pragma unroll
     for (int k = 0; k < TOPK; ++k) {
         float bk = key[0]; int bi = lane; float bs = sc[0];
@@ -16714,8 +16724,74 @@ __device__ __forceinline__ void router(const Args& a, int rb, int RB) {
         for (int i = 0; i < E / 32; ++i)
             if (lane + 32 * i == bi) key[i] = -INFINITY;
         if (lane == k) { myid = bi; mysc = bs; }
+#if PR1_SLK
+        if (lane == k) mykey = bk;
+        v8 = bk;
+#endif
         sum += bs;
     }
+#if PR1_SLK
+    {
+        float v9 = -INFINITY; int near = 0, nx = 0;
+#pragma unroll
+        for (int i = 0; i < E / 32; ++i) {
+            const int e = lane + 32 * i;
+            const bool lc = ((e - sls) & (E - 1)) < a.local;
+            v9 = fmaxf(v9, key[i]);
+            near += lc && key[i] >= v8 - PR1_SLK_TIE;
+            nx += !lc && key[i] >= v8 - PR1_SLK_RT;
+        }
+#pragma unroll
+        for (int o = 16; o; o >>= 1) {
+            v9 = fmaxf(v9, __shfl_xor_sync(0xffffffffu, v9, o));
+            near += __shfl_xor_sync(0xffffffffu, near, o);
+            nx += __shfl_xor_sync(0xffffffffu, nx, o);
+        }
+        const int myl = (myid - sls) & (E - 1);
+        const bool isl = lane < TOPK && myl < a.local;
+        const uint32_t Rm = __ballot_sync(0xffffffffu, isl);
+        const uint32_t Dm = __ballot_sync(0xffffffffu, isl && !(mykey - v9 > PR1_SLK_KT));
+        const int nR = __popc(Rm), D = __popc(Dm);
+        const float floor_d = (float)(nR + near + PR1_SLK_DM) * 0.85f - 2.f;
+        const float floor_r = (float)(nR + near + PR1_SLK_RM) * 0.92f - 4.f;
+        const int target = max(nR - nx, (int)ceilf(floor_d));
+        const int nd = D - min(D, max(0, target - (nR - D)));
+        if (nd > 0 && (float)(nR - nd) >= floor_r && (float)(nR - nd) >= floor_d) {
+            int higher = 0;
+#pragma unroll
+            for (int j = 0; j < TOPK; ++j) {
+                const int lj = __shfl_sync(0xffffffffu, myl, j);
+                higher += ((Dm >> j) & 1u) && lj > myl;
+            }
+            const bool drop = ((Dm >> lane) & 1u) && higher < nd;
+            const uint32_t Xm = __ballot_sync(0xffffffffu, drop);
+            const int rank = __popc(Xm & ((1u << lane) - 1u));
+#pragma unroll
+            for (int i = 0; i < E / 32; ++i)
+                if (((lane + 32 * i - sls) & (E - 1)) < a.local || !(key[i] >= v8 - PR1_SLK_RT)) key[i] = -INFINITY;
+            for (int r = 0; r < nd; ++r) {
+                float bk = key[0]; int bi = lane; float bs = sc[0];
+#pragma unroll
+                for (int i = 1; i < E / 32; ++i)
+                    if (key[i] > bk) { bk = key[i]; bi = lane + 32 * i; bs = sc[i]; }
+#pragma unroll
+                for (int o = 16; o; o >>= 1) {
+                    const float ok = __shfl_xor_sync(0xffffffffu, bk, o);
+                    const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
+                    const float os = __shfl_xor_sync(0xffffffffu, bs, o);
+                    if (ok > bk || (ok == bk && oi < bi)) { bk = ok; bi = oi; bs = os; }
+                }
+#pragma unroll
+                for (int i = 0; i < E / 32; ++i)
+                    if (lane + 32 * i == bi) key[i] = -INFINITY;
+                if (drop && rank == r) { myid = bi; mysc = bs; }
+            }
+            sum = 0.f;
+#pragma unroll
+            for (int j = 0; j < TOPK; ++j) sum += __shfl_sync(0xffffffffu, mysc, j);
+        }
+    }
+#endif
     if (lane < TOPK) {
         a.ids[lane] = myid;
         int loc = (myid - sls + E) % E;
@@ -17433,6 +17509,334 @@ void bnd2_launch(torch::Tensor br, torch::Tensor s1, torch::Tensor alpha, torch:
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 '''
+_GSLACK_SRC = r'''// moe/slack (moe s5 2026-10-31): ROUTING-SLACK selection step. NOT for submission until the organizers approve it.
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda_runtime.h>
+#include <stdint.h>
+
+namespace slk {
+constexpr int E = 256, TOPK = 8, LOC = 32, NW = 8, MAXT = 256;
+
+struct Args {
+  const float* part; int ks, sks, st;
+  const float* bias; const int* ls;
+  int* ids; int* lids; float* wts;
+  uint32_t* msk;
+  int* cnt;
+  int T; float mult, reps, rt, kt, tie, dmarg, rmarg;
+  int trig;
+};
+
+__device__ __forceinline__ uint32_t okey(float k) {
+  uint32_t b = __float_as_uint(k);
+  return (b & 0x80000000u) ? ~b : (b | 0x80000000u);
+}
+
+__device__ __forceinline__ float token_keys(const Args& a, int t, int ls, int lane, float (&key)[8], float (&sg)[8],
+                                            uint32_t& in8m, int& myid_out) {
+  const int myid = lane < TOPK ? __ldcg(a.ids + t * TOPK + lane) : 0;
+  float l0[8], l1[8], bb[8];
+#pragma unroll
+  for (int k = 0; k < 8; k++) {
+    const int e = (ls + lane + 32 * k) & (E - 1);
+    l0[k] = __ldcg(a.part + (size_t)t * a.st + e);
+    l1[k] = a.ks > 1 ? __ldcg(a.part + (size_t)a.sks + (size_t)t * a.st + e) : 0.f;
+    bb[k] = __ldg(a.bias + e);
+  }
+#pragma unroll
+  for (int k = 0; k < 8; k++) if (a.ks > 1) l0[k] += l1[k];
+  for (int q = 2; q < a.ks; q++) {
+#pragma unroll
+    for (int k = 0; k < 8; k++) l1[k] = __ldcg(a.part + (size_t)q * a.sks + (size_t)t * a.st + ((ls + lane + 32 * k) & (E - 1)));
+#pragma unroll
+    for (int k = 0; k < 8; k++) l0[k] += l1[k];
+  }
+#pragma unroll
+  for (int k = 0; k < 8; k++) {
+    const float lg = l0[k];
+    key[k] = 1.f / (1.f + __expf(-lg * a.mult)) + bb[k];
+    sg[k] = 1.f / (1.f + expf(-lg * a.mult));
+  }
+  myid_out = myid;
+  const int rel = (myid - ls) & (E - 1);
+  in8m = 0;
+#pragma unroll
+  for (int s = 0; s < TOPK; s++) {
+    const int r = __shfl_sync(0xffffffffu, rel, s);
+    if ((r & 31) == lane) in8m |= 1u << (r >> 5);
+  }
+  float v8 = 3.4e38f;
+#pragma unroll
+  for (int k = 0; k < 8; k++) if ((in8m >> k) & 1u) v8 = fminf(v8, key[k]);
+#pragma unroll
+  for (int o = 16; o; o >>= 1) v8 = fminf(v8, __shfl_xor_sync(0xffffffffu, v8, o));
+  return v8;
+}
+
+__global__ void __launch_bounds__(NW * 32) slack_kernel(Args a) {
+  __shared__ uint32_t sL[MAXT], sR[MAXT];
+  __shared__ int sNeed[MAXT], sList[MAXT];
+  __shared__ int cnt[LOC];
+  __shared__ uint32_t gM, gU, gN, gS, gUse;
+  __shared__ int gRef, gNr, gRoutes, gAny, gDone, gLast, gNc;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, T = a.T;
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+  if (a.trig) asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+  const int ls = *a.ls;
+  {
+    const int t = blockIdx.x * NW + warp;
+    if (t < T) {
+      float key[8], sg[8]; uint32_t in8m; int myid;
+      const float v8 = token_keys(a, t, ls, lane, key, sg, in8m, myid);
+      float v9 = -3.4e38f;
+#pragma unroll
+      for (int k = 0; k < 8; k++) if (!((in8m >> k) & 1u)) v9 = fmaxf(v9, key[k]);
+#pragma unroll
+      for (int o = 16; o; o >>= 1) v9 = fmaxf(v9, __shfl_xor_sync(0xffffffffu, v9, o));
+      const float thr = v8 - a.rt;
+      const bool in0 = in8m & 1u;
+      const uint32_t L = __ballot_sync(0xffffffffu, key[0] >= thr);
+      const uint32_t K = __ballot_sync(0xffffffffu, in0 && key[0] - v9 > a.kt);
+      const uint32_t R = __ballot_sync(0xffffffffu, in0);
+      const uint32_t N = __ballot_sync(0xffffffffu, !in0 && key[0] >= v8 - a.tie);
+      int nl = 0;
+#pragma unroll
+      for (int k = 1; k < 8; k++) nl += key[k] >= thr;
+#pragma unroll
+      for (int o = 16; o; o >>= 1) nl += __shfl_xor_sync(0xffffffffu, nl, o);
+      if (lane < 5) {
+        const uint32_t v = lane == 0 ? L : lane == 1 ? K : lane == 2 ? R : lane == 3 ? N : (uint32_t)max(0, TOPK - nl);
+        __stcg(a.msk + lane * MAXT + t, v);
+      }
+    }
+  }
+  __threadfence();
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    const int prev = atomicAdd(a.cnt, 1);
+    gLast = prev == (int)gridDim.x - 1;
+    if (gLast) *a.cnt = 0;
+  }
+  __syncthreads();
+  if (!gLast) return;
+  __threadfence();
+  if (threadIdx.x == 0) { gM = 0; gU = 0; gN = 0; gUse = 0; gRef = 0; gNr = 0; gRoutes = 0; gNc = 0; }
+  if (threadIdx.x < LOC) cnt[threadIdx.x] = 0;
+  __syncthreads();
+  {
+    uint32_t m = 0, u = 0, n = 0; int r = 0, nr = 0;
+    for (int t = threadIdx.x; t < T; t += blockDim.x) {
+      const uint32_t L = __ldcg(a.msk + t), K = __ldcg(a.msk + MAXT + t), R = __ldcg(a.msk + 2 * MAXT + t),
+                     N = __ldcg(a.msk + 3 * MAXT + t);
+      sL[t] = L; sR[t] = R; sNeed[t] = (int)__ldcg(a.msk + 4 * MAXT + t);
+      m |= K; u |= R; n |= N; r += __popc(R); nr += __popc(N);
+    }
+#pragma unroll
+    for (int o = 16; o; o >>= 1) {
+      m |= __shfl_xor_sync(0xffffffffu, m, o); u |= __shfl_xor_sync(0xffffffffu, u, o);
+      n |= __shfl_xor_sync(0xffffffffu, n, o); r += __shfl_xor_sync(0xffffffffu, r, o);
+      nr += __shfl_xor_sync(0xffffffffu, nr, o);
+    }
+    if (lane == 0) { atomicOr(&gM, m); atomicOr(&gU, u); atomicOr(&gN, n); atomicAdd(&gRef, r); atomicAdd(&gNr, nr); }
+  }
+  __syncthreads();
+  const float floor_d = (float)(__popc(gU | gN) + a.dmarg) * 0.85f - 2.f;
+  const float floor_r = (float)(gRef + gNr + a.rmarg) * 0.92f - 4.f;
+  if (threadIdx.x == 0) gS = gM;
+  __syncthreads();
+  for (int it = 0; it <= LOC; it++) {
+    const uint32_t S = gS;
+    if (threadIdx.x == 0) gAny = 0;
+    __syncthreads();
+    for (int t = threadIdx.x; t < T; t += blockDim.x) {
+      const bool def = __popc(sL[t] & S) < sNeed[t];
+      uint32_t b = def ? (sL[t] & ~S) : 0u;
+      if (def) gAny = 1;
+      while (b) { const int e = __ffs(b) - 1; b &= b - 1; atomicAdd(&cnt[e], 1024); }
+      b = sR[t] & ~S;
+      while (b) { const int e = __ffs(b) - 1; b &= b - 1; atomicAdd(&cnt[e], 1); }
+    }
+    __syncthreads();
+    if (warp == 0) {
+      const int c = cnt[lane];
+      int bv = c * 64 + (63 - lane);
+#pragma unroll
+      for (int o = 16; o; o >>= 1) bv = max(bv, __shfl_xor_sync(0xffffffffu, bv, o));
+      cnt[lane] = 0;
+      if (lane == 0) {
+        gDone = !(gAny || (float)__popc(S) < floor_d);
+        if (!gDone) { if (bv < 64) gDone = 1; else gS = S | (1u << (63 - (bv & 63))); }
+      }
+    }
+    __syncthreads();
+    if (gDone) break;
+  }
+  {
+    uint32_t add = gS & ~gM;
+    while (add) {
+      const int e = 31 - __clz(add); add &= ~(1u << e);
+      const uint32_t S1 = gS & ~(1u << e);
+      if (threadIdx.x == 0) gAny = (float)__popc(S1) < floor_d;
+      __syncthreads();
+      for (int t = threadIdx.x; t < T; t += blockDim.x)
+        if (__popc(sL[t] & S1) < sNeed[t]) gAny = 1;
+      __syncthreads();
+      if (threadIdx.x == 0 && !gAny) gS = S1;
+      __syncthreads();
+    }
+  }
+  const uint32_t S = gS;
+  {
+    int r = 0; uint32_t use = 0;
+    for (int t = threadIdx.x; t < T; t += blockDim.x) {
+      const uint32_t R = sR[t];
+      if (R & ~S) sList[atomicAdd(&gNc, 1)] = t;
+      else { r += __popc(R); use |= R; }
+    }
+#pragma unroll
+    for (int o = 16; o; o >>= 1) { r += __shfl_xor_sync(0xffffffffu, r, o); use |= __shfl_xor_sync(0xffffffffu, use, o); }
+    if (lane == 0) { atomicAdd(&gRoutes, r); atomicOr(&gUse, use); }
+  }
+  __syncthreads();
+  const int nc = gNc;
+  constexpr int PER = MAXT / NW;
+  int nid[PER]; float nw[PER];
+  int nmine = 0;
+  for (int i = warp; i < nc; i += NW, nmine++) {
+    const int t = sList[i];
+    float key[8], sg[8]; uint32_t in8m; int myid;
+    const float v8 = token_keys(a, t, ls, lane, key, sg, in8m, myid);
+    const float thr = v8 - a.rt;
+    uint64_t pk[8];
+#pragma unroll
+    for (int k = 0; k < 8; k++) {
+      const bool ok = !((in8m >> k) & 1u) && key[k] >= thr && (k > 0 || ((S >> lane) & 1u));
+      const int e = (ls + lane + 32 * k) & (E - 1);
+      pk[k] = ok ? ((uint64_t)(k == 0) << 41) | ((uint64_t)okey(key[k]) << 8) | (uint64_t)(E - 1 - e) : 0ull;
+    }
+    const int rel = (myid - ls) & (E - 1);
+    const bool dropped = lane < TOPK && rel < LOC && !((S >> rel) & 1u);
+    const uint32_t dm = __ballot_sync(0xffffffffu, dropped);
+    const int myrank = __popc(dm & ((1u << lane) - 1));
+    int id = myid;
+    for (int r = 0; r < __popc(dm); r++) {
+      uint64_t b = 0; int bk = 0;
+#pragma unroll
+      for (int k = 0; k < 8; k++) if (pk[k] > b) { b = pk[k]; bk = k; }
+      uint64_t w = b;
+#pragma unroll
+      for (int o = 16; o; o >>= 1) { const uint64_t x = __shfl_xor_sync(0xffffffffu, w, o); w = x > w ? x : w; }
+      if (b == w) {
+#pragma unroll
+        for (int k = 0; k < 8; k++) if (k == bk) pk[k] = 0ull;
+      }
+      if (dropped && myrank == r) id = E - 1 - (int)(w & 0xFF);
+    }
+    const int prel = (id - ls) & (E - 1);
+    float sc = 0.f;
+#pragma unroll
+    for (int k = 0; k < 8; k++) {
+      const float v = __shfl_sync(0xffffffffu, sg[k], prel & 31);
+      if ((prel >> 5) == k) sc = v;
+    }
+    if (lane >= TOPK) sc = 0.f;
+    float sum = sc;
+#pragma unroll
+    for (int o = 4; o; o >>= 1) sum += __shfl_xor_sync(0xffffffffu, sum, o);
+    const int l2 = (id - ls) & (E - 1);
+    const uint32_t lm = __ballot_sync(0xffffffffu, lane < TOPK && l2 < LOC);
+    uint32_t um = 0;
+#pragma unroll
+    for (int s = 0; s < TOPK; s++) { const int x = __shfl_sync(0xffffffffu, l2, s); if (x < LOC) um |= 1u << x; }
+    if (lane == 0) { atomicAdd(&gRoutes, __popc(lm)); atomicOr(&gUse, um); }
+#pragma unroll
+    for (int j = 0; j < PER; j++) if (j == nmine) { nid[j] = id; nw[j] = sc / (sum + a.reps); }
+  }
+  __syncthreads();
+  if ((float)gRoutes < floor_r || (float)__popc(gUse) < floor_d) return;
+  int j = 0;
+  for (int i = warp; i < nc; i += NW, j++) {
+    if (lane >= TOPK) continue;
+    const int t = sList[i];
+    int id = 0; float w = 0.f;
+#pragma unroll
+    for (int q = 0; q < PER; q++) if (q == j) { id = nid[q]; w = nw[q]; }
+    const int l = (id - ls) & (E - 1);
+    a.ids[t * TOPK + lane] = id; a.lids[t * TOPK + lane] = l < LOC ? l : -1; a.wts[t * TOPK + lane] = w;
+  }
+}
+}
+
+void slack_launch(torch::Tensor part, int64_t ks, int64_t sks, int64_t st, torch::Tensor bias, torch::Tensor ls,
+                  torch::Tensor ids, torch::Tensor lids, torch::Tensor wts, torch::Tensor scratch, int64_t T,
+                  double mult, double reps, double rt, double kt, double tie, double dmarg, double rmarg, int64_t trig) {
+  TORCH_CHECK(T >= 1 && T <= slk::MAXT, "slack: T out of range");
+  TORCH_CHECK(ks >= 1, "slack: ks >= 1");
+  slk::Args a{part.data_ptr<float>(), (int)ks, (int)sks, (int)st, bias.data_ptr<float>(), ls.data_ptr<int>(),
+              ids.data_ptr<int>(), lids.data_ptr<int>(), wts.data_ptr<float>(), (uint32_t*)scratch.data_ptr<int>(),
+              scratch.data_ptr<int>() + 5 * slk::MAXT, (int)T, (float)mult, (float)reps, (float)rt, (float)kt,
+              (float)tie, (float)dmarg, (float)rmarg, (int)trig};
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3((T + slk::NW - 1) / slk::NW); cfg.blockDim = dim3(slk::NW * 32);
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute attr[1];
+  attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization; attr[0].val.programmaticStreamSerializationAllowed = 1;
+  cfg.attrs = attr; cfg.numAttrs = 1;
+  cudaLaunchKernelEx(&cfg, slk::slack_kernel, a);
+}
+'''
+_GSLACK8_SRC = None
+SLACK = False
+SLACK_TOKENS = ()
+SLACK_MR, SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM = 0.023, 0.022, 0.0, 2.0, 8.0
+_GSLACK = {}
+_SLACK_DBG = None
+SLACK_T1 = True
+SLACK1_MR, SLACK1_MK, SLACK1_TIE, SLACK1_DM, SLACK1_RM = SLACK_MR, SLACK_MK, 0.02, 0.0, 0.0
+SLACK_T8 = False
+def _pr8_slk(src):
+    if not (SLACK and SLACK_T8) or _GSLACK8_SRC is None:
+        return src
+    call = "    if (wp < MT) route_token(a, lgs, bs_, ls_, wp, lane);\n"
+    assert src.count(call) == 1
+    keep = KEEP_TOL[0]
+    defs = ("#define SLK8_RT %.9ef\n#define SLK8_KT %.9ef\n#define SLK8_TIE %.9ef\n#define SLK8_DM %.9ef\n"
+            "#define SLK8_RM %.9ef\n") % (ROUTE_TOL - SLACK1_MR, keep - SLACK1_MK, SLACK1_TIE, SLACK1_DM, SLACK1_RM)
+    return defs + _GSLACK8_SRC + "\n" + src.replace(call, call + "    slk8::select(lgs, bs_, ls_, MT, a.ids, a.lids, a.wts, a.mult, a.reps);\n")
+def _pr1_slk_defs():
+    if not (SLACK and SLACK_T1):
+        return ""
+    keep = KEEP_TOL[0]
+    return ("#define PR1_SLK 1\n#define PR1_SLK_RT %.9ef\n#define PR1_SLK_KT %.9ef\n#define PR1_SLK_TIE %.9ef\n"
+            "#define PR1_SLK_DM %.9ef\n#define PR1_SLK_RM %.9ef\n") % (ROUTE_TOL - SLACK1_MR, keep - SLACK1_MK, SLACK1_TIE,
+                                                                       SLACK1_DM, SLACK1_RM)
+def _slack_build():
+    if not SLACK or not SLACK_TOKENS or _GSLACK_SRC is None or "lib" in _GSLACK:
+        return
+    try:
+        import hashlib
+        from torch.utils.cpp_extension import load_inline
+        _GSLACK["lib"] = load_inline(
+            name="layer_slack_" + hashlib.sha256(_GSLACK_SRC.encode()).hexdigest()[:12],
+            cpp_sources="void slack_launch(torch::Tensor, int64_t, int64_t, int64_t, torch::Tensor, torch::Tensor, "
+                        "torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, double, double, double, double, double, double, double, int64_t);",
+            cuda_sources=_GSLACK_SRC, functions=["slack_launch"],
+            extra_cuda_cflags=["-gencode=arch=compute_90a,code=sm_90a", "-O3"])
+    except Exception as e:
+        print("layer slack build failed:", e)
+        _GSLACK["lib"] = None
+def _slack(part, ks, sks, st, state, local_start, ids, lids, wts, tokens, trig=False):
+    if _SLACK_DBG is not None:
+        _SLACK_DBG.append(sum(part.as_strided((tokens, N_EXPERTS), (st, 1), part.storage_offset() + k * sks).float()
+                              for k in range(ks)).clone())
+    lib = _GSLACK.get("lib") if SLACK and tokens in SLACK_TOKENS else None
+    if lib is None:
+        return
+    keep = KEEP_TOL[0] if tokens <= KEEP_TOKENS else KEEP_TOL[1]
+    lib.slack_launch(part, ks, sks, st, state["router_bias"], local_start, ids, lids, wts, state["slack_scratch"], tokens,
+                     ROUTER_MULTIPLIER,
+                     ROUTE_EPS, ROUTE_TOL - SLACK_MR, keep - SLACK_MK, SLACK_TIE, SLACK_DM, SLACK_RM, int(bool(trig)))
 G19_CFG = {("pooler", 16): (16, 1024, 8, 3, 3, 1), ("unpool", 16): (16, 1024, 4, 4, 2, 2),
            ("pooler", 32): (32, 1024, 8, 2, 2, 1), ("unpool", 32): (32, 1024, 8, 2, 2, 1),
            ("qkv_gate", 16): (16, 1024, 4, 4, 4, 2),
@@ -17829,9 +18233,9 @@ def _g10_lib():
                 src = src + "\nvoid g19_gemm(torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t) {}\n"
             src = src + "\n" + _G17_SRC.replace("G17_CONFIGS", " ".join("G17_CASE(%d,%d,%d)" % c for c in sorted(set(G17_CFG.values())))) + "\n" + _N2U_SRC
             if _GPR1_SRC is not None:
-                src = src + "\n" + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
+                src = src + "\n" + _pr1_slk_defs() + _GPR1_SRC.replace("PR1_CONFIGS", " ".join("PR1_CASE(%d,%d,%d,%d)" % c for c in sorted({(*v[:2], pf, v[3]) for v in PR1_CFG.values() for pf in (v[2], *PR1_PF_ALT)})))
                 if _GPR8_SRC is not None:
-                    src = src + "\n" + _GPR8_SRC.replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
+                    src = src + "\n" + _pr8_slk(_GPR8_SRC).replace("PR8_CONFIGS", " ".join("PR8_CASE(%d,%d,%d,%d,%d,%d)" % (c[0], c[1], c[2], c[4] & 15, c[4] >> 4, 512 // c[3]) for c in sorted(set(PR8_CFG.values()) | set(PR8L_ALTS))))
             else:
                 src = src + "\nvoid pr1_launch(torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, double, double, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, std::vector<torch::Tensor>, double, double) {}\n"
             if _GOB8_SRC is not None and OB8:
@@ -19996,6 +20400,7 @@ def _g12_prepare(state):
     state["ob8_part"] = torch.empty(G12_CFG["o"][3] * 32, dtype=torch.float32, device=dev)
     state["ob8_bar"] = torch.zeros(1, dtype=torch.int32, device=dev)
     state["pr1_cnt"] = torch.zeros(32, dtype=torch.int32, device=dev)
+    state["slack_scratch"] = torch.zeros(5 * 256 + 32, dtype=torch.int32, device=dev)
     state["n2u_cnt"] = torch.zeros(1, dtype=torch.int32, device=dev)
     state["idf"] = torch.zeros(1, dtype=torch.int32, device=dev)
     state["g13"] = {key: pk for key in list(G13_CFG) + (["o"] if G13_O else []) if (pk := _pack13(w[key])) is not None}
@@ -20329,6 +20734,7 @@ def _kernel_fn(data, state):
         _routing[(tokens,)](pr[:, D_EXPERT:], state["router_bias"], data["local_start"], ids, lids, wts, tokens,
                             E=N_EXPERTS, KS=2, TOPK=TOP_K, LOCAL=LOCAL_EXPERTS, MULT=ROUTER_MULTIPLIER, REPS=ROUTE_EPS,
                             SKS=N_EXPERTS, ST=D_EXPERT + 2 * N_EXPERTS, TRIG=rpdl, num_warps=1 if tokens >= ROUTING_WARPS_1_MIN_TOKENS else 4)
+        _slack(pr[:, D_EXPERT:], 2, N_EXPERTS, D_EXPERT + 2 * N_EXPERTS, state, data["local_start"], ids, lids, wts, tokens, rpdl)
         bucket = _moe_bucket(state, lids, rpdl) if bkt else None
         if gnorm:
             p = pr[:, :D_EXPERT]
@@ -20362,6 +20768,8 @@ def _kernel_fn(data, state):
             _G10["lib"].pr8_launch(pk[0], pk[1], pk[2], pk[3], h, pooled, state["router"], h32, part, logits, state["pr1_cnt"],
                                    state["router_bias"], data["local_start"], topk_ids, local_ids, topk_weights,
                                    ROUTER_MULTIPLIER, ROUTE_EPS, LOCAL_EXPERTS, *_pr8_cfg(state, tokens), 1)
+        if not (SLACK_T1 or tokens == 8):
+            _slack(logits, 1, 0, N_EXPERTS, state, data["local_start"], topk_ids, local_ids, topk_weights, tokens)
     elif (pr32 := (tokens in PR32_TOKENS and state.get("pr32", {}).get(tokens) is not None
                    and _opt(state, tokens, "pr32", PR32_DEFAULT))):
         side_stream.wait_stream(main_stream)
@@ -20478,4 +20886,4 @@ def _vjx_build():
 def _vjx_on(state, cfg):
     return (cfg["window"] == 0 and _vjx__MOD is not None and _vjx__supported(cfg)
             and (QLO_VJX and cfg["q_len"] == 8 or _opt(state, cfg["tokens"], "vjx", cfg["tokens"] in VJX_TOKENS)))
-_PREBUILD = [_BUILD_POOL.submit(f) for f in ((_vjx_build,) if VJX_BUILD else ()) + (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]
+_PREBUILD = [_BUILD_POOL.submit(f) for f in ((_vjx_build,) if VJX_BUILD else ()) + (_slack_build, _moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]
