@@ -4308,7 +4308,7 @@ expert-side hop >= 1 us is left open. Hold aa51716 (moe board 5ef66b6c 2.3391x).
   (activations 0.01-2.1 MB; v32's +5 MB over unique = gathered activations + inter re-reads, not weights.)
 - Verdict: no weight tensor is re-read from DRAM anywhere (all <= 1%): IBM-style col-major tile order / L2 weight reuse has
   nothing to recover; split-K atomics already exist where they pay (tk2f/twm per earlier closures). col-major/L2 reuse: CLOSED.
-## o45 (2026-11-02 07:55-08:35Z, session 1 of 11-02): lead 07:45Z MICROBENCH lane 'twm consumer cycles'; H100, 0 judge runs
+## o46 (2026-11-02 07:55-08:35Z (tools dir named o45), session 1 of 11-02): lead 07:45Z MICROBENCH lane 'twm consumer cycles'; H100, 0 judge runs
 Tools: muse_moe_w4a16/tools/o45/ (mb_chain.py, mb_regs.py, mb_dsmem.py; base = tools/s18/mb_wgmma.py). Gate for a build:
 dq+RS stage cycles <= 0.85x today at N32 AND N64 (today = s18 RT4 N32 1046, RT2 N64 737). Cycles per twm stage (4 k16 x RT).
 (1) LONG K-CHAINS (mb_chain.py <grid>): group = CH k16 steps x RT tiles, all dq'd ahead, ORD tiles (k outer) or chain
