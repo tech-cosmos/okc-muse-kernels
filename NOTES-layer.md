@@ -4195,3 +4195,7 @@ instr/thread/tile on an issue-bound kernel: probably also a loss.
 ## n79 (2026-11-02 02:33-02:40Z, session 5)
 Status only. No lead line after 01:35Z (QLO-overlap lane closed n78, gate not met). Board v185 2.2048, overall #250
 (was #244 at n76: others are passing us); layer #1 pjmullin3 2.484. Main = v189 unchanged. 0 judge runs, 0 GPU.
+
+## n80 (2026-11-02 02:49-02:55Z, session 6)
+Status only. No lead line after 01:35Z (QLO-overlap lane closed n78). Board v185 2.2048, overall #251 (slipping:
+#244 n76, #250 n79); layer #1 pjmullin3 2.484. Main = v189 unchanged. 0 judge runs, 0 GPU.
