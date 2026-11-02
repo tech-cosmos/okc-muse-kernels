@@ -4199,3 +4199,6 @@ Status only. No lead line after 01:35Z (QLO-overlap lane closed n78, gate not me
 ## n80 (2026-11-02 02:49-02:55Z, session 6)
 Status only. No lead line after 01:35Z (QLO-overlap lane closed n78). Board v185 2.2048, overall #251 (slipping:
 #244 n76, #250 n79); layer #1 pjmullin3 2.484. Main = v189 unchanged. 0 judge runs, 0 GPU.
+
+## n81 (2026-11-02 03:05-03:10Z, session 7)
+Status only. No lead line after 01:35Z (QLO-overlap lane closed n78). Board v185 2.2048, overall #253 (slipping: #251 n80); layer #1 pjmullin3 2.484. Main = v189 unchanged. 0 judge runs, 0 GPU.
