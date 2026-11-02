@@ -1,4 +1,13 @@
 # STATE-fresh (newest first)
+## x42 (2026-11-02 05:37Z-06:30Z): lead 03:45Z (human asked) SLACK H200 MEASUREMENT ONLY. 0 judge, 6.8 Modal GPU-min (11-02).
+  Branch fresh-slack-h200 12f704e = v189 b24b7cb + layer/slack1 1fc464c (+ moe/slack a9242fb), slack OFF by default, NOCAP build
+  (1,005,355 B: NOT submittable as is). tools/fresh/x42/{mk_files.sh, slack_ab.py, RESULTS.md, logs}. on.py test 13/13 (H100).
+  H200, 6 router seeds x 4 inputs x 3 rounds, paired on-off us: d1 sl -1.81 fu -1.29; v16 sl -0.26 fu +1.41 (tie); v32 sl +2.03
+  fu +3.85 (LOSS); untouched loads +-0.2. Score +0.28% all-on; T=1 only (PR1_SLK) ~+0.42%. H100 said +0.56% (overstates v16/v32).
+  Routing stress H200: 0 fails / 216 slack-on inputs (d1/v16/v32 sl+fu), worst gap .0272/.05, drop-lead .0093/.03.
+  NOTE: branch name is fresh-slack-h200 (git can't have fresh/slack-h200 beside branch fresh).
+## Next (x43): hold (status only) until the lead answers the x42 line. If asked to prep T=1-only: drop SLACK_TOKENS kernel +
+  slack_src from the build (back under 1 MB), keep PR1_SLK; H200 replay/stress again. Checks 11-02: 0/6; Modal 11-02 6.8/20.
 ## x41 (2026-11-01 00:25Z-00:30Z): status only, 0 judge, 0 Modal, 0 GPU. No lead line since 23:55Z (idle-stop OK); layer n55 waits
   on the human for vjeux full attention (+~0.6%). Board #185 at 2.205 (#1 pjmullin3 2.469, #2 dolanzhao 2.442).
 ## Next (x42): read Human decisions + lead lines naming fresh (human checks in 11-01; vjeux copy + QLO full half are human calls).
@@ -137,38 +146,4 @@
   (ab_flag CB_HB_TRIG another -1.4/-1.6), v16 sl -0.7, GD_PW d16 full -2.2 (ab_flag) / tie (pinned); rest noise. Exact:
   test 13/13, graph_eq bitwise on sliding, replay 0 fails everywhere.
 - Check 05077ac2 (main v176 + x14 attn_src.py) FAILED on a v32 sl routing tail draw (margin 0.0305 > 0.03; outputs
-  identical to v176, same local margins): no score. 11 shapes: d32 sl 152.1 vs 154.6; fixed-SGLang (v32 imputed) 2.1962.
-  Handoff posted (layer merges attn_src.py). Checks today: 2 of 6 used.
-## Next (x15): after 00:00Z Modal H200 A/B v176 vs v176+x14 attn_src (d32 sl, v16 sl, d16 full; ~3 GPU-min) and the
-  x13 MRG 2 A/B (d32). Untried same-pattern items: _attn_split (v1 full, ~0.6 us start gap, .033 %/us) - small.
-- Rule learned: whole-file A/Bs with the tuner on compare different tuner picks; pin TUNE for A/B and graph_eq.
-## x13 (2026-10-31 14:27Z-15:10Z): lead 14:30Z CW for T=8 / T=16/32. 1 judge check (9eeab096), 0 Modal. FRESH.md x13.
-- T=8 CW built (segment-major CwIt, bitwise 300+300) but H100 v1 NEUTRAL; no-wait oracle v1 <= 0.5 us, d16 BAL no-wait
-  -0.3/0: CW closed at T=8/16 (stream hides the transition). Patch tools/fresh/cw/cw8_sm_neutral.patch (not kept).
-- d32 tk2h waits on ONE global gemm13 counter (MRG 1). MRG 2 (existing per-segment counters, one-line layer change):
-  H100 d32 sl -2.7 / full -2.2 us (= no-wait oracle), test 13/13, replay 0/120, sl bitwise. Branch fresh 9325413 =
-  main v176 + MRG 2. Check 9eeab096: raw 2.1736 / fixed 2.1460 (slow draw; d32 sl 157.8 vs v176 154.6): UNRESOLVED.
-## Next (x14): read Human decisions IN FULL. After 00:00Z: Modal H200 A/B d32 sl+full, v176 vs v176+MRG 2 (~3 GPU-min,
-  command in FRESH.md x13). Win >= 1.5 us sl -> Handoff to layer; else close MRG 2 (H200 balanced, as moe's PSC).
-## x12 (2026-10-31 13:58Z-14:30Z): lead 13:58Z BUILD CW: DONE, WIN on the H100 (d1 sl -0.5, full -1.55 us, 4 seeds). 0 judge, 0 Modal.
-- Branch fresh = v174 + CW v3 (layer TK2F_CW = True, cfg 184294 = tk2f PF 4 | 8192, T=1 only; patch tools/fresh/cw/cw3.patch).
-  gemm13 rows interleaved per segment (i & 3) * 64 + i / 4, CTA order chunk-major; per-(segment, chunk) counters cnt[64 +
-  seg * 4 + c] published by a helper warp (tk2f_cw_helper); gemm2 blocks on chunk 0 only, polls later chunks per stage.
-- Bitwise 1500 eager + 1500 replay routings; test 13/13; replay_test 0 fails. Handoff posted (layer: bundle + check; moe:
-  bs1 port). First permutation (v1, 16 v + u) was neutral: wrong for 5.8 rows/CTA (FRESH.md x12, correction).
-## Next (x13): read Human decisions IN FULL. If asked: (a) H200 A/B of CW vs v174 on d1 (Modal after 00:00Z, ~3 min),
-  (b) CW at T=8 (v1: up to 64 segments -> counter area + zeroing; nu8 PF 16 path), (c) help moe port CW to the moe board's
-  M=1 tk2f (bs1 fixed cost: x11 O2 bound 1.4 us). Stamp tools: tools/fresh/cw/{stamp,strun}.py.
-## x11 (2026-10-31 13:34Z-13:56Z): lead 12:25Z MOE BS1 GAP, cont. H100 stamps + oracles, 0 judge, 0 Modal. FRESH.md x11.
-- bs1 fixed ~9.5 us = pre-data 4.3 (routing 1.5, TMA issue 0.5, first data 2.3) + w13->w2 transition 1.4 (O2) + norm
-  2.4 (O1) + launch/PDL ~1. In-layer: transition bound ~1.1 us d1 / ~0.5-0.8 d16/d32 (O2); n2u work 3.5/4.4 d1 (O3,
-  latency chain, every fix on record dead); boundary ~0 (O3b).
-- Candidate CW (chunk-wait: q-major strided gemm13 rows + per-(expert, chunk) counters, gemm2 waits per stage):
-  est. ~0.6 us d1, ~1 us bs1; NOT built (multi-hour inter-CTA protocol). Asked the lead in COORD Requests.
-## Next (x12): read Human decisions IN FULL. If the lead says build CW: branch fresh, T=1 first (cfg 84204 path), the
-  stress test (many routings, replay) before timing; H100 gate >= 0.5 us d1 sl via tools/ab_files.py base,c,c,base.
-  After 00:00Z, the H200 A/B of the standalone 'late' patch if the lead/moe want it (Modal share 20 min).
-## x10 (2026-10-31 13:12Z-13:40Z): lead 12:25Z MOE BS1 GAP. H100 fit bs1: t = 9.5 + 10.0 x E us (fixed 9.5 = the gap).
-  Candidate 'late' (tools/fresh/bs1/late.patch on muse_moe_w4a16/submission.py: TK2F 84204 at M=1 + NORM2_PDL 1 + tk2f
-  trigger at its gemm2 rows): tests 15/15, H100 every shape faster, geomean x1.846 -> x1.868. Handoff to moe/lead; needs
-  H200 (moe n5s19: PDL norm2 lost +3.4 us d1 there with the ENTRY trigger). FRESH.md x10. 0 judge, 0 Modal.
+## (older entries x1-x12: see FRESH.md and git history of this file)
