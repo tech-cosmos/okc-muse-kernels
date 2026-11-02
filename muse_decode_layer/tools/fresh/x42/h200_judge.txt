@@ -1,0 +1,44 @@
+h200: reserved 7 min (4 of 60 used today before this run)
+NVIDIA H200
+===== base (rc 0)
+env: torch 2.14.1+cu130, triton 3.8.0
+env: torch 2.14.1+cu130, triton 3.8.0
+rs11 d1 sli JUDGE fails 0/6 gap 0.0072 drop-lead 0.0072 distinct saved 0.33
+rs11 d1 ful JUDGE fails 0/6 gap 0.0069 drop-lead 0.0069 distinct saved 0.17
+rs11 v16 sl JUDGE fails 0/6 gap 0.0269 drop-lead 0.0078 distinct saved 1.17
+rs11 v16 fu JUDGE fails 0/6 gap 0.0172 drop-lead 0.0073 distinct saved 0.83
+rs11 v32 sl JUDGE fails 0/6 gap 0.0241 drop-lead 0.0078 distinct saved 0.83
+rs11 v32 fu JUDGE fails 0/6 gap 0.0108 drop-lead 0.0059 distinct saved 0.83
+rs23 d1 sli JUDGE fails 0/6 gap 0.0022 drop-lead 0.0054 distinct saved 0.17
+rs23 d1 ful JUDGE fails 0/6 gap 0.0021 drop-lead 0.0021 distinct saved 0.33
+rs23 v16 sl JUDGE fails 0/6 gap 0.0264 drop-lead 0.0080 distinct saved 1.67
+rs23 v16 fu JUDGE fails 0/6 gap 0.0249 drop-lead 0.0066 distinct saved 1.00
+rs23 v32 sl JUDGE fails 0/6 gap 0.0190 drop-lead 0.0046 distinct saved 0.17
+rs23 v32 fu JUDGE fails 0/6 gap 0.0177 drop-lead 0.0047 distinct saved 0.50
+rs37 d1 sli JUDGE fails 0/6 gap 0.0080 drop-lead 0.0049 distinct saved 0.33
+rs37 d1 ful JUDGE fails 0/6 gap 0.0272 drop-lead 0.0076 distinct saved 0.50
+rs37 v16 sl JUDGE fails 0/6 gap 0.0041 drop-lead 0.0050 distinct saved 0.83
+rs37 v16 fu JUDGE fails 0/6 gap 0.0266 drop-lead 0.0080 distinct saved 0.83
+rs37 v32 sl JUDGE fails 0/6 gap 0.0263 drop-lead 0.0062 distinct saved 1.00
+rs37 v32 fu JUDGE fails 0/6 gap 0.0271 drop-lead 0.0050 distinct saved 1.17
+rs41 d1 sli JUDGE fails 0/6 gap 0.0038 drop-lead 0.0038 distinct saved 0.33
+rs41 d1 ful JUDGE fails 0/6 gap 0.0047 drop-lead 0.0047 distinct saved 0.17
+rs41 v16 sl JUDGE fails 0/6 gap 0.0271 drop-lead 0.0022 distinct saved 0.17
+rs41 v16 fu JUDGE fails 0/6 gap 0.0147 drop-lead 0.0077 distinct saved 1.00
+rs41 v32 sl JUDGE fails 0/6 gap 0.0093 drop-lead 0.0093 distinct saved 0.50
+rs41 v32 fu JUDGE fails 0/6 gap 0.0090 drop-lead 0.0090 distinct saved 1.17
+rs53 d1 sli JUDGE fails 0/6 gap 0.0055 drop-lead -1.0000 distinct saved 0.00
+rs53 d1 ful JUDGE fails 0/6 gap 0.0078 drop-lead 0.0035 distinct saved 0.50
+rs53 v16 sl JUDGE fails 0/6 gap 0.0213 drop-lead 0.0077 distinct saved 1.50
+rs53 v16 fu JUDGE fails 0/6 gap 0.0138 drop-lead 0.0057 distinct saved 1.17
+rs53 v32 sl JUDGE fails 0/6 gap 0.0243 drop-lead 0.0062 distinct saved 0.83
+rs53 v32 fu JUDGE fails 0/6 gap 0.0090 drop-lead 0.0090 distinct saved 1.00
+rs67 d1 sli JUDGE fails 0/6 gap 0.0063 drop-lead 0.0073 distinct saved 0.33
+rs67 d1 ful JUDGE fails 0/6 gap 0.0077 drop-lead 0.0077 distinct saved 0.33
+rs67 v16 sl JUDGE fails 0/6 gap 0.0257 drop-lead 0.0051 distinct saved 0.83
+rs67 v16 fu JUDGE fails 0/6 gap 0.0118 drop-lead 0.0068 distinct saved 1.00
+rs67 v32 sl JUDGE fails 0/6 gap 0.0249 drop-lead 0.0070 distinct saved 0.83
+rs67 v32 fu JUDGE fails 0/6 gap 0.0231 drop-lead 0.0059 distinct saved 1.17
+shape              off(med)  on(med)   on-off  (median over router seeds of per-seed medians)
+JUDGE total: 0 fails / 216 slack-on inputs, distinct saved 0.71/input, worst drop-lead 0.0093
+h200: charged 3.2 GPU-min; 7 of 60 used today

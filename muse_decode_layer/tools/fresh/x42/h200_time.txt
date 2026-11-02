@@ -1,0 +1,99 @@
+h200: reserved 7 min (0 of 60 used today before this run)
+NVIDIA H200
+===== base (rc 0)
+env: torch 2.14.1+cu130, triton 3.8.0
+env: torch 2.14.1+cu130, triton 3.8.0
+rs11 d1 sli   68.50   65.62  -2.88
+rs11 d1 ful   71.22   69.56  -1.66
+rs11 d16 sl  139.98  140.43  +0.45
+rs11 d16 fu  218.01  218.64  +0.63
+rs11 d32 sl  158.46  158.40  -0.06
+rs11 d32 fu  309.25  309.22  -0.03
+rs11 v1 sli  127.39  127.06  -0.33
+rs11 v1 ful  131.42  131.09  -0.32
+rs11 v16 sl  275.07  273.26  -1.80
+rs11 v16 fu  374.19  375.54  +1.36
+rs11 v32 sl  349.78  350.66  +0.88
+rs11 v32 fu  525.82  526.64  +0.82
+rs23 d1 sli   65.49   62.40  -3.09
+rs23 d1 ful   76.50   76.80  +0.30
+rs23 d16 sl  159.11  159.21  +0.10
+rs23 d16 fu  228.46  228.66  +0.20
+rs23 d32 sl  181.62  182.32  +0.70
+rs23 d32 fu  332.81  333.23  +0.42
+rs23 v1 sli  131.24  131.40  +0.15
+rs23 v1 ful  130.50  130.62  +0.13
+rs23 v16 sl  294.15  299.52  +5.37
+rs23 v16 fu  370.46  370.98  +0.53
+rs23 v32 sl  347.56  350.90  +3.35
+rs23 v32 fu  531.02  537.78  +6.75
+rs37 d1 sli   67.18   65.56  -1.62
+rs37 d1 ful   74.61   73.98  -0.63
+rs37 d16 sl  128.90  128.69  -0.20
+rs37 d16 fu  207.64  207.65  +0.01
+rs37 d32 sl  151.30  151.48  +0.17
+rs37 d32 fu  296.96  296.86  -0.10
+rs37 v1 sli  110.83  111.12  +0.29
+rs37 v1 ful  118.02  118.00  -0.02
+rs37 v16 sl  262.87  267.89  +5.02
+rs37 v16 fu  361.60  361.15  -0.46
+rs37 v32 sl  324.17  327.22  +3.04
+rs37 v32 fu  504.52  510.47  +5.95
+rs41 d1 sli   65.41   65.47  +0.06
+rs41 d1 ful   69.59   65.87  -3.72
+rs41 d16 sl  132.62  132.46  -0.16
+rs41 d16 fu  204.16  204.62  +0.46
+rs41 d32 sl  159.90  159.89  -0.01
+rs41 d32 fu  306.77  306.68  -0.09
+rs41 v1 sli  102.08  102.15  +0.07
+rs41 v1 ful  123.56  123.32  -0.23
+rs41 v16 sl  283.58  284.66  +1.08
+rs41 v16 fu  374.96  380.98  +6.01
+rs41 v32 sl  353.52  353.15  -0.37
+rs41 v32 fu  536.51  539.98  +3.47
+rs53 d1 sli   63.94   60.70  -3.24
+rs53 d1 ful   73.31   71.88  -1.43
+rs53 d16 sl  123.84  124.17  +0.33
+rs53 d16 fu  201.20  200.99  -0.21
+rs53 d32 sl  145.63  145.87  +0.24
+rs53 d32 fu  285.42  285.64  +0.22
+rs53 v1 sli  115.22  115.02  -0.20
+rs53 v1 ful  121.86  121.88  +0.02
+rs53 v16 sl  272.79  259.61 -13.18
+rs53 v16 fu  376.44  372.70  -3.74
+rs53 v32 sl  337.17  339.59  +2.42
+rs53 v32 fu  514.16  517.83  +3.67
+rs67 d1 sli   63.99   63.88  -0.11
+rs67 d1 ful   73.15   72.58  -0.58
+rs67 d16 sl  130.02  130.24  +0.22
+rs67 d16 fu  203.64  203.71  +0.07
+rs67 d32 sl  150.09  150.25  +0.16
+rs67 d32 fu  298.64  298.98  +0.35
+rs67 v1 sli  113.51  113.38  -0.14
+rs67 v1 ful  122.20  122.28  +0.09
+rs67 v16 sl  260.75  262.72  +1.97
+rs67 v16 fu  351.37  356.12  +4.75
+rs67 v32 sl  321.99  324.87  +2.88
+rs67 v32 fu  500.71  503.16  +2.45
+shape              off(med)  on(med)   on-off  (median over router seeds of per-seed medians)
+decode 1 sliding      65.45    64.68   -0.77
+decode 1 full         73.23    72.23   -1.00
+decode 16 sliding    131.32   131.35   +0.03
+decode 16 full       205.90   206.14   +0.23
+decode 32 sliding    154.88   154.94   +0.06
+decode 32 full       302.70   302.83   +0.13
+verify 1 sliding     114.36   114.20   -0.17
+verify 1 full        122.88   122.80   -0.07
+verify 16 sliding    273.93   270.58   -3.35
+verify 16 full       372.32   371.84   -0.48
+verify 32 sliding    342.36   345.12   +2.76
+verify 32 full       519.99   522.24   +2.25
+  decode 1   load gain +1.24%
+  decode 16  load gain -0.05%
+  decode 32  load gain -0.04%
+  verify 1   load gain +0.12%
+  verify 16  load gain +0.88%
+  verify 32  load gain -0.67%
+score delta (geomean over 6 loads): +0.25%  (6-load board: x6/6)
+JUDGE total: 0 fails / 0 slack-on inputs, distinct saved 0.00/input, worst drop-lead 0.0000
+h200: charged 3.6 GPU-min; 4 of 60 used today

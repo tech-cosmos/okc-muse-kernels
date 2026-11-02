@@ -1,0 +1,96 @@
+env: torch 2.14.1+cu130, triton 3.8.0
+env: torch 2.14.1+cu130, triton 3.8.0
+rs 11 decode 1 sliding off    72.98 on    72.85  on-off  -0.13
+rs 11 decode 1 sliding JUDGE fails 0/10 gap 0.0187 drop-lead 0.0165 distinct saved 0.30
+rs 11 decode 1 full    off    92.00 on    84.54  on-off  -7.46
+rs 11 decode 1 full    JUDGE fails 0/10 gap 0.0069 drop-lead 0.0069 distinct saved 0.10
+rs 11 decode 16 sliding off   190.26 on   190.26  on-off  +0.00
+rs 11 decode 16 full   off   295.94 on   296.54  on-off  +0.61
+rs 11 decode 32 sliding off   231.46 on   233.12  on-off  +1.66
+rs 11 decode 32 full   off   421.42 on   419.57  on-off  -1.86
+rs 11 verify 1 sliding off   162.88 on   161.82  on-off  -1.06
+rs 11 verify 1 full    off   145.65 on   144.93  on-off  -0.72
+rs 11 verify 16 sliding off   322.03 on   326.96  on-off  +4.93
+rs 11 verify 16 sliding JUDGE fails 0/10 gap 0.0269 drop-lead 0.0079 distinct saved 1.20
+rs 11 verify 16 full   off   472.82 on   475.38  on-off  +2.56
+rs 11 verify 16 full   JUDGE fails 0/10 gap 0.0220 drop-lead 0.0098 distinct saved 0.90
+rs 11 verify 32 sliding off   392.83 on   398.70  on-off  +5.87
+rs 11 verify 32 sliding JUDGE fails 0/10 gap 0.0241 drop-lead 0.0078 distinct saved 0.80
+rs 11 verify 32 full   off   650.93 on   633.20  on-off -17.73
+rs 11 verify 32 full   JUDGE fails 0/10 gap 0.0108 drop-lead 0.0059 distinct saved 0.80
+rs 23 decode 1 sliding off    82.69 on    82.88  on-off  +0.19
+rs 23 decode 1 sliding JUDGE fails 0/10 gap 0.0022 drop-lead 0.0054 distinct saved 0.20
+rs 23 decode 1 full    off   111.89 on   112.96  on-off  +1.07
+rs 23 decode 1 full    JUDGE fails 0/10 gap 0.0055 drop-lead 0.0055 distinct saved 0.50
+rs 23 decode 16 sliding off   227.81 on   228.26  on-off  +0.45
+rs 23 decode 16 full   off   323.50 on   322.74  on-off  -0.77
+rs 23 decode 32 sliding off   257.07 on   257.63  on-off  +0.56
+rs 23 decode 32 full   off   446.64 on   445.60  on-off  -1.04
+rs 23 verify 1 sliding off   151.14 on   150.26  on-off  -0.88
+rs 23 verify 1 full    off   163.52 on   163.41  on-off  -0.11
+rs 23 verify 16 sliding off   355.26 on   344.56  on-off -10.70
+rs 23 verify 16 sliding JUDGE fails 0/10 gap 0.0264 drop-lead 0.0080 distinct saved 1.40
+rs 23 verify 16 full   off   460.66 on   464.51  on-off  +3.86
+rs 23 verify 16 full   JUDGE fails 0/10 gap 0.0254 drop-lead 0.0066 distinct saved 1.00
+rs 23 verify 32 sliding off   393.02 on   398.90  on-off  +5.87
+rs 23 verify 32 sliding JUDGE fails 0/10 gap 0.0190 drop-lead 0.0046 distinct saved 0.20
+rs 23 verify 32 full   off   653.58 on   659.52  on-off  +5.94
+rs 23 verify 32 full   JUDGE fails 0/10 gap 0.0177 drop-lead 0.0047 distinct saved 0.50
+rs 37 decode 1 sliding off    82.66 on    82.83  on-off  +0.18
+rs 37 decode 1 sliding JUDGE fails 0/10 gap 0.0080 drop-lead 0.0049 distinct saved 0.30
+rs 37 decode 1 full    off    84.05 on    82.54  on-off  -1.50
+rs 37 decode 1 full    JUDGE fails 0/10 gap 0.0272 drop-lead 0.0076 distinct saved 0.50
+rs 37 decode 16 sliding off   182.64 on   182.78  on-off  +0.14
+rs 37 decode 16 full   off   282.06 on   281.70  on-off  -0.37
+rs 37 decode 32 sliding off   186.16 on   185.54  on-off  -0.62
+rs 37 decode 32 full   off   407.73 on   407.60  on-off  -0.13
+rs 37 verify 1 sliding off   152.34 on   151.71  on-off  -0.62
+rs 37 verify 1 full    off   147.58 on   146.74  on-off  -0.85
+rs 37 verify 16 sliding off   303.95 on   307.10  on-off  +3.15
+rs 37 verify 16 sliding JUDGE fails 0/10 gap 0.0140 drop-lead 0.0056 distinct saved 0.70
+rs 37 verify 16 full   off   426.16 on   430.90  on-off  +4.74
+rs 37 verify 16 full   JUDGE fails 0/10 gap 0.0266 drop-lead 0.0080 distinct saved 0.80
+rs 37 verify 32 sliding off   379.62 on   385.26  on-off  +5.65
+rs 37 verify 32 sliding JUDGE fails 0/10 gap 0.0270 drop-lead 0.0062 distinct saved 1.00
+rs 37 verify 32 full   off   592.08 on   588.02  on-off  -4.06
+rs 37 verify 32 full   JUDGE fails 0/10 gap 0.0271 drop-lead 0.0074 distinct saved 1.40
+rs 41 decode 1 sliding off    73.70 on    73.55  on-off  -0.14
+rs 41 decode 1 sliding JUDGE fails 0/10 gap 0.0079 drop-lead 0.0079 distinct saved 0.30
+rs 41 decode 1 full    off    83.71 on    83.47  on-off  -0.24
+rs 41 decode 1 full    JUDGE fails 0/10 gap 0.0047 drop-lead 0.0047 distinct saved 0.20
+rs 41 decode 16 sliding off   192.48 on   192.05  on-off  -0.43
+rs 41 decode 16 full   off   262.42 on   263.42  on-off  +1.01
+rs 41 decode 32 sliding off   189.15 on   189.55  on-off  +0.40
+rs 41 decode 32 full   off   416.75 on   416.78  on-off  +0.03
+rs 41 verify 1 sliding off   133.90 on   133.34  on-off  -0.56
+rs 41 verify 1 full    off   145.68 on   145.10  on-off  -0.58
+rs 41 verify 16 sliding off   334.24 on   333.73  on-off  -0.51
+rs 41 verify 16 sliding JUDGE fails 0/10 gap 0.0271 drop-lead 0.0077 distinct saved 0.50
+rs 41 verify 16 full   off   463.63 on   464.03  on-off  +0.40
+rs 41 verify 16 full   JUDGE fails 0/10 gap 0.0150 drop-lead 0.0077 distinct saved 0.80
+rs 41 verify 32 sliding off   413.62 on   419.26  on-off  +5.65
+rs 41 verify 32 sliding JUDGE fails 0/10 gap 0.0227 drop-lead 0.0093 distinct saved 0.60
+rs 41 verify 32 full   off   648.05 on   654.13  on-off  +6.08
+rs 41 verify 32 full   JUDGE fails 0/10 gap 0.0172 drop-lead 0.0069 distinct saved 0.80
+shape              off(med)  on(med)   on-off  (median over router seeds of per-seed medians)
+decode 1 sliding      78.18    78.19   +0.02
+decode 1 full         88.02    84.01   -4.02
+decode 16 sliding    191.37   191.15   -0.22
+decode 16 full       289.00   289.12   +0.12
+decode 32 sliding    210.30   211.34   +1.03
+decode 32 full       419.09   418.18   -0.91
+verify 1 sliding     151.74   150.98   -0.75
+verify 1 full        146.63   145.92   -0.71
+verify 16 sliding    328.14   330.34   +2.21
+verify 16 full       462.14   464.27   +2.13
+verify 32 sliding    392.93   398.80   +5.87
+verify 32 full       649.49   643.66   -5.82
+  decode 1   load gain +1.28%
+  decode 16  load gain +0.06%
+  decode 32  load gain -0.20%
+  verify 1   load gain +0.49%
+  verify 16  load gain -0.60%
+  verify 32  load gain -0.62%
+score delta (geomean over 6 loads): +0.07%  (6-load board: x6/6)
+JUDGE total: 0 fails / 240 slack-on inputs, distinct saved 0.66/input, worst drop-lead 0.0165
+python tools/fresh/x42/slack_ab.py /tmp/x42/off.py /tmp/x42/on.py 11,23,37,41  37.46s user 3.25s system 106% cpu 38.362 total

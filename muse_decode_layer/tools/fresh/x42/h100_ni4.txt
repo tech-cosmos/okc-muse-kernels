@@ -1,0 +1,96 @@
+env: torch 2.14.1+cu130, triton 3.8.0
+env: torch 2.14.1+cu130, triton 3.8.0
+rs 11 decode 1 sliding off    82.45 on    78.00  on-off  -4.45  (4 inputs)
+rs 11 decode 1 full    off    85.21 on    84.50  on-off  -0.71  (4 inputs)
+rs 11 decode 16 sliding off   182.40 on   181.81  on-off  -0.59  (4 inputs)
+rs 11 decode 16 full   off   298.71 on   298.20  on-off  -0.50  (4 inputs)
+rs 11 decode 32 sliding off   202.08 on   202.09  on-off  +0.01  (4 inputs)
+rs 11 decode 32 full   off   434.64 on   434.72  on-off  +0.08  (4 inputs)
+rs 11 verify 1 sliding off   165.58 on   165.10  on-off  -0.48  (4 inputs)
+rs 11 verify 1 full    off   168.58 on   168.01  on-off  -0.57  (4 inputs)
+rs 11 verify 16 sliding off   344.07 on   339.42  on-off  -4.65  (4 inputs)
+rs 11 verify 16 full   off   465.73 on   460.37  on-off  -5.36  (4 inputs)
+rs 11 verify 32 sliding off   418.80 on   416.74  on-off  -2.06  (4 inputs)
+rs 11 verify 32 full   off   645.60 on   640.68  on-off  -4.92  (4 inputs)
+rs 23 decode 1 sliding off    78.16 on    74.02  on-off  -4.15  (4 inputs)
+rs 23 decode 1 full    off    92.37 on    93.06  on-off  +0.68  (4 inputs)
+rs 23 decode 16 sliding off   209.30 on   209.38  on-off  +0.08  (4 inputs)
+rs 23 decode 16 full   off   316.87 on   316.57  on-off  -0.30  (4 inputs)
+rs 23 decode 32 sliding off   232.93 on   233.68  on-off  +0.75  (4 inputs)
+rs 23 decode 32 full   off   465.24 on   465.12  on-off  -0.12  (4 inputs)
+rs 23 verify 1 sliding off   170.49 on   170.47  on-off  -0.02  (4 inputs)
+rs 23 verify 1 full    off   166.91 on   166.37  on-off  -0.54  (4 inputs)
+rs 23 verify 16 sliding off   353.54 on   355.21  on-off  +1.67  (4 inputs)
+rs 23 verify 16 full   off   456.50 on   453.50  on-off  -3.01  (4 inputs)
+rs 23 verify 32 sliding off   410.68 on   408.24  on-off  -2.44  (4 inputs)
+rs 23 verify 32 full   off   643.25 on   645.70  on-off  +2.44  (4 inputs)
+rs 37 decode 1 sliding off    80.47 on    78.23  on-off  -2.24  (4 inputs)
+rs 37 decode 1 full    off    90.01 on    90.51  on-off  +0.50  (4 inputs)
+rs 37 decode 16 sliding off   159.52 on   159.43  on-off  -0.09  (4 inputs)
+rs 37 decode 16 full   off   284.98 on   284.61  on-off  -0.37  (4 inputs)
+rs 37 decode 32 sliding off   188.15 on   187.84  on-off  -0.31  (4 inputs)
+rs 37 decode 32 full   off   412.30 on   412.73  on-off  +0.42  (4 inputs)
+rs 37 verify 1 sliding off   141.08 on   141.42  on-off  +0.34  (4 inputs)
+rs 37 verify 1 full    off   147.84 on   147.70  on-off  -0.14  (4 inputs)
+rs 37 verify 16 sliding off   311.57 on   316.08  on-off  +4.51  (4 inputs)
+rs 37 verify 16 full   off   434.09 on   429.78  on-off  -4.32  (4 inputs)
+rs 37 verify 32 sliding off   371.86 on   371.84  on-off  -0.02  (4 inputs)
+rs 37 verify 32 full   off   604.84 on   605.91  on-off  +1.07  (4 inputs)
+rs 41 decode 1 sliding off    78.31 on    78.34  on-off  +0.02  (4 inputs)
+rs 41 decode 1 full    off    82.75 on    79.68  on-off  -3.07  (4 inputs)
+rs 41 decode 16 sliding off   169.12 on   169.26  on-off  +0.14  (4 inputs)
+rs 41 decode 16 full   off   277.67 on   277.00  on-off  -0.68  (4 inputs)
+rs 41 decode 32 sliding off   198.84 on   199.06  on-off  +0.23  (4 inputs)
+rs 41 decode 32 full   off   427.85 on   428.02  on-off  +0.16  (4 inputs)
+rs 41 verify 1 sliding off   127.08 on   127.38  on-off  +0.29  (4 inputs)
+rs 41 verify 1 full    off   156.63 on   156.23  on-off  -0.40  (4 inputs)
+rs 41 verify 16 sliding off   346.38 on   347.66  on-off  +1.28  (4 inputs)
+rs 41 verify 16 full   off   463.77 on   465.62  on-off  +1.84  (4 inputs)
+rs 41 verify 32 sliding off   419.35 on   417.16  on-off  -2.18  (4 inputs)
+rs 41 verify 32 full   off   654.30 on   657.11  on-off  +2.81  (4 inputs)
+rs 53 decode 1 sliding off    75.67 on    71.49  on-off  -4.18  (4 inputs)
+rs 53 decode 1 full    off    87.83 on    86.20  on-off  -1.63  (4 inputs)
+rs 53 decode 16 sliding off   157.06 on   156.86  on-off  -0.20  (4 inputs)
+rs 53 decode 16 full   off   273.17 on   273.35  on-off  +0.18  (4 inputs)
+rs 53 decode 32 sliding off   179.15 on   179.62  on-off  +0.47  (4 inputs)
+rs 53 decode 32 full   off   394.88 on   394.52  on-off  -0.36  (4 inputs)
+rs 53 verify 1 sliding off   146.52 on   146.99  on-off  +0.47  (4 inputs)
+rs 53 verify 1 full    off   154.15 on   154.49  on-off  +0.34  (4 inputs)
+rs 53 verify 16 sliding off   326.22 on   311.38  on-off -14.84  (4 inputs)
+rs 53 verify 16 full   off   456.47 on   449.16  on-off  -7.31  (4 inputs)
+rs 53 verify 32 sliding off   399.70 on   398.64  on-off  -1.06  (4 inputs)
+rs 53 verify 32 full   off   628.06 on   625.66  on-off  -2.40  (4 inputs)
+rs 67 decode 1 sliding off    75.92 on    75.91  on-off  -0.00  (4 inputs)
+rs 67 decode 1 full    off    87.45 on    88.58  on-off  +1.13  (4 inputs)
+rs 67 decode 16 sliding off   165.02 on   165.46  on-off  +0.44  (4 inputs)
+rs 67 decode 16 full   off   278.04 on   277.08  on-off  -0.96  (4 inputs)
+rs 67 decode 32 sliding off   181.60 on   181.96  on-off  +0.36  (4 inputs)
+rs 67 decode 32 full   off   412.36 on   412.56  on-off  +0.20  (4 inputs)
+rs 67 verify 1 sliding off   144.08 on   144.41  on-off  +0.33  (4 inputs)
+rs 67 verify 1 full    off   154.59 on   154.77  on-off  +0.18  (4 inputs)
+rs 67 verify 16 sliding off   304.06 on   302.96  on-off  -1.11  (4 inputs)
+rs 67 verify 16 full   off   428.52 on   424.86  on-off  -3.66  (4 inputs)
+rs 67 verify 32 sliding off   365.90 on   363.99  on-off  -1.91  (4 inputs)
+rs 67 verify 32 full   off   593.61 on   591.94  on-off  -1.67  (4 inputs)
+shape              off(med)  on(med)   on-off  (median over router seeds of per-seed medians)
+decode 1 sliding      78.24    76.96   -1.28
+decode 1 full         87.64    87.39   -0.25
+decode 16 sliding    167.07   167.36   +0.29
+decode 16 full       281.51   280.85   -0.67
+decode 32 sliding    193.49   193.45   -0.04
+decode 32 full       420.11   420.37   +0.26
+verify 1 sliding     145.30   145.70   +0.40
+verify 1 full        155.61   155.50   -0.11
+verify 16 sliding    335.14   327.75   -7.39
+verify 16 full       456.49   451.33   -5.16
+verify 32 sliding    405.19   403.44   -1.75
+verify 32 full       635.66   633.17   -2.48
+  decode 1   load gain +1.27%
+  decode 16  load gain -0.02%
+  decode 32  load gain -0.01%
+  verify 1   load gain -0.18%
+  verify 16  load gain +1.88%
+  verify 32  load gain +0.42%
+score delta (geomean over 6 loads): +0.56%  (6-load board: x6/6)
+JUDGE total: 0 fails / 0 slack-on inputs, distinct saved 0.00/input, worst drop-lead 0.0000
+python tools/fresh/x42/slack_ab.py /tmp/x42/off.py /tmp/x42/on.py  3 0 "" ""   61.56s user 6.86s system 103% cpu 1:05.95 total
