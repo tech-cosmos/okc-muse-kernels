@@ -1,6 +1,9 @@
 # STATE-moe (muse_moe_w4a16; rewritten o21 2026-10-31 17:40Z: session log moved to NOTES-moe.md "STATE archive o21")
 
 ## NOW (read first)
+- o48 (11-02 09:15Z sandbox clock, lead 09:50Z H200 confirmation, 3.0 Modal min, tools/o48, NOTES o48): H200 = H100 +-2 cycles for
+  o47 a-d and o46 chain best. FP16 acc + FP32 promotion every 4/2/1 k16 is SLOWER than today (P4 1.03x N8/N32, 1.22x N64; P1 1.4-2.4x;
+  2-set promotion is always ptxas-serialized, C7514). Only unpromoted FP16 acc wins (forbidden). Holding.
 - o47 (11-02 09:20Z, lead 09:10Z F16-accumulate microbench, MEASUREMENT ONLY, tools/o47, NOTES o47): f16 operands = 1.000x;
   FP16 accumulate wgmma 0.817x N32 / 0.937x N64 / 0.946x N8 (mma.sync 0.93/0.96); error relL2 2.3e-3 whole-K, 2e-4 per-k16 promotion
   (FP32 1e-6). Rule 'no FP16 acc' stands; nothing in submission. Holding.
@@ -30,8 +33,6 @@
 - o42 (lead 22:55Z): v1 sl expert-side hop stamps (tools/o42, NOTES o42). Only unclosed hop = nu8 (D) 4.9 us past-wait->end;
   BUILT nu8 'mmq' (compile-time nt MMA, bitwise class = base): H100 v1 sl -0.6..-0.9 / full -0.5..-0.6 us = under the 1 us gate;
   posted as an optional rider for layer (`python tools/o42/stp_patch.py <layer sub> <out> mmq`). Not validated/H200 yet.
-- o43: mmq rider being integrated by layer (r-layer working tree 23:46Z); nothing open for moe.
-- Sessions o20-o41 found no new lever (o22: test PASS on 8242d5e again; o27-o41 status only). Suggested to the lead: ~/STOP-moe until a build needs moe.
 
 ## Board
 - (old, see NOW for current) Best submit was **aeba42c5 @a60019d (TWM_EPI), 2.2792x** (21:30Z 10-28; check fc7e86d6 2.3127x). Was 4fb734c6 @eb8c03c 2.2703x. Was 951c17e0 @21deb8a (bs256 hot32+split66), 2.2535x (2026-10-28 05:45Z; check cefcc133 2.2632x). Was febfcb1f @72d1274 (SCB) 2.2469x. Was 6a92803a 2.190x. Board is a TEST BED only (lead 01:45Z): the layer counts.

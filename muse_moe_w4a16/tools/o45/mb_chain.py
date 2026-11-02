@@ -21,6 +21,7 @@ VARS = [(2, 64, 1, 0, 1), (2, 64, 2, 1, 1), (2, 64, 4, 0, 1), (2, 64, 4, 1, 1), 
         (4, 32, 1, 0, 1), (4, 32, 2, 1, 1), (4, 32, 4, 0, 1), (4, 32, 4, 1, 1), (4, 32, 4, 1, 0), (4, 32, 8, 1, 0),
         (4, 8, 1, 0, 1), (4, 8, 4, 1, 1)]
 if len(sys.argv) > 2: VARS = [v for v in VARS if f"{v[0]},{v[1]}" in sys.argv[2].split(":")]
+if os.environ.get("CHV"): VARS = [v for v in VARS if ",".join(map(str, v)) in os.environ["CHV"].split(":")]
 SRC = r"""
 #include <cstdint>
 __device__ __forceinline__ uint32_t smem_u32(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }

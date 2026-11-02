@@ -1,0 +1,156 @@
+NVIDIA H100 80GB HBM3, 1980 MHz
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+torch 2.14.1+cu130
+## SASS (mb_f16p, this build): key regs/instr/alu/HGMMA/HMUL2 (ty 0-2: dq-only, both; ty 3-8 both)
+PTXAS C7514 ('p', '3', '2', '64', '1', '1')
+PTXAS C7517 ('p', '2', '2', '64', '1', '1')
+PTXAS C7514 ('p', '2', '2', '64', '1', '1')
+PTXAS C7514 ('p', '3', '2', '64', '2', '1')
+PTXAS C7519 ('p', '2', '2', '64', '2', '1')
+PTXAS C7519 ('p', '2', '2', '64', '2', '1')
+PTXAS C7519 ('p', '2', '2', '64', '2', '1')
+PTXAS C7519 ('p', '2', '2', '64', '2', '1')
+PTXAS C7517 ('p', '2', '2', '64', '2', '1')
+PTXAS C7514 ('p', '2', '2', '64', '2', '1')
+PTXAS C7514 ('p', '3', '2', '64', '4', '1')
+PTXAS C7519 ('p', '2', '2', '64', '4', '1')
+PTXAS C7519 ('p', '2', '2', '64', '4', '1')
+PTXAS C7517 ('p', '2', '2', '64', '4', '1')
+PTXAS C7514 ('p', '2', '2', '64', '4', '1')
+PTXAS C7517 ('p', '2', '2', '64', '1', '0')
+PTXAS C7514 ('p', '2', '2', '64', '1', '0')
+PTXAS C7519 ('p', '2', '2', '64', '2', '0')
+PTXAS C7519 ('p', '2', '2', '64', '2', '0')
+PTXAS C7519 ('p', '2', '2', '64', '2', '0')
+PTXAS C7519 ('p', '2', '2', '64', '2', '0')
+PTXAS C7517 ('p', '2', '2', '64', '2', '0')
+PTXAS C7514 ('p', '2', '2', '64', '2', '0')
+PTXAS C7519 ('p', '2', '2', '64', '4', '0')
+PTXAS C7519 ('p', '2', '2', '64', '4', '0')
+PTXAS C7517 ('p', '2', '2', '64', '4', '0')
+PTXAS C7514 ('p', '2', '2', '64', '4', '0')
+PTXAS C7514 ('p', '3', '4', '32', '1', '1')
+PTXAS C7517 ('p', '2', '4', '32', '1', '1')
+PTXAS C7514 ('p', '2', '4', '32', '1', '1')
+PTXAS C7514 ('p', '3', '4', '32', '2', '1')
+PTXAS C7519 ('p', '2', '4', '32', '2', '1')
+PTXAS C7519 ('p', '2', '4', '32', '2', '1')
+PTXAS C7519 ('p', '2', '4', '32', '2', '1')
+PTXAS C7519 ('p', '2', '4', '32', '2', '1')
+PTXAS C7517 ('p', '2', '4', '32', '2', '1')
+PTXAS C7514 ('p', '2', '4', '32', '2', '1')
+PTXAS C7514 ('p', '3', '4', '32', '4', '1')
+PTXAS C7519 ('p', '2', '4', '32', '4', '1')
+PTXAS C7519 ('p', '2', '4', '32', '4', '1')
+PTXAS C7517 ('p', '2', '4', '32', '4', '1')
+PTXAS C7514 ('p', '2', '4', '32', '4', '1')
+PTXAS C7517 ('p', '2', '4', '32', '1', '0')
+PTXAS C7514 ('p', '2', '4', '32', '1', '0')
+PTXAS C7519 ('p', '2', '4', '32', '2', '0')
+PTXAS C7519 ('p', '2', '4', '32', '2', '0')
+PTXAS C7519 ('p', '2', '4', '32', '2', '0')
+PTXAS C7519 ('p', '2', '4', '32', '2', '0')
+PTXAS C7517 ('p', '2', '4', '32', '2', '0')
+PTXAS C7514 ('p', '2', '4', '32', '2', '0')
+PTXAS C7519 ('p', '2', '4', '32', '4', '0')
+PTXAS C7519 ('p', '2', '4', '32', '4', '0')
+PTXAS C7517 ('p', '2', '4', '32', '4', '0')
+PTXAS C7514 ('p', '2', '4', '32', '4', '0')
+PTXAS C7514 ('p', '3', '4', '8', '1', '1')
+PTXAS C7517 ('p', '2', '4', '8', '1', '1')
+PTXAS C7514 ('p', '2', '4', '8', '1', '1')
+PTXAS C7514 ('p', '3', '4', '8', '2', '1')
+PTXAS C7519 ('p', '2', '4', '8', '2', '1')
+PTXAS C7519 ('p', '2', '4', '8', '2', '1')
+PTXAS C7519 ('p', '2', '4', '8', '2', '1')
+PTXAS C7519 ('p', '2', '4', '8', '2', '1')
+PTXAS C7517 ('p', '2', '4', '8', '2', '1')
+PTXAS C7514 ('p', '2', '4', '8', '2', '1')
+PTXAS C7514 ('p', '3', '4', '8', '4', '1')
+PTXAS C7519 ('p', '2', '4', '8', '4', '1')
+PTXAS C7519 ('p', '2', '4', '8', '4', '1')
+PTXAS C7517 ('p', '2', '4', '8', '4', '1')
+PTXAS C7514 ('p', '2', '4', '8', '4', '1')
+PTXAS C7517 ('p', '2', '4', '8', '1', '0')
+PTXAS C7514 ('p', '2', '4', '8', '1', '0')
+PTXAS C7519 ('p', '2', '4', '8', '2', '0')
+PTXAS C7519 ('p', '2', '4', '8', '2', '0')
+PTXAS C7519 ('p', '2', '4', '8', '2', '0')
+PTXAS C7519 ('p', '2', '4', '8', '2', '0')
+PTXAS C7517 ('p', '2', '4', '8', '2', '0')
+PTXAS C7514 ('p', '2', '4', '8', '2', '0')
+PTXAS C7519 ('p', '2', '4', '8', '4', '0')
+PTXAS C7519 ('p', '2', '4', '8', '4', '0')
+PTXAS C7517 ('p', '2', '4', '8', '4', '0')
+PTXAS C7514 ('p', '2', '4', '8', '4', '0')
+4 8 0 (36, 576, 328, [], ['HMUL2.BF16_V2']) (90, 616, 328, ['HGMMA.64x8x16.F32.BF16'], ['HMUL2.BF16_V2'])
+4 8 1 (36, 576, 328, [], ['HMUL2']) (90, 616, 328, ['HGMMA.64x8x16.F32'], ['HMUL2'])
+4 8 2 (36, 576, 328, [], ['HMUL2']) (84, 600, 334, ['HGMMA.64x8x16.F16'], ['HMUL2'])
+4 8 3  (106, 960, 542, ['HGMMA.64x8x16.F16'], ['HMUL2'])
+4 8 4  (114, 1024, 536, ['HGMMA.64x8x16.F16'], ['HMUL2'])
+4 8 5  (137, 1136, 506, ['HGMMA.64x8x16.F16'], ['HMUL2'])
+4 8 6  (61, 1008, 549, ['HGMMA.64x8x16.F16'], ['HMUL2'])
+4 8 7  (59, 1080, 554, ['HGMMA.64x8x16.F16'], ['HMUL2'])
+4 8 8  (56, 1208, 519, ['HGMMA.64x8x16.F16'], ['HMUL2'])
+4 32 0 (36, 576, 328, [], ['HMUL2.BF16_V2']) (154, 680, 329, ['HGMMA.64x32x16.F32.BF16'], ['HMUL2.BF16_V2'])
+4 32 1 (36, 576, 328, [], ['HMUL2']) (154, 680, 329, ['HGMMA.64x32x16.F32'], ['HMUL2'])
+4 32 2 (36, 576, 328, [], ['HMUL2']) (122, 680, 358, ['HGMMA.64x32x16.F16'], ['HMUL2'])
+4 32 3  (222, 1256, 499, ['HGMMA.64x32x16.F16'], ['HMUL2'])
+4 32 4  (202, 1504, 499, ['HGMMA.64x32x16.F16'], ['HMUL2'])
+4 32 5  (199, 2008, 499, ['HGMMA.64x32x16.F16'], ['HMUL2'])
+4 32 6  (157, 1352, 543, ['HGMMA.64x32x16.F16'], ['HMUL2'])
+4 32 7  (155, 1624, 531, ['HGMMA.64x32x16.F16'], ['HMUL2'])
+4 32 8  (157, 2120, 531, ['HGMMA.64x32x16.F16'], ['HMUL2'])
+2 64 0 (32, 456, 224, [], ['HMUL2.BF16_V2']) (122, 560, 226, ['HGMMA.64x64x16.F32.BF16'], ['HMUL2.BF16_V2'])
+2 64 1 (32, 456, 224, [], ['HMUL2']) (122, 560, 226, ['HGMMA.64x64x16.F32'], ['HMUL2'])
+2 64 2 (32, 456, 224, [], ['HMUL2']) (90, 560, 255, ['HGMMA.64x64x16.F16'], ['HMUL2'])
+2 64 3  (200, 1008, 291, ['HGMMA.64x64x16.F16'], ['HMUL2'])
+2 64 4  (255, 1264, 291, ['HGMMA.64x64x16.F16'], ['HMUL2'])
+2 64 5  (188, 1776, 291, ['HGMMA.64x64x16.F16'], ['HMUL2'])
+2 64 6  (196, 1088, 324, ['HGMMA.64x64x16.F16'], ['HMUL2'])
+2 64 7  (168, 1344, 323, ['HGMMA.64x64x16.F16'], ['HMUL2'])
+2 64 8  (147, 1856, 323, ['HGMMA.64x64x16.F16'], ['HMUL2'])
+## mb_f16p grid 132
+RT4 N 8 bf16/f32acc: dq    750 MMA    416 both    804 both/today 1.000 | regs 90 alu 328 ['HGMMA.64x8x16.F32.BF16'] ['HMUL2.BF16_V2']
+RT4 N 8 f16/f32acc : dq    750 MMA    416 both    804 both/today 1.000 | regs 90 alu 328 ['HGMMA.64x8x16.F32'] ['HMUL2']
+RT4 N 8 f16/f16acc : dq    750 MMA    423 both    761 both/today 0.946 | regs 84 alu 334 ['HGMMA.64x8x16.F16'] ['HMUL2']
+RT4 N 8 f16acc+P4 : dq    nan MMA    767 both    830 both/today 1.032 | regs 106 alu 542 ['HGMMA.64x8x16.F16'] ['HMUL2']
+RT4 N 8 f16acc+P2 : dq    nan MMA    680 both    923 both/today 1.149 | regs 114 alu 536 ['HGMMA.64x8x16.F16'] ['HMUL2']
+RT4 N 8 f16acc+P1 : dq    nan MMA    457 both   1106 both/today 1.376 | regs 137 alu 506 ['HGMMA.64x8x16.F16'] ['HMUL2']
+RT4 N 8 2set+P4   : dq    nan MMA    797 both   1145 both/today 1.425 | regs 61 alu 549 ['HGMMA.64x8x16.F16'] ['HMUL2']
+RT4 N 8 2set+P2   : dq    nan MMA    721 both   1179 both/today 1.467 | regs 59 alu 554 ['HGMMA.64x8x16.F16'] ['HMUL2']
+RT4 N 8 2set+P1   : dq    nan MMA    483 both   1267 both/today 1.577 | regs 56 alu 519 ['HGMMA.64x8x16.F16'] ['HMUL2']
+RT4 N32 bf16/f32acc: dq    750 MMA    542 both   1047 both/today 1.000 | regs 154 alu 329 ['HGMMA.64x32x16.F32.BF16'] ['HMUL2.BF16_V2']
+RT4 N32 f16/f32acc : dq    750 MMA    542 both   1047 both/today 1.000 | regs 154 alu 329 ['HGMMA.64x32x16.F32'] ['HMUL2']
+RT4 N32 f16/f16acc : dq    750 MMA    512 both    856 both/today 0.818 | regs 122 alu 358 ['HGMMA.64x32x16.F16'] ['HMUL2']
+RT4 N32 f16acc+P4 : dq    nan MMA   1141 both   1084 both/today 1.035 | regs 222 alu 499 ['HGMMA.64x32x16.F16'] ['HMUL2']
+RT4 N32 f16acc+P2 : dq    nan MMA   1164 both   1435 both/today 1.370 | regs 202 alu 499 ['HGMMA.64x32x16.F16'] ['HMUL2']
+RT4 N32 f16acc+P1 : dq    nan MMA   1431 both   2008 both/today 1.917 | regs 199 alu 499 ['HGMMA.64x32x16.F16'] ['HMUL2']
+RT4 N32 2set+P4   : dq    nan MMA   1148 both   1636 both/today 1.562 | regs 157 alu 543 ['HGMMA.64x32x16.F16'] ['HMUL2']
+RT4 N32 2set+P2   : dq    nan MMA   1130 both   1731 both/today 1.653 | regs 155 alu 531 ['HGMMA.64x32x16.F16'] ['HMUL2']
+RT4 N32 2set+P1   : dq    nan MMA   1436 both   2226 both/today 2.126 | regs 157 alu 531 ['HGMMA.64x32x16.F16'] ['HMUL2']
+RT2 N64 bf16/f32acc: dq    376 MMA    512 both    736 both/today 1.000 | regs 122 alu 226 ['HGMMA.64x64x16.F32.BF16'] ['HMUL2.BF16_V2']
+RT2 N64 f16/f32acc : dq    377 MMA    512 both    736 both/today 1.000 | regs 122 alu 226 ['HGMMA.64x64x16.F32'] ['HMUL2']
+RT2 N64 f16/f16acc : dq    376 MMA    512 both    690 both/today 0.937 | regs 90 alu 255 ['HGMMA.64x64x16.F16'] ['HMUL2']
+RT2 N64 f16acc+P4 : dq    nan MMA    893 both    900 both/today 1.222 | regs 200 alu 291 ['HGMMA.64x64x16.F16'] ['HMUL2']
+RT2 N64 f16acc+P2 : dq    nan MMA   1094 both   1124 both/today 1.527 | regs 255 alu 291 ['HGMMA.64x64x16.F16'] ['HMUL2']
+RT2 N64 f16acc+P1 : dq    nan MMA   1390 both   1789 both/today 2.429 | regs 188 alu 291 ['HGMMA.64x64x16.F16'] ['HMUL2']
+RT2 N64 2set+P4   : dq    nan MMA    916 both    969 both/today 1.316 | regs 196 alu 324 ['HGMMA.64x64x16.F16'] ['HMUL2']
+RT2 N64 2set+P2   : dq    nan MMA   1033 both   1221 both/today 1.658 | regs 168 alu 323 ['HGMMA.64x64x16.F16'] ['HMUL2']
+RT2 N64 2set+P1   : dq    nan MMA   1379 both   1773 both/today 2.407 | regs 147 alu 323 ['HGMMA.64x64x16.F16'] ['HMUL2']
+## mb_mmasync16 grid 132
+RT4 N 8 bf16/f32acc: dq    796 mma.sync    220 both    711 both/today 1.000
+RT4 N 8 f16/f32acc : dq    796 mma.sync    220 both    712 both/today 1.002
+RT4 N 8 f16/f16acc : dq    796 mma.sync    215 both    683 both/today 0.960
+RT4 N32 bf16/f32acc: dq    798 mma.sync    808 both   1209 both/today 1.000
+RT4 N32 f16/f32acc : dq    798 mma.sync    807 both   1210 both/today 1.001
+RT4 N32 f16/f16acc : dq    798 mma.sync    790 both   1125 both/today 0.930
+RT2 N64 bf16/f32acc: dq    424 mma.sync    835 both   1029 both/today 1.000
+RT2 N64 f16/f32acc : dq    424 mma.sync    835 both   1029 both/today 1.000
+RT2 N64 f16/f16acc : dq    424 mma.sync    798 both    988 both/today 0.961
+## mb_chain grid 132 (CH1 base, CH8 chain WD1 N64, CH4 chain WD0 N32)
+RT2 N64 CH 1 tiles WD1: dq    504 | MMA    512 | both    771
+RT2 N64 CH 8 chain WD1: dq    358 | MMA    512 | both    652
+RT4 N32 CH 1 tiles WD1: dq    844 | MMA    569 | both   1271
+RT4 N32 CH 4 chain WD0: dq    761 | MMA    644 | both   1021

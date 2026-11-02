@@ -4368,3 +4368,29 @@ full K=4096; errors vs FP64 of the same exact-f16 operands; 2^b weight scaling b
 Verdict: FP16 accumulate gives 0.82x at N32 / 0.94x at N64 stage cycles (N32 under the old 0.85x gate, N64 not), at
 ~2.3e-3 relL2 (whole K) or ~2e-4 (per-k16 promotion, whose extra FADD/convert cost was NOT measured). Rule 'no FP16
 accumulators' stands: nothing in submission.py, nothing merged.
+## o48 (2026-11-02 08:53-09:15Z sandbox clock, session 1 (unattended)): lead 09:50Z H200 CONFIRMATION of o47; 3.0 Modal GPU-min, 0 judge
+Tools: muse_moe_w4a16/tools/o48/ (mb_f16p.py = o47 mb_f16 + promoted variants; run_mb.sh = mb_f16p + o47 mb_mmasync16 +
+o45 mb_chain best (new CHV env filter); h200m.py = tools/h200.py copy with --min <GPU-min> for non-bench commands).
+Raw: h100_run_mb.txt / h200_run_mb.txt (one Modal container, image's nvcc 13.0.88 = local; H200 SM clock 1980 MHz = H100's).
+NEW: (c) with FP32 promotion every P k16 (the error-safe form). Two builds:
+  TY 3-5 (DeepGEMM style): one f16 acc set, the last k16 of each P-group waits 0, HADD2.F32 + FADD per element into FP32,
+    next wgmma scale-d 0 (no zeroing). MODE 3 builds clean (no C7514) once the f16->f32 converts are asm volatile (otherwise
+    the compiler sinks them past the next wgmma.fence and ptxas serializes every wgmma).
+  TY 6-8: two f16 sets alternating every P, promote the idle set after wait 1 (keeps 1 group in flight): ptxas ALWAYS
+    serializes it (C7514: non-wgmma reads of acc regs inside the pipeline stage; it cannot track which group is done).
+  (MMA-alone column for TY 3-8 is ptxas-serialized too; only 'both' counts.)
+Cycles per twm stage, grid 132, both/(today both); H100 | H200:
+  variant                        RT4 N8           RT4 N32          RT2 N64
+  (a) bf16 f32acc = today        804 | 803        1047 | 1048      736 | 736
+  (b) f16 f32acc                 1.000 | 1.000    1.000 | 1.000    1.000 | 1.000
+  (c) f16 f16acc whole K         0.946 | 0.947    0.818 | 0.817    0.937 | 0.937
+  (c)+P4 (wait0, 1 set)          1.032 | 1.034    1.035 | 1.034    1.222 | 1.224   (regs 106 / 222 / 200)
+  (c)+P2                         1.149 | 1.150    1.370 | 1.368    1.527 | 1.527
+  (c)+P1                         1.376 | 1.377    1.917 | 1.916    2.429 | 2.429
+  (c)+P4/P2/P1 2-set (serialized) 1.42-1.58        1.56-2.13        1.32-2.41
+  (d) mma.sync f16acc            0.960 | 0.960    0.930 | 0.931    0.961 | 0.961   (b: 1.00 both)
+  o46 chain best (vs own CH1 / vs s18 today): N64 CH8 chain WD1 652 | 652 (0.885x of 736); N32 CH4 chain WD0 1021 | 1021 (0.976x)
+Verdict: H200 = H100 to +-2 cycles on every variant (the stage is SM-clock bound, no memory). FP16 accumulation's gain
+(0.82x N32 / 0.94x N8,N64) is real on the H200, but every error-safe form (FP32 promotion every 4/2/1 k16, 2e-4..3e-4 relL2
+per o47) is SLOWER than today: best P4 1.03x N8/N32, 1.22x N64. So an FP16-acc path only wins without promotion
+(2.3e-3 relL2, whole K), which our rule forbids. Nothing in submission.py, nothing merged.
