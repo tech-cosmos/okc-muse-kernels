@@ -1,6 +1,9 @@
 # STATE-moe (muse_moe_w4a16; rewritten o21 2026-10-31 17:40Z: session log moved to NOTES-moe.md "STATE archive o21")
 
 ## NOW (read first)
+- o47 (11-02 09:20Z, lead 09:10Z F16-accumulate microbench, MEASUREMENT ONLY, tools/o47, NOTES o47): f16 operands = 1.000x;
+  FP16 accumulate wgmma 0.817x N32 / 0.937x N64 / 0.946x N8 (mma.sync 0.93/0.96); error relL2 2.3e-3 whole-K, 2e-4 per-k16 promotion
+  (FP32 1e-6). Rule 'no FP16 acc' stands; nothing in submission. Holding.
 - o46 (11-02 08:35Z, lead 07:45Z twm consumer-cycles microbench lane): ALL 3 FAIL the 0.85x gate (NOTES o46, tools/o45):
   (1) same-acc K-chains 2-16 / wait depth: best N64 0.885x, N32 0.976x (MMA-side cost unchanged); (2) 18 register-mapping
   variants/shape: best 0.935x / 0.936x; (3) DSMEM cluster bandwidth saturates at 21 B/clk/SM (need ~75, kill < 37). Holding.

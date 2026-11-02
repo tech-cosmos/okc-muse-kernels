@@ -4336,3 +4336,35 @@ dq+RS stage cycles <= 0.85x today at N32 AND N64 (today = s18 RT4 N32 1046, RT2 
     Saturates at 21 B/clk/SM (~2.4 TB/s over 66 receivers), vs ~75 needed and the ~37 kill line. KILLED. In a real split the
     MMA SM would also spend smem bandwidth on SS reads (s18/s19).
 Verdict: all three items fail the gate; holding. 0 judge runs, nothing merged.
+## o47 (2026-11-02 08:45-09:20Z, session 1 (unattended) of 11-02): lead 09:10Z MEASUREMENT-ONLY 'F16 accumulate'; H100, 0 judge runs
+Tools: muse_moe_w4a16/tools/o47/ (mb_f16.py = o45/mb_regs PAD0 PERM0 stage with TY 0/1/2; mb_mmasync16.py = s18 mma.sync
+with TY; err_f16acc.py = accuracy). f16 dq = same LOP3/SHF/IMAD multiset with the code bits at f16 sign + bits 11..9 (value
+E2M1*2^-14, exact incl. the 0.5 subnormal) + mul.rn.f16x2. Exact f16 weight: E2M1*E4M3*2^b is exact in f16 for b<=7 with ONE
+HMUL2 (granularity 2^(b-17) >= 2^-24, <= 11 significant bits), global scale/2^-b after, in FP32.
+SASS verified: HMUL2 vs HMUL2.BF16_V2; HGMMA.64xNx16.F32.BF16 / .F32 (f16 in) / .F16; HMMA.16816.F32.BF16 / .F32 / .F16. No spills.
+(a-c) wgmma RS twm stage, cycles/stage, grid 132 (grid 1 within +-5):
+  shape    variant          dq    MMA   both  both/today  regs
+  RT4 N8   bf16 f32acc (a)  750   416   804   1.000        90   (s18 ref 792)
+           f16  f32acc (b)  750   416   804   0.999        90
+           f16  f16acc (c)  750   422   761   0.946        84
+  RT4 N32  (a)              750   542  1047   1.000       154   (s18 ref 1046)
+           (b)              750   542  1047   1.000       154
+           (c)              750   512   856   0.817       122
+  RT2 N64  (a)              377   512   736   1.000       122   (s18 ref 737)
+           (b)              376   512   736   1.000       122
+           (c)              376   512   690   0.937        90
+(d) mma.sync m16n8k16, same dq (dq-only mode also does the B LDS, as in s18):
+  RT4 N8   a 712 | b 710 (0.997) | c 682 (0.958);  RT4 N32  a 1209 | b 1210 | c 1125 (0.930);  RT2 N64  a 1029 | b 1029 | c 988 (0.961)
+  => f16 OPERANDS change nothing; only the FP16 ACCUMULATOR helps (fewer acc regs / RF traffic): 0.82x N32, 0.94x N8/N64 (wgmma).
+Accuracy of (c) (err_f16acc.py, mma.sync f16 acc; expert 0 of generate_weights(5252), 256 tokens generate_input(256,full,7),
+full K=4096; errors vs FP64 of the same exact-f16 operands; 2^b weight scaling b=-7/-10/-14 gives identical errors, no inf):
+  variant                relL2      maxabs/max|ref|   (gemm13 normal | gemm2 normal | gemm13 skewed | gemm2 skewed, ~same)
+  F32 acc                1.0-4.0e-6  2.3-4.5e-6
+  F16 acc whole K        2.3-2.4e-3  5.1-6.2e-3   (elementwise rel up to 1.5-2.3 on small outputs)
+  F16 partial, FP32 every 4 k16  3.3e-4  3.6-4.8e-4
+                       every 2     2.5e-4  2.6-3.4e-4
+                       every 1     2.1e-4  2.1-2.3e-4  (each k16 partial rounded to f16: ~200x FP32's error even at P=1)
+  bf16->f16 activations: 3-84 of 1M elements inexact (small values -> f16 subnormals).
+Verdict: FP16 accumulate gives 0.82x at N32 / 0.94x at N64 stage cycles (N32 under the old 0.85x gate, N64 not), at
+~2.3e-3 relL2 (whole K) or ~2e-4 (per-k16 promotion, whose extra FADD/convert cost was NOT measured). Rule 'no FP16
+accumulators' stands: nothing in submission.py, nothing merged.
