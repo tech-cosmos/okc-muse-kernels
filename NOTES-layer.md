@@ -4171,3 +4171,23 @@ Status only: no lead line after 23:45Z (QLO full half, done n75: v189 check 1804
 
 ## n77 (2026-11-02 01:16-01:20Z)
 Status only: no new lead lane after 23:45Z (QLO done n75). Board v185 2.2048, overall #244. 0 judge, 0 GPU.
+
+## n78 (11-02 01:35-02:35Z, session 4): lead 01:35Z lane "make QLO ~free" = NOT MET, every variant loses; 0 judge
+Goal: H100 KV-in-L2 oracle QLO overhead <= +2 us v16 / +4 us v32 full (from +5.3..5.6 / +10.1 reproduced today:
+dev/n75/ab.py l2: v16 base 98.0-99.4 / ss3 103.8-105.0; v32 177.1 / 187.2). Code: dev/n78/vjx_ovl.py (patches on top of
+vjx_qlo ss3, not wired), dev/n78/ab.py (variants), dev/n78/ncu_drv.py. All numbers v16 full s99 l2, ss3 = main v189:
+| variant | what | us vs ss3 (~105) | ptxas |
+| ovl (split) | QK as 2 key halves (m64n32k32, 2 commit groups), half 0 softmax+PV under half 1's QK | +15 | clean after giving common tiles their own body copy (a runtime switch inside one body -> C7514) |
+| ovls | the n32 split only (no overlap) | +9.5 | n32 wgmmas cost more than n64 for the same FLOPs |
+| rot | QK(i+1) issued at tile i's end after PV(i), into a 2nd score array | +3.5 | C7512 (104-reg consumers: s + s_next + o + P) + 8 B spill |
+| noend | no wait at tile end (PV(i) runs under QK(i+1) issue) | +3 | C7514; cause = the PK2 rare offset-move branch (o *= alpha); noendx (that branch off, wrong on rare tiles) still +4 |
+| lnext / lnextt / lnextf | tile i+1's lo pair (or full QK) issued with PV(i) (stage i+1 waited / try-tested before PV) | +2.3..+11 (structure alone, early path never taken: +5.5) | C7519 injected arrives (scores loop-carried into a "+f" wgmma) |
+| **lato** (oracle, WRONG results) | lo pair of the SAME tile moved from the QK group into the PV group | **-6.9..-7.3 = base** | clean |
+ncu (v16 l2 eager): smem bank reads 12 (base) / 17 (ss3) / 20% (ovls) of peak: not smem-bound; issue 51-55%; tensor <35%.
+rs (lo A fragments in registers, n75) in l2: +2.8 vs ss3. => QLO's cost is LATENCY on the per-warpgroup QK -> softmax chain
+(lato proves the tensor work itself is free), but every way to take it off the chain costs more than it saves in this
+kernel: 104 registers/consumer (no room for a 2nd score array), ptxas serializes all wgmmas (C7514) when PV stays in
+flight across the loop edge together with the rare in-register o rescale, and n32 halves cost +9.5. Not wired; no check.
+Leftover idea (not tried, needs a lead/human call on precision): overlap the hi-pair ex2 with the lo pair and fold the lo
+term in as P = ex2(hi) * poly3(lo*ssc) (lo <= ~0.6 log2 units, poly3 err ~1e-3 << the e4m3 step of P) costs ~160 FMA-pipe
+instr/thread/tile on an issue-bound kernel: probably also a loss.

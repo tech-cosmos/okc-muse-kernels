@@ -1,15 +1,19 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
+n78 (11-02 01:35-02:35Z, session 4): lead 01:35Z lane (hide QLO's lo QK pair in vjx flat q8) BUILT 6 ways, gate NOT met, 0 judge.
+Oracle lato (lo pair moved into the PV group, wrong results) = base speed, so the +5.5/+10 us (v16/v32 L2) is QK->softmax chain
+latency, not tensor/smem throughput; but every real reorder loses (+2.3..+15 us): 104-reg consumers (no 2nd score array, C7512),
+ptxas C7514 when PV stays in flight across the loop edge with the rare o-rescale, n32 halves +9.5, loop-carried scores into a
+"+f" wgmma (C7519). Table: NOTES n78; code dev/n78/vjx_ovl.py (not wired). Main = v189 unchanged; board v185 2.2048.
+NEXT: lead picks; QLO overlap closed unless someone finds a register-free way to take the lo pair off the chain.
+
 n77 (11-02 01:16-01:20Z, session 3): status only; still no lead line after 23:45Z (QLO done n75, v189 2.1884 not submitted). Hold board v185 2.2048. 0 judge, 0 GPU.
 
 n76 (11-02 01:00-01:10Z, session 2): status only; no lead line after 23:45Z (QLO lane done n75); hold (board v185 2.2048, overall #244; #1 pjmullin3 2.484). Main = v189 (unsubmitted). Considered recovering QLO's H200 cost (+6.6/+12.5 us v16/v32 full): the M=64 QK tile is full (8 tok x 8 heads), so the lo pair can only be hidden by QK/softmax overlap (deep vjx rework, <=0.3% upside = gate): not started without a lead lane. 0 judge, 0 GPU.
 
 n75 (11-02 00:00-01:15Z, session 1): lead 23:45Z lane DONE: **v189 = main b24b7cb** = v188 + QLO full half (vjx_qlo.py: two-term E4M3 q in vjx q_len-8, flat q8 3 stages + smem lo plane; QLO_VJX: verify full always vjx, no _gw_verify there). test 13/13, replay 0/360, route_judge full drop-lead v1 .011->.001, v16 .013-.017->.003-.005, v32 .015-.018->.004-.007. **CHECK 180453c9 2.1884 raw** (< 2.2048: NOT submitted, nothing withdrawn); H200 cost real: v16/v32 full +14.6/+18.6 us vs v188 check; H100 L2-resident oracle: QLO +0.7/+6.6/+12.5 us v1/v16/v32 full (3 stages free). ~0.3% = the accepted cost. NEXT: the human decides whether to withdraw v185 (lead asks); v1 SLIDING has no QLO (drop-lead .0186 = fp8ref at router seed 12) if the human wants full coverage.
 
-n74 (11-01 23:25-23:28Z, session 14): status only; no lead line after 21:15Z; hold (board v185 2.2048, overall #242; #1 2.484). 0 judge, 0 GPU.
 
-n73 (11-01 23:09-23:12Z, session 13): status only; still no lead line after 21:15Z; hold (board v185 2.2048). 0 judge, 0 GPU.
 
-n72 (11-01 22:53-22:58Z, session 12): status only; no new lead lane; hold (board v185 2.2048, overall #241). 0 judge.
 
 n71 (11-01 22:26-22:55Z, session 11): API back; **v188 CHECK 93de9b4f = 2.1954 raw / 2.1914 fixed** (< 2.2048) -> NOT submitted; noise both ways per shape. Board = v185 2.2048. NEXT: hold (status-only) until the lead posts a new lane; no more v188 draws.
 
