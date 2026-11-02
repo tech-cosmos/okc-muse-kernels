@@ -1,6 +1,6 @@
 """n75 QLO: vjx q_len-8 (dyn pool, = main v188) vs + two-term E4M3 queries (vjx_qlo.py), standalone on the layer's
 full verify inputs. Error vs the reference attention (BF16 queries, FP32 math), and the H100 graph-replay time.
-python dev/n75/ab.py <filter> <seeds> <rounds> [variants=rs] (vjx_qlo.patch flat modes)"""
+python dev/n75/ab.py <filter> <seeds> <rounds> [variants=rs] [l2] (vjx_qlo.patch flat modes; l2: page table mod 8192 = KV L2-resident)"""
 import sys, statistics, torch
 sys.path.insert(0, ".")
 import bench, vjx_src, vjx_dyn, vjx_qlo, reference as R
@@ -25,7 +25,10 @@ for load, c in bench.SCORED:
         x = data["attn_input"]
         qkv = (x @ st["dense"]["qkv_gate"].T).view(cfg["batch"], cfg["q_len"], -1)
         vd = {k: data[k] for k in ("cache_loc", "k_cache", "v_cache", "k_scale", "v_scale", "seq_lens", "page_table")}
-        vd.update(qkv=qkv, config=cfg)
+        if len(sys.argv) > 5:
+            pt = data["page_table"]
+            data["page_table"] = torch.where(pt >= 0, pt % 8192, pt)
+        vd.update(qkv=qkv, config=cfg, page_table=data["page_table"])
         fns = {k: (lambda m=m: vjx_src._launch(vd, _mod=m)) for k, m in mods.items()}
         ref = R._attention(data, x.float(), w)[0].float().view(cfg["batch"] * cfg["q_len"], -1)
         ref8 = R._attention(data, x.float(), w, torch.float8_e4m3fn)[0].float().view(ref.shape)

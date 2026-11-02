@@ -4130,3 +4130,38 @@ Status only: no lead line after 21:15Z (hold after the v188 check, done n71). Bo
 
 ## n74 2026-11-01T23:25Z (session 14)
 Status only. No lead line after 21:15Z (which said hold after the v188 check, done n71). Board v185 2.2048, overall #242. 0 judge runs, 0 GPU.
+
+## n75 (11-02 00:00-, session 1): v189 = v188 + QLO full half (lead 11-01 23:45Z, human-approved)
+- vjx_qlo.py (build-time patch after vjx_dyn, like v188; vjx_src.py stays pristine; modification notice added in build.py):
+  q_len-8 vjx queries as q_hi = e4m3(q), q_lo = e4m3(q - q_hi); QK^T = 2 SS wgmmas on hi + 2 on lo, same FP32 accumulator
+  (wgmma .f32.e4m3.e4m3; FP8 KV read as FP8 as before). Per-request kernels (QDIR, v1): lo plane at q8s+8192 (desc +512).
+  Flat kernel (WS, v16/v32): smem was full (Smem<8,true> 113664 B + 1 KB, 2 CTAs/SM = 229 KB of 228 KB: 2 KB headroom, cf
+  n66 "+2 KB kills coop occupancy"), so: (rs) lo A fragments in registers + RS wgmma: 36 B spill, v16/v32 full +9/+12 us;
+  (ss3, DEFAULT) flat q8 pipeline 4 -> 3 stages + smem lo plane: free. base3 (3 stages, no QLO) = base: stage 4 never mattered.
+- layer.py QLO_VJX: verify full (q_len 8) always vjx (when supported/fits), TUNE vjx options at T=8/128/256 dropped, so
+  _gw_verify / Triton qk8 (one E4M3 term) no longer run on scored full verify layers. Decode full untouched (vjx FP16 q).
+- H100 standalone (dev/n75/ab.py, seeds 99/7, 4 rounds, us): v1 full 16.6 base / 16.6 ss3; v16 131.3 / 131.3 (rs 140.8);
+  v32 252.4 / 252.5 (rs 264.8). Attention output rel err vs BF16-query reference: base 7.4-7.7e-2 -> ss3 1.6-2.0e-2
+  (one-term E4M3 reference itself 7.1-7.5e-2).
+- test 13/13; replay_test full 30 x seeds 11,7: 0/360.
+- route_judge 30 inputs x router seeds 11/5/12, worst dropped-keep lead (v188 -> v189): v1 full .0114/.0125/.0089 ->
+  .0011/.0006/.0008 (~10-20x); v16 full .0133/.0132/.0167 -> .0046/.0037/.0028 (2.9-6.0x); v32 full .0176/.0154/.0151 ->
+  .0036/.0067/.0043 (2.3-4.9x). Worst gap v16/v32 full .019-.026 -> .005-.007. Remaining level = the sliding layers'
+  (nvs QLO: .002-.005); the lead's >=5x is met at v1, not on every seed at v16/v32 (the rest is not the queries: vjx q8 PV
+  runs P in E4M3, approved n59; BF16 qkv). Sliding v1 (T=8 batch 1, csl/vtk) has NO QLO: drop-lead .0186 at rs 12 = fp8ref.
+- In-layer H100 ab_files 4 rounds v188 vs v189 (us): v1 sl 140.7/140.6, v1 full 152.2/152.2, v16 sl 300.1/299.5,
+  v16 full 445.7/431.9 (-13.8), v32 sl 361.4/361.1, v32 full 625.8/615.0 (-10.9): forcing vjx at T=128/256 beats v188's
+  tuner picks there (H100 tuner had kept ours at T=128).
+- Commit b24b7cb (sha1 764bcc38). okc budget 11-02 is now 10 checks / 5 scored per day.
+- CHECK 180453c9 (v189 b24b7cb) **2.1884 raw** [2.156, 2.221] < board 2.2048 -> NOT submitted (lead 23:45Z: no submit, no
+  withdraw; v185 stays the board row unless the human decides to withdraw it). Fixed-SGLang (this script's formula, same for
+  both): v188 93de9b4f 2.1785 -> v189 2.1669 (-0.5%). us sl/full: d1 64.5/73.2, d16 123.6/205.4, d32 153.4/304.7,
+  v1 108.6/119.5, v16 258.1/359.4, v32 334.9/516.5. vs v188's check: v16 full +14.6, v32 full +18.6, v1 full -0.7; untouched
+  shapes moved -5.7..+10.4 (d32 sl +8.6, v32 sl +10.4: node draw). H200 profile: v32 full vjx flat kernel 194.8 -> 210.8 us;
+  v16 full vjx 112.2 vs v188's _gw_verify+_combine_bal+_new_tokens 127.7 (one sample each). H200 tuner synthetic T=256 full flat
+  (505.8 vs 505.6).
+- WHY (H100 compute-bound oracle, dev/n75/ab.py ... l2 = KV L2-resident like the H200 mostly is): base / ss3 / base3 us:
+  v1 15.6/16.3/15.6, v16 99.0/105.7/98.1, v32 177.6/190.1/176.6: 3 stages free, the second QK pair costs +0.7/+6.6/+12.5 us
+  once the kernel is not HBM-bound (H100 real-cache runs hide it under the gather). Expected H200 cost ~0.25-0.3% of score =
+  the lead's accepted ~0.3%. Lever if wanted: cheaper lo term (lo plane only for the K32 half that matters? no: all dims
+  matter) -> none found this session; the QK^T pair is tensor work (QK 2x64^3 + PV 64x72x64 per tile -> +47% MMA).

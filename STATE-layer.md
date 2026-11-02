@@ -1,4 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
+n75 (11-02 00:00-01:15Z, session 1): lead 23:45Z lane DONE: **v189 = main b24b7cb** = v188 + QLO full half (vjx_qlo.py: two-term E4M3 q in vjx q_len-8, flat q8 3 stages + smem lo plane; QLO_VJX: verify full always vjx, no _gw_verify there). test 13/13, replay 0/360, route_judge full drop-lead v1 .011->.001, v16 .013-.017->.003-.005, v32 .015-.018->.004-.007. **CHECK 180453c9 2.1884 raw** (< 2.2048: NOT submitted, nothing withdrawn); H200 cost real: v16/v32 full +14.6/+18.6 us vs v188 check; H100 L2-resident oracle: QLO +0.7/+6.6/+12.5 us v1/v16/v32 full (3 stages free). ~0.3% = the accepted cost. NEXT: the human decides whether to withdraw v185 (lead asks); v1 SLIDING has no QLO (drop-lead .0186 = fp8ref at router seed 12) if the human wants full coverage.
+
 n74 (11-01 23:25-23:28Z, session 14): status only; no lead line after 21:15Z; hold (board v185 2.2048, overall #242; #1 2.484). 0 judge, 0 GPU.
 
 n73 (11-01 23:09-23:12Z, session 13): status only; still no lead line after 21:15Z; hold (board v185 2.2048). 0 judge, 0 GPU.
@@ -19,7 +21,7 @@ n66 (11-01 19:02-20:00Z sandbox, session 6): lead-approved v16/v32 full lane BUI
 
 n65 (11-01 18:44-19:00Z sandbox, session 5): v16/v32 full gap diagnosed, 0 judge. Not math (ex2/cvt ablations no gain; ncu no pipe >34%) but END-OF-GRID TAIL: per-CTA stamps (dev/n65/stamps.py) show equal-key CTAs finishing 223..260 us at v32 (mean wait 12-15 us), v16 10, d32 9.5, d16 6 us. q8 variance random per run; q1 static per SM (corr 0.96). Extra segment costs ~7-12 us, so balance inside a request. Ideal ~0.55% / realistic ~0.3%. NEXT: lead picks (A) per-request dynamic tile pool in vjx flat (all 4 full shapes) or (B) q1 SM-weighted partition (needs H200 per-SM evidence); table NOTES n65.
 
-BOARD BEST = submit fcb67ee9 = v185, **2.2048x** (#~180). Main = v188 (v187 + n66 pool). v187: check 7b620515 2.2039, submit 122374d8 2.2028 (not best).
+BOARD BEST = submit fcb67ee9 = v185, **2.2048x** (#~180). Main = v189 (v188 + n75 QLO full half; check 180453c9 2.1884, not submitted). v188 = v187 + n66 pool. v187: check 7b620515 2.2039, submit 122374d8 2.2028 (not best).
 Previous bests: bc16338a v183 2.1874 (robust to non-SA weights); 50534b24 v174 2.1717 (crashed on non-SA, superseded).
 Per-session summaries n10..n64, night5-night12: NOTES-layer.md (grep '^## n'); STATE trimmed in n69.
 
