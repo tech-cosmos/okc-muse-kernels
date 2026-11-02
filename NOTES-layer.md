@@ -4191,3 +4191,7 @@ flight across the loop edge together with the rare in-register o rescale, and n3
 Leftover idea (not tried, needs a lead/human call on precision): overlap the hi-pair ex2 with the lo pair and fold the lo
 term in as P = ex2(hi) * poly3(lo*ssc) (lo <= ~0.6 log2 units, poly3 err ~1e-3 << the e4m3 step of P) costs ~160 FMA-pipe
 instr/thread/tile on an issue-bound kernel: probably also a loss.
+
+## n79 (2026-11-02 02:33-02:40Z, session 5)
+Status only. No lead line after 01:35Z (QLO-overlap lane closed n78, gate not met). Board v185 2.2048, overall #250
+(was #244 at n76: others are passing us); layer #1 pjmullin3 2.484. Main = v189 unchanged. 0 judge runs, 0 GPU.

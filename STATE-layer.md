@@ -1,4 +1,6 @@
 # STATE-layer (muse_decode_layer): short current picture; NOTES-layer.md is the long log
+n79 (11-02 02:33-02:40Z, session 5): status only; no lead line after 01:35Z (that lane closed n78). Board v185 2.2048 (overall #250; layer #1 pjmullin3 2.484). Main = v189 (unsubmitted). Holding. 0 judge, 0 GPU.
+
 n78 (11-02 01:35-02:35Z, session 4): lead 01:35Z lane (hide QLO's lo QK pair in vjx flat q8) BUILT 6 ways, gate NOT met, 0 judge.
 Oracle lato (lo pair moved into the PV group, wrong results) = base speed, so the +5.5/+10 us (v16/v32 L2) is QK->softmax chain
 latency, not tensor/smem throughput; but every real reorder loses (+2.3..+15 us): 104-reg consumers (no 2nd score array, C7512),
