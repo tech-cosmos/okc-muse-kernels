@@ -1,6 +1,9 @@
 # STATE-moe (muse_moe_w4a16; rewritten o21 2026-10-31 17:40Z: session log moved to NOTES-moe.md "STATE archive o21")
 
 ## NOW (read first)
+- o45 (11-02 08:35Z, lead 07:45Z twm consumer-cycles microbench lane): ALL 3 FAIL the 0.85x gate (NOTES o45, tools/o45):
+  (1) same-acc K-chains 2-16 / wait depth: best N64 0.885x, N32 0.976x (MMA-side cost unchanged); (2) 18 register-mapping
+  variants/shape: best 0.935x / 0.936x; (3) DSMEM cluster bandwidth saturates at 21 B/clk/SM (need ~75, kill < 37). Holding.
 - o44 (11-01 20:31Z, lead 20:20Z): ncu in-layer DRAM read of expert kernels = unique routed weight bytes x1.000-1.009 on all
   6 shapes (NOTES o44, tools/o44/l2reuse.py; count experts from the layer's own topk ids). col-major/L2 reuse CLOSED. Paused after.
 - Lane (lead 10-28 LANE DECISION 6/7 + 10-31 lines): the muse_moe_w4a16 board is our H200 A/B bench; winners also go to layer

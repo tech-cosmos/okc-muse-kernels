@@ -4308,3 +4308,31 @@ expert-side hop >= 1 us is left open. Hold aa51716 (moe board 5ef66b6c 2.3391x).
   (activations 0.01-2.1 MB; v32's +5 MB over unique = gathered activations + inter re-reads, not weights.)
 - Verdict: no weight tensor is re-read from DRAM anywhere (all <= 1%): IBM-style col-major tile order / L2 weight reuse has
   nothing to recover; split-K atomics already exist where they pay (tk2f/twm per earlier closures). col-major/L2 reuse: CLOSED.
+## o45 (2026-11-02 07:55-08:35Z, session 1 of 11-02): lead 07:45Z MICROBENCH lane 'twm consumer cycles'; H100, 0 judge runs
+Tools: muse_moe_w4a16/tools/o45/ (mb_chain.py, mb_regs.py, mb_dsmem.py; base = tools/s18/mb_wgmma.py). Gate for a build:
+dq+RS stage cycles <= 0.85x today at N32 AND N64 (today = s18 RT4 N32 1046, RT2 N64 737). Cycles per twm stage (4 k16 x RT).
+(1) LONG K-CHAINS (mb_chain.py <grid>): group = CH k16 steps x RT tiles, all dq'd ahead, ORD tiles (k outer) or chain
+    (same accumulator CH times back to back; SASS verified: e.g. 4x HGMMA R24 then 4x R56), 1 commit, wait WD (0/1).
+    No spills, no C75xx, one DEPBAR per group. grid 132 (grid 1 identical):
+      RT2 N64: CH1 tiles 771 | CH2 chain 691 | CH4 tiles 691, chain 697, chain WD0 713 | CH8 tiles 699, chain 652, chain WD0 673 | CH16 chain WD0 666
+               (dq alone 504/440/392/358/362; MMA alone 512-559)
+      RT4 N32: CH1 1272 | CH2 chain 1207 | CH4 tiles 1067, chain 1056, chain WD0 1021 | CH8 chain WD0 1028 (MMA alone 512-644)
+      RT4 N8:  CH1 1097 | CH4 chain 931
+    (this CH1 uses LDS.32 per k-step, so it is slower than s18; compare against s18's 737/1046.) both minus dq stays
+    ~270-300 cycles at N64 for every chain length: the MMA-side cost does not shrink with same-accumulator chains. The
+    gains come from batching on the dq side. Best: N64 652 = 0.885x, N32 1021 = 0.976x. FAIL. (CH8 RT2 WD1 needs 218 regs too.)
+(2) REGISTER PLACEMENT (mb_regs.py): s18 stage exactly (PAD0 PERM0 = 736 / 1050 reproduces s18). 18 variants per shape:
+    PAD 0/1/3/6/11 live dummy regs (empty asm "+r", no in-loop instructions) x PERM {tile->acc reversed, dq temps/bmul
+    in reverse order}; each has a distinct SASS register-mapping hash. Regs 122-124 (N64) / 154-164 (N32). PERM bit0 (A-set
+    role swap) gives byte-identical SASS, so it is dropped.
+      RT2 N64 both: 689-757 (689 at PAD1/3 PERM0, PAD3 PERM2, PAD11 PERM2; base 736); dq alone 377-406 (no correlation)
+      RT4 N32 both: 980-1055 (980 PAD6 PERM2, 985 PAD6 PERM0; base 1050)
+    So the mapping alone moves dq||RS by up to ~7%, but the best is 0.935x / 0.936x. FAIL. (Could be a ~6% rider in twm
+    if a mapping can be pinned there, but ptxas re-allocates on any twm change: not robust, not pursued.)
+(3) CROSS-SM DEQUANT / DSMEM (mb_dsmem.py <grid> <bufs>): 2-CTA clusters, 1 CTA/SM, producer CTA fills a ring in the peer's
+    smem, mbarrier full/empty (remote arrives), consumer optionally LDS-reads the stage. B/clk per consumer SM, grid 132:
+      st.shared::cluster.v4 (256 thr): 8 KB 6.3 | 16 KB 11.1 | 32 KB 15.4 | 48 KB 17.2
+      cp.async.bulk smem->peer smem:   8 KB 9.1 | 16 KB 18.1 | 32 KB 21.1 | 48 KB 21.1   (x4 issuers same; LDS read-back -0..7%)
+    Saturates at 21 B/clk/SM (~2.4 TB/s over 66 receivers), vs ~75 needed and the ~37 kill line. KILLED. In a real split the
+    MMA SM would also spend smem bandwidth on SS reads (s18/s19).
+Verdict: all three items fail the gate; holding. 0 judge runs, nothing merged.
