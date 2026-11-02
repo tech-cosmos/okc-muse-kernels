@@ -3377,9 +3377,9 @@ TUNE = {1: ({}, {"g10alt:o": 1}, _VJX_OFF),
              {"g30n:unpool": True, "g30n:qkv_gate": True, **_VJX_ON}),
         32: ({}, {"g30kgx:pooler": False}, {"g19:o": True}, {"tk2h": 3},
              {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}, _VJX_OFF),
-        8: ({}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}, _VJX_OFF),
-        128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}, _VJX_ON),
-        256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, _VJX_ON)}
+        8: ({}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}),  # n75 QLO: verify full = vjx always (no vjx options)
+        128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}),
+        256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
 # n5s10 (lead 03:25Z: judge prepare_s <= 220 s; drop options the H200 tuner hasn't picked in the last 3 checks): TUNE lists
 # cut to the picks of checks bb8ea548 / 60f02748 / submit 3e3b9fd3 (+ escapes back to the old base); the full old lists are in
 # git (r-layer 51acdef layer.py). T=32 base += g30kgx:pooler (picked sl 60f02748 + 3e3b9fd3, full 3e3b9fd3); T=8 full base
@@ -4276,6 +4276,9 @@ VJX_BUILD = True
 VJX_TOKENS = (1, 8, 32)  # H100 in-layer ab_files 6 rounds (vs v186): d1 -0.8, v1 -3.8, d32 -9.7 us; d16 +0.6, v16 +2.0, v32 +4.2
 # (tuner option there: fresh x39c H200 standalone has vjeux ahead on all 6 full shapes, d16 -1.4, v16 -4.4, v32 -9.3 us)
 VJX_PDL = True  # launched as a PDL secondary (griddepcontrol.wait before its first qkv read)
+# n75 QLO (human-approved 11-01 23:45Z, routing-fail insurance): verify full layers (q_len 8) always run vjx, whose q_len-8
+# kernels take two-term E4M3 queries (vjx_qlo.py); ours (_gw_verify / Triton qk8) keep one E4M3 term, so they no longer run there
+QLO_VJX = True
 
 
 def _vjx_build():
@@ -4286,7 +4289,7 @@ def _vjx_build():
 
 def _vjx_on(state, cfg):
     return (cfg["window"] == 0 and _vjx__MOD is not None and _vjx__supported(cfg)
-            and _opt(state, cfg["tokens"], "vjx", cfg["tokens"] in VJX_TOKENS))
+            and (QLO_VJX and cfg["q_len"] == 8 or _opt(state, cfg["tokens"], "vjx", cfg["tokens"] in VJX_TOKENS)))
 
 
 _PREBUILD = [_BUILD_POOL.submit(f) for f in ((_vjx_build,) if VJX_BUILD else ()) + (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]

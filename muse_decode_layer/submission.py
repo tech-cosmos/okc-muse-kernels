@@ -9989,6 +9989,8 @@ def _moe_kernel_fn(data, st):
 # kernel_fn, Inputs) are left out (judge 1 MB file limit).
 # Modified by tech-cosmos (2026-11-01): the flat q_len-8 kernel drains a per-request dynamic pool of KV tiles
 # (atomic tile tickets, counters reset in the finalize) to even out the end of the grid.
+# Modified by tech-cosmos (2026-11-02): q_len-8 queries as two E4M3 terms (q_hi + q_lo, two FP32-accumulated
+# QK^T wgmmas).
 """Gated attention decode for Muse Spark Open: one fused CUDA kernel per call.
 
 Algorithm
@@ -10092,7 +10094,7 @@ static constexpr int BASEREGS = (65536 / (2 * NTX)) / 8 * 8 > 255 ? 248 : (65536
 static constexpr int PREGS = (L == 1) ? 56 : 32;
 static constexpr int CREGS = ((BASEREGS * NTX - PREGS * NP) / (NT > 0 ? NT : 1)) / 8 * 8 > 248
 ? 248 : ((BASEREGS * NTX - PREGS * NP) / (NT > 0 ? NT : 1)) / 8 * 8;
-static constexpr int STAGES = F ? ((L == 1) ? 3 : 4) : 3;
+static constexpr int STAGES = 3;
 static_assert(!WS || (NP % 8 == 0 && NP >= 8 && 64 % (NP >= 8 ? NP / 8 : 1) == 0),
 "producer threads must cover a tile in whole passes");
 };
@@ -10382,6 +10384,12 @@ asm("cvt.rn.satfinite.e4m3x2.f32 %0, %2, %1;" : "=h"(lo) : "f"(x0), "f"(x1));
 asm("cvt.rn.satfinite.e4m3x2.f32 %0, %2, %1;" : "=h"(hi) : "f"(x2), "f"(x3));
 return (uint32_t)lo | ((uint32_t)hi << 16);
 }
+__device__ __forceinline__ uint32_t e4m3x4_res(float x0, float x1, float x2, float x3, uint32_t hi) {
+const uint32_t d01 = cvt2(hi), d23 = cvt2h(hi);
+const float2 a = __half22float2(*reinterpret_cast<const __half2*>(&d01));
+const float2 b = __half22float2(*reinterpret_cast<const __half2*>(&d23));
+return e4m3x4f(x0 - a.x, x1 - a.y, x2 - b.x, x3 - b.y);
+}
 __device__ __forceinline__ uint32_t pack_e4m3x4(uint32_t h01, uint32_t h23) {
 __half2_raw a, b;
 a.x = (unsigned short)(h01 & 0xffffu); a.y = (unsigned short)(h01 >> 16);
@@ -10454,7 +10462,7 @@ int claim[2];
 int nxt[4][2];
 int idx[2 * Cfg<L, F>::STAGES * TILE];
 alignas(1024) uint8_t kvq[(L == 1) ? L * 16 * 64 * 2 : 18432];
-alignas(1024) uint8_t q8s[(L == 8) ? 8192 : 16];
+alignas(1024) uint8_t q8s[(L == 8) ? (F ? 16384 : 16384) : 16];
 __device__ __forceinline__ __nv_bfloat16* qst() { return reinterpret_cast<__nv_bfloat16*>(kvq); }
 __nv_bfloat16 kvst[L * 4 * 64];
 __nv_bfloat16 gst[L * 4 * 64];
@@ -11275,9 +11283,12 @@ x[2 * e + 1] = a0 * sn + a1 * c;
 }
 const int hk4 = hh >> 3, gg4 = hh & 7;
 const int r4 = j * 8 + gg4, kb = q4 * 16;
-*reinterpret_cast<uint4*>(S.q8s + hk4 * 4096 + r4 * 64 + (((kb >> 4) ^ ((r4 >> 1) & 3)) << 4)) =
-make_uint4(e4m3x4f(x[0], x[1], x[2], x[3]), e4m3x4f(x[4], x[5], x[6], x[7]),
+const uint4 qh8 = make_uint4(e4m3x4f(x[0], x[1], x[2], x[3]), e4m3x4f(x[4], x[5], x[6], x[7]),
 e4m3x4f(x[8], x[9], x[10], x[11]), e4m3x4f(x[12], x[13], x[14], x[15]));
+*reinterpret_cast<uint4*>(S.q8s + hk4 * 4096 + r4 * 64 + (((kb >> 4) ^ ((r4 >> 1) & 3)) << 4)) = qh8;
+*reinterpret_cast<uint4*>(S.q8s + 8192 + hk4 * 4096 + r4 * 64 + (((kb >> 4) ^ ((r4 >> 1) & 3)) << 4)) =
+make_uint4(e4m3x4_res(x[0], x[1], x[2], x[3], qh8.x), e4m3x4_res(x[4], x[5], x[6], x[7], qh8.y),
+e4m3x4_res(x[8], x[9], x[10], x[11], qh8.z), e4m3x4_res(x[12], x[13], x[14], x[15], qh8.w));
 }
 } else
 #pragma unroll
@@ -11523,6 +11534,7 @@ pdl_launch_dependents();
 } else {
 uint8_t* V16 = S.kvq;
 uint32_t qa8[2][4];
+uint32_t ql8[2][4];
 if constexpr (!QDIR) {
 const uint8_t* qs = (hk ? S.v : S.k) + (STAGES - 1) * STAGE_BYTES;
 const int r0 = 16 * wsub + g, r1 = r0 + 8;
@@ -11537,6 +11549,16 @@ const uint2 lo = *reinterpret_cast<const uint2*>(q0 + dofs);
 const uint2 hi = *reinterpret_cast<const uint2*>(q1 + dofs);
 qa8[ks][2 * hf] = pack_e4m3x4(lo.x, lo.y);
 qa8[ks][2 * hf + 1] = pack_e4m3x4(hi.x, hi.y);
+{
+const uint32_t a0 = qa8[ks][2 * hf], a1 = qa8[ks][2 * hf + 1];
+uint32_t d0 = cvt2(a0), d1 = cvt2h(a0), d2 = cvt2(a1), d3 = cvt2h(a1);
+const __half2 r0 = __hsub2(*reinterpret_cast<const __half2*>(&lo.x), *reinterpret_cast<const __half2*>(&d0));
+const __half2 r1 = __hsub2(*reinterpret_cast<const __half2*>(&lo.y), *reinterpret_cast<const __half2*>(&d1));
+const __half2 r2 = __hsub2(*reinterpret_cast<const __half2*>(&hi.x), *reinterpret_cast<const __half2*>(&d2));
+const __half2 r3 = __hsub2(*reinterpret_cast<const __half2*>(&hi.y), *reinterpret_cast<const __half2*>(&d3));
+ql8[ks][2 * hf] = pack_e4m3x4(*reinterpret_cast<const uint32_t*>(&r0), *reinterpret_cast<const uint32_t*>(&r1));
+ql8[ks][2 * hf + 1] = pack_e4m3x4(*reinterpret_cast<const uint32_t*>(&r2), *reinterpret_cast<const uint32_t*>(&r3));
+}
 }
 }
 #pragma unroll
@@ -11548,6 +11570,10 @@ const int kb = 32 * ks + 16 * hf + 4 * tig;
 qa8[ks][2 * hf];
 *reinterpret_cast<uint32_t*>(S.q8s + hk * 4096 + r1 * 64 + (((kb >> 4) ^ ((r1 >> 1) & 3)) << 4) + (kb & 15)) =
 qa8[ks][2 * hf + 1];
+*reinterpret_cast<uint32_t*>(S.q8s + 8192 + hk * 4096 + r0 * 64 + (((kb >> 4) ^ ((r0 >> 1) & 3)) << 4) + (kb & 15)) =
+ql8[ks][2 * hf];
+*reinterpret_cast<uint32_t*>(S.q8s + 8192 + hk * 4096 + r1 * 64 + (((kb >> 4) ^ ((r1 >> 1) & 3)) << 4) + (kb & 15)) =
+ql8[ks][2 * hf + 1];
 }
 fence_proxy_async();
 
@@ -11639,6 +11665,13 @@ const uint64_t qd2 = ((uint64_t)((512 >> 4) | (2u << 30)) << 32) | (qlo0 + 2u);
 
 wgmma_m64n64k32_e4m3_ss(s, qdesc0, kd, 0);
 wgmma_m64n64k32_e4m3_ss(s, qd2, kd2, 1);
+if constexpr (true) {
+wgmma_m64n64k32_e4m3_ss(s, qdesc0 + 512u, kd, 1);
+wgmma_m64n64k32_e4m3_ss(s, qd2 + 512u, kd2, 1);
+} else {
+wgmma_m64n64k32_e4m3(s, ql8[0][0], ql8[0][1], ql8[0][2], ql8[0][3], kd, 1);
+wgmma_m64n64k32_e4m3(s, ql8[1][0], ql8[1][1], ql8[1][2], ql8[1][3], kd2, 1);
+}
 
 wgmma_commit();
 if constexpr (!WS) {
@@ -19708,9 +19741,9 @@ TUNE = {1: ({}, {"g10alt:o": 1}, _VJX_OFF),
              {"g30n:unpool": True, "g30n:qkv_gate": True, **_VJX_ON}),
         32: ({}, {"g30kgx:pooler": False}, {"g19:o": True}, {"tk2h": 3},
              {"g24sk2:pooler": True, "g24sk2:unpool": True, "tk2h": 4, "lt:o": True, "g24:qkv_gate": True}, _VJX_OFF),
-        8: ({}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}, _VJX_OFF),
-        128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}, _VJX_ON),
-        256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True}, _VJX_ON)}
+        8: ({}, {"g30n:o": False}, {"g14alt:qkv_gate": 1}),
+        128: ({}, {"lt:o": True}, {"ltalt:pooler": 2}),
+        256: ({}, {"lt:o": True}, {"lt:pooler": True, "lt:unpool": True, "lt:o": True})}
 HOT256 = 3216064
 HOT128 = 32064
 _T8N = {"cslpw": True, "pr8_npf": 220}
@@ -20437,11 +20470,12 @@ def _kernel_fn(data, state):
 VJX_BUILD = True
 VJX_TOKENS = (1, 8, 32)
 VJX_PDL = True
+QLO_VJX = True
 def _vjx_build():
     global _vjx__MOD
     _vjx__MOD = _vjx__build()
     return _vjx__MOD
 def _vjx_on(state, cfg):
     return (cfg["window"] == 0 and _vjx__MOD is not None and _vjx__supported(cfg)
-            and _opt(state, cfg["tokens"], "vjx", cfg["tokens"] in VJX_TOKENS))
+            and (QLO_VJX and cfg["q_len"] == 8 or _opt(state, cfg["tokens"], "vjx", cfg["tokens"] in VJX_TOKENS)))
 _PREBUILD = [_BUILD_POOL.submit(f) for f in ((_vjx_build,) if VJX_BUILD else ()) + (_moe__lib, _g10_lib, _lt_build, _g22_build, _g24_build, _g27_build, _g30_build, *_g30n_builds(), *_g30gx_builds(), *_g30k_builds(), *_pr32_builds())]

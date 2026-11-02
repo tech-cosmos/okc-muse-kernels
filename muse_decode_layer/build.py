@@ -71,11 +71,15 @@ vjx = (here / "vjx_src.py").read_text()
 import vjx_dyn
 _c0 = vjx.index('\nCUDA_SRC = r"""') + 16
 _c1 = vjx.index('"""', _c0)
-vjx = vjx[:_c0] + vjx_dyn.patch(vjx[_c0:_c1], 100, 2) + vjx[_c1:]
+# n75 QLO (human-approved 11-01 23:45Z): two-term E4M3 queries in the q_len-8 kernels (vjx_qlo.py)
+import vjx_qlo
+vjx = vjx[:_c0] + vjx_qlo.patch(vjx_dyn.patch(vjx[_c0:_c1], 100, 2)) + vjx[_c1:]
 _m = "# kernel_fn, Inputs) are left out (judge 1 MB file limit).\n"
 assert vjx.count(_m) == 1
 vjx = vjx.replace(_m, _m + "# Modified by tech-cosmos (2026-11-01): the flat q_len-8 kernel drains a per-request dynamic pool of KV tiles\n"
-                  "# (atomic tile tickets, counters reset in the finalize) to even out the end of the grid.\n", 1)
+                  "# (atomic tile tickets, counters reset in the finalize) to even out the end of the grid.\n"
+                  "# Modified by tech-cosmos (2026-11-02): q_len-8 queries as two E4M3 terms (q_hi + q_lo, two FP32-accumulated\n"
+                  "# QK^T wgmmas).\n", 1)
 vjx_head = vjx.split("\n", 1)[1].split('"""', 1)[0]  # the attribution header (comment lines: kept in the built file)
 _t = ast.parse(vjx)  # n57: drop vjx's top-level helpers the layer never calls (1 MB cap): the layer runs _launch only
 _drop = [n for n in _t.body if getattr(n, "name", None) in ("_fallback", "_rms", "_rope", "kernel_fn", "Inputs")]
